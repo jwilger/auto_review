@@ -44,12 +44,25 @@ pub enum ChatCommand {
 
 /// Parse a comment body looking for `@<bot_name> <command>` on any
 /// line. The first matching line wins; subsequent lines are ignored.
+///
+/// Mention matching is case-insensitive (`@AUTO_REVIEW` and
+/// `@auto_review` both reach a bot configured as `auto_review`).
+/// Forgejo treats usernames as case-insensitive in its UI and links
+/// either form to the same user, so the parser has to follow suit
+/// or the bot would silently skip legitimate mentions.
 pub fn parse_chat_command(body: &str, bot_name: &str) -> ChatCommand {
     let mention = format!("@{bot_name}");
     for raw_line in body.lines() {
         let line = raw_line.trim();
-        let Some(after) = line.strip_prefix(&mention) else {
-            continue;
+        // Case-insensitive prefix check so @Auto_Review matches
+        // @auto_review. The mention itself is ASCII (Forgejo
+        // usernames are restricted to ASCII alphanumerics + `-_.`),
+        // so eq_ignore_ascii_case is the right semantic.
+        let after = match line.as_bytes().get(..mention.len()) {
+            Some(prefix) if prefix.eq_ignore_ascii_case(mention.as_bytes()) => {
+                &line[mention.len()..]
+            }
+            _ => continue,
         };
         // Require a separator after the mention (whitespace, punctuation,
         // or end-of-line). Avoids matching "@auto_reviewer" against
@@ -250,6 +263,31 @@ mod tests {
             ChatCommand::Remember("something".into())
         );
         assert_eq!(parse("@auto_review HELP"), ChatCommand::Help);
+    }
+
+    #[test]
+    fn case_insensitive_mention_matches_configured_bot_name() {
+        // Forgejo treats usernames as case-insensitive; a user
+        // typing @AUTO_REVIEW or @Auto_Review reaches the same
+        // bot account as @auto_review. The parser MUST follow
+        // suit or the bot silently ignores legitimate mentions.
+        for body in [
+            "@AUTO_REVIEW help",
+            "@Auto_Review help",
+            "@auto_REVIEW help",
+            "@auto_review help",
+        ] {
+            assert_eq!(parse(body), ChatCommand::Help, "input = {body:?}");
+        }
+    }
+
+    #[test]
+    fn case_insensitive_mention_still_rejects_substring_extensions() {
+        // "@AUTOREVIEWER" must NOT match @auto_review just because
+        // a case-insensitive prefix matches — the separator check
+        // still has to fire.
+        assert_eq!(parse("@AUTOREVIEWER remember X"), ChatCommand::NotMentioned);
+        assert_eq!(parse("@Auto_Reviewer help"), ChatCommand::NotMentioned);
     }
 
     #[test]
