@@ -15,6 +15,9 @@ services:
       - FORGEJO_BASE_URL=${FORGEJO_BASE_URL}
       - FORGEJO_TOKEN=${FORGEJO_TOKEN}
       - WEBHOOK_SECRET=${WEBHOOK_SECRET}
+      - LLM_BASE_URL=${LLM_BASE_URL:-http://host.docker.internal:11434}
+      - LLM_API_KEY=${LLM_API_KEY:-}
+      - LLM_REASONING_MODEL=${LLM_REASONING_MODEL:-qwen2.5-coder:32b}
     ports:
       - "8080:8080"
     depends_on:

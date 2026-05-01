@@ -1,12 +1,14 @@
 //! HTTP webhook intake.
 //!
 //! Validates Forgejo's HMAC-SHA256 signature, decodes the `pull_request`
-//! event, and (in v1) hands off to the orchestrator. For now the handoff is
-//! stubbed: the gateway just acks 202 once the payload is validated.
+//! event, and dispatches a review job. The dispatcher abstraction lets the
+//! gateway return 202 immediately while the actual review runs in the
+//! background.
 
 pub mod hmac;
 pub mod webhook;
 
+use ar_orchestrator::JobDispatcher;
 use axum::routing::{get, post};
 use axum::Router;
 use std::sync::Arc;
@@ -14,12 +16,14 @@ use std::sync::Arc;
 #[derive(Clone)]
 pub struct AppState {
     pub webhook_secret: Arc<String>,
+    pub dispatcher: Arc<dyn JobDispatcher>,
 }
 
 impl AppState {
-    pub fn new(webhook_secret: impl Into<String>) -> Self {
+    pub fn new(webhook_secret: impl Into<String>, dispatcher: Arc<dyn JobDispatcher>) -> Self {
         Self {
             webhook_secret: Arc::new(webhook_secret.into()),
+            dispatcher,
         }
     }
 }

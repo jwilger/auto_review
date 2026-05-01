@@ -60,6 +60,9 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "ar-forgejo",
+ "ar-llm",
+ "ar-orchestrator",
+ "async-trait",
  "axum",
  "hex",
  "hmac",
@@ -106,6 +109,9 @@ name = "ar-orchestrator"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ar-forgejo",
+ "ar-llm",
+ "ar-review",
  "async-trait",
  "serde",
  "serde_json",
