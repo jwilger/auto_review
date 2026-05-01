@@ -107,6 +107,19 @@ async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
             return reject(StatusCode::BAD_REQUEST, &format!("payload decode: {e}"));
         }
     };
+    // Only act on freshly-created comments. Edited comments would
+    // re-fire the bot and produce duplicate replies (the user
+    // edited their `@bot help` to add another mention; Forgejo
+    // sends a second webhook). Deleted comments shouldn't trigger
+    // anything either — the user already removed the mention.
+    use ar_forgejo::IssueCommentAction;
+    if evt.action != IssueCommentAction::Created {
+        tracing::debug!(
+            action = ?evt.action,
+            "ignoring non-Created issue_comment action"
+        );
+        return (StatusCode::ACCEPTED, "").into_response();
+    }
     if !evt.is_pull_request_comment() {
         // Plain issue (not PR) — ignored.
         return (StatusCode::ACCEPTED, "").into_response();
@@ -764,6 +777,38 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn issue_comment_with_edited_action_is_ignored() {
+        // A user editing their `@bot help` would otherwise refire
+        // the chat handler and post a duplicate reply. Forgejo
+        // sends a separate webhook for the edit; the bot must
+        // act only on Created.
+        let secret = "s";
+        let app = build_router(AppState::new(secret, Arc::new(NoOpDispatcher)));
+
+        let body = comment_payload("edited", "@auto_review help", "alice");
+        let sig = sign(secret, &body);
+        let req = Request::post("/webhooks/forgejo")
+            .header(EVENT_HEADER, "issue_comment")
+            .header(SIG_HEADER, &sig)
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        // No chat command should have been recorded.
+        let metrics_req = Request::get("/metrics").body(Body::empty()).unwrap();
+        let metrics_resp = app.oneshot(metrics_req).await.unwrap();
+        let bytes = axum::body::to_bytes(metrics_resp.into_body(), 1024 * 1024)
+            .await
+            .unwrap();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("auto_review_chat_commands_received_total 0\n"),
+            "edited comment must not increment chat counter:\n{text}"
+        );
     }
 
     #[tokio::test]
