@@ -49,7 +49,10 @@ pub async fn init(args: InitArgs) -> Result<()> {
     println!("    auto_review register-webhook --owner OWNER --repo REPO \\");
     println!("        --forgejo-url {} \\", args.forgejo_url);
     println!("        --gateway-url https://reviewer.example.com \\");
-    println!("        --webhook-secret <pick a strong secret>");
+    println!("        --webhook-secret \"$(openssl rand -hex 32)\"");
+    println!();
+    println!("(register-webhook rejects secrets shorter than 16 bytes; the");
+    println!(" gateway warns when WEBHOOK_SECRET is similarly short.)");
     Ok(())
 }
 
