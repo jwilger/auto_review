@@ -31,13 +31,24 @@ pub enum EmbedError {
     OutOfRange { path: String, line_end: u32 },
 }
 
+/// Maximum symbols sent in a single `router.embed(...)` call.
+/// Conservative cap that fits comfortably under hosted providers'
+/// batch limits (OpenAI's `text-embedding-3-*` accepts up to 2048
+/// inputs but rejects payloads above ~300k tokens; 32 small
+/// snippets is well below either bound) and well-known local
+/// embedders. Symbol counts above this are split across multiple
+/// sequential calls — bounded slowdown on large repos in exchange
+/// for not failing the whole RAG pass.
+pub const EMBED_BATCH_SIZE: usize = 32;
+
 /// Embed each symbol via the router's Embedding tier. `file_contents`
 /// must contain an entry for every distinct path referenced by
 /// `symbols`; missing paths are reported as `MissingFile`.
 ///
-/// Symbols are batched into a single `embed()` call per provider for
-/// efficiency. Tier mis-configuration (no Embedding provider) bubbles
-/// up as an `ar_llm::Error::NoProvider` via the `?`.
+/// Symbols are batched in groups of [`EMBED_BATCH_SIZE`] so a large
+/// repo doesn't exceed the provider's per-request size limit. Tier
+/// mis-configuration (no Embedding provider) bubbles up as an
+/// `ar_llm::Error::NoProvider` via the `?`.
 pub async fn embed_symbols(
     router: &Router,
     symbols: &[IndexedSymbol],
@@ -56,7 +67,13 @@ pub async fn embed_symbols(
         snippets.push(snippet_for_symbol(content, sym)?);
     }
 
-    let vectors = router.embed(ModelTier::Embedding, &snippets).await?;
+    // Batch the embed calls so a 5k-symbol repo doesn't try to
+    // POST 5k inputs in one request.
+    let mut vectors: Vec<Vec<f32>> = Vec::with_capacity(snippets.len());
+    for chunk in snippets.chunks(EMBED_BATCH_SIZE) {
+        let chunk_vec = router.embed(ModelTier::Embedding, chunk).await?;
+        vectors.extend(chunk_vec);
+    }
 
     let out = symbols
         .iter()
@@ -182,6 +199,37 @@ mod tests {
         let calls = embedder.seen.lock().unwrap();
         assert_eq!(calls.len(), 1);
         assert_eq!(calls[0].len(), 2);
+    }
+
+    #[tokio::test]
+    async fn batches_when_symbol_count_exceeds_batch_size() {
+        // Defence: a 5k-symbol repo shouldn't try to POST all 5k
+        // inputs in one embed call. Batching caps each request at
+        // EMBED_BATCH_SIZE.
+        let embedder = Arc::new(DeterministicEmbedder::new());
+        let router = Router::new().with(ModelTier::Embedding, embedder.clone());
+
+        // 80 trivial symbols spread across two files.
+        let mut files = HashMap::new();
+        let lines: String = (0..80).map(|i| format!("fn s{i}() {{}}\n")).collect();
+        files.insert("src/a.rs".into(), lines);
+        let symbols: Vec<IndexedSymbol> = (0..80)
+            .map(|i| isym("src/a.rs", &format!("s{i}"), i + 1, i + 1))
+            .collect();
+
+        let out = embed_symbols(&router, &symbols, &files).await.expect("ok");
+        assert_eq!(out.len(), 80);
+
+        let calls = embedder.seen.lock().unwrap();
+        // 80 / 32 = 3 batches (32, 32, 16).
+        assert_eq!(calls.len(), 3, "expected 3 batches, got {}", calls.len());
+        assert_eq!(calls[0].len(), EMBED_BATCH_SIZE);
+        assert_eq!(calls[1].len(), EMBED_BATCH_SIZE);
+        assert_eq!(calls[2].len(), 80 - 2 * EMBED_BATCH_SIZE);
+        // Total inputs across batches must equal symbol count — no
+        // duplicates, no drops.
+        let total: usize = calls.iter().map(|c| c.len()).sum();
+        assert_eq!(total, symbols.len());
     }
 
     #[tokio::test]
