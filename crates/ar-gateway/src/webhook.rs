@@ -81,11 +81,13 @@ async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
         let repo = evt.repository.name.clone();
         let issue_number = evt.issue.number;
         let cmd_for_log = format!("{cmd:?}");
+        let dispatcher = state.dispatcher.clone();
         tokio::spawn(async move {
             let handler = ChatHandler {
                 forgejo: &chat.forgejo,
                 llm: &chat.llm,
                 learnings: chat.learnings.as_ref(),
+                dispatcher: Some(dispatcher),
             };
             let ctx = ChatContext {
                 owner: &owner,

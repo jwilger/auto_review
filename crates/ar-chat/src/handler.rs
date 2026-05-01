@@ -9,8 +9,11 @@
 //!   new id.
 //! - `Forget(id)`: removes the learning. Replies confirming, or
 //!   surfaces "not found" when the id is unknown.
-//! - `ReReview`: posts an acknowledgement; the orchestrator
-//!   integration that actually re-runs the review is a follow-up.
+//! - `ReReview`: when a JobDispatcher is configured, fetches the
+//!   PR's current head SHA + metadata and dispatches a force=true
+//!   ReviewJob (bypasses the per-PR history dedup). Drafts are
+//!   skipped with an explanation. Without a dispatcher, replies
+//!   noting the feature isn't wired up.
 //! - `Freeform(text)`: posts a placeholder reply that we received
 //!   the message; the chat-tier LLM call is a follow-up.
 //! - `NotMentioned`: silently returns; the gateway shouldn't have
@@ -20,6 +23,8 @@ use crate::command::ChatCommand;
 use ar_forgejo::Client as ForgejoClient;
 use ar_index::{LearningSource, LearningsStore};
 use ar_llm::{ModelTier, Router as LlmRouter};
+use ar_orchestrator::{JobDispatcher, ReviewJob};
+use std::sync::Arc;
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChatError {
@@ -52,6 +57,9 @@ pub struct ChatHandler<'a> {
     pub forgejo: &'a ForgejoClient,
     pub llm: &'a LlmRouter,
     pub learnings: &'a (dyn LearningsStore + Sync),
+    /// Optional review dispatcher. When set, `ReReview` queues a
+    /// fresh review job. When unset, `ReReview` just acks.
+    pub dispatcher: Option<Arc<dyn JobDispatcher>>,
 }
 
 /// Coordinates that locate a PR comment thread on Forgejo.
@@ -79,12 +87,7 @@ impl ChatHandler<'_> {
                 self.handle_forget(ctx, id).await?;
             }
             ChatCommand::ReReview => {
-                self.post(
-                    ctx,
-                    "Acknowledged — re-review will be triggered on the next dispatch \
-                     cycle. (Direct orchestrator dispatch from chat is a follow-up.)",
-                )
-                .await?;
+                self.handle_re_review(ctx).await?;
             }
             ChatCommand::Freeform(_text) => {
                 self.post(
@@ -98,6 +101,48 @@ impl ChatHandler<'_> {
             ChatCommand::NotMentioned => {}
         }
         Ok(())
+    }
+
+    async fn handle_re_review(&self, ctx: ChatContext<'_>) -> Result<(), ChatError> {
+        let Some(dispatcher) = &self.dispatcher else {
+            self.post(
+                ctx,
+                "Re-review isn't wired up here (no dispatcher configured). The \
+                 next review on this PR will run when the next webhook fires.",
+            )
+            .await?;
+            return Ok(());
+        };
+        // Fetch the PR's current head SHA + metadata to build a job.
+        let pr = self
+            .forgejo
+            .get_pull_request(ctx.owner, ctx.repo, ctx.issue_number)
+            .await?;
+        if pr.draft {
+            self.post(
+                ctx,
+                "Skipping re-review: this PR is a draft. Mark it ready first.",
+            )
+            .await?;
+            return Ok(());
+        }
+        let job = ReviewJob {
+            owner: ctx.owner.to_string(),
+            repo: ctx.repo.to_string(),
+            pr_number: pr.number,
+            head_sha: pr.head.sha.clone(),
+            pr_title: pr.title,
+            pr_body: pr.body,
+            // force=true bypasses the per-PR review-history dedup so
+            // the user gets a fresh review even at the same SHA.
+            force: true,
+        };
+        dispatcher.dispatch(job).await;
+        let reply = format!(
+            "Queued a fresh review at {}. Watch the commit-status badge for progress.",
+            pr.head.sha
+        );
+        self.post(ctx, &reply).await
     }
 
     async fn handle_remember(&self, ctx: ChatContext<'_>, text: &str) -> Result<(), ChatError> {
@@ -208,6 +253,7 @@ mod tests {
             forgejo: &forgejo,
             llm: &llm,
             learnings: &learnings,
+            dispatcher: None,
         };
         handler.handle(ctx(), ChatCommand::Help).await.expect("ok");
     }
@@ -224,6 +270,7 @@ mod tests {
             forgejo: &forgejo,
             llm: &llm,
             learnings: &learnings,
+            dispatcher: None,
         };
         handler
             .handle(ctx(), ChatCommand::Remember("prefer Result".into()))
@@ -259,6 +306,7 @@ mod tests {
             forgejo: &forgejo,
             llm: &llm,
             learnings: &learnings,
+            dispatcher: None,
         };
         handler
             .handle(ctx(), ChatCommand::Forget(added.id))
@@ -279,6 +327,7 @@ mod tests {
             forgejo: &forgejo,
             llm: &llm,
             learnings: &learnings,
+            dispatcher: None,
         };
         handler
             .handle(ctx(), ChatCommand::Forget(999))
@@ -294,6 +343,7 @@ mod tests {
             forgejo: &forgejo,
             llm: &llm,
             learnings: &learnings,
+            dispatcher: None,
         };
         handler
             .handle(ctx(), ChatCommand::NotMentioned)
@@ -316,6 +366,7 @@ mod tests {
             forgejo: &forgejo,
             llm: &router,
             learnings: &learnings,
+            dispatcher: None,
         };
         handler
             .handle(ctx(), ChatCommand::Remember("guidance".into()))
@@ -323,5 +374,117 @@ mod tests {
             .expect("ok");
         let stored = learnings.list().await.expect("list");
         assert_eq!(stored[0].embedding, Vec::<f32>::new());
+    }
+
+    /// RecordingDispatcher exposes its captured state via an Arc so
+    /// tests can read it back even after the dispatcher itself gets
+    /// erased to `Arc<dyn JobDispatcher>`.
+    struct RecordingDispatcher {
+        seen: Arc<std::sync::Mutex<Vec<ReviewJob>>>,
+    }
+
+    #[async_trait::async_trait]
+    impl JobDispatcher for RecordingDispatcher {
+        async fn dispatch(&self, job: ReviewJob) {
+            self.seen.lock().unwrap().push(job);
+        }
+    }
+
+    #[tokio::test]
+    async fn re_review_with_dispatcher_queues_force_job() {
+        let (server, forgejo, learnings, llm) = setup().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "fix: thing",
+                "body": "details",
+                "draft": false,
+                "head": {"ref": "topic", "sha": "deadbeef"},
+                "base": {"ref": "main", "sha": "cafef00d"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dispatcher: Arc<dyn JobDispatcher> =
+            Arc::new(RecordingDispatcher { seen: seen.clone() });
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &llm,
+            learnings: &learnings,
+            dispatcher: Some(dispatcher),
+        };
+        handler
+            .handle(ctx(), ChatCommand::ReReview)
+            .await
+            .expect("ok");
+        let queued = seen.lock().unwrap();
+        assert_eq!(queued.len(), 1);
+        assert_eq!(queued[0].pr_number, 42);
+        assert_eq!(queued[0].head_sha, "deadbeef");
+        assert!(queued[0].force, "ReReview must set force=true");
+    }
+
+    #[tokio::test]
+    async fn re_review_without_dispatcher_replies_with_explanation() {
+        let (server, forgejo, learnings, llm) = setup().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &llm,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::ReReview)
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn re_review_on_draft_pr_skips_dispatch() {
+        let (server, forgejo, learnings, llm) = setup().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "wip",
+                "body": "",
+                "draft": true,
+                "head": {"ref": "t", "sha": "abc"},
+                "base": {"ref": "main", "sha": "def"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dispatcher: Arc<dyn JobDispatcher> =
+            Arc::new(RecordingDispatcher { seen: seen.clone() });
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &llm,
+            learnings: &learnings,
+            dispatcher: Some(dispatcher),
+        };
+        handler
+            .handle(ctx(), ChatCommand::ReReview)
+            .await
+            .expect("ok");
+        assert!(seen.lock().unwrap().is_empty());
     }
 }

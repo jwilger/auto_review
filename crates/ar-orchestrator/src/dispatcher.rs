@@ -23,6 +23,10 @@ pub struct ReviewJob {
     pub head_sha: String,
     pub pr_title: String,
     pub pr_body: String,
+    /// When true, bypasses the per-PR review-history dedup check and
+    /// forces a fresh review even if this SHA was already reviewed.
+    /// Used by the chat handler's `re-review` command.
+    pub force: bool,
 }
 
 impl From<&PullRequestEvent> for ReviewJob {
@@ -34,6 +38,7 @@ impl From<&PullRequestEvent> for ReviewJob {
             head_sha: evt.pull_request.head.sha.clone(),
             pr_title: evt.pull_request.title.clone(),
             pr_body: evt.pull_request.body.clone(),
+            force: false,
         }
     }
 }
@@ -205,28 +210,44 @@ pub async fn run_review_job(
     let mut incremental_diff: Option<String> = None;
     if let Some(prev) = &last_reviewed_sha {
         if prev == &job.head_sha {
+            if job.force {
+                tracing::info!(
+                    repo = format!("{}/{}", job.owner, job.repo),
+                    pr = job.pr_number,
+                    sha = %job.head_sha,
+                    "force=true: re-reviewing the same SHA the user asked"
+                );
+            } else {
+                tracing::info!(
+                    repo = format!("{}/{}", job.owner, job.repo),
+                    pr = job.pr_number,
+                    sha = %job.head_sha,
+                    "no new commits since last review; skipping"
+                );
+                return;
+            }
+        } else if job.force {
             tracing::info!(
                 repo = format!("{}/{}", job.owner, job.repo),
                 pr = job.pr_number,
-                sha = %job.head_sha,
-                "no new commits since last review; skipping"
+                "force=true: full review (skipping compare-diff incremental path)"
             );
-            return;
-        }
-        tracing::info!(
-            repo = format!("{}/{}", job.owner, job.repo),
-            pr = job.pr_number,
-            previous = %prev,
-            current = %job.head_sha,
-            "incremental review: fetching compare diff",
-        );
-        match forgejo
-            .get_compare_diff(&job.owner, &job.repo, prev, &job.head_sha)
-            .await
-        {
-            Ok(d) => incremental_diff = Some(d),
-            Err(e) => {
-                tracing::warn!(error = %e, "compare_diff failed; falling back to full diff");
+        } else {
+            tracing::info!(
+                repo = format!("{}/{}", job.owner, job.repo),
+                pr = job.pr_number,
+                previous = %prev,
+                current = %job.head_sha,
+                "incremental review: fetching compare diff",
+            );
+            match forgejo
+                .get_compare_diff(&job.owner, &job.repo, prev, &job.head_sha)
+                .await
+            {
+                Ok(d) => incremental_diff = Some(d),
+                Err(e) => {
+                    tracing::warn!(error = %e, "compare_diff failed; falling back to full diff");
+                }
             }
         }
     }

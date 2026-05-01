@@ -85,6 +85,9 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
         head_sha: pr.head.sha,
         pr_title: pr.title,
         pr_body: pr.body,
+        // review-once is a one-shot debug command: force a full
+        // review regardless of any review history that might dedup.
+        force: true,
     };
 
     println!(

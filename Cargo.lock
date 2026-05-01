@@ -75,6 +75,7 @@ dependencies = [
  "ar-forgejo",
  "ar-index",
  "ar-llm",
+ "ar-orchestrator",
  "async-trait",
  "serde",
  "serde_json",
