@@ -5,8 +5,10 @@
 //! follow-up commits.
 
 pub mod symbols;
+pub mod walker;
 
 pub use symbols::{
     extract_python_symbols, extract_rust_symbols, extract_symbols_for_path, extract_tsx_symbols,
     extract_typescript_symbols, ExtractError, Symbol, SymbolKind,
 };
+pub use walker::{index_workspace, IndexedSymbol, WalkError};
