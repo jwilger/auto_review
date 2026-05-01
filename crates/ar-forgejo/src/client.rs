@@ -181,6 +181,31 @@ impl Client {
         Ok(body)
     }
 
+    /// Post a top-level comment on an issue or pull request. Used by
+    /// the agentic chat handler to reply to `@auto_review` mentions.
+    /// Returns the comment id on success.
+    pub async fn post_issue_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+        body: &str,
+    ) -> Result<u64, Error> {
+        #[derive(serde::Serialize)]
+        struct Req<'a> {
+            body: &'a str,
+        }
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            id: u64,
+        }
+        let url = self.url(&format!(
+            "repos/{owner}/{repo}/issues/{issue_number}/comments"
+        ))?;
+        let resp: Resp = json_post(&self.http, url, &Req { body }).await?;
+        Ok(resp.id)
+    }
+
     /// Fetch the Forgejo server's reported version string. Used as a
     /// cheap connectivity probe by readiness checks at gateway startup.
     pub async fn get_server_version(&self) -> Result<String, Error> {
@@ -370,6 +395,43 @@ mod tests {
             .expect_err("err");
         match err {
             Error::Api { status, .. } => assert_eq!(status, 404),
+            other => panic!("unexpected: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn post_issue_comment_returns_new_id() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/issues/7/comments"))
+            .and(body_json(serde_json::json!({"body": "hi from the bot"})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 42,
+                "body": "hi from the bot"
+            })))
+            .mount(&server)
+            .await;
+        let id = client
+            .post_issue_comment("o", "r", 7, "hi from the bot")
+            .await
+            .expect("ok");
+        assert_eq!(id, 42);
+    }
+
+    #[tokio::test]
+    async fn post_issue_comment_propagates_403() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/issues/7/comments"))
+            .respond_with(ResponseTemplate::new(403).set_body_string("forbidden"))
+            .mount(&server)
+            .await;
+        let err = client
+            .post_issue_comment("o", "r", 7, "x")
+            .await
+            .expect_err("err");
+        match err {
+            Error::Api { status, .. } => assert_eq!(status, 403),
             other => panic!("unexpected: {other:?}"),
         }
     }

@@ -14,5 +14,7 @@
 //! events and falls back to polling for missed mentions.
 
 pub mod command;
+pub mod handler;
 
 pub use command::{parse_chat_command, ChatCommand};
+pub use handler::{ChatContext, ChatError, ChatHandler};
