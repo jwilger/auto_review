@@ -1,3 +1,4 @@
+use crate::review_history::{InMemoryReviewHistory, PrKey, ReviewHistory};
 use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullRequestEvent};
 use ar_llm::Router as LlmRouter;
 use ar_review::{
@@ -58,13 +59,16 @@ impl JobDispatcher for NoOpDispatcher {
 /// [`run_review_job`] in the background, and returns to the caller.
 ///
 /// Owns the Forgejo base URL + bot token in addition to the API client
-/// because the lint phase needs them to build a clone URL.
+/// because the lint phase needs them to build a clone URL. Also owns
+/// a [`ReviewHistory`] so subsequent commits on the same PR can use
+/// `compare_diff` instead of re-reviewing the whole PR.
 #[derive(Clone)]
 pub struct SpawningDispatcher {
     forgejo: Arc<ForgejoClient>,
     llm: Arc<LlmRouter>,
     forgejo_base: Arc<String>,
     forgejo_token: Arc<String>,
+    history: Arc<dyn ReviewHistory>,
 }
 
 impl SpawningDispatcher {
@@ -79,7 +83,15 @@ impl SpawningDispatcher {
             llm,
             forgejo_base: Arc::new(forgejo_base.into()),
             forgejo_token: Arc::new(forgejo_token.into()),
+            history: Arc::new(InMemoryReviewHistory::new()),
         }
+    }
+
+    /// Replace the default in-memory history with a custom one
+    /// (e.g. SQLite-backed for persistence across restarts).
+    pub fn with_history(mut self, history: Arc<dyn ReviewHistory>) -> Self {
+        self.history = history;
+        self
     }
 }
 
@@ -90,6 +102,7 @@ impl JobDispatcher for SpawningDispatcher {
         let llm = self.llm.clone();
         let base = self.forgejo_base.clone();
         let token = self.forgejo_token.clone();
+        let history = self.history.clone();
         // Outer spawn returns immediately so the webhook handler can ack.
         // Inner spawn runs the actual review; the outer awaits the inner's
         // JoinHandle so panics or cancellations get logged AND surface to
@@ -103,7 +116,7 @@ impl JobDispatcher for SpawningDispatcher {
         let forgejo_for_status = forgejo.clone();
         tokio::spawn(async move {
             let inner = tokio::spawn(async move {
-                run_review_job(&forgejo, &llm, &base, &token, job).await;
+                run_review_job(&forgejo, &llm, &base, &token, history.as_ref(), job).await;
             });
             if let Err(e) = inner.await {
                 tracing::error!(
@@ -151,8 +164,40 @@ pub async fn run_review_job(
     llm: &LlmRouter,
     forgejo_base: &str,
     forgejo_token: &str,
+    history: &dyn ReviewHistory,
     job: ReviewJob,
 ) {
+    let pr_key = PrKey {
+        owner: job.owner.clone(),
+        repo: job.repo.clone(),
+        pr_number: job.pr_number,
+    };
+    let last_reviewed_sha = match history.last_reviewed(&pr_key).await {
+        Ok(sha) => sha,
+        Err(e) => {
+            tracing::warn!(error = %e, "review history lookup failed; treating as full review");
+            None
+        }
+    };
+    if let Some(prev) = &last_reviewed_sha {
+        if prev == &job.head_sha {
+            tracing::info!(
+                repo = format!("{}/{}", job.owner, job.repo),
+                pr = job.pr_number,
+                sha = %job.head_sha,
+                "no new commits since last review; skipping"
+            );
+            return;
+        }
+        tracing::info!(
+            repo = format!("{}/{}", job.owner, job.repo),
+            pr = job.pr_number,
+            previous = %prev,
+            current = %job.head_sha,
+            "incremental review: new commits since last review",
+        );
+    }
+
     let _ = forgejo
         .post_commit_status(
             &job.owner,
@@ -296,6 +341,13 @@ pub async fn run_review_job(
         .post_commit_status(&job.owner, &job.repo, &job.head_sha, &final_status)
         .await
         .inspect_err(|e| tracing::warn!(error = %e, "failed to post final status"));
+
+    // Record the SHA so the next webhook against this PR can do an
+    // incremental review. Best-effort: a record failure just means
+    // the next review will be a full one.
+    if let Err(e) = history.record(&pr_key, &job.head_sha).await {
+        tracing::warn!(error = %e, "failed to record review history");
+    }
 }
 
 #[derive(Debug, thiserror::Error)]

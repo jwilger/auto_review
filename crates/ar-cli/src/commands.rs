@@ -6,7 +6,7 @@ use ar_forgejo::{
     Client, CreateAccessTokenRequest, CreateWebhookRequest, InitClient, WebhookConfig,
 };
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
-use ar_orchestrator::{run_review_job, ReviewJob};
+use ar_orchestrator::{run_review_job, InMemoryReviewHistory, ReviewJob};
 use ar_prompts::{render_review_prompt, ReviewPromptInputs};
 use ar_review::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 use std::sync::Arc;
@@ -91,7 +91,19 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
         "Reviewing {}/{} #{} at {}",
         args.owner, args.repo, args.pr, job.head_sha
     );
-    run_review_job(&forgejo, &llm, &args.forgejo_url, &args.token, job).await;
+    // Fresh in-memory history each invocation: review-once is a one-
+    // shot debug command, so the no-incremental fall-through is what
+    // we want.
+    let history = InMemoryReviewHistory::new();
+    run_review_job(
+        &forgejo,
+        &llm,
+        &args.forgejo_url,
+        &args.token,
+        &history,
+        job,
+    )
+    .await;
     println!("Done. Check the PR for the posted review.");
     Ok(())
 }
