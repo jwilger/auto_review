@@ -1,0 +1,315 @@
+# Operations Runbook
+
+Day-2 operations for `auto_review` after the [QUICKSTART](../QUICKSTART.md)
+walks you through the first deploy. Audience: the on-call engineer or
+operator running the bot.
+
+For *what* the bot defends against, see
+[THREAT-MODEL.md](./THREAT-MODEL.md). This document covers *how* you
+keep it healthy.
+
+---
+
+## Quick reference
+
+| Symptom                                                      | First action                                           | Section |
+|--------------------------------------------------------------|--------------------------------------------------------|---------|
+| `webhook_signature_failures_total` increasing                | Suspect secret drift or active probing                 | §2.1    |
+| `webhook_payload_failures_total` increasing                  | Forgejo upgraded; payload schema may have shifted      | §2.2    |
+| Reviews failing with `LLM` errors                            | Provider down or model unloaded                        | §3.1    |
+| Reviews failing with `Workspace` errors                      | Disk full / network egress blocked / token revoked     | §3.2    |
+| Bot replies to itself in a chat thread                       | `AR_BOT_LOGIN` mismatch                                | §4.1    |
+| Bot ignores `@<name>` mentions                               | `AR_BOT_NAME` mismatch                                 | §4.1    |
+| Reviewer host high CPU / memory                              | Sandbox limits not set; runaway linter                 | §5.1    |
+| Same PR reviewed in a loop                                   | Bot self-detection broken; check `AR_BOT_LOGIN`        | §4.1    |
+
+---
+
+## 1. Daily / weekly checks
+
+**Scrape metrics** at `GET /metrics` from your Prometheus and dashboard:
+- `auto_review_jobs_dispatched_total` — should track PR opens.
+- `auto_review_webhook_signature_failures_total` — should be zero or
+  near-zero.
+- `auto_review_webhook_payload_failures_total` — should be zero.
+- `auto_review_chat_commands_received_total` — non-zero only if your
+  team uses `@<bot> remember/forget/re-review/...`.
+
+**Tail logs** for anomalies:
+```
+journalctl -u auto-review -f --since "1 hour ago" | grep -E 'WARN|ERROR'
+```
+The orchestrator logs each review's repo, PR number, and final
+finding count at INFO; warnings during the lint/RAG/verify phases are
+non-fatal but worth scanning if findings drop noticeably.
+
+---
+
+## 2. Webhook anomalies
+
+### 2.1 Signature failures
+
+`auto_review_webhook_signature_failures_total` is the alerting signal
+for either secret drift or active probing.
+
+**Diagnosis:**
+1. Compare the `WEBHOOK_SECRET` env var in your gateway against the
+   value Forgejo has stored for the webhook
+   (`GET /api/v1/repos/{owner}/{repo}/hooks` as admin).
+2. Check `journalctl -u auto-review` for the `signature: ...`
+   reject lines — `signature: mismatch` means wrong secret;
+   `signature: not hex` means malformed sender; `signature: missing`
+   means the header isn't being sent (proxy stripping it?).
+
+**Fix:** rotate (see §6.1).
+
+### 2.2 Payload-decode failures
+
+A spike here usually means Forgejo was upgraded and the JSON shape
+shifted. We pin against the Gitea/Forgejo API contract; new fields
+are tolerated, but renamed-or-removed fields break parsing.
+
+**Diagnosis:** find a failing example in logs and compare against
+[`crates/ar-forgejo/src/types.rs`](../crates/ar-forgejo/src/types.rs).
+File an issue with the failing payload (redact the `secret` field
+from the webhook envelope first).
+
+**Workaround until fix:** revert Forgejo to the last working
+version, or accept the missed reviews on PRs that webhook in this
+window.
+
+---
+
+## 3. Review failures
+
+The dispatcher posts a final commit-status to every PR. `error`
+means transport / config; `failure` means the LLM produced
+something the schema validator + self-heal couldn't repair.
+
+### 3.1 LLM errors
+
+`auto_review failed: llm: ...` on the commit-status.
+
+**Cloud profile:** check the provider dashboard for 4xx (auth /
+quota) or 5xx (provider outage). `LLM_API_KEY` rotation: see §6.2.
+
+**Local profile (Ollama / vLLM):**
+1. `curl -s ${LLM_BASE_URL}/v1/models | jq '.data[].id'` —
+   confirm the configured `LLM_REASONING_MODEL` is loaded.
+2. If absent, `ollama pull <model>` or restart the inference server.
+3. Watch `journalctl -u auto-review` after a fresh PR; the next
+   review should succeed.
+
+### 3.2 Workspace errors
+
+`auto_review failed: workspace: clone failed: ...`
+
+**Common causes:**
+- The bot's PAT was revoked or expired → re-mint (§6.1).
+- Disk pressure on the workspace tmpfs → bump the volume size or
+  reduce `AR_WORKSPACE_MAX_BYTES` if set.
+- Network egress to the Forgejo instance blocked from the gateway.
+
+---
+
+## 4. Bot identity
+
+### 4.1 `AR_BOT_LOGIN` and `AR_BOT_NAME`
+
+Two separate things:
+- `AR_BOT_LOGIN` — the Forgejo username the bot authenticates as.
+  Used for self-loop detection (don't act on the bot's own
+  comments).
+- `AR_BOT_NAME` — the mention handle (`@<name>`). Often the same
+  as `AR_BOT_LOGIN`.
+
+**Symptom: bot ignores all `@<name>` mentions.** `AR_BOT_NAME`
+doesn't match what users are typing. Update the env var; restart.
+
+**Symptom: bot replies to itself, looping.** `AR_BOT_LOGIN` doesn't
+match the actual bot account. The webhook receives the bot's own
+`issue_comment`, doesn't recognise the sender as itself, and acts.
+Update the env var; restart. (As of v0.1.0, both the webhook
+handler and the background poller honour these.)
+
+---
+
+## 5. Resource pressure
+
+### 5.1 Sandbox limits
+
+Without `AR_SANDBOX_IMAGE` set, linter binaries spawn directly on
+the host. That's only safe for trusted-PR-source environments.
+Production deployments should set:
+
+```
+AR_SANDBOX_IMAGE=ghcr.io/your-org/auto_review-sandbox:<tag>
+AR_SANDBOX_MEMORY_MIB=512
+AR_SANDBOX_CPUS=1.0
+AR_SANDBOX_PIDS_LIMIT=128
+AR_SANDBOX_TIMEOUT_SECS=60
+```
+
+Tune the limits per-linter empirically — `golangci-lint` on a large
+Go monorepo will need more memory and a longer timeout than
+`shellcheck`.
+
+### 5.2 Long-running reviews
+
+The orchestrator has no global per-PR timeout; each phase has its
+own. If reviews start taking minutes, check:
+
+1. LLM tier latency. `qwen2.5-coder:32b` on CPU can take 5-10× longer
+   per token than on GPU.
+2. Workspace clone size. Monorepos clone slowly. Consider
+   `--depth=1` (already set) and shallow-fetch (set by the workspace
+   builder).
+3. Linter wall-clock. Increase `AR_SANDBOX_TIMEOUT_SECS` only if you
+   have a known-slow linter; raising it for everything masks
+   genuine fork-bomb attacks.
+
+---
+
+## 6. Rotation
+
+### 6.1 Bot PAT (`FORGEJO_TOKEN`)
+
+```bash
+auto_review init \
+    --forgejo-url $FORGEJO_BASE_URL \
+    --username $AR_BOT_LOGIN \
+    --token-name auto_review-$(date -I)
+```
+
+Save the new token, update the gateway env, restart, then revoke
+the old token in Forgejo's user settings. Rotate at least every
+180 days; sooner if you suspect compromise (cf. T5 in the
+[threat model](./THREAT-MODEL.md)).
+
+### 6.2 LLM API key (`LLM_API_KEY`)
+
+Provider-specific. After rotation: update the env, restart the
+gateway, run a smoke-test PR through `auto_review review-once
+--dry-run` to confirm prompt rendering succeeds, then a real
+`review-once` to confirm the new key works.
+
+### 6.3 Webhook secret (`WEBHOOK_SECRET`)
+
+Generate a new value (`openssl rand -hex 32`). Update both:
+1. The gateway's env. Restart.
+2. Every Forgejo webhook configured against this gateway:
+   `GET /api/v1/repos/{owner}/{repo}/hooks` to find them, then
+   `PATCH .../hooks/{id}` with the new `config.secret`.
+
+There's a brief window where webhooks signed with the old secret
+will get rejected. Plan accordingly — schedule for a low-PR-traffic
+window.
+
+---
+
+## 7. Repo-level operations
+
+### 7.1 Disable the bot for one repo
+
+Add to the repo root:
+```yaml
+# .auto_review.yaml
+enabled: false
+```
+
+The bot still receives the webhook but skips the review and posts a
+"disabled by repo config" success status.
+
+### 7.2 Add custom guidelines
+
+```yaml
+# .auto_review.yaml
+guidelines: |
+  We never use raw SQL — every query goes through the QueryBuilder.
+  Prefer immutable types; mutating helpers must be marked with
+  `// MUTATES` for the reviewer.
+```
+
+These get injected into the LLM prompt's "repository conventions"
+section. Validate locally:
+```bash
+auto_review validate-config .auto_review.yaml
+```
+
+### 7.3 Disable a noisy linter
+
+```yaml
+# .auto_review.yaml
+disabled_tools:
+  - markdownlint
+  - phpstan
+```
+
+Names match `LinterRunner::name()`. Find the canonical name in
+`auto_review review-once --dry-run` output (linters that ran are
+listed in the Findings section).
+
+---
+
+## 8. Learnings store
+
+When `AR_LEARNINGS_DB` is set to a file path, learnings persist across
+restarts.
+
+**Backup:**
+```bash
+sqlite3 /var/lib/auto_review/learnings.db ".backup '/backup/learnings-$(date -I).db'"
+```
+
+**Inspect:**
+```bash
+sqlite3 /var/lib/auto_review/learnings.db \
+    "SELECT id, repo, source, substr(text, 1, 80) FROM learnings ORDER BY id DESC LIMIT 20;"
+```
+
+**Restore:** stop the gateway, replace the file, restart.
+
+**Wipe:** delete the file, restart. The `@<bot> forget` chat command
+removes individual entries without operator intervention.
+
+---
+
+## 9. Upgrade
+
+Semver: pre-1.0, minor versions can break configuration. Always
+read the [CHANGELOG](../CHANGELOG.md) before bumping.
+
+```bash
+# Build the new version
+git -C /opt/auto_review pull
+cargo build --release -p ar-gateway -p ar-cli
+
+# Validate config still parses (some keys may have moved)
+auto_review validate-config /etc/auto_review/
+
+# Restart
+systemctl restart auto-review
+
+# Smoke-test
+curl -s http://localhost:8080/version | jq
+```
+
+If the new version fails to start, the old binary is still on disk
+at `target/release/ar-gateway.bak` (manual; we do not auto-back-up).
+Roll back, file an issue.
+
+---
+
+## 10. Filing an issue
+
+Before filing, capture:
+- `GET /version` JSON
+- `GET /metrics` snapshot
+- `journalctl -u auto-review --since "1h ago" --no-pager > logs.txt`
+- The exact commit-status `description` text from the failing PR
+- Sanitised `.auto_review.yaml` (strip any sensitive `guidelines`
+  text)
+- Forgejo version (`GET /api/v1/version`)
+
+Attach those to the issue. Do **not** include `FORGEJO_TOKEN`,
+`LLM_API_KEY`, or `WEBHOOK_SECRET` in any field.

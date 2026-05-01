@@ -23,7 +23,9 @@ CLI subcommand replays PR fixtures through the LLM-review path
 for regression tracking and model comparison. CLI helpers mint
 the bot's PAT and register the webhook on a repo.
 
-To deploy: see [QUICKSTART.md](./QUICKSTART.md). For background,
+To deploy: see [QUICKSTART.md](./QUICKSTART.md). To run on an
+ongoing basis (rotation, upgrades, alerts, repo config),
+see [docs/OPERATIONS.md](./docs/OPERATIONS.md). For background,
 the [feasibility study](./docs/FEASIBILITY.md) lays out the broader
 plan; [ADR-0001](./docs/ADR-0001-architecture.md) captures the
 architecture decision; the [threat model](./docs/THREAT-MODEL.md)

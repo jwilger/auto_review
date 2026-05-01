@@ -464,6 +464,23 @@ default in-memory store to the SQLite-backed one.
   which is correct (a user named `auto_review_helper` was
   previously silently ignored).
 
+#### Operations runbook (M5 docs)
+
+- `docs/OPERATIONS.md`: day-2 operations runbook for the
+  on-call engineer. Quick-reference symptom table mapped to
+  diagnosis sections, daily/weekly health checks, webhook
+  anomaly playbooks (signature + payload failures), review
+  failure triage by error class, bot identity gotchas,
+  resource pressure tuning, full rotation procedures
+  (PAT / API key / webhook secret), repo-level operations
+  (`.auto_review.yaml` patterns), learnings store backup /
+  inspect / restore, upgrade procedure with rollback note,
+  and an issue-filing checklist that lists exactly which
+  artefacts to capture (and which secrets to redact).
+  README and QUICKSTART link it; complements the threat model
+  (which covers *what* the bot defends against) by covering
+  *how* operators keep it healthy.
+
 #### Threat model (M5 docs)
 
 - `docs/THREAT-MODEL.md`: living document enumerating
