@@ -27,12 +27,50 @@ async fn main() -> Result<()> {
 
     let forgejo =
         Arc::new(ForgejoClient::new(&forgejo_base, &forgejo_token).context("forgejo client")?);
+
     let reasoning_provider = Arc::new(
         OpenAiProvider::new(&llm_base, llm_api_key.as_deref(), &reasoning_model)
             .context("reasoning LLM provider")?,
     );
-    let llm_router = Arc::new(LlmRouter::new().with(ModelTier::Reasoning, reasoning_provider));
+    let mut router = LlmRouter::new().with(ModelTier::Reasoning, reasoning_provider);
 
+    // Optional Embedding tier — when configured, the orchestrator
+    // builds a RAG context from the cloned workspace and injects
+    // it into the LLM prompt. Reuses LLM_BASE_URL + LLM_API_KEY by
+    // default; override with LLM_EMBEDDING_BASE_URL / _API_KEY when
+    // your embedder lives on a different endpoint.
+    if let Ok(embedding_model) = env::var("LLM_EMBEDDING_MODEL") {
+        let embed_base = env::var("LLM_EMBEDDING_BASE_URL").unwrap_or_else(|_| llm_base.clone());
+        let embed_key = env::var("LLM_EMBEDDING_API_KEY")
+            .ok()
+            .or_else(|| llm_api_key.clone());
+        let mut provider = OpenAiProvider::new(&embed_base, embed_key.as_deref(), &embedding_model)
+            .context("embedding LLM provider")?;
+        provider = provider.with_embedding_model(&embedding_model);
+        let provider = Arc::new(provider);
+        router = router.with(ModelTier::Embedding, provider);
+        tracing::info!(model = %embedding_model, "embedding tier configured; RAG enabled");
+    } else {
+        tracing::info!("LLM_EMBEDDING_MODEL not set; RAG disabled");
+    }
+
+    // Optional Cheap tier — used by the LLM-driven file triage step.
+    if let Ok(cheap_model) = env::var("LLM_CHEAP_MODEL") {
+        let cheap_base = env::var("LLM_CHEAP_BASE_URL").unwrap_or_else(|_| llm_base.clone());
+        let cheap_key = env::var("LLM_CHEAP_API_KEY")
+            .ok()
+            .or_else(|| llm_api_key.clone());
+        let provider = Arc::new(
+            OpenAiProvider::new(&cheap_base, cheap_key.as_deref(), &cheap_model)
+                .context("cheap LLM provider")?,
+        );
+        router = router.with(ModelTier::Cheap, provider);
+        tracing::info!(model = %cheap_model, "cheap tier configured; LLM triage enabled");
+    } else {
+        tracing::info!("LLM_CHEAP_MODEL not set; LLM triage disabled (heuristic only)");
+    }
+
+    let llm_router = Arc::new(router);
     let dispatcher = Arc::new(SpawningDispatcher::new(
         forgejo,
         llm_router,

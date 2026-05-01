@@ -18,6 +18,10 @@ services:
       - LLM_BASE_URL=${LLM_BASE_URL:-http://host.docker.internal:11434}
       - LLM_API_KEY=${LLM_API_KEY:-}
       - LLM_REASONING_MODEL=${LLM_REASONING_MODEL:-qwen2.5-coder:32b}
+      # Optional: enable RAG by setting an embedding model.
+      - LLM_EMBEDDING_MODEL=${LLM_EMBEDDING_MODEL:-}
+      # Optional: enable LLM-driven triage by setting a cheap model.
+      - LLM_CHEAP_MODEL=${LLM_CHEAP_MODEL:-}
     ports:
       - "8080:8080"
     depends_on:
