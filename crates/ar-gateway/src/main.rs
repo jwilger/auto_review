@@ -138,7 +138,7 @@ async fn main() -> Result<()> {
     // (remember/forget) become visible to RAG retrieval in subsequent
     // reviews. Set AR_LEARNINGS_DB to a filesystem path to persist
     // across restarts; otherwise an in-memory store is used.
-    let learnings: Arc<dyn ar_index::LearningsStore> = match env::var("AR_LEARNINGS_DB").ok() {
+    let learnings: Arc<dyn ar_index::LearningsStore> = match read_non_empty_env("AR_LEARNINGS_DB") {
         Some(path) => {
             let path = PathBuf::from(path);
             let store = SqliteLearningsStore::open(&path)
@@ -162,7 +162,7 @@ async fn main() -> Result<()> {
     // path to persist across restarts; otherwise an in-memory store
     // is used (every restart triggers a fresh full review on the
     // next webhook for any open PR).
-    let history: Arc<dyn ReviewHistory> = match env::var("AR_HISTORY_DB").ok() {
+    let history: Arc<dyn ReviewHistory> = match read_non_empty_env("AR_HISTORY_DB") {
         Some(path) => {
             let path = PathBuf::from(path);
             let store = SqliteReviewHistory::open(&path)
@@ -264,27 +264,27 @@ async fn main() -> Result<()> {
         version: env!("CARGO_PKG_VERSION"),
         bot_login: bot_login.clone(),
         bot_name: bot_name.clone(),
-        sandbox: if env::var("AR_SANDBOX_IMAGE").is_ok() {
+        sandbox: if read_non_empty_env("AR_SANDBOX_IMAGE").is_some() {
             "podman"
         } else {
             "direct"
         },
-        learnings: if env::var("AR_LEARNINGS_DB").is_ok() {
+        learnings: if read_non_empty_env("AR_LEARNINGS_DB").is_some() {
             "sqlite"
         } else {
             "in-memory"
         },
-        history: if env::var("AR_HISTORY_DB").is_ok() {
+        history: if read_non_empty_env("AR_HISTORY_DB").is_some() {
             "sqlite"
         } else {
             "in-memory"
         },
         llm_tiers: {
             let mut tiers = vec!["reasoning"]; // always present (required)
-            if env::var("LLM_CHEAP_MODEL").is_ok() {
+            if read_non_empty_env("LLM_CHEAP_MODEL").is_some() {
                 tiers.push("cheap");
             }
-            if env::var("LLM_EMBEDDING_MODEL").is_ok() {
+            if read_non_empty_env("LLM_EMBEDDING_MODEL").is_some() {
                 tiers.push("embedding");
             }
             tiers
@@ -423,7 +423,7 @@ fn read_non_empty_env(name: &str) -> Option<String> {
 }
 
 fn build_sandbox() -> Result<Arc<dyn Sandbox>> {
-    if let Ok(image) = env::var("AR_SANDBOX_IMAGE") {
+    if let Some(image) = read_non_empty_env("AR_SANDBOX_IMAGE") {
         let memory_mib = env::var("AR_SANDBOX_MEMORY_MIB")
             .ok()
             .and_then(|s| s.parse().ok())
