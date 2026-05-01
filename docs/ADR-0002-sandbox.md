@@ -5,7 +5,7 @@ Date: 2026-04-30
 
 ## Context
 
-`auto_review` runs ~13 linter binaries against the working tree of an
+`auto_review` runs ~44 linter binaries against the working tree of an
 incoming pull request. The PR's contents are attacker-controlled by
 construction — anyone can open a PR, including a hostile contributor.
 Several linters in the bundle (rubocop, golangci-lint, eslint via

@@ -87,7 +87,7 @@ the navigation aid. The summary table:
 | `ar-tools` | Static-analysis runners + result parsers (44 linters) |
 | `ar-cli` | Operator CLI (init / register-webhook / review-once / bench / doctor / status / 16 more — see crate README) |
 | `ar-sandbox` | Sandbox trait + DirectSandbox + PodmanSandbox (see ADR-0002) |
-| `ar-chat` | Agentic `@auto_review` chat handler (8 commands + freeform) |
+| `ar-chat` | Agentic `@auto_review` chat handler (7 specific commands + freeform fallback) |
 | `ar-index` | Tree-sitter symbols, embeddings, co-change graph, learnings store |
 
 ## Adding a new linter
@@ -118,7 +118,7 @@ The existing 44 linters in `crates/ar-tools/src/` are the template.
 ## Adding a new CLI subcommand
 
 The bot's operator CLI lives in `crates/ar-cli/`. Each subcommand
-follows a five-step shape; the existing 22 subcommands are
+follows a five-step shape; the existing 16 subcommands are
 templates.
 
 1. **Define the args struct** in `crates/ar-cli/src/cli.rs`:

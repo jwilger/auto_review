@@ -1096,6 +1096,24 @@ default in-memory store to the SQLite-backed one.
   forget-learning behavioural (drop existing record,
   unknown-id errors clearly).
 
+#### Stale numeric stats sweep
+
+- `docs/ADR-0002-sandbox.md` claimed `~13 linter binaries`
+  in the Context section. Actual is ~44 (matches every
+  other doc). Fixed.
+- `CONTRIBUTING.md` "Adding a new CLI subcommand" claimed
+  `the existing 22 subcommands` are the template. Actual
+  is 16. Fixed.
+- `CONTRIBUTING.md` `ar-chat` row claimed `(8 commands +
+  freeform)`. The 8th is `Freeform` itself, so the wording
+  was double-counting. Fixed to
+  `(7 specific commands + freeform fallback)`.
+- These don't have CI guards — numbers in prose drift
+  silently. The structural drift tests (catalogue ↔
+  Dockerfile, RepoConfig ↔ example, clap ↔ README, etc.)
+  catch the high-impact cases; numeric stats are
+  audited periodically.
+
 #### CLI README / clap subcommands contract test
 
 - `ar-cli/README.md` was missing two subcommand rows:
