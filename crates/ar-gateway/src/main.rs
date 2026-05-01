@@ -490,14 +490,21 @@ fn build_sandbox() -> Result<Arc<dyn Sandbox>> {
         let cpus = parse_env::<f64>("AR_SANDBOX_CPUS").unwrap_or(1.0);
         let pids_limit = parse_env::<u32>("AR_SANDBOX_PIDS_LIMIT").unwrap_or(128);
         let wall_clock_secs = parse_env::<u64>("AR_SANDBOX_TIMEOUT_SECS").unwrap_or(60);
-        let podman_bin = env::var("AR_SANDBOX_PODMAN_BIN").unwrap_or_else(|_| "podman".into());
+        // Operator override: AR_SANDBOX_RUNTIME (preferred, neutral name)
+        // or AR_SANDBOX_PODMAN_BIN (legacy alias). When neither is set,
+        // auto-detect — prefer `podman` (rootless, no daemon) and fall
+        // back to `docker` if podman isn't on PATH. Either binary
+        // accepts our hardening flag set unchanged.
+        let podman_bin = env::var("AR_SANDBOX_RUNTIME")
+            .or_else(|_| env::var("AR_SANDBOX_PODMAN_BIN"))
+            .unwrap_or_else(|_| autodetect_oci_runtime());
         let cfg = PodmanSandboxConfig {
             image: image.clone(),
             memory_mib,
             cpus,
             pids_limit,
             wall_clock: Duration::from_secs(wall_clock_secs),
-            podman_bin,
+            podman_bin: podman_bin.clone(),
         };
         tracing::info!(
             image,
@@ -505,7 +512,8 @@ fn build_sandbox() -> Result<Arc<dyn Sandbox>> {
             cpus,
             pids_limit,
             wall_clock_secs,
-            "sandbox: podman (hardened)"
+            runtime = %podman_bin,
+            "sandbox: oci hardened"
         );
         Ok(Arc::new(PodmanSandbox::new(cfg)))
     } else {
@@ -514,4 +522,27 @@ fn build_sandbox() -> Result<Arc<dyn Sandbox>> {
         );
         Ok(Arc::new(DirectSandbox::new()))
     }
+}
+
+/// Probe PATH at startup for an OCI runtime. Synchronous because
+/// build_sandbox runs before the tokio runtime is built. Default
+/// preference: podman (rootless, no daemon dependency), then
+/// docker (needs daemon + group membership). When neither is
+/// installed, returns "podman" so the eventual SandboxError on
+/// the first review surfaces a clear "podman binary not found"
+/// message rather than a misleading docker error.
+fn autodetect_oci_runtime() -> String {
+    for bin in ["podman", "docker"] {
+        if std::process::Command::new(bin)
+            .arg("--version")
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .map(|s| s.success())
+            .unwrap_or(false)
+        {
+            return bin.to_string();
+        }
+    }
+    "podman".to_string()
 }
