@@ -124,3 +124,22 @@ pub struct PullRequestRefSummary {
     pub ref_name: String,
     pub sha: String,
 }
+
+/// One inline review-thread comment on a pull request — what
+/// `Client::list_pr_review_comments` returns. The chat poller uses
+/// `id` as a monotonic cursor (Forgejo issues ids from a single
+/// sequence) and `body` to detect `@auto_review` mentions.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PrReviewComment {
+    pub id: u64,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub user: PrReviewCommentUser,
+}
+
+#[derive(Debug, Clone, Default, Deserialize, Serialize)]
+pub struct PrReviewCommentUser {
+    #[serde(default)]
+    pub login: String,
+}

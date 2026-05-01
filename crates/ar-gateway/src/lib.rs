@@ -6,6 +6,7 @@
 //! background.
 
 pub mod hmac;
+pub mod poller;
 pub mod webhook;
 
 use ar_forgejo::Client as ForgejoClient;

@@ -37,6 +37,12 @@ pub trait ReviewHistory: Send + Sync {
     /// Drop the recorded SHA — used when a PR is closed or reopened
     /// to force the next review to be a full one.
     async fn clear(&self, key: &PrKey) -> Result<(), HistoryError>;
+
+    /// List every PR we've recorded a review for. Used by the chat
+    /// poller to know which PRs to scan for new mentions; the
+    /// `pull_request_review_comment` webhook is unreliable on
+    /// Forgejo so a periodic poll picks up the gap.
+    async fn list_known(&self) -> Result<Vec<PrKey>, HistoryError>;
 }
 
 #[derive(Default)]
@@ -64,6 +70,10 @@ impl ReviewHistory for InMemoryReviewHistory {
     async fn clear(&self, key: &PrKey) -> Result<(), HistoryError> {
         self.inner.lock().await.remove(key);
         Ok(())
+    }
+
+    async fn list_known(&self) -> Result<Vec<PrKey>, HistoryError> {
+        Ok(self.inner.lock().await.keys().cloned().collect())
     }
 }
 

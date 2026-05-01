@@ -1,8 +1,10 @@
 use anyhow::{Context, Result};
 use ar_forgejo::Client as ForgejoClient;
+use ar_gateway::poller::{ChatPoller, DEFAULT_POLL_INTERVAL};
 use ar_gateway::{build_router, AppState, ChatDeps};
 use ar_index::{InMemoryLearningsStore, SqliteLearningsStore};
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
+use ar_orchestrator::review_history::{InMemoryReviewHistory, ReviewHistory};
 use ar_orchestrator::SpawningDispatcher;
 use ar_sandbox::{DirectSandbox, PodmanSandbox, PodmanSandboxConfig, Sandbox};
 use std::env;
@@ -97,6 +99,12 @@ async fn main() -> Result<()> {
 
     let sandbox = build_sandbox()?;
 
+    // Shared review history. Both the orchestrator's incremental-
+    // review dedup AND the chat poller need to enumerate the PRs
+    // we've reviewed; constructing one Arc and threading it through
+    // both keeps them consistent.
+    let history: Arc<dyn ReviewHistory> = Arc::new(InMemoryReviewHistory::new());
+
     let dispatcher = Arc::new(
         SpawningDispatcher::new(
             forgejo.clone(),
@@ -104,9 +112,42 @@ async fn main() -> Result<()> {
             forgejo_base.clone(),
             forgejo_token.clone(),
         )
+        .with_history(history.clone())
         .with_learnings(learnings.clone())
         .with_sandbox(sandbox),
     );
+
+    // Background poller for inline review-thread `@auto_review`
+    // mentions. Forgejo doesn't fire pull_request_review_comment
+    // webhooks reliably for thread replies (gitea#26023), so we
+    // poll. Disabled when AR_POLL_INTERVAL_SECS=0.
+    let poll_interval_secs = env::var("AR_POLL_INTERVAL_SECS")
+        .ok()
+        .and_then(|s| s.parse::<u64>().ok())
+        .unwrap_or(DEFAULT_POLL_INTERVAL.as_secs());
+    if poll_interval_secs > 0 {
+        let bot_login = env::var("AR_BOT_LOGIN").unwrap_or_else(|_| "auto_review".into());
+        let bot_name = env::var("AR_BOT_NAME").unwrap_or_else(|_| bot_login.clone());
+        let dispatcher_dyn: Arc<dyn ar_orchestrator::JobDispatcher> = dispatcher.clone();
+        ChatPoller::new(
+            forgejo.clone(),
+            llm_router.clone(),
+            learnings.clone(),
+            history.clone(),
+            dispatcher_dyn,
+            bot_login.clone(),
+            bot_name.clone(),
+        )
+        .spawn(Duration::from_secs(poll_interval_secs));
+        tracing::info!(
+            interval_secs = poll_interval_secs,
+            bot_login,
+            bot_name,
+            "chat poller running"
+        );
+    } else {
+        tracing::info!("AR_POLL_INTERVAL_SECS=0; chat poller disabled");
+    }
 
     let chat_deps = ChatDeps {
         forgejo: forgejo.clone(),

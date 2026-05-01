@@ -206,6 +206,27 @@ impl Client {
         Ok(resp.id)
     }
 
+    /// List inline review-thread comments on a pull request.
+    ///
+    /// Used by the chat poller as a fallback for the
+    /// `pull_request_review_comment` webhook, which Forgejo doesn't
+    /// fire reliably for thread replies. Returns every review
+    /// comment on the PR; the caller filters by id cursor to detect
+    /// new ones.
+    ///
+    /// Caps the response at 50 comments per call (default Forgejo
+    /// page size); operators with very chatty PR threads can paginate
+    /// later if needed.
+    pub async fn list_pr_review_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+        n: u64,
+    ) -> Result<Vec<crate::types::PrReviewComment>, Error> {
+        let url = self.url(&format!("repos/{owner}/{repo}/pulls/{n}/comments"))?;
+        json_get(&self.http, url).await
+    }
+
     /// Fetch the Forgejo server's reported version string. Used as a
     /// cheap connectivity probe by readiness checks at gateway startup.
     pub async fn get_server_version(&self) -> Result<String, Error> {

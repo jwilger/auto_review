@@ -286,6 +286,27 @@ default in-memory store to the SQLite-backed one.
   the manifest with the OSV/GHSA/CVE id in the rule_id and
   presence-of-CVSS-as-severity heuristic.
 
+#### Polling fallback for inline review-thread mentions (M4)
+
+- Forgejo doesn't fire `pull_request_review_comment` webhooks
+  reliably for thread replies (gitea#26023). The webhook path
+  catches top-level PR comments via `issue_comment`; this poller
+  fills the inline-thread gap.
+- `ar_gateway::poller::ChatPoller` runs a background tokio task
+  that, every `AR_POLL_INTERVAL_SECS` (default 60, set to 0 to
+  disable), enumerates every PR in `ReviewHistory::list_known`,
+  fetches its review comments via the new
+  `Client::list_pr_review_comments`, and dispatches any new
+  `@auto_review` mentions through the chat handler.
+- Cursors are per-(repo, pr) highest-seen comment id (Forgejo's
+  ids are monotonic). First poll per PR seeds the cursor at the
+  current max id without dispatching, so backfill never replays
+  history. Bot-authored comments are filtered by login to prevent
+  self-reply loops. Per-PR errors don't abort the pass.
+- Knobs: `AR_POLL_INTERVAL_SECS`, `AR_BOT_LOGIN`, `AR_BOT_NAME`.
+- 5 wiremock-backed tests cover the seed/dispatch/skip-bot/error
+  branches end-to-end.
+
 #### Test-scaffolding chat command (M4 finishing-touches)
 
 - `@auto_review tests` (or `test` / `unit-tests` / `scaffold-tests`)

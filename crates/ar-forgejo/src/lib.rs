@@ -15,8 +15,8 @@ pub use client::{Client, Error};
 pub use init::InitClient;
 pub use types::{
     ChangedFile, CommitStatus, CommitStatusState, CreateAccessTokenRequest, CreateReviewRequest,
-    CreateWebhookRequest, CreatedAccessToken, CreatedWebhook, PullRequestRefSummary,
-    PullRequestSummary, ReviewComment, ReviewEvent, WebhookConfig,
+    CreateWebhookRequest, CreatedAccessToken, CreatedWebhook, PrReviewComment, PrReviewCommentUser,
+    PullRequestRefSummary, PullRequestSummary, ReviewComment, ReviewEvent, WebhookConfig,
 };
 pub use webhook::{
     Comment, Issue, IssueCommentAction, IssueCommentEvent, IssuePullRequestRef, PullRequestAction,
