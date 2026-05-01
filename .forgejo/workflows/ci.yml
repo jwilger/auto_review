@@ -1,8 +1,9 @@
 name: CI
 
+# Only PRs trigger CI: main is branch-protected and requires a PR,
+# so any merge has already passed CI on the PR. Re-running on push
+# to main would be redundant and burn cache cycles for no signal.
 on:
-  push:
-    branches: [main]
   pull_request:
 
 permissions:
