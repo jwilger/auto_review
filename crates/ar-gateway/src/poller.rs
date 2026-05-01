@@ -185,8 +185,20 @@ impl ChatPoller {
                 continue; // never reply to ourselves
             }
             // Cheap pre-filter: only dispatch comments that even
-            // mention us. The handler will parse properly.
-            if c.body.contains(&format!("@{}", self.bot_name)) {
+            // mention us. Case-insensitive to match Forgejo's
+            // username semantics and the parser's own
+            // case-insensitive prefix check — otherwise a comment
+            // saying "@AUTO_REVIEW help" would be filtered out
+            // here even though the parser would accept it.
+            // Bytewise windows() so we don't allocate a lowercased
+            // copy of every comment body.
+            let needle = format!("@{}", self.bot_name);
+            let needle_bytes = needle.as_bytes();
+            let body_bytes = c.body.as_bytes();
+            if body_bytes
+                .windows(needle_bytes.len())
+                .any(|w| w.eq_ignore_ascii_case(needle_bytes))
+            {
                 to_dispatch.push(c.id);
             }
         }
