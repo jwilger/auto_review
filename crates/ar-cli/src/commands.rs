@@ -7,6 +7,8 @@ use ar_forgejo::{
 };
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::{run_review_job, ReviewJob};
+use ar_prompts::{render_review_prompt, ReviewPromptInputs};
+use ar_review::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 use std::sync::Arc;
 
 const WEBHOOK_PATH: &str = "/webhooks/forgejo";
@@ -51,15 +53,6 @@ pub async fn init(args: InitArgs) -> Result<()> {
 pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
     let forgejo =
         Arc::new(Client::new(&args.forgejo_url, &args.token).context("build forgejo client")?);
-    let provider = Arc::new(
-        OpenAiProvider::new(
-            &args.llm_base_url,
-            args.llm_api_key.as_deref(),
-            &args.llm_model,
-        )
-        .context("build LLM provider")?,
-    );
-    let llm = Arc::new(LlmRouter::new().with(ModelTier::Reasoning, provider));
 
     let pr = forgejo
         .get_pull_request(&args.owner, &args.repo, args.pr)
@@ -70,6 +63,20 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
         println!("PR #{} is a draft; not reviewing.", pr.number);
         return Ok(());
     }
+
+    if args.dry_run {
+        return print_dry_run_prompt(&forgejo, &args, &pr.title, &pr.body).await;
+    }
+
+    let provider = Arc::new(
+        OpenAiProvider::new(
+            &args.llm_base_url,
+            args.llm_api_key.as_deref(),
+            &args.llm_model,
+        )
+        .context("build LLM provider")?,
+    );
+    let llm = Arc::new(LlmRouter::new().with(ModelTier::Reasoning, provider));
 
     let job = ReviewJob {
         owner: args.owner.clone(),
@@ -86,6 +93,37 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
     );
     run_review_job(&forgejo, &llm, &args.forgejo_url, &args.token, job).await;
     println!("Done. Check the PR for the posted review.");
+    Ok(())
+}
+
+async fn print_dry_run_prompt(
+    forgejo: &Client,
+    args: &ReviewOnceArgs,
+    pr_title: &str,
+    pr_body: &str,
+) -> Result<()> {
+    let raw_diff = forgejo
+        .get_pr_diff(&args.owner, &args.repo, args.pr)
+        .await
+        .context("fetch diff")?;
+    let diff = cap_diff(&raw_diff, DEFAULT_MAX_DIFF_BYTES);
+    let files = forgejo
+        .list_changed_files(&args.owner, &args.repo, args.pr)
+        .await
+        .context("fetch changed files")?;
+    let changed_files: Vec<String> = files.iter().map(|f| f.filename.clone()).collect();
+    let repo_full = format!("{}/{}", args.owner, args.repo);
+    let prompt = render_review_prompt(&ReviewPromptInputs {
+        repo_full_name: &repo_full,
+        pr_number: args.pr,
+        pr_title,
+        pr_body,
+        diff: &diff,
+        changed_files: &changed_files,
+        linter_findings: &[],
+        guidelines: "",
+    });
+    println!("{prompt}");
     Ok(())
 }
 

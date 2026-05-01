@@ -80,6 +80,12 @@ pub struct ReviewOnceArgs {
 
     #[arg(long, env = "LLM_REASONING_MODEL", default_value = "qwen2.5-coder:32b")]
     pub llm_model: String,
+
+    /// Print the rendered LLM prompt and exit. Skips clone, lint, LLM,
+    /// and posting. Useful for tuning .auto_review.yaml or debugging
+    /// prompt content without burning tokens or touching the PR.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(clap::Args, Debug)]

@@ -21,3 +21,5 @@ rpassword = "7"
 ar-forgejo = { path = "../ar-forgejo" }
 ar-llm = { path = "../ar-llm" }
 ar-orchestrator = { path = "../ar-orchestrator" }
+ar-prompts = { path = "../ar-prompts" }
+ar-review = { path = "../ar-review" }
