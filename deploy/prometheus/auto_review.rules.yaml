@@ -139,6 +139,33 @@ groups:
               - reviews_failed_unhealable_total → schema-validation
                 gave up after the self-heal retry budget
 
+      # The concurrency cap (AR_REVIEW_CONCURRENCY) is engaging
+      # heavily — sustained queue waits mean the cap is too
+      # tight or traffic exceeds capacity. Only meaningful when
+      # the cap is set; without it the counter stays at zero
+      # and the alert never fires.
+      - alert: AutoReviewQueueSaturation
+        expr: |
+          rate(auto_review_review_queue_waits_total[10m])
+            / clamp_min(rate(auto_review_reviews_started_total[10m]), 0.0001)
+            > 0.10
+        for: 10m
+        labels:
+          severity: warning
+          service: auto_review
+        annotations:
+          summary: "auto_review: > 10% of reviews waiting on the concurrency cap"
+          description: |
+            More than 10% of dispatched reviews are queueing on the
+            AR_REVIEW_CONCURRENCY semaphore over a 10m window.
+            Action ladder:
+              1. Raise AR_REVIEW_CONCURRENCY if the host has
+                 capacity (CPU + workspace disk).
+              2. If already at host capacity, scale horizontally
+                 — multiple gateway instances against a shared
+                 SQLite history (AR_HISTORY_DB pointing at the
+                 same file).
+
       # The poller is a background loop; if it stops ticking,
       # inline-thread mentions go silently unanswered.
       - alert: AutoReviewPollerStalled

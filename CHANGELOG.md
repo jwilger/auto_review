@@ -1096,6 +1096,26 @@ default in-memory store to the SQLite-backed one.
   forget-learning behavioural (drop existing record,
   unknown-id errors clearly).
 
+#### Prometheus alert: AutoReviewQueueSaturation
+
+- New alert in
+  `deploy/prometheus/auto_review.rules.yaml` covering the
+  queue-waits counter shipped in the previous iteration.
+  Fires on
+  `rate(queue_waits[10m]) / rate(reviews_started[10m]) > 10%`
+  for 10m. Annotation includes the action ladder from
+  OPERATIONS.md (raise cap, then scale horizontally).
+- `clamp_min(.., 0.0001)` on the denominator so the rule
+  doesn't fire on `0/0` when no reviews have started yet
+  in the window.
+- Contract test
+  (`shipped_prometheus_rules_reference_only_real_metrics`)
+  verifies the new `auto_review_review_queue_waits_total`
+  and `auto_review_reviews_started_total` references both
+  exist in the gateway's `/metrics` output, so a typo
+  here fails CI.
+- Total alerts in the rules pack now 9 (was 8).
+
 #### Concurrency-cap queue-wait counter
 
 - Counterpart to the `AR_REVIEW_CONCURRENCY` cap: new
