@@ -9,6 +9,14 @@
       "type": "string",
       "description": "One- to three-sentence overall assessment of the change. State what the PR does and whether it appears safe to merge."
     },
+    "walkthrough": {
+      "type": "string",
+      "description": "Optional longer markdown walkthrough (file-by-file or thematic). Empty string if not useful."
+    },
+    "mermaid": {
+      "type": "string",
+      "description": "Optional Mermaid diagram source describing changed control flow. The text inside (without the ```mermaid fence). Empty string if not applicable."
+    },
     "findings": {
       "type": "array",
       "description": "Inline review comments. Empty array if there is nothing to flag.",

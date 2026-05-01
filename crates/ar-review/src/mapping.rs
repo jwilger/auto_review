@@ -4,7 +4,8 @@ use ar_prompts::{ReviewFinding, ReviewOutput, ReviewSeverity};
 /// Map a validated [`ReviewOutput`] to a Forgejo [`CreateReviewRequest`].
 ///
 /// Conventions:
-/// - The review body is the LLM's `summary`. Keeps the top-level review
+/// - The review body is `summary` plus optional walkthrough/Mermaid
+///   sections, each on its own paragraph. Keeps the top-level review
 ///   readable on its own.
 /// - `event` is `RequestChanges` if any finding has severity `Error`,
 ///   otherwise `Comment`. Drafts can't be approved by a bot.
@@ -30,11 +31,31 @@ pub fn output_to_review_request(out: &ReviewOutput, head_sha: &str) -> CreateRev
         .collect::<Vec<_>>();
 
     CreateReviewRequest {
-        body: out.summary.clone(),
+        body: render_body(out),
         commit_id: head_sha.to_string(),
         event,
         comments,
     }
+}
+
+fn render_body(out: &ReviewOutput) -> String {
+    let mut body = out.summary.clone();
+    if !out.walkthrough.is_empty() {
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str("## Walkthrough\n\n");
+        body.push_str(&out.walkthrough);
+    }
+    if !out.mermaid.is_empty() {
+        if !body.is_empty() {
+            body.push_str("\n\n");
+        }
+        body.push_str("```mermaid\n");
+        body.push_str(out.mermaid.trim());
+        body.push_str("\n```");
+    }
+    body
 }
 
 fn finding_to_comment(f: &ReviewFinding) -> ReviewComment {
@@ -68,6 +89,15 @@ fn severity_label(s: ReviewSeverity) -> &'static str {
 mod tests {
     use super::*;
 
+    fn output(summary: &str, findings: Vec<ReviewFinding>) -> ReviewOutput {
+        ReviewOutput {
+            summary: summary.into(),
+            walkthrough: String::new(),
+            mermaid: String::new(),
+            findings,
+        }
+    }
+
     fn finding(severity: ReviewSeverity, line_start: u32, line_end: Option<u32>) -> ReviewFinding {
         ReviewFinding {
             path: "src/x.rs".into(),
@@ -80,11 +110,7 @@ mod tests {
 
     #[test]
     fn empty_findings_are_a_comment_event_with_no_comments() {
-        let out = ReviewOutput {
-            summary: "lgtm".into(),
-            findings: vec![],
-        };
-        let req = output_to_review_request(&out, "deadbeef");
+        let req = output_to_review_request(&output("lgtm", vec![]), "deadbeef");
         assert_eq!(req.event, ReviewEvent::Comment);
         assert!(req.comments.is_empty());
         assert_eq!(req.body, "lgtm");
@@ -93,48 +119,50 @@ mod tests {
 
     #[test]
     fn any_error_severity_promotes_to_request_changes() {
-        let out = ReviewOutput {
-            summary: "issues".into(),
-            findings: vec![
-                finding(ReviewSeverity::Note, 1, None),
-                finding(ReviewSeverity::Error, 2, None),
-            ],
-        };
-        let req = output_to_review_request(&out, "x");
+        let req = output_to_review_request(
+            &output(
+                "issues",
+                vec![
+                    finding(ReviewSeverity::Note, 1, None),
+                    finding(ReviewSeverity::Error, 2, None),
+                ],
+            ),
+            "x",
+        );
         assert_eq!(req.event, ReviewEvent::RequestChanges);
     }
 
     #[test]
     fn only_warnings_and_notes_stay_comment() {
-        let out = ReviewOutput {
-            summary: "minor".into(),
-            findings: vec![
-                finding(ReviewSeverity::Warning, 1, None),
-                finding(ReviewSeverity::Note, 2, None),
-            ],
-        };
-        let req = output_to_review_request(&out, "x");
+        let req = output_to_review_request(
+            &output(
+                "minor",
+                vec![
+                    finding(ReviewSeverity::Warning, 1, None),
+                    finding(ReviewSeverity::Note, 2, None),
+                ],
+            ),
+            "x",
+        );
         assert_eq!(req.event, ReviewEvent::Comment);
     }
 
     #[test]
     fn line_start_becomes_new_position() {
-        let out = ReviewOutput {
-            summary: "".into(),
-            findings: vec![finding(ReviewSeverity::Note, 17, None)],
-        };
-        let req = output_to_review_request(&out, "x");
+        let req = output_to_review_request(
+            &output("", vec![finding(ReviewSeverity::Note, 17, None)]),
+            "x",
+        );
         assert_eq!(req.comments[0].new_position, Some(17));
         assert!(req.comments[0].old_position.is_none());
     }
 
     #[test]
     fn multi_line_range_is_annotated_in_body() {
-        let out = ReviewOutput {
-            summary: "".into(),
-            findings: vec![finding(ReviewSeverity::Warning, 5, Some(9))],
-        };
-        let req = output_to_review_request(&out, "x");
+        let req = output_to_review_request(
+            &output("", vec![finding(ReviewSeverity::Warning, 5, Some(9))]),
+            "x",
+        );
         let body = &req.comments[0].body;
         assert!(body.contains("Lines 5"));
         assert!(body.contains("9"));
@@ -142,22 +170,62 @@ mod tests {
 
     #[test]
     fn single_line_range_does_not_include_range_label() {
-        let out = ReviewOutput {
-            summary: "".into(),
-            findings: vec![finding(ReviewSeverity::Note, 3, Some(3))],
-        };
-        let req = output_to_review_request(&out, "x");
+        let req = output_to_review_request(
+            &output("", vec![finding(ReviewSeverity::Note, 3, Some(3))]),
+            "x",
+        );
         let body = &req.comments[0].body;
         assert!(!body.contains("Lines"));
     }
 
     #[test]
     fn finding_body_includes_severity_label() {
+        let req = output_to_review_request(
+            &output("", vec![finding(ReviewSeverity::Error, 1, None)]),
+            "x",
+        );
+        assert!(req.comments[0].body.to_lowercase().contains("error"));
+    }
+
+    #[test]
+    fn walkthrough_appears_under_a_walkthrough_heading_in_review_body() {
         let out = ReviewOutput {
-            summary: "".into(),
-            findings: vec![finding(ReviewSeverity::Error, 1, None)],
+            summary: "TL;DR".into(),
+            walkthrough: "- File `a.rs`: refactored\n- File `b.rs`: new tests".into(),
+            mermaid: String::new(),
+            findings: vec![],
         };
         let req = output_to_review_request(&out, "x");
-        assert!(req.comments[0].body.to_lowercase().contains("error"));
+        assert!(req.body.starts_with("TL;DR"));
+        assert!(req.body.contains("## Walkthrough"));
+        assert!(req.body.contains("a.rs"));
+    }
+
+    #[test]
+    fn mermaid_diagram_is_rendered_in_a_fenced_block() {
+        let out = ReviewOutput {
+            summary: "summary".into(),
+            walkthrough: String::new(),
+            mermaid: "graph TD\nA-->B".into(),
+            findings: vec![],
+        };
+        let req = output_to_review_request(&out, "x");
+        assert!(req.body.contains("```mermaid"));
+        assert!(req.body.contains("graph TD"));
+        assert!(req.body.contains("A-->B"));
+        assert!(req.body.trim_end().ends_with("```"));
+    }
+
+    #[test]
+    fn empty_summary_with_walkthrough_does_not_double_blank_line() {
+        let out = ReviewOutput {
+            summary: String::new(),
+            walkthrough: "all the details".into(),
+            mermaid: String::new(),
+            findings: vec![],
+        };
+        let req = output_to_review_request(&out, "x");
+        // No leading blank lines from concatenating "" + "\n\n" + walkthrough.
+        assert!(req.body.starts_with("## Walkthrough"));
     }
 }

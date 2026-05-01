@@ -23,9 +23,16 @@ Forgejo PR.
 Rules:
 - Output **only** a JSON object that matches the provided schema. Do not \
   emit prose, markdown fences, or any text outside the JSON.
-- Cite specific lines from the diff using 1-based new-file line numbers.
-- Be concrete and actionable. If you have nothing useful to say, return \
-  `findings: []` with a `summary` of why.
+- `summary`: 1–3 sentences for the top-level review body.
+- `walkthrough` (optional): a longer markdown walkthrough of what changed \
+  and why it matters. Use bullet lists per file or per theme. Leave empty \
+  when the PR is small enough that the summary suffices.
+- `mermaid` (optional): a Mermaid diagram source (no fence — the text inside \
+  the fence) when control flow or sequence changes meaningfully. Leave \
+  empty otherwise.
+- `findings`: cite specific lines from the diff using 1-based new-file line \
+  numbers. Be concrete and actionable. If you have nothing useful to say, \
+  return `findings: []` with a `summary` of why.
 - Do not flag style/formatting unless the codebase has explicit conventions \
   in the diff. Do not invent issues to look thorough.
 - Static-analysis findings (when present) are mechanical signals — \

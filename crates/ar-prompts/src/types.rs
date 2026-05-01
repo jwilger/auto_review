@@ -23,5 +23,11 @@ pub struct ReviewFinding {
 #[serde(deny_unknown_fields)]
 pub struct ReviewOutput {
     pub summary: String,
+    /// Optional longer-form walkthrough in markdown.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub walkthrough: String,
+    /// Optional Mermaid diagram source (without the ```mermaid fence).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mermaid: String,
     pub findings: Vec<ReviewFinding>,
 }
