@@ -266,6 +266,17 @@ impl ChatHandler<'_> {
             self.post(ctx, &msg).await?;
             return Ok(());
         }
+        // Same closed-PR skip as re_review. Posting inline review
+        // suggestions on a closed PR either errors from Forgejo or
+        // posts comments the user can't act on.
+        if pr.state != "open" {
+            let msg = format!(
+                "Skipping {}: this PR is closed/merged. Reopen it first.",
+                kind.lowercase_label()
+            );
+            self.post(ctx, &msg).await?;
+            return Ok(());
+        }
         let diff = self
             .forgejo
             .get_pr_diff(ctx.owner, ctx.repo, ctx.issue_number)
@@ -378,6 +389,14 @@ impl ChatHandler<'_> {
         if pr.draft {
             self.post(ctx, "Skipping test scaffolds: this PR is a draft.")
                 .await?;
+            return Ok(());
+        }
+        if pr.state != "open" {
+            self.post(
+                ctx,
+                "Skipping test scaffolds: this PR is closed/merged. Reopen it first.",
+            )
+            .await?;
             return Ok(());
         }
         let diff = self
@@ -1547,6 +1566,51 @@ mod tests {
             .and(body_partial_json(
                 serde_json::json!({"body": "Skipping autofix: this PR is a draft."}),
             ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &router,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::Autofix)
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn autofix_on_closed_pr_posts_skip_message() {
+        let server = MockServer::start().await;
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let learnings = InMemoryLearningsStore::new();
+        let cheap = Arc::new(CannedCheapProvider {
+            reply: r#"{"patches":[]}"#.into(),
+        });
+        let router = Router::new()
+            .with(ModelTier::Embedding, Arc::new(ConstantEmbedder))
+            .with(ModelTier::Cheap, cheap);
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "old",
+                "body": "",
+                "draft": false,
+                "state": "closed",
+                "head": {"ref": "t", "sha": "abc"},
+                "base": {"ref": "main", "sha": "def"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(serde_json::json!({
+                "body": "Skipping autofix: this PR is closed/merged. Reopen it first."
+            })))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
             .mount(&server)
             .await;
