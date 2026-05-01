@@ -7,6 +7,7 @@ use ar_tools::actionlint::ActionlintRunner;
 use ar_tools::ast_grep::AstGrepRunner;
 use ar_tools::biome::BiomeRunner;
 use ar_tools::checkov::CheckovRunner;
+use ar_tools::dotenv_linter::DotenvLinterRunner;
 use ar_tools::eslint::EslintRunner;
 use ar_tools::gitleaks::GitleaksRunner;
 use ar_tools::golangci_lint::GolangciLintRunner;
@@ -229,6 +230,15 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         runners.push(Box::new(CheckovRunner { files: tf_files }));
     }
 
+    let env_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| is_dotenv_file(&f.filename))
+        .map(|f| f.filename.clone())
+        .collect();
+    if !env_files.is_empty() {
+        runners.push(Box::new(DotenvLinterRunner { files: env_files }));
+    }
+
     // yamllint runs on every YAML file, including workflows (it complains
     // about formatting; actionlint handles semantics — they're
     // complementary).
@@ -274,6 +284,12 @@ fn has_php_ext(name: &str) -> bool {
 
 fn has_terraform_ext(name: &str) -> bool {
     name.ends_with(".tf") || name.ends_with(".tfvars") || name.ends_with(".hcl")
+}
+
+fn is_dotenv_file(name: &str) -> bool {
+    let last = name.rsplit('/').next().unwrap_or(name);
+    // `.env`, `.env.local`, `.env.production`, `env.example`, etc.
+    last == ".env" || last.starts_with(".env.") || last == "env" || last.starts_with("env.")
 }
 
 fn has_js_ext(name: &str) -> bool {
@@ -603,6 +619,33 @@ mod tests {
                 "trivy"
             ]
         );
+    }
+
+    #[test]
+    fn dotenv_files_select_dotenv_linter() {
+        for name in [
+            ".env",
+            ".env.local",
+            ".env.production",
+            "config/.env.staging",
+        ] {
+            let files = vec![cf(name, "modified")];
+            let runners = select_runners(&files);
+            let mut got = names(&runners);
+            got.sort();
+            assert_eq!(
+                got,
+                vec![
+                    "ast-grep",
+                    "dotenv-linter",
+                    "gitleaks",
+                    "osv-scanner",
+                    "semgrep",
+                    "trivy"
+                ],
+                "name = {name}"
+            );
+        }
     }
 
     #[test]

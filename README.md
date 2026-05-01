@@ -10,7 +10,7 @@ you control, with optional support for fully local LLMs.
 
 **Alpha.** End-to-end review pipeline works: webhook intake → LLM
 triage (skip lockfile-only PRs, route trivial files away from the
-reasoning model) → shallow-clone → 20 bundled linters fanned out
+reasoning model) → shallow-clone → 21 bundled linters fanned out
 in parallel inside an optional sandbox → tree-sitter + embedding
 RAG context + persistent learnings memory → reasoning-tier LLM
 with strict-JSON-schema output and self-heal validation → cheap-
@@ -29,7 +29,7 @@ architecture decision.
 
 What's still on the roadmap: a LanceDB-backed vector store
 (currently in-memory + SQLite-backed for learnings), the full
-~45-linter set (20 bundled today), a youki-based sandbox in
+~45-linter set (21 bundled today), a youki-based sandbox in
 addition to the podman path, and a labelled-corpus benchmark
 (the bench harness handles regression tracking; precision/recall
 needs ground-truth fixtures someone has to build). Real-world
