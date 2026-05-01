@@ -34,6 +34,7 @@ use ar_tools::ruff::RuffRunner;
 use ar_tools::runner::{run_all, LinterRunner};
 use ar_tools::semgrep::SemgrepRunner;
 use ar_tools::shellcheck::ShellCheckRunner;
+use ar_tools::shfmt::ShfmtRunner;
 use ar_tools::sqlfluff::SqlfluffRunner;
 use ar_tools::staticcheck::StaticcheckRunner;
 use ar_tools::stylelint::StylelintRunner;
@@ -226,7 +227,13 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         .map(|f| f.filename.clone())
         .collect();
     if !shell_files.is_empty() {
-        runners.push(Box::new(ShellCheckRunner { files: shell_files }));
+        runners.push(Box::new(ShellCheckRunner {
+            files: shell_files.clone(),
+        }));
+        // shfmt covers formatting drift; shellcheck handles bugs.
+        // The two are complementary and most repos run them
+        // together.
+        runners.push(Box::new(ShfmtRunner { files: shell_files }));
     }
 
     let docker_files: Vec<String> = surviving
@@ -647,7 +654,7 @@ mod tests {
     }
 
     #[test]
-    fn shell_files_select_shellcheck() {
+    fn shell_files_select_shellcheck_and_shfmt() {
         let files = vec![cf("scripts/build.sh", "modified")];
         let runners = select_runners(&files);
         let mut got = names(&runners);
@@ -660,6 +667,7 @@ mod tests {
                 "osv-scanner",
                 "semgrep",
                 "shellcheck",
+                "shfmt",
                 "trivy",
                 "typos"
             ]
@@ -741,6 +749,7 @@ mod tests {
                 "ruff",
                 "semgrep",
                 "shellcheck",
+                "shfmt",
                 "trivy",
                 "typos",
                 "vale"
@@ -1262,6 +1271,7 @@ mod tests {
                 "ruff",
                 "semgrep",
                 "shellcheck",
+                "shfmt",
                 "trivy",
                 "typos"
             ]

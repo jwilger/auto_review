@@ -44,7 +44,7 @@ since the start of the project.
   `run_review_job` posts pending → final commit statuses around the
   triage → clone → lint → review → post sequence.
 
-#### Linters (40 of CodeRabbit's ~45 set)
+#### Linters (41 of CodeRabbit's ~45 set)
 
 | Tool | Languages / files | Source-tool name |
 |---|---|---|
@@ -76,6 +76,7 @@ since the start of the project.
 | `pmd` | Java static analysis (.java) | `pmd` |
 | `ktlint` | Kotlin (.kt / .kts) | `ktlint` |
 | `shellcheck` | Bash / sh | `shellcheck` |
+| `shfmt` | Shell-script formatter (drift detection alongside shellcheck) | `shfmt` |
 | `hadolint` | Dockerfiles | `hadolint` |
 | `markdownlint` | `*.md` / `*.markdown` | `markdownlint` |
 | `vale` | Prose linter (grammar/voice/spelling) for `.md`/`.markdown` | `vale` |
@@ -286,8 +287,8 @@ default in-memory store to the SQLite-backed one.
   paths cover correctness; LanceDB is the scale lever).
 - youki-based `Sandbox` impl as a lighter alternative to the
   podman shell-out.
-- Remaining ~5 linters from CodeRabbit's set
-  (languagetool, shfmt, jsonlint, vint, nilaway).
+- Remaining ~4 linters from CodeRabbit's set
+  (languagetool, jsonlint, vint, nilaway).
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
   wiremock + canned LLM providers.

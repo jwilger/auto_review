@@ -41,6 +41,7 @@ pub mod ruff;
 pub mod runner;
 pub mod semgrep;
 pub mod shellcheck;
+pub mod shfmt;
 pub mod sqlfluff;
 pub mod staticcheck;
 pub mod stylelint;
