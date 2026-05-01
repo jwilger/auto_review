@@ -748,13 +748,46 @@ fn format_suggestion_body(p: &AutofixPatch) -> String {
         out.push_str(p.reason.trim());
         out.push_str("\n\n");
     }
-    out.push_str("```suggestion\n");
+    // Pick a fence longer than any backtick run inside the
+    // replacement, so a replacement that contains ```...``` (e.g. a
+    // markdown file diff or a bash heredoc) doesn't prematurely
+    // close the suggestion block. CommonMark requires the opening
+    // and closing fences to use the same length, and the closing
+    // fence's length must be >= the longest internal run.
+    let fence = pick_fence(&p.replacement);
+    out.push_str(&fence);
+    out.push_str("suggestion\n");
     out.push_str(&p.replacement);
     if !p.replacement.ends_with('\n') {
         out.push('\n');
     }
-    out.push_str("```");
+    out.push_str(&fence);
     out
+}
+
+/// Return a backtick fence (≥ 3 backticks) that's strictly longer
+/// than the longest backtick run inside `body`. CommonMark fenced
+/// code blocks require the closing fence's length to match the
+/// opening fence and exceed any internal backtick run.
+fn pick_fence(body: &str) -> String {
+    let max_internal = longest_backtick_run(body);
+    "`".repeat(max_internal.max(2) + 1)
+}
+
+fn longest_backtick_run(body: &str) -> usize {
+    let mut max = 0usize;
+    let mut current = 0usize;
+    for c in body.chars() {
+        if c == '`' {
+            current += 1;
+            if current > max {
+                max = current;
+            }
+        } else {
+            current = 0;
+        }
+    }
+    max
 }
 
 /// Extract every changed-file path from a unified diff. Accepts
@@ -1892,6 +1925,57 @@ mod tests {
         // Block must always close on its own line.
         assert!(body.ends_with("```"));
         assert!(body.contains("no newline\n```"));
+    }
+
+    #[test]
+    fn format_suggestion_body_uses_longer_fence_when_replacement_has_triple_backticks() {
+        // Real failure mode: an LLM autofix on a markdown file or a
+        // bash heredoc could legitimately contain ``` inside the
+        // replacement. With a fixed 3-backtick fence, the inner
+        // ``` would close the suggestion block prematurely and
+        // Forgejo would render the rest of the comment as plain
+        // text — the "Apply suggestion" button might disappear or
+        // apply only the truncated body.
+        let p = AutofixPatch {
+            path: "README.md".into(),
+            line: 5,
+            replacement: "Heres a code block:\n```rust\nlet x = 1;\n```\nDone.".into(),
+            reason: "doc fix".into(),
+        };
+        let body = format_suggestion_body(&p);
+        // The outer fence must be at least 4 backticks since the
+        // replacement contains 3.
+        assert!(
+            body.contains("````suggestion"),
+            "expected ≥4-backtick fence, got body:\n{body}"
+        );
+        // The closing fence must match.
+        assert!(body.trim_end().ends_with("````"));
+    }
+
+    #[test]
+    fn pick_fence_default_is_three_backticks() {
+        // Plain replacement with no internal backticks → standard
+        // 3-backtick fence (preserves prior behaviour for the
+        // common case).
+        assert_eq!(pick_fence("plain code"), "```");
+        assert_eq!(pick_fence("code with `single` backticks"), "```");
+    }
+
+    #[test]
+    fn pick_fence_grows_one_longer_than_internal_run() {
+        assert_eq!(pick_fence("a ``` b"), "````");
+        assert_eq!(pick_fence("a ```` b"), "`````");
+    }
+
+    #[test]
+    fn longest_backtick_run_counts_consecutive_only() {
+        assert_eq!(longest_backtick_run("no backticks"), 0);
+        assert_eq!(longest_backtick_run("`a`"), 1);
+        assert_eq!(longest_backtick_run("``code``"), 2);
+        assert_eq!(longest_backtick_run("```hi``` and ``"), 3);
+        // Non-consecutive runs don't merge.
+        assert_eq!(longest_backtick_run("`` x ``"), 2);
     }
 
     /// Contract: every user-facing ChatCommand variant must appear as a
