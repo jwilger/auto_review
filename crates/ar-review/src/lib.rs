@@ -26,7 +26,7 @@ pub mod workspace;
 pub mod workspace_tools;
 
 pub use agentic_verify::verify_findings_agentic;
-pub use config::{load_repo_config, RepoConfig};
+pub use config::{load_repo_config, parse_repo_config, RepoConfig};
 pub use context_builder::{build_review_context, ContextBuildError};
 pub use diff::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 pub use error::ReviewError;

@@ -35,6 +35,13 @@ pub enum Command {
     /// Useful for picking models, tuning prompts, and tracking
     /// regression in review behaviour over time.
     Bench(BenchArgs),
+
+    /// Validate one or more `.auto_review.yaml` configuration files.
+    /// Parses each file with the same code path the gateway uses and
+    /// surfaces any errors with line numbers. Exits non-zero on
+    /// validation failure so this fits cleanly in a pre-commit hook
+    /// or CI step.
+    ValidateConfig(ValidateConfigArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -93,6 +100,14 @@ pub struct ReviewOnceArgs {
     /// prompt content without burning tokens or touching the PR.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ValidateConfigArgs {
+    /// One or more `.auto_review.yaml` paths (or directories
+    /// containing such files).
+    #[arg(required = true)]
+    pub paths: Vec<std::path::PathBuf>,
 }
 
 #[derive(clap::Args, Debug)]
@@ -267,6 +282,29 @@ mod tests {
             }
             _ => panic!("expected ReviewOnce"),
         }
+    }
+
+    #[test]
+    fn validate_config_accepts_multiple_paths() {
+        let cli = Cli::try_parse_from([
+            "auto_review",
+            "validate-config",
+            "/tmp/a/.auto_review.yaml",
+            "/tmp/b",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::ValidateConfig(a) => {
+                assert_eq!(a.paths.len(), 2);
+            }
+            _ => panic!("expected ValidateConfig"),
+        }
+    }
+
+    #[test]
+    fn validate_config_requires_at_least_one_path() {
+        let res = Cli::try_parse_from(["auto_review", "validate-config"]);
+        assert!(res.is_err());
     }
 
     #[test]

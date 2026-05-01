@@ -433,3 +433,19 @@ default in-memory store to the SQLite-backed one.
   most once (duplicate model findings at the same coordinate
   count as spurious), so the precision number penalises
   noise correctly.
+
+#### validate-config subcommand (M5)
+
+- `auto_review validate-config <paths>...` parses one or more
+  `.auto_review.yaml` files through the same code path the
+  gateway uses (`ar_review::parse_repo_config`) and reports
+  per-file results. A directory argument is scanned for the
+  standard config filenames (`.auto_review.yaml` /
+  `.auto_review.yml`); a file argument is taken as-is. Output
+  is one `✓` line per valid file with key counts and one `✗`
+  line per failure with line/column when serde_yaml provides
+  it. Exits non-zero on any failure or when no files are
+  found, so the subcommand fits cleanly in a pre-commit hook
+  or CI step. Repo authors can iterate on `ignored_paths`,
+  `disabled_tools`, and free-form `guidelines` locally
+  without firing a real PR through the bot.

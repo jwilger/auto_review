@@ -1,6 +1,6 @@
 //! Implementations of the CLI subcommands.
 
-use crate::cli::{InitArgs, RegisterWebhookArgs, ReviewOnceArgs};
+use crate::cli::{InitArgs, RegisterWebhookArgs, ReviewOnceArgs, ValidateConfigArgs};
 use anyhow::{Context, Result};
 use ar_forgejo::{
     Client, CreateAccessTokenRequest, CreateWebhookRequest, InitClient, WebhookConfig,
@@ -182,9 +182,123 @@ pub fn build_webhook_url(gateway_url: &str) -> String {
     format!("{trimmed}{WEBHOOK_PATH}")
 }
 
+/// Validate one or more `.auto_review.yaml` files. Each path can be a
+/// file or a directory; directories are scanned for the standard
+/// config filenames. Returns Ok with the count of validated files;
+/// returns Err when any file fails to parse or no files are found.
+pub fn validate_config(args: ValidateConfigArgs) -> Result<()> {
+    let files = expand_config_paths(&args.paths)?;
+    if files.is_empty() {
+        anyhow::bail!("no .auto_review.yaml files found at the supplied paths");
+    }
+    let mut failures: Vec<(std::path::PathBuf, String)> = Vec::new();
+    for file in &files {
+        let body = match std::fs::read_to_string(file) {
+            Ok(b) => b,
+            Err(e) => {
+                failures.push((file.clone(), format!("read: {e}")));
+                continue;
+            }
+        };
+        match ar_review::parse_repo_config(&body) {
+            Ok(cfg) => {
+                println!(
+                    "✓ {}: enabled={}, ignored={}, disabled_tools={}",
+                    file.display(),
+                    cfg.enabled,
+                    cfg.ignored_paths.len(),
+                    cfg.disabled_tools.len()
+                );
+            }
+            Err(e) => {
+                let detail = if let Some(loc) = e.location() {
+                    format!("line {}, column {}: {e}", loc.line(), loc.column())
+                } else {
+                    e.to_string()
+                };
+                failures.push((file.clone(), detail));
+            }
+        }
+    }
+    for (path, detail) in &failures {
+        eprintln!("✗ {}: {}", path.display(), detail);
+    }
+    if failures.is_empty() {
+        println!("validated {} file(s)", files.len());
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "{} of {} file(s) failed validation",
+            failures.len(),
+            files.len()
+        );
+    }
+}
+
+/// Resolve each input path: a file is taken as-is; a directory is
+/// scanned for `.auto_review.yaml` and `.auto_review.yml`. Sorted
+/// + deduplicated so output ordering is stable.
+fn expand_config_paths(paths: &[std::path::PathBuf]) -> Result<Vec<std::path::PathBuf>> {
+    use std::collections::BTreeSet;
+    let mut out: BTreeSet<std::path::PathBuf> = BTreeSet::new();
+    for p in paths {
+        let meta = std::fs::metadata(p).with_context(|| format!("stat {}", p.display()))?;
+        if meta.is_dir() {
+            for name in [".auto_review.yaml", ".auto_review.yml"] {
+                let candidate = p.join(name);
+                if candidate.exists() {
+                    out.insert(candidate);
+                }
+            }
+        } else {
+            out.insert(p.clone());
+        }
+    }
+    Ok(out.into_iter().collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_config_succeeds_on_valid_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".auto_review.yaml"),
+            "enabled: true\nignored_paths:\n  - vendor/**\n",
+        )
+        .unwrap();
+        let args = ValidateConfigArgs {
+            paths: vec![dir.path().to_path_buf()],
+        };
+        validate_config(args).expect("valid config");
+    }
+
+    #[test]
+    fn validate_config_fails_on_malformed_yaml() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join(".auto_review.yaml"),
+            "enabled: not_a_bool\n",
+        )
+        .unwrap();
+        let args = ValidateConfigArgs {
+            paths: vec![dir.path().to_path_buf()],
+        };
+        let err = validate_config(args).expect_err("malformed should fail");
+        assert!(err.to_string().contains("failed validation"));
+    }
+
+    #[test]
+    fn validate_config_fails_when_no_files_found() {
+        let dir = tempfile::tempdir().unwrap();
+        let args = ValidateConfigArgs {
+            paths: vec![dir.path().to_path_buf()],
+        };
+        let err = validate_config(args).expect_err("empty dir should fail");
+        assert!(err.to_string().contains("no .auto_review.yaml"));
+    }
 
     #[test]
     fn webhook_url_appends_path() {

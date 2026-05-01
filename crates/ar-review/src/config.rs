@@ -52,6 +52,15 @@ impl Default for RepoConfig {
     }
 }
 
+/// Parse a `.auto_review.yaml` body into a [`RepoConfig`], surfacing
+/// errors verbatim. Used by the `auto_review validate-config` CLI
+/// subcommand; the runtime loader [`load_repo_config`] swallows the
+/// same errors and falls back to defaults so a malformed config
+/// can't break the review pipeline.
+pub fn parse_repo_config(yaml: &str) -> Result<RepoConfig, serde_yaml::Error> {
+    serde_yaml::from_str::<RepoConfig>(yaml)
+}
+
 /// Load the repo-level config from a cloned workspace. Returns
 /// `RepoConfig::default()` if no config file is present or parsing fails;
 /// in the latter case, a warning is logged.

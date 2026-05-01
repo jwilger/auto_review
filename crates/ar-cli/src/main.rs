@@ -22,5 +22,6 @@ async fn main() -> Result<()> {
         Command::RegisterWebhook(args) => commands::register_webhook(args).await,
         Command::ReviewOnce(args) => commands::review_once(args).await,
         Command::Bench(args) => bench::run(args).await,
+        Command::ValidateConfig(args) => commands::validate_config(args),
     }
 }
