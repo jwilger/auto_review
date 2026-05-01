@@ -235,6 +235,7 @@ impl JobDispatcher for SpawningDispatcher {
         let sha_for_status = job.head_sha.clone();
         let forgejo_for_status = forgejo.clone();
         let observer_for_queue = observer.clone();
+        let observer_for_panic = observer.clone();
         tokio::spawn(async move {
             // Acquire the concurrency permit BEFORE the inner spawn
             // so the wait actually limits in-flight reviews. Held
@@ -268,6 +269,7 @@ impl JobDispatcher for SpawningDispatcher {
                 }
                 None => None,
             };
+            let panic_started = Instant::now();
             let inner = tokio::spawn(async move {
                 run_review_job(
                     &forgejo,
@@ -289,6 +291,20 @@ impl JobDispatcher for SpawningDispatcher {
                     error = %e,
                     "review task panicked or was cancelled"
                 );
+                // Without this observation, a panic mid-review would
+                // tick `reviews_started_total` but never tick any of
+                // the `reviews_failed_*` / `reviews_succeeded` /
+                // `reviews_skipped_*` counters — operators would see
+                // started/completed counts that don't add up. Bucket
+                // the panic under a stable "panic" class so dashboards
+                // can alert on it independently of the four ReviewError
+                // variants.
+                if let Some(obs) = observer_for_panic.as_deref() {
+                    obs.record(ReviewObservation::Failed {
+                        duration: panic_started.elapsed(),
+                        error_class: "panic",
+                    });
+                }
                 // Best-effort failure-status post; if this fails too, we
                 // log and give up.
                 let status = CommitStatus {

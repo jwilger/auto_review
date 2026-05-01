@@ -42,6 +42,12 @@ pub struct Metrics {
     pub reviews_failed_workspace: AtomicU64,
     pub reviews_failed_llm: AtomicU64,
     pub reviews_failed_unhealable: AtomicU64,
+    /// Reviews that ended via a tokio task panic / cancellation in
+    /// the dispatcher's outer wrapper. Distinct from the four
+    /// `ReviewError` variants because a panic isn't a structured
+    /// failure — it's a bug. Sustained increases here mean
+    /// "investigate logs, fix the panic site".
+    pub reviews_failed_panic: AtomicU64,
     /// Failure classes we don't recognise. Routes here instead of
     /// silently misbucketing into `reviews_failed_unhealable`. Drift
     /// alarm: a non-zero value means the orchestrator's
@@ -161,6 +167,7 @@ impl Metrics {
             "workspace" => &self.reviews_failed_workspace,
             "llm" => &self.reviews_failed_llm,
             "unhealable" => &self.reviews_failed_unhealable,
+            "panic" => &self.reviews_failed_panic,
             other => {
                 tracing::warn!(
                     error_class = other,
@@ -322,6 +329,11 @@ impl Metrics {
                 "auto_review_reviews_failed_unhealable_total",
                 "Review jobs whose LLM output never satisfied the schema validator after the self-heal retry budget.",
                 &self.reviews_failed_unhealable,
+            ),
+            (
+                "auto_review_reviews_failed_panic_total",
+                "Review jobs whose tokio task panicked or was cancelled. Bugs to investigate, distinct from the structured ReviewError variants.",
+                &self.reviews_failed_panic,
             ),
             (
                 "auto_review_reviews_failed_unknown_total",
@@ -665,6 +677,7 @@ mod tests {
             "auto_review_reviews_completed_count",
             "auto_review_reviews_failed_forgejo_total",
             "auto_review_reviews_failed_llm_total",
+            "auto_review_reviews_failed_panic_total",
             "auto_review_reviews_failed_unhealable_total",
             "auto_review_reviews_failed_unknown_total",
             "auto_review_reviews_failed_workspace_total",
@@ -954,11 +967,13 @@ mod tests {
         m.record_review_failed(20, "workspace");
         m.record_review_failed(30, "llm");
         m.record_review_failed(40, "unhealable");
+        m.record_review_failed(50, "panic");
         let out = m.render();
         assert!(out.contains("auto_review_reviews_failed_forgejo_total 1\n"));
         assert!(out.contains("auto_review_reviews_failed_workspace_total 1\n"));
         assert!(out.contains("auto_review_reviews_failed_llm_total 1\n"));
         assert!(out.contains("auto_review_reviews_failed_unhealable_total 1\n"));
+        assert!(out.contains("auto_review_reviews_failed_panic_total 1\n"));
         assert!(out.contains("auto_review_reviews_failed_unknown_total 0\n"));
     }
 
