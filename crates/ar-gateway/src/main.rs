@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use ar_forgejo::Client as ForgejoClient;
 use ar_gateway::metrics::{Metrics, MetricsObserver};
 use ar_gateway::poller::{ChatPoller, DEFAULT_POLL_INTERVAL};
+use ar_gateway::dedup::RecentDeliveries;
 use ar_gateway::ratelimit::TokenBucket;
 use ar_gateway::{build_router, AppState, ChatDeps, GatewayInfo, ReadinessProbe};
 use ar_index::{InMemoryLearningsStore, SqliteLearningsStore};
@@ -220,6 +221,19 @@ async fn main() -> Result<()> {
         .with_metrics(metrics)
         .with_readiness(readiness)
         .with_info(info);
+
+    // Webhook delivery dedup. On by default with a 256-ID LRU;
+    // operators can override via AR_DEDUP_CAPACITY (set to 0 to
+    // disable, e.g. for tests that want every delivery dispatched).
+    let dedup_capacity = env::var("AR_DEDUP_CAPACITY")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+        .unwrap_or(256);
+    if dedup_capacity > 0 {
+        let dedup = Arc::new(RecentDeliveries::new(dedup_capacity));
+        state = state.with_webhook_dedup(dedup);
+        tracing::info!(capacity = dedup_capacity, "webhook delivery dedup enabled");
+    }
 
     // Optional global webhook throttle (T7 mitigation). Off by
     // default so existing deployments don't suddenly start

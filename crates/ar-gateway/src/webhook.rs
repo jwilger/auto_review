@@ -12,6 +12,8 @@ const SIG_HEADER: &str = "x-forgejo-signature";
 const FALLBACK_SIG_HEADER: &str = "x-gitea-signature";
 const EVENT_HEADER: &str = "x-forgejo-event";
 const FALLBACK_EVENT_HEADER: &str = "x-gitea-event";
+const DELIVERY_HEADER: &str = "x-forgejo-delivery";
+const FALLBACK_DELIVERY_HEADER: &str = "x-gitea-delivery";
 
 /// Top-level webhook handler.
 ///
@@ -56,6 +58,32 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
     state.metrics.record_event(event);
+
+    // Delivery dedup: a Forgejo retry of the same delivery
+    // (network blip, gateway restart) gets the same
+    // X-Forgejo-Delivery UUID. We've already verified HMAC, so
+    // bouncing duplicates here saves the orchestrator from a
+    // racing second dispatch.
+    if let Some(dedup) = state.webhook_dedup.as_ref() {
+        let delivery_id = headers
+            .get(DELIVERY_HEADER)
+            .or_else(|| headers.get(FALLBACK_DELIVERY_HEADER))
+            .and_then(|v| v.to_str().ok());
+        if let Some(id) = delivery_id {
+            if matches!(
+                dedup.check_and_record(id),
+                crate::dedup::CheckResult::Duplicate
+            ) {
+                state.metrics.record_duplicate();
+                tracing::debug!(delivery_id = id, "duplicate delivery; replying OK without dispatch");
+                return (StatusCode::OK, "duplicate").into_response();
+            }
+        }
+        // No header present: nothing to dedup against. Fall
+        // through. Self-hosted Forgejo always sets the header
+        // when configured to do so; old versions or custom
+        // webhook posters might not.
+    }
 
     match event {
         "pull_request" => handle_pull_request(&state, &body).await,
@@ -534,6 +562,80 @@ mod tests {
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("auto_review_webhooks_pull_request_total 1\n"));
         assert!(text.contains("auto_review_jobs_dispatched_total 1\n"));
+    }
+
+    #[tokio::test]
+    async fn webhook_dedup_replies_ok_without_dispatching_on_retry() {
+        use crate::dedup::RecentDeliveries;
+        let dedup = Arc::new(RecentDeliveries::new(8));
+        let recorder = RecordingDispatcher::new();
+        let app = build_router(
+            AppState::new("s", recorder.clone() as Arc<dyn JobDispatcher>)
+                .with_webhook_dedup(dedup),
+        );
+        let body = pr_payload("opened", false);
+        let sig = sign("s", &body);
+
+        // First delivery: dispatched.
+        let req = Request::post("/webhooks/forgejo")
+            .header(EVENT_HEADER, "pull_request")
+            .header(SIG_HEADER, &sig)
+            .header(DELIVERY_HEADER, "uuid-1")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert_eq!(recorder.jobs().len(), 1);
+
+        // Forgejo retries with the same delivery id: 200 OK,
+        // no second dispatch.
+        let req = Request::post("/webhooks/forgejo")
+            .header(EVENT_HEADER, "pull_request")
+            .header(SIG_HEADER, &sig)
+            .header(DELIVERY_HEADER, "uuid-1")
+            .body(Body::from(body.clone()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        assert_eq!(
+            recorder.jobs().len(),
+            1,
+            "duplicate must NOT trigger a second dispatch"
+        );
+
+        // The duplicate counter ticks for the rejected request.
+        let req = Request::get("/metrics").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("auto_review_webhook_duplicates_total 1\n"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn webhook_dedup_passes_through_when_no_delivery_header() {
+        use crate::dedup::RecentDeliveries;
+        // Some old Forgejo / custom posters don't set the
+        // delivery header. We must still process the request.
+        let dedup = Arc::new(RecentDeliveries::new(8));
+        let recorder = RecordingDispatcher::new();
+        let app = build_router(
+            AppState::new("s", recorder.clone() as Arc<dyn JobDispatcher>)
+                .with_webhook_dedup(dedup),
+        );
+        let body = pr_payload("opened", false);
+        let sig = sign("s", &body);
+        // No DELIVERY_HEADER.
+        let req = Request::post("/webhooks/forgejo")
+            .header(EVENT_HEADER, "pull_request")
+            .header(SIG_HEADER, &sig)
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert_eq!(recorder.jobs().len(), 1);
     }
 
     #[tokio::test]

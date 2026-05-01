@@ -5,6 +5,7 @@
 //! gateway return 202 immediately while the actual review runs in the
 //! background.
 
+pub mod dedup;
 pub mod hmac;
 pub mod metrics;
 pub mod poller;
@@ -57,6 +58,10 @@ pub struct AppState {
     /// model. None = no throttling (current default for tests and
     /// trust-the-environment deployments).
     pub webhook_rate_limit: Option<Arc<crate::ratelimit::TokenBucket>>,
+    /// Optional in-memory dedup of recently-seen `X-Forgejo-Delivery`
+    /// IDs. None = no dedup (caller dispatches every well-signed
+    /// webhook even on Forgejo retry).
+    pub webhook_dedup: Option<Arc<crate::dedup::RecentDeliveries>>,
 }
 
 /// Runtime-config snapshot returned from `GET /info`. Captured once
@@ -166,6 +171,7 @@ impl AppState {
             readiness: None,
             info: None,
             webhook_rate_limit: None,
+            webhook_dedup: None,
         }
     }
 
@@ -177,6 +183,17 @@ impl AppState {
         bucket: Arc<crate::ratelimit::TokenBucket>,
     ) -> Self {
         self.webhook_rate_limit = Some(bucket);
+        self
+    }
+
+    /// Wire in a recently-seen-delivery LRU so retried webhooks
+    /// (same `X-Forgejo-Delivery` UUID) are answered 200 OK
+    /// without re-dispatching to the orchestrator.
+    pub fn with_webhook_dedup(
+        mut self,
+        dedup: Arc<crate::dedup::RecentDeliveries>,
+    ) -> Self {
+        self.webhook_dedup = Some(dedup);
         self
     }
 

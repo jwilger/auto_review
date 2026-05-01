@@ -162,6 +162,35 @@ PR's changed file extensions.
   to do that. When no probe is wired (single-pod systemd
   deploy), `/readyz` degrades safely to `/healthz` semantics.
 - `GET /version` — JSON `{"name", "version"}` from `CARGO_PKG_VERSION`.
+#### Webhook delivery dedup
+
+- New in-memory LRU of recently-seen `X-Forgejo-Delivery`
+  UUIDs. When Forgejo retries a delivery (transient
+  network blip, gateway restart, etc.) the same UUID
+  arrives twice; the dedup layer replies 200 OK on the
+  retry without re-dispatching. Default capacity 256 IDs
+  (covers thousands of seconds of typical traffic);
+  configurable via `AR_DEDUP_CAPACITY` (set to 0 to
+  disable).
+- Placement: **after** HMAC verify, **before** event
+  dispatch. Unsigned junk doesn't pollute the LRU; only
+  authenticated retries land there.
+- New counter `auto_review_webhook_duplicates_total`
+  surfaces Forgejo's at-least-once-delivery behaviour.
+- Falls through cleanly when the delivery header is
+  absent (old Forgejo / custom webhook posters); the
+  request proceeds as if dedup weren't configured.
+- Implementation: `RecentDeliveries` in
+  `ar_gateway::dedup` — `Mutex<(HashSet, VecDeque)>`
+  keyed by string UUID. Insertion is O(1); eviction
+  pops the front of the queue and removes from the
+  set. 5 unit tests cover first-sight, duplicate,
+  capacity eviction (with a 4-step LRU-correctness
+  trace), zero-capacity defensive clamping, and
+  multi-id no-clash.
+- 2 webhook integration tests verify retry-no-redispatch
+  and missing-header pass-through.
+
 #### Webhook rate limiter (T7 mitigation)
 
 - Optional global token-bucket throttle on the
