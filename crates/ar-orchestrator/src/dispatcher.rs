@@ -11,8 +11,52 @@ use ar_sandbox::{DirectSandbox, Sandbox};
 use ar_tools::Finding;
 use async_trait::async_trait;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 const STATUS_CONTEXT: &str = "auto_review";
+
+/// Observed at the boundary of a single review job's lifecycle.
+/// Wired into the gateway's Prometheus counters via
+/// [`SpawningDispatcher::with_observer`] without ar-orchestrator
+/// having to know about the metrics format.
+#[derive(Debug, Clone)]
+pub enum ReviewObservation {
+    /// A review just started executing. Posted before any I/O the
+    /// dispatcher does on the PR's behalf, so it counts review
+    /// *attempts* including ones that immediately fail.
+    Started,
+    /// A review finished and posted comments successfully. `duration`
+    /// covers the whole pipeline (clone + lint + LLM + verify +
+    /// post). `findings_count` is what landed on the PR; zero is the
+    /// happy path, not an error.
+    Succeeded {
+        duration: Duration,
+        findings_count: usize,
+    },
+    /// A review terminated with an error (LLM/Workspace/Forgejo
+    /// failure or unhealable JSON). `error_class` is one of:
+    /// `"forgejo"`, `"workspace"`, `"llm"`, `"unhealable"`. Stable
+    /// strings so operators can label dashboards.
+    Failed {
+        duration: Duration,
+        error_class: &'static str,
+    },
+    /// The review was a no-op for a benign reason — same SHA already
+    /// reviewed (and not forced), all-trivial files, or
+    /// `enabled: false`. Distinguished from Failed because operators
+    /// shouldn't alert on these.
+    Skipped {
+        reason: &'static str,
+    },
+}
+
+/// Optional sink for [`ReviewObservation`]s. The gateway provides
+/// a Prometheus-counter-backed implementation; the trait keeps the
+/// orchestrator independent of any specific metrics backend and
+/// makes it easy to write dispatcher tests that count outcomes.
+pub trait ReviewObserver: Send + Sync {
+    fn record(&self, observation: ReviewObservation);
+}
 
 /// One review job's worth of input — extracted from a webhook event so the
 /// dispatcher can be tested without depending on the full event shape.
@@ -78,6 +122,7 @@ pub struct SpawningDispatcher {
     history: Arc<dyn ReviewHistory>,
     learnings: Option<Arc<dyn LearningsStore>>,
     sandbox: Arc<dyn Sandbox>,
+    observer: Option<Arc<dyn ReviewObserver>>,
 }
 
 impl SpawningDispatcher {
@@ -97,7 +142,16 @@ impl SpawningDispatcher {
             // Default: no isolation. Override with `with_sandbox` in
             // production to wrap linter spawns in a hardened container.
             sandbox: Arc::new(DirectSandbox::new()),
+            observer: None,
         }
+    }
+
+    /// Wire in a metrics observer so review outcomes feed the
+    /// gateway's `/metrics` endpoint. Without one, reviews still
+    /// run but are invisible to Prometheus.
+    pub fn with_observer(mut self, observer: Arc<dyn ReviewObserver>) -> Self {
+        self.observer = Some(observer);
+        self
     }
 
     /// Replace the default in-memory history with a custom one
@@ -135,6 +189,7 @@ impl JobDispatcher for SpawningDispatcher {
         let history = self.history.clone();
         let learnings = self.learnings.clone();
         let sandbox = self.sandbox.clone();
+        let observer = self.observer.clone();
         // Outer spawn returns immediately so the webhook handler can ack.
         // Inner spawn runs the actual review; the outer awaits the inner's
         // JoinHandle so panics or cancellations get logged AND surface to
@@ -156,6 +211,7 @@ impl JobDispatcher for SpawningDispatcher {
                     history.as_ref(),
                     learnings.as_deref(),
                     sandbox.as_ref(),
+                    observer.as_deref(),
                     job,
                 )
                 .await;
@@ -210,8 +266,15 @@ pub async fn run_review_job(
     history: &dyn ReviewHistory,
     learnings: Option<&dyn LearningsStore>,
     sandbox: &dyn Sandbox,
+    observer: Option<&dyn ReviewObserver>,
     job: ReviewJob,
 ) {
+    let started_at = Instant::now();
+    let observe = |o: ReviewObservation| {
+        if let Some(obs) = observer {
+            obs.record(o);
+        }
+    };
     let pr_key = PrKey {
         owner: job.owner.clone(),
         repo: job.repo.clone(),
@@ -241,6 +304,9 @@ pub async fn run_review_job(
                     sha = %job.head_sha,
                     "no new commits since last review; skipping"
                 );
+                observe(ReviewObservation::Skipped {
+                    reason: "same_sha",
+                });
                 return;
             }
         } else if job.force {
@@ -268,6 +334,8 @@ pub async fn run_review_job(
             }
         }
     }
+
+    observe(ReviewObservation::Started);
 
     let _ = forgejo
         .post_commit_status(
@@ -310,6 +378,9 @@ pub async fn run_review_job(
                     },
                 )
                 .await;
+            observe(ReviewObservation::Skipped {
+                reason: "trivial_files",
+            });
             return;
         }
         Ok(_) => {}
@@ -351,6 +422,9 @@ pub async fn run_review_job(
                     },
                 )
                 .await;
+            observe(ReviewObservation::Skipped {
+                reason: "disabled_by_config",
+            });
             return;
         }
         Ok(LintPhaseOutput {
@@ -420,6 +494,10 @@ pub async fn run_review_job(
                 findings = outcome.findings_count,
                 "review posted"
             );
+            observe(ReviewObservation::Succeeded {
+                duration: started_at.elapsed(),
+                findings_count: outcome.findings_count,
+            });
             CommitStatus {
                 state: CommitStatusState::Success,
                 target_url: String::new(),
@@ -434,6 +512,10 @@ pub async fn run_review_job(
                 error = %e,
                 "review failed"
             );
+            observe(ReviewObservation::Failed {
+                duration: started_at.elapsed(),
+                error_class: error_class(e),
+            });
             CommitStatus {
                 state: error_state(e),
                 target_url: String::new(),
@@ -581,6 +663,18 @@ fn error_state(err: &ReviewError) -> CommitStatusState {
     match err {
         ReviewError::Forgejo(_) | ReviewError::Workspace(_) => CommitStatusState::Error,
         ReviewError::Llm(_) | ReviewError::Unhealable { .. } => CommitStatusState::Failure,
+    }
+}
+
+/// Stable label string for [`ReviewObservation::Failed`]. Used by
+/// the gateway's `/metrics` endpoint to bucket failures so operators
+/// can see `llm` vs `workspace` vs `forgejo` outage rates separately.
+fn error_class(err: &ReviewError) -> &'static str {
+    match err {
+        ReviewError::Forgejo(_) => "forgejo",
+        ReviewError::Workspace(_) => "workspace",
+        ReviewError::Llm(_) => "llm",
+        ReviewError::Unhealable { .. } => "unhealable",
     }
 }
 

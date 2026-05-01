@@ -28,12 +28,37 @@ keep it healthy.
 ## 1. Daily / weekly checks
 
 **Scrape metrics** at `GET /metrics` from your Prometheus and dashboard:
+
+*Webhook layer:*
 - `auto_review_jobs_dispatched_total` — should track PR opens.
 - `auto_review_webhook_signature_failures_total` — should be zero or
   near-zero.
 - `auto_review_webhook_payload_failures_total` — should be zero.
 - `auto_review_chat_commands_received_total` — non-zero only if your
   team uses `@<bot> remember/forget/re-review/...`.
+
+*Review pipeline:*
+- `auto_review_reviews_started_total` — fired once each review
+  begins post-dedup. Compare against `jobs_dispatched_total`; the
+  gap is reviews short-circuited by the `same_sha`/`trivial`/
+  `disabled` skip paths (see `*_skipped_*_total` counters below).
+- `auto_review_reviews_succeeded_total` and the four
+  `auto_review_reviews_failed_<class>_total` counters
+  (`forgejo`, `workspace`, `llm`, `unhealable`). Track success
+  rate as
+  `succeeded / (succeeded + failed_forgejo + failed_workspace + failed_llm + failed_unhealable)`.
+  A spike in a single class points at one subsystem.
+- `auto_review_review_duration_ms_sum` paired with
+  `auto_review_reviews_completed_count` lets Prometheus compute a
+  rolling average review latency
+  (`rate(...sum[5m]) / rate(...count[5m])`). Not a histogram —
+  for p99 you'd downsample externally.
+- `auto_review_review_findings_sum` — total findings posted across
+  successful reviews. Useful for charting bot output volume.
+- `auto_review_reviews_skipped_<reason>_total` — `same_sha`
+  (incremental dedup), `trivial_files` (lockfiles / vendored /
+  generated), `disabled_by_config` (`enabled: false`). Operators
+  shouldn't alert on these.
 
 **Tail logs** for anomalies:
 ```

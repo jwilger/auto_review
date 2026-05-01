@@ -112,6 +112,9 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
         // store wired in. Future: take a path to a SQLite file.
         None,
         &sandbox,
+        // No observer either: review-once prints to stdout, doesn't
+        // export Prometheus metrics.
+        None,
         job,
     )
     .await;

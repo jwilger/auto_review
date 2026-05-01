@@ -1,5 +1,6 @@
 use anyhow::{Context, Result};
 use ar_forgejo::Client as ForgejoClient;
+use ar_gateway::metrics::{Metrics, MetricsObserver};
 use ar_gateway::poller::{ChatPoller, DEFAULT_POLL_INTERVAL};
 use ar_gateway::{build_router, AppState, ChatDeps};
 use ar_index::{InMemoryLearningsStore, SqliteLearningsStore};
@@ -105,6 +106,10 @@ async fn main() -> Result<()> {
     // both keeps them consistent.
     let history: Arc<dyn ReviewHistory> = Arc::new(InMemoryReviewHistory::new());
 
+    let metrics = Arc::new(Metrics::new());
+    let observer: Arc<dyn ar_orchestrator::ReviewObserver> =
+        Arc::new(MetricsObserver::new(metrics.clone()));
+
     let dispatcher = Arc::new(
         SpawningDispatcher::new(
             forgejo.clone(),
@@ -114,7 +119,8 @@ async fn main() -> Result<()> {
         )
         .with_history(history.clone())
         .with_learnings(learnings.clone())
-        .with_sandbox(sandbox),
+        .with_sandbox(sandbox)
+        .with_observer(observer),
     );
 
     // Background poller for inline review-thread `@auto_review`
@@ -162,7 +168,8 @@ async fn main() -> Result<()> {
 
     let state = AppState::new(secret, dispatcher)
         .with_chat(chat_deps)
-        .with_bot_identity(bot_login, bot_name);
+        .with_bot_identity(bot_login, bot_name)
+        .with_metrics(metrics);
     let app = build_router(state);
 
     let listener = TcpListener::bind(&bind)

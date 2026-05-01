@@ -78,6 +78,15 @@ impl AppState {
         self.bot_name = Arc::new(bot_name.into());
         self
     }
+
+    /// Inject a shared metrics handle so the orchestrator's
+    /// `MetricsObserver` and the `/metrics` endpoint read/write the
+    /// same counters. Without this, `/metrics` returns the gateway's
+    /// own (empty) instance.
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = metrics;
+        self
+    }
 }
 
 pub fn build_router(state: AppState) -> Router {

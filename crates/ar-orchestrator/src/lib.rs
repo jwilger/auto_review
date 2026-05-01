@@ -11,6 +11,7 @@ pub mod review_history;
 pub mod state;
 
 pub use dispatcher::{
-    run_review_job, JobDispatcher, NoOpDispatcher, ReviewJob, SpawningDispatcher,
+    run_review_job, JobDispatcher, NoOpDispatcher, ReviewJob, ReviewObservation, ReviewObserver,
+    SpawningDispatcher,
 };
 pub use review_history::{HistoryError, InMemoryReviewHistory, PrKey, ReviewHistory};

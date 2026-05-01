@@ -151,18 +151,35 @@ PR's changed file extensions.
 
 - `GET /healthz` — cheap liveness check.
 - `GET /version` — JSON `{"name", "version"}` from `CARGO_PKG_VERSION`.
-- `GET /metrics` — Prometheus-format counters: webhooks
-  bucketed by event (`pull_request`, `issue_comment`, `ping`,
-  `other`), HMAC signature failures, malformed-payload
-  failures, jobs dispatched, chat commands received, and
-  chat commands dropped because `ChatDeps` was not wired in.
-  Sustained increases in
-  `auto_review_webhook_signature_failures_total` are the
-  primary alerting signal for secret-rotation drift or active
-  probing; `auto_review_webhook_payload_failures_total` is the
-  signal for Forgejo version mismatch. No external metrics
-  crate dependency — counters are `AtomicU64`s rendered to the
-  text exposition format on scrape.
+- `GET /metrics` — Prometheus-format counters spanning the
+  webhook layer AND the review pipeline.
+  - **Webhook layer:** webhooks bucketed by event
+    (`pull_request`, `issue_comment`, `ping`, `other`),
+    HMAC signature failures, malformed-payload failures,
+    jobs dispatched, chat commands received, and chat
+    commands dropped because `ChatDeps` was not wired in.
+    Sustained increases in
+    `auto_review_webhook_signature_failures_total` are the
+    primary alerting signal for secret-rotation drift or
+    active probing;
+    `auto_review_webhook_payload_failures_total` is the
+    signal for Forgejo version mismatch.
+  - **Review pipeline:** `reviews_started_total`,
+    `reviews_succeeded_total`, four
+    `reviews_failed_<class>_total` counters (`forgejo`,
+    `workspace`, `llm`, `unhealable`), three
+    `reviews_skipped_<reason>_total` counters (`same_sha`,
+    `trivial_files`, `disabled_by_config`),
+    `review_duration_ms_sum` paired with
+    `reviews_completed_count` for a rolling-average latency,
+    and `review_findings_sum` for charting bot output volume.
+    Wired through a new `ReviewObserver` trait on
+    `SpawningDispatcher`, so the dispatcher remains
+    independent of the metrics format and the dependency
+    arrow stays gateway → orchestrator.
+  - No external metrics crate dependency — counters are
+    `AtomicU64`s rendered to the text exposition format on
+    scrape.
 - `POST /webhooks/forgejo` — HMAC-verified PR/event intake.
 
 #### Documentation
