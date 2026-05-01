@@ -265,6 +265,12 @@ default in-memory store to the SQLite-backed one.
   fork-bombs, egress attempts, prompt-injected PRs) — the
   structural isolation ships now; adversarial-input verification
   is a follow-up.
+- Wire `verify_findings_agentic` into the default pipeline behind
+  an `AR_AGENTIC_VERIFIER` env flag — the function ships standalone
+  with full tests, but the orchestrator still routes to the simpler
+  `verify_findings`. Wiring requires extending the workspace
+  lifetime past `review_pull_request` (currently dropped after the
+  lint phase).
 
 #### osv-scanner runner (13th bundled linter)
 
@@ -274,6 +280,26 @@ default in-memory store to the SQLite-backed one.
   DB has indexed first. Findings are surfaced at line 1 of
   the manifest with the OSV/GHSA/CVE id in the rule_id and
   presence-of-CVSS-as-severity heuristic.
+
+#### Agentic verifier with workspace tools (M3/M4)
+
+- `ar_review::workspace_tools` ships `read_file` and `search` as
+  standalone functions: read-only file inspection bounded to the
+  workspace root. Both reject `..` traversal, absolute paths, and
+  symlinks pointing outside the workspace; `search` skips
+  `.git`/`target`/`node_modules`/`vendor`/`__pycache__`/`.venv`/
+  `dist`/`build`/`.next`/`.cache` during recursive walks.
+- `ar_review::agentic_verify::verify_findings_agentic` runs a
+  per-finding ReAct loop: cheap-tier LLM emits JSON tool calls
+  (`read_file` / `search` / `verdict`) constrained by JSON schema;
+  the loop executes the tool, feeds the result back as the next
+  user message, and continues until the model emits a `verdict`
+  or the turn budget (5) is exhausted.
+- Fail-open at every error path: LLM failure, malformed JSON,
+  unknown tool, turn-budget exhausted, tool execution error all
+  keep the finding rather than dropping it. The simple
+  `verify_findings` is still the default; operators wire the
+  agentic version when they want context-extending verification.
 
 #### bench subcommand (M5)
 
