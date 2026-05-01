@@ -1,0 +1,187 @@
+# Prometheus rules for `auto_review`.
+#
+# Drop into your Prometheus config under `rule_files:`:
+#
+#   rule_files:
+#     - /etc/prometheus/auto_review.rules.yaml
+#
+# Two groups: recording rules that pre-compute useful ratios, and
+# alerting rules with conservative defaults. Tune the alert windows
+# and `for:` durations to your traffic volume — these defaults
+# assume a few PRs per hour. For a busier instance, lengthen the
+# windows; for a quieter one, raise the alert thresholds so a
+# single bad request doesn't page.
+
+groups:
+  - name: auto_review.recording
+    interval: 30s
+    rules:
+      # Per-second rate of completed reviews, both successful and
+      # failed. Lets dashboards show "review throughput".
+      - record: auto_review:reviews_completed:rate5m
+        expr: |
+          rate(auto_review_reviews_completed_count[5m])
+
+      # Success rate over the last 10 minutes. Returns NaN when no
+      # reviews have completed yet (Prometheus handles this).
+      - record: auto_review:review_success_ratio:5m
+        expr: |
+          rate(auto_review_reviews_succeeded_total[5m])
+            /
+          (
+            rate(auto_review_reviews_succeeded_total[5m])
+              + rate(auto_review_reviews_failed_forgejo_total[5m])
+              + rate(auto_review_reviews_failed_workspace_total[5m])
+              + rate(auto_review_reviews_failed_llm_total[5m])
+              + rate(auto_review_reviews_failed_unhealable_total[5m])
+          )
+
+      # Combined chat-command intake rate (webhook + poller).
+      - record: auto_review:chat_commands:rate5m
+        expr: |
+          rate(auto_review_chat_commands_received_total[5m])
+            + rate(auto_review_poll_mentions_dispatched_total[5m])
+
+      # Review-latency p95 from the histogram. Use the result on
+      # dashboards or as a labelless alert input.
+      - record: auto_review:review_latency_p95:5m
+        expr: |
+          histogram_quantile(
+            0.95,
+            sum by (le) (
+              rate(auto_review_review_duration_seconds_bucket[5m])
+            )
+          )
+
+  - name: auto_review.alerts
+    rules:
+      # Sustained signature failures imply either secret-rotation
+      # drift (gateway and Forgejo disagree on WEBHOOK_SECRET) or
+      # active probing. Either way operators should investigate.
+      - alert: AutoReviewWebhookSignatureFailures
+        expr: rate(auto_review_webhook_signature_failures_total[5m]) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: auto_review
+        annotations:
+          summary: "auto_review: sustained webhook signature failures"
+          description: |
+            More than 0.05/s HMAC signature failures over 10m. Either
+            the WEBHOOK_SECRET drifted between gateway and Forgejo,
+            or an external party is probing /webhooks/forgejo with
+            invalid signatures.
+            Run `auto_review test-webhook --gateway-url <URL>
+            --webhook-secret "$WEBHOOK_SECRET"` to confirm the local
+            secret. If that passes, check Forgejo's webhook config
+            and rotate per OPERATIONS.md §6.3.
+
+      # Forgejo schema drift breaks payload decoding. A burst here
+      # usually means Forgejo was upgraded and the JSON shape moved.
+      - alert: AutoReviewWebhookPayloadFailures
+        expr: rate(auto_review_webhook_payload_failures_total[15m]) > 0.05
+        for: 15m
+        labels:
+          severity: warning
+          service: auto_review
+        annotations:
+          summary: "auto_review: webhook payload decode failures"
+          description: |
+            More than 0.05/s payload decode failures over 15m.
+            Forgejo upgrades occasionally rename or remove fields
+            we depend on. Capture a failing payload from logs and
+            file an issue with the redacted body. See OPERATIONS.md
+            §2.2.
+
+      # Review success rate dropping is the headline reliability
+      # signal. The 0.9 threshold is conservative — tune to your
+      # baseline.
+      - alert: AutoReviewSuccessRateBelowSLO
+        expr: auto_review:review_success_ratio:5m < 0.9
+        for: 15m
+        labels:
+          severity: warning
+          service: auto_review
+        annotations:
+          summary: "auto_review: review success rate below 90% over 15m"
+          description: |
+            Drill into the per-class failure counters to identify the
+            culprit subsystem:
+              - reviews_failed_llm_total → LLM provider down
+              - reviews_failed_workspace_total → clone failed
+                (revoked PAT, network egress, disk pressure)
+              - reviews_failed_forgejo_total → Forgejo 5xx /
+                rate-limit / token revoked
+              - reviews_failed_unhealable_total → schema-validation
+                gave up after the self-heal retry budget
+
+      # The poller is a background loop; if it stops ticking,
+      # inline-thread mentions go silently unanswered.
+      - alert: AutoReviewPollerStalled
+        expr: rate(auto_review_poll_cycles_total[10m]) == 0
+        for: 10m
+        labels:
+          severity: warning
+          service: auto_review
+        annotations:
+          summary: "auto_review: chat poller is not running"
+          description: |
+            poll_cycles_total has not advanced in 10m. Either
+            AR_POLL_INTERVAL_SECS=0 (deliberate; ignore the alert
+            or scope it to the gateway hosts where polling is on),
+            or the spawn task panicked. Restart the gateway and
+            check logs at startup for `chat poller running`.
+
+      # Review latency rising past 2 minutes p95 hints at LLM
+      # slowdown (wrong model loaded, cold cache, GPU thrashing) or
+      # a huge-PR pathology.
+      - alert: AutoReviewReviewLatencyHigh
+        expr: auto_review:review_latency_p95:5m > 120
+        for: 15m
+        labels:
+          severity: warning
+          service: auto_review
+        annotations:
+          summary: "auto_review: review p95 latency > 2m"
+          description: |
+            histogram_quantile(0.95) over the duration histogram is
+            above 120s for 15m. Check:
+              1. The LLM endpoint's GPU / queue health.
+              2. `auto_review doctor --llm-base-url <URL>
+                 --llm-reasoning-model <model>` to confirm the
+                 model is still loaded.
+              3. Whether a large PR (or many synchronized commits)
+                 just hit and the queue is draining.
+
+      # Forgejo-class failures specifically — fastest signal for
+      # "Forgejo is having a bad time".
+      - alert: AutoReviewForgejoFailures
+        expr: rate(auto_review_reviews_failed_forgejo_total[5m]) > 0.1
+        for: 10m
+        labels:
+          severity: critical
+          service: auto_review
+        annotations:
+          summary: "auto_review: forgejo-class failures spiking"
+          description: |
+            More than 0.1/s reviews fail at the Forgejo boundary
+            for 10m. Likely Forgejo down, rate-limited, or the
+            bot PAT was revoked. /readyz on the gateway should
+            also be returning 503 — k8s will have removed the pod
+            from rotation if you wired the readinessProbe.
+
+      # LLM-class failures distinct from Forgejo. Tracks provider
+      # outages or the wrong model name in env.
+      - alert: AutoReviewLlmFailures
+        expr: rate(auto_review_reviews_failed_llm_total[5m]) > 0.1
+        for: 10m
+        labels:
+          severity: critical
+          service: auto_review
+        annotations:
+          summary: "auto_review: llm-class failures spiking"
+          description: |
+            LLM provider returning errors for 10m. Run
+            `auto_review doctor --llm-base-url <URL>
+            --llm-reasoning-model "$LLM_REASONING_MODEL"` to
+            confirm the model is loaded and reachable.

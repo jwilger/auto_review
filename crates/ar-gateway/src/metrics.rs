@@ -421,6 +421,91 @@ impl ReviewObserver for MetricsObserver {
 mod tests {
     use super::*;
 
+    /// Cross-file contract test: every `auto_review_*` metric the
+    /// shipped Prometheus rules file references must exist in the
+    /// rendered `/metrics` output. Catches drift when someone
+    /// renames a counter without updating
+    /// `deploy/prometheus/auto_review.rules.yaml`.
+    #[test]
+    fn shipped_prometheus_rules_reference_only_real_metrics() {
+        let rules_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("deploy/prometheus/auto_review.rules.yaml");
+        let rules = std::fs::read_to_string(&rules_path)
+            .unwrap_or_else(|e| panic!("reading {}: {e}", rules_path.display()));
+
+        // Pull every `auto_review_*` token referenced in the rules
+        // file. Strip the `_bucket`/`_count`/`_sum` histogram
+        // suffixes and the `_total` counter suffix is preserved
+        // (it's part of the actual metric name).
+        let mut referenced = std::collections::BTreeSet::new();
+        for line in rules.lines() {
+            // Skip recording-rule names (`record:`); those live
+            // in the rules file itself, not in /metrics.
+            let trimmed = line.trim_start();
+            if trimmed.starts_with("- record:") || trimmed.starts_with("- alert:") {
+                continue;
+            }
+            let mut idx = 0;
+            while let Some(start) = line[idx..].find("auto_review_") {
+                let abs = idx + start;
+                let end_byte = line[abs..]
+                    .find(|c: char| !c.is_ascii_alphanumeric() && c != '_')
+                    .map(|n| abs + n)
+                    .unwrap_or(line.len());
+                let token = &line[abs..end_byte];
+                // Strip histogram suffixes for membership testing —
+                // a histogram named `foo_seconds` exposes
+                // `foo_seconds_bucket`, `foo_seconds_sum`,
+                // `foo_seconds_count` lines, and rules can reference
+                // any of them.
+                let canonical = token
+                    .trim_end_matches("_bucket")
+                    .trim_end_matches("_sum")
+                    .trim_end_matches("_count");
+                referenced.insert(canonical.to_string());
+                idx = end_byte;
+            }
+        }
+
+        let exposed_text = Metrics::new().render();
+        // Strip leading whitespace/labels — we only care about names.
+        let mut exposed = std::collections::BTreeSet::new();
+        for line in exposed_text.lines() {
+            let line = line.trim_start();
+            if line.starts_with("# ") || line.is_empty() {
+                continue;
+            }
+            let name = line
+                .split([' ', '{'])
+                .next()
+                .unwrap_or("")
+                .trim_end_matches("_bucket")
+                .trim_end_matches("_sum")
+                .trim_end_matches("_count");
+            if !name.is_empty() {
+                exposed.insert(name.to_string());
+            }
+        }
+
+        // Recording-rule outputs are derived names that look like
+        // `auto_review:foo`; ignore those (they're prefixed with a
+        // colon, not an underscore).
+        let referenced: std::collections::BTreeSet<String> = referenced
+            .into_iter()
+            .filter(|r| !r.contains(':'))
+            .collect();
+
+        let unknown: Vec<&String> = referenced.difference(&exposed).collect();
+        assert!(
+            unknown.is_empty(),
+            "rules reference metrics that don't exist in /metrics: {unknown:?}"
+        );
+    }
+
     #[test]
     fn render_emits_zero_counters_with_help_and_type_lines() {
         let m = Metrics::new();

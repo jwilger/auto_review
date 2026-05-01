@@ -510,6 +510,27 @@ default in-memory store to the SQLite-backed one.
   which is correct (a user named `auto_review_helper` was
   previously silently ignored).
 
+#### Prometheus rules pack (M5 deploy)
+
+- `deploy/prometheus/auto_review.rules.yaml`: drop-in
+  recording + alerting rules for the metrics surface.
+  Four recording rules pre-compute review-completion rate,
+  success ratio, combined chat-command rate, and review
+  latency p95. Six alerting rules cover signature failures,
+  payload-decode failures, success rate below SLO, poller
+  stalled, review latency high, and per-class failure spikes
+  (Forgejo-class and LLM-class). Each alert carries
+  `service: auto_review` + `severity` labels for direct
+  Alertmanager routing.
+- `deploy/prometheus/README.md`: install snippet, tuning
+  notes (which thresholds and `for:` durations to adjust for
+  your traffic), and example Alertmanager routes.
+- A new contract test in `ar_gateway::metrics` parses the
+  rules YAML and asserts every `auto_review_*` metric the
+  rules reference actually exists in `/metrics` output, so
+  renaming a counter without updating the rules file fails
+  CI.
+
 #### Operations runbook (M5 docs)
 
 - `docs/OPERATIONS.md`: day-2 operations runbook for the

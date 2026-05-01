@@ -66,6 +66,15 @@ runbook. `doctor` exits non-zero when any check fails;
 
 ## 1. Daily / weekly checks
 
+If you run Prometheus, drop in [`deploy/prometheus/auto_review.rules.yaml`](../deploy/prometheus/auto_review.rules.yaml)
+for pre-baked recording + alerting rules covering signature
+failures, payload-decode failures, success rate, poller stall,
+review latency p95, and per-class failure spikes. See
+[`deploy/prometheus/README.md`](../deploy/prometheus/README.md)
+for tuning notes and Alertmanager routing.
+
+
+
 **Scrape metrics** at `GET /metrics` from your Prometheus and dashboard:
 
 *Webhook layer:*
