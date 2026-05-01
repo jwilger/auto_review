@@ -98,10 +98,24 @@ fn split_diff_sections(diff: &str) -> Vec<&str> {
 }
 
 /// Extract the new-side path from a `diff --git a/<path> b/<path>` header.
+///
+/// Handles git's quoted form too — when `core.quotepath=true` (default)
+/// and a path contains spaces or special characters, git emits
+/// `diff --git "a/old name" "b/new name"`. Without quoted handling
+/// the unquoted ` b/` anchor wouldn't match (the b/ is preceded by `"`,
+/// not space) and the section's path-based filter would silently
+/// fall through.
 fn extract_diff_path(section: &str) -> Option<&str> {
     let line = section.lines().next()?;
     let rest = line.strip_prefix("diff --git ")?;
-    // Find " b/" anchor (one space + "b/") to split the two paths.
+    // Try the quoted form first: `... "b/<path>"`.
+    if let Some(b_idx) = rest.find("\"b/") {
+        let after = &rest[b_idx + "\"b/".len()..];
+        if let Some(end) = after.find('"') {
+            return Some(&after[..end]);
+        }
+    }
+    // Unquoted: `... b/<path>` after a space.
     let b_idx = rest.find(" b/")?;
     let b_path = &rest[b_idx + " b/".len()..];
     Some(b_path.trim_end())
@@ -203,5 +217,21 @@ diff --git a/vendor/x.go b/vendor/x.go
     fn extract_diff_path_returns_none_on_malformed_header() {
         assert!(extract_diff_path("not a header").is_none());
         assert!(extract_diff_path("diff --git only-a-side\n").is_none());
+    }
+
+    #[test]
+    fn extract_diff_path_handles_quoted_path_with_spaces() {
+        // git's default core.quotepath=true emits `"a/path" "b/path"`
+        // for paths with spaces / special chars. Without quoted-form
+        // support, the section's path-based filter would silently
+        // fall through and ignored_paths globs wouldn't match.
+        let section = "diff --git \"a/My File.txt\" \"b/My File.txt\"\n";
+        assert_eq!(extract_diff_path(section), Some("My File.txt"));
+    }
+
+    #[test]
+    fn extract_diff_path_handles_quoted_rename() {
+        let section = "diff --git \"a/old name.rs\" \"b/new name.rs\"\n";
+        assert_eq!(extract_diff_path(section), Some("new name.rs"));
     }
 }
