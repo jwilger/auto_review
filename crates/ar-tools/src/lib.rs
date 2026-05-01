@@ -11,6 +11,7 @@
 
 pub mod eslint;
 pub mod finding;
+pub mod gitleaks;
 pub mod hadolint;
 pub mod markdownlint;
 pub mod ruff;
