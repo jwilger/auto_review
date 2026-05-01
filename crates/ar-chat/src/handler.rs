@@ -1743,6 +1743,33 @@ mod tests {
                 "HELP_TEXT must mention `{kw}` for variant {cmd:?}; \
                  update HELP_TEXT or `keyword_for` so they agree"
             );
+
+            // Round-trip: the keyword we advertise in HELP_TEXT must
+            // actually parse to the same variant family (or for the
+            // arg-taking ones, to the dispatch help when args are
+            // missing). Catches drift like "rename keyword in HELP_TEXT
+            // but forget to teach the parser".
+            let invocation = match cmd {
+                ChatCommand::Remember(_) => format!("@auto_review {kw} sample text"),
+                ChatCommand::Forget(_) => format!("@auto_review {kw} 1"),
+                _ => format!("@auto_review {kw}"),
+            };
+            let parsed = crate::parse_chat_command(&invocation, "auto_review");
+            let same_family = matches!(
+                (cmd, &parsed),
+                (ChatCommand::Help, ChatCommand::Help)
+                    | (ChatCommand::Remember(_), ChatCommand::Remember(_))
+                    | (ChatCommand::Forget(_), ChatCommand::Forget(_))
+                    | (ChatCommand::ReReview, ChatCommand::ReReview)
+                    | (ChatCommand::Autofix, ChatCommand::Autofix)
+                    | (ChatCommand::Docstrings, ChatCommand::Docstrings)
+                    | (ChatCommand::TestScaffolds, ChatCommand::TestScaffolds)
+            );
+            assert!(
+                same_family,
+                "parser disagrees with HELP_TEXT for `{kw}`: \
+                 expected {cmd:?} family, got {parsed:?}"
+            );
         }
     }
 }
