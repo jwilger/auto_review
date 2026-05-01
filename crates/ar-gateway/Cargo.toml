@@ -25,6 +25,7 @@ serde_json.workspace = true
 ar-forgejo = { path = "../ar-forgejo" }
 ar-orchestrator = { path = "../ar-orchestrator" }
 ar-llm = { path = "../ar-llm" }
+ar-chat = { path = "../ar-chat" }
 async-trait.workspace = true
 
 [dev-dependencies]

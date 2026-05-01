@@ -119,6 +119,7 @@ name = "ar-gateway"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ar-chat",
  "ar-forgejo",
  "ar-llm",
  "ar-orchestrator",

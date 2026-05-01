@@ -18,4 +18,7 @@ pub use types::{
     CreateWebhookRequest, CreatedAccessToken, CreatedWebhook, PullRequestRefSummary,
     PullRequestSummary, ReviewComment, ReviewEvent, WebhookConfig,
 };
-pub use webhook::{PullRequestAction, PullRequestEvent};
+pub use webhook::{
+    Comment, Issue, IssueCommentAction, IssueCommentEvent, IssuePullRequestRef, PullRequestAction,
+    PullRequestEvent,
+};

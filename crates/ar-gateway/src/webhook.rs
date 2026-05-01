@@ -1,6 +1,7 @@
 use crate::hmac::{verify, HmacError};
 use crate::AppState;
-use ar_forgejo::{PullRequestAction, PullRequestEvent};
+use ar_chat::{parse_chat_command, ChatCommand};
+use ar_forgejo::{IssueCommentEvent, PullRequestAction, PullRequestEvent};
 use ar_orchestrator::ReviewJob;
 use axum::body::Bytes;
 use axum::extract::State;
@@ -44,12 +45,53 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
 
     match event {
         "pull_request" => handle_pull_request(&state, &body).await,
+        "issue_comment" => handle_issue_comment(&state, &body).await,
         "ping" => (StatusCode::OK, "pong").into_response(),
         other => {
             tracing::debug!(event = other, "ignoring webhook event");
             (StatusCode::ACCEPTED, "").into_response()
         }
     }
+}
+
+async fn handle_issue_comment(_state: &AppState, body: &[u8]) -> Response {
+    let evt: IssueCommentEvent = match serde_json::from_slice(body) {
+        Ok(e) => e,
+        Err(e) => return reject(StatusCode::BAD_REQUEST, &format!("payload decode: {e}")),
+    };
+    if !evt.is_pull_request_comment() {
+        // Plain issue (not PR) — ignored.
+        return (StatusCode::ACCEPTED, "").into_response();
+    }
+    // Bot's own comments must be ignored to avoid loops.
+    if is_bot_self(&evt.sender.login) {
+        return (StatusCode::ACCEPTED, "").into_response();
+    }
+    // Parse the @-mention. NotMentioned acks silently; the rest get
+    // routed (TODO: hand off to ar-chat dispatcher; for now we log).
+    let bot_name = "auto_review";
+    let cmd = parse_chat_command(&evt.comment.body, bot_name);
+    match &cmd {
+        ChatCommand::NotMentioned => {}
+        _ => {
+            tracing::info!(
+                repo = %evt.repository.full_name,
+                issue = evt.issue.number,
+                sender = %evt.sender.login,
+                command = ?cmd,
+                "received chat command (handler dispatch is a TODO)"
+            );
+        }
+    }
+    (StatusCode::ACCEPTED, "").into_response()
+}
+
+fn is_bot_self(sender_login: &str) -> bool {
+    // Conservative: don't act on any comment whose author starts with
+    // "auto_review" or "auto-review" (covers bot users named
+    // auto-review, auto-reviewer, etc.).
+    let lower = sender_login.to_ascii_lowercase();
+    lower.starts_with("auto_review") || lower.starts_with("auto-review")
 }
 
 async fn handle_pull_request(state: &AppState, body: &[u8]) -> Response {
@@ -267,13 +309,79 @@ mod tests {
         assert_eq!(body, "pong");
     }
 
+    fn comment_payload(action: &str, body: &str, sender: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "action": action,
+            "comment": {"id": 1, "body": body, "user": {"login": sender, "id": 1}},
+            "issue": {
+                "number": 7,
+                "title": "x",
+                "pull_request": {"html_url": "https://forge/o/r/pulls/7"}
+            },
+            "repository": {
+                "name": "r", "full_name": "o/r", "default_branch": "main",
+                "owner": {"login": "o", "id": 99}
+            },
+            "sender": {"login": sender, "id": 1}
+        }))
+        .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pr_issue_comment_with_mention_is_accepted() {
+        let body = comment_payload("created", "@auto_review help", "alice");
+        let sig = sign("s", &body);
+        let (status, _) = send(
+            "s",
+            "issue_comment",
+            body,
+            Some(&sig),
+            Arc::new(NoOpDispatcher),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn issue_comment_from_bot_self_is_ignored() {
+        // Sender starts with "auto_review" — must not act (would loop).
+        let body = comment_payload("created", "@auto_review help", "auto_review");
+        let sig = sign("s", &body);
+        let (status, _) = send(
+            "s",
+            "issue_comment",
+            body,
+            Some(&sig),
+            Arc::new(NoOpDispatcher),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn issue_comment_without_mention_is_accepted_silently() {
+        let body = comment_payload("created", "thanks for the review", "alice");
+        let sig = sign("s", &body);
+        let (status, _) = send(
+            "s",
+            "issue_comment",
+            body,
+            Some(&sig),
+            Arc::new(NoOpDispatcher),
+        )
+        .await;
+        assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
     #[tokio::test]
     async fn unknown_event_is_accepted_silently() {
         let body = b"{}".to_vec();
         let sig = sign("s", &body);
         let (status, _) = send(
             "s",
-            "issue_comment",
+            // "release" is an event the gateway doesn't currently
+            // handle; should ack 202 silently.
+            "release",
             body,
             Some(&sig),
             Arc::new(NoOpDispatcher),
