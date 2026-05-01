@@ -76,8 +76,16 @@ pub fn filter_reviewable(files: &[ChangedFile], triage: &TriageOutput) -> Vec<Ch
         .collect()
 }
 
+/// Cap on the diff bytes embedded in the triage prompt. The
+/// cheap-tier model classifies files as trivial / simple / complex;
+/// it doesn't need the full diff to do that — file paths plus
+/// representative hunks are enough. 40 KiB stays comfortably under
+/// any cheap-model context limit and avoids burning a triage call
+/// on a payload the model would just refuse anyway.
+const TRIAGE_DIFF_CAP: usize = 40 * 1024;
+
 fn render_user_prompt(files: &[ChangedFile], diff: &str) -> String {
-    let mut out = String::with_capacity(diff.len() + 256);
+    let mut out = String::with_capacity(diff.len().min(TRIAGE_DIFF_CAP) + 256);
     out.push_str("Files changed in this PR:\n");
     for f in files {
         out.push_str("- ");
@@ -85,9 +93,21 @@ fn render_user_prompt(files: &[ChangedFile], diff: &str) -> String {
         out.push('\n');
     }
     out.push_str("\nUnified diff:\n```diff\n");
-    out.push_str(diff);
-    if !diff.ends_with('\n') {
-        out.push('\n');
+    if diff.len() <= TRIAGE_DIFF_CAP {
+        out.push_str(diff);
+        if !diff.ends_with('\n') {
+            out.push('\n');
+        }
+    } else {
+        let mut cut = TRIAGE_DIFF_CAP;
+        while cut > 0 && !diff.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        out.push_str(&diff[..cut]);
+        if !out.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("[diff truncated for triage]\n");
     }
     out.push_str("```\n\nClassify each file using the schema.\n");
     out
@@ -202,6 +222,32 @@ mod tests {
         let kept = filter_reviewable(&files, &triage);
         let names: Vec<&str> = kept.iter().map(|f| f.filename.as_str()).collect();
         assert_eq!(names, vec!["a.rs", "c.py"]);
+    }
+
+    #[test]
+    fn render_user_prompt_passes_short_diff_through_unchanged() {
+        let files = vec![cf("a.rs")];
+        let diff = "diff --git a/a.rs b/a.rs\n+new line\n";
+        let out = render_user_prompt(&files, diff);
+        assert!(out.contains("+new line"));
+        assert!(!out.contains("[diff truncated for triage]"));
+    }
+
+    #[test]
+    fn render_user_prompt_caps_oversized_diff_with_marker() {
+        // A multi-MB diff would otherwise burn a cheap-tier API
+        // call on a payload the model would refuse for context
+        // overflow. Cap to 40 KiB and surface the truncation.
+        let files = vec![cf("a.rs")];
+        let huge = "x".repeat(80_000);
+        let out = render_user_prompt(&files, &huge);
+        assert!(out.contains("[diff truncated for triage]"));
+        // Total prompt should be bounded by the cap + framing.
+        assert!(
+            out.len() < 50_000,
+            "expected capped prompt, got {} bytes",
+            out.len()
+        );
     }
 
     #[test]
