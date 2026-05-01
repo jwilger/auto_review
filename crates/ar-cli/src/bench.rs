@@ -177,12 +177,21 @@ struct Comparison {
 }
 
 impl Comparison {
-    /// Regression heuristic: precision or recall drop by > 5
-    /// percentage points (i.e. delta < -0.05), or p99 latency
-    /// jumps by > 50% (after computing percent from the baseline).
-    /// Tunable, but these defaults are the ones operators want
-    /// out of the box.
+    /// Regression heuristic: precision/recall/success_rate drop by
+    /// more than 5 percentage points (delta < -0.05), or p99 latency
+    /// jumps by more than 5 seconds. Tunable, but these defaults
+    /// are the ones operators want out of the box.
     fn is_regression(&self) -> bool {
+        // Success-rate drop is the bluntest regression signal: a
+        // model change that breaks JSON-schema output frequently
+        // would tank this even when precision/recall stayed flat
+        // for the surviving runs. Catch it explicitly rather than
+        // hoping precision/recall would surface it.
+        if let Some(d) = self.success_rate_delta {
+            if d < -0.05 {
+                return true;
+            }
+        }
         if let Some(d) = self.precision_delta {
             if d < -0.05 {
                 return true;
@@ -684,6 +693,35 @@ mod tests {
         let current = agg(5, 5, 1000, 5000, 10, Some(label(0.8, 0.8)));
         let c = compare(&baseline, &current);
         assert!(c.is_regression());
+    }
+
+    #[test]
+    fn compare_success_rate_drop_above_5pp_is_a_regression() {
+        // Catches the failure mode where a model change broke
+        // JSON-schema output frequently — the surviving runs may
+        // still have decent precision/recall, but the bot is
+        // posting fewer reviews overall. Previously the comparison
+        // computed `success_rate_delta` but `is_regression()`
+        // didn't consult it, so this kind of regression slipped
+        // through `--fail-on-regression`.
+        let baseline = agg(10, 10, 1000, 5000, 10, None);
+        // 5 successes / 10 fixtures = 0.5 success rate (down from
+        // 1.0 = 50pp drop, well above the 5pp threshold).
+        let current = agg(10, 5, 1000, 5000, 10, None);
+        let c = compare(&baseline, &current);
+        assert!(
+            c.is_regression(),
+            "50pp success-rate drop must trigger regression"
+        );
+    }
+
+    #[test]
+    fn compare_success_rate_drop_below_5pp_is_not_a_regression() {
+        // 100 fixtures, 99 vs 96 successes → 3pp drop, under threshold.
+        let baseline = agg(100, 99, 1000, 5000, 10, None);
+        let current = agg(100, 96, 1000, 5000, 10, None);
+        let c = compare(&baseline, &current);
+        assert!(!c.is_regression(), "3pp drop should not be a regression");
     }
 
     #[test]
