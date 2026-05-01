@@ -950,7 +950,17 @@ fn longest_backtick_run(body: &str) -> usize {
 fn paths_in_diff(diff: &str) -> std::collections::HashSet<String> {
     let mut paths = std::collections::HashSet::new();
     for line in diff.lines() {
-        if let Some(rest) = line.strip_prefix("+++ b/") {
+        // Quoted form for paths with spaces / special chars:
+        // `+++ "b/path with space"`. Strip the quotes before
+        // taking the path.
+        if let Some(rest) = line.strip_prefix("+++ \"b/") {
+            if let Some(end) = rest.find('"') {
+                let path = &rest[..end];
+                if !path.is_empty() {
+                    paths.insert(path.to_string());
+                }
+            }
+        } else if let Some(rest) = line.strip_prefix("+++ b/") {
             let path = rest.split_whitespace().next().unwrap_or("");
             if !path.is_empty() {
                 paths.insert(path.to_string());
@@ -958,7 +968,17 @@ fn paths_in_diff(diff: &str) -> std::collections::HashSet<String> {
         } else if let Some(rest) = line.strip_prefix("diff --git ") {
             // Format: `a/<old-path> b/<new-path>`. Take the new
             // (`b/`) path since that's what suggestion comments
-            // anchor on.
+            // anchor on. Quoted form: `"a/old" "b/new"` — split
+            // on `" "b/"` to land inside the second quoted span.
+            if let Some(b_part) = rest.split("\"b/").nth(1) {
+                if let Some(end) = b_part.find('"') {
+                    let path = &b_part[..end];
+                    if !path.is_empty() {
+                        paths.insert(path.to_string());
+                        continue;
+                    }
+                }
+            }
             if let Some(b_part) = rest.split(" b/").nth(1) {
                 let path = b_part.split_whitespace().next().unwrap_or("");
                 if !path.is_empty() {
@@ -2442,6 +2462,28 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert!(paths.contains("a.rs"));
         assert!(paths.contains("b.rs"));
+    }
+
+    #[test]
+    fn paths_in_diff_handles_quoted_paths_with_spaces() {
+        // git uses double-quote escaping for paths with spaces or
+        // special characters (when core.quotepath is on, which is
+        // the default). Without explicit quote handling, the
+        // path-guard would silently drop autofix patches for any
+        // file whose name contains a space.
+        let diff = "diff --git \"a/My File.txt\" \"b/My File.txt\"\n\
+                    +++ \"b/My File.txt\"\n";
+        let paths = paths_in_diff(diff);
+        assert!(paths.contains("My File.txt"));
+    }
+
+    #[test]
+    fn paths_in_diff_handles_quoted_renames_with_spaces() {
+        let diff = "diff --git \"a/old name.rs\" \"b/new name.rs\"\n\
+                    +++ \"b/new name.rs\"\n";
+        let paths = paths_in_diff(diff);
+        assert!(paths.contains("new name.rs"));
+        assert!(!paths.contains("old name.rs"));
     }
 
     #[tokio::test]
