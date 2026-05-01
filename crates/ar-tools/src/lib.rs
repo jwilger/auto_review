@@ -1,25 +1,20 @@
 //! Static-analysis tool runners.
 //!
-//! Each runner exec's a bundled binary inside the sandbox and parses
-//! output into a normalized `Finding`.
+//! Each runner exec's a bundled binary against a working tree and parses
+//! output into a normalized [`Finding`]. Parsing is split from execution so
+//! parsers can be tested directly against captured tool outputs without
+//! invoking the binary.
+//!
+//! Milestone 1 ships 5 runners (ruff, eslint, shellcheck, hadolint,
+//! markdownlint) running directly against the repo. Milestone 3 introduces
+//! the OCI sandbox; runners are unchanged but execution moves into the jail.
 
-use serde::{Deserialize, Serialize};
+pub mod finding;
+pub mod hadolint;
+pub mod markdownlint;
+pub mod ruff;
+pub mod runner;
+pub mod shellcheck;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Severity {
-    Note,
-    Warning,
-    Error,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Finding {
-    pub source_tool: String,
-    pub rule_id: Option<String>,
-    pub path: String,
-    pub line_start: u32,
-    pub line_end: u32,
-    pub severity: Severity,
-    pub message: String,
-}
+pub use finding::{Finding, Severity};
+pub use runner::{run_all, LinterRunner};
