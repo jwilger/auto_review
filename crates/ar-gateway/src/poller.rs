@@ -371,7 +371,7 @@ mod tests {
         // restart re-fire every historical mention against PRs
         // already in the review history.
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/alice/widgets/pulls/1/comments"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {"id": 3, "body": "looks good", "user": {"login": "carol"}},
                 {"id": 7, "body": "@auto_review re-review", "user": {"login": "bob"}}
@@ -437,7 +437,7 @@ mod tests {
         // Round 1 returns one pre-existing mention; round 2 returns
         // one *new* mention plus the same old one.
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/alice/widgets/pulls/1/comments"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {"id": 5, "body": "old chatter, no mention", "user": {"login": "carol"}}
             ])))
@@ -445,7 +445,7 @@ mod tests {
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/alice/widgets/pulls/1/comments"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {"id": 5, "body": "old chatter, no mention", "user": {"login": "carol"}},
                 {"id": 9, "body": "@auto_review re-review", "user": {"login": "bob"}}
@@ -502,7 +502,7 @@ mod tests {
 
         // First poll seeds cursor; no comments yet.
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/alice/widgets/pulls/1/comments"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
             .up_to_n_times(1)
             .mount(&server)
@@ -510,7 +510,7 @@ mod tests {
         // Second poll: a bot-authored comment that mentions itself.
         // Must not loop.
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/alice/widgets/pulls/1/comments"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {"id": 11, "body": "@auto_review autofix posted 1 patch", "user": {"login": "auto_review"}}
             ])))
@@ -541,12 +541,12 @@ mod tests {
         history.record(&k_good, "y").await.unwrap();
 
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/alice/broken/pulls/1/comments"))
+            .and(path("/api/v1/repos/alice/broken/issues/1/comments"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/alice/widgets/pulls/2/comments"))
+            .and(path("/api/v1/repos/alice/widgets/issues/2/comments"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
             .mount(&server)
             .await;
@@ -583,7 +583,7 @@ mod tests {
 
         // First poll: empty, seeds cursor to 0.
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/alice/widgets/pulls/1/comments"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
             .up_to_n_times(1)
             .mount(&server)
@@ -591,7 +591,7 @@ mod tests {
         // Second poll: a `help` mention. The chat handler posts a
         // confirmation comment to /issues/<n>/comments.
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/alice/widgets/pulls/1/comments"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {"id": 9, "body": "@auto_review help", "user": {"login": "bob"}}
             ])))
@@ -627,12 +627,12 @@ mod tests {
         history.record(&k_good, "y").await.unwrap();
 
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/alice/broken/pulls/1/comments"))
+            .and(path("/api/v1/repos/alice/broken/issues/1/comments"))
             .respond_with(ResponseTemplate::new(500))
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/alice/widgets/pulls/2/comments"))
+            .and(path("/api/v1/repos/alice/widgets/issues/2/comments"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {"id": 3, "body": "no mention", "user": {"login": "carol"}}
             ])))
@@ -660,7 +660,7 @@ mod tests {
         history.record(&k, "deadbeef").await.unwrap();
 
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/alice/widgets/pulls/1/comments"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {"id": 5, "body": "noise", "user": {"login": "carol"}}
             ])))

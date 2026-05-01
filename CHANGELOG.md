@@ -550,6 +550,35 @@ default in-memory store to the SQLite-backed one.
 - `deploy/forgejo-action/`   — composite action wrapping
   `auto_review review-once` for in-CI mode.
 
+### Fixed
+
+- `pre_merge::contains_todo_marker` now scans every occurrence of
+  each marker on a line. The previous `find()`-based loop only
+  examined the first hit, so a real `FIXME` after a substring
+  collision (e.g. `suppressFIXME ... FIXME`) was silently missed.
+- `crates/ar-prompts/schemas/review.json` is now compatible with
+  OpenAI's `response_format: json_schema` strict mode: every
+  property at every object level is listed in `required`, with
+  optional fields (`line_end`) expressed via nullable types.
+  Previously OpenAI rejected every review request with HTTP 400.
+- `crates/ar-prompts/schemas/verification.json` had the same
+  strict-mode bug (`reasoning` in properties, missing from
+  required). The verifier-tier was hitting HTTP 400 on every
+  review, so no findings were filtered. Fixed by adding
+  `reasoning` to `required`; the parser already allowed empty
+  strings via `#[serde(default)]`. The strict-mode test now
+  walks all four schemas (review, triage, verification,
+  pre_merge_custom).
+- `ar_index::embed::embed_symbols` truncates each per-symbol
+  snippet at 24 KiB before sending to the embedder. A single
+  symbol exceeding OpenAI's 8192-token per-input cap (~32 KiB
+  English) used to take the whole RAG pass down with HTTP 400.
+- `ar_forgejo::Client::list_pr_review_comments` now hits
+  `/api/v1/repos/{owner}/{repo}/issues/{n}/comments` instead of
+  the `/pulls/{n}/comments` path, which doesn't exist in
+  Forgejo (verified against 15.0.0; the chat poller was
+  logging a 404 on every cycle).
+
 ### Pending (roadmap, per the feasibility study)
 
 - LanceDB-backed `VectorStore` impl (the in-memory + SQLite

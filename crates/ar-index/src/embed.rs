@@ -41,6 +41,29 @@ pub enum EmbedError {
 /// for not failing the whole RAG pass.
 pub const EMBED_BATCH_SIZE: usize = 32;
 
+/// Per-input byte cap. OpenAI's `text-embedding-3-*` rejects any
+/// single input exceeding 8191 tokens (~32 KiB English) with HTTP
+/// 400, which would fail the whole batch. A single oversized
+/// symbol — generated code, a giant Lua string literal, an
+/// ML-pipeline notebook converted to one fn — used to take the
+/// entire RAG pass down with it. Truncate at the char boundary
+/// instead; semantic similarity from the prefix is good enough
+/// for retrieval ranking.
+pub const EMBED_INPUT_CAP_BYTES: usize = 24 * 1024;
+
+fn truncate_at_char_boundary(s: String, max_bytes: usize) -> String {
+    if s.len() <= max_bytes {
+        return s;
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = s;
+    out.truncate(cut);
+    out
+}
+
 /// Embed each symbol via the router's Embedding tier. `file_contents`
 /// must contain an entry for every distinct path referenced by
 /// `symbols`; missing paths are reported as `MissingFile`.
@@ -58,13 +81,16 @@ pub async fn embed_symbols(
         return Ok(Vec::new());
     }
 
-    // Slice each symbol's source range.
+    // Slice each symbol's source range, then cap each snippet at
+    // EMBED_INPUT_CAP_BYTES so a single huge symbol can't fail the
+    // whole batch.
     let mut snippets: Vec<String> = Vec::with_capacity(symbols.len());
     for sym in symbols {
         let content = file_contents
             .get(&sym.path)
             .ok_or_else(|| EmbedError::MissingFile(sym.path.clone()))?;
-        snippets.push(snippet_for_symbol(content, sym)?);
+        let snippet = snippet_for_symbol(content, sym)?;
+        snippets.push(truncate_at_char_boundary(snippet, EMBED_INPUT_CAP_BYTES));
     }
 
     // Batch the embed calls so a 5k-symbol repo doesn't try to
@@ -241,6 +267,35 @@ mod tests {
             .await
             .expect_err("err");
         assert!(matches!(err, EmbedError::MissingFile(p) if p == "does/not/exist.rs"));
+    }
+
+    #[tokio::test]
+    async fn oversized_symbol_snippet_is_truncated_before_embed_call() {
+        // Regression: a single symbol with body >8k tokens used to fail
+        // the whole RAG pass with HTTP 400 from OpenAI. Truncate to
+        // EMBED_INPUT_CAP_BYTES so retrieval still works on the prefix.
+        let embedder = Arc::new(DeterministicEmbedder::new());
+        let router = Router::new().with(ModelTier::Embedding, embedder.clone());
+
+        let huge_line = "x".repeat(EMBED_INPUT_CAP_BYTES * 2);
+        let mut files = HashMap::new();
+        files.insert(
+            "src/big.rs".into(),
+            format!("fn huge() {{\n{huge_line}\n}}\n"),
+        );
+        let symbols = vec![isym("src/big.rs", "huge", 1, 3)];
+
+        let _ = embed_symbols(&router, &symbols, &files).await.expect("ok");
+
+        let calls = embedder.seen.lock().unwrap();
+        assert_eq!(calls.len(), 1);
+        assert_eq!(calls[0].len(), 1);
+        assert!(
+            calls[0][0].len() <= EMBED_INPUT_CAP_BYTES,
+            "snippet not truncated: {} bytes vs {} cap",
+            calls[0][0].len(),
+            EMBED_INPUT_CAP_BYTES
+        );
     }
 
     #[tokio::test]

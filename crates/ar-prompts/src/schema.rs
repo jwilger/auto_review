@@ -44,4 +44,53 @@ mod tests {
             .collect();
         assert_eq!(levels, vec!["note", "warning", "error"]);
     }
+
+    /// OpenAI's `response_format: json_schema` strict mode requires every
+    /// property listed in `properties` to appear in `required`. Optional
+    /// fields are expressed via nullable types instead. A drift here turns
+    /// every LLM call into a 400 from the API — caught the hard way during
+    /// dogfooding (Review and Verification schemas both regressed).
+    #[test]
+    fn every_response_schema_satisfies_openai_strict_mode() {
+        for (name, schema) in [
+            ("review", crate::schema::review_schema()),
+            ("triage", crate::triage::triage_schema()),
+            ("verification", crate::verification::verification_schema()),
+            (
+                "pre_merge_custom",
+                crate::pre_merge_custom::pre_merge_custom_schema(),
+            ),
+        ] {
+            assert_strict_mode_compatible(schema, name);
+        }
+    }
+
+    fn assert_strict_mode_compatible(schema: &serde_json::Value, label: &str) {
+        fn walk(node: &serde_json::Value, path: &str) {
+            if node["type"] == "object" {
+                let props = node["properties"]
+                    .as_object()
+                    .unwrap_or_else(|| panic!("{path}: object missing properties"));
+                let required: Vec<&str> = node["required"]
+                    .as_array()
+                    .unwrap_or_else(|| panic!("{path}: object missing required array"))
+                    .iter()
+                    .filter_map(|v| v.as_str())
+                    .collect();
+                for name in props.keys() {
+                    assert!(
+                        required.contains(&name.as_str()),
+                        "{path}: property `{name}` is not in required (strict mode forbids this)"
+                    );
+                }
+                for (name, child) in props {
+                    walk(child, &format!("{path}.{name}"));
+                }
+            }
+            if node["type"] == "array" {
+                walk(&node["items"], &format!("{path}[]"));
+            }
+        }
+        walk(schema, &format!("${label}"));
+    }
 }

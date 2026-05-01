@@ -3,7 +3,7 @@
   "title": "Review",
   "type": "object",
   "additionalProperties": false,
-  "required": ["summary", "findings"],
+  "required": ["summary", "walkthrough", "mermaid", "findings"],
   "properties": {
     "summary": {
       "type": "string",
@@ -23,7 +23,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["path", "line_start", "severity", "message"],
+        "required": ["path", "line_start", "line_end", "severity", "message"],
         "properties": {
           "path": {
             "type": "string",
@@ -35,9 +35,9 @@
             "description": "1-based line number in the new file content."
           },
           "line_end": {
-            "type": "integer",
+            "type": ["integer", "null"],
             "minimum": 1,
-            "description": "1-based inclusive end line; defaults to line_start if omitted."
+            "description": "1-based inclusive end line. Set to null (or to line_start) for a single-line finding."
           },
           "severity": {
             "type": "string",

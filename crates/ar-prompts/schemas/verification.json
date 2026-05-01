@@ -11,7 +11,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["finding_index", "keep"],
+        "required": ["finding_index", "keep", "reasoning"],
         "properties": {
           "finding_index": {
             "type": "integer",
@@ -24,7 +24,7 @@
           },
           "reasoning": {
             "type": "string",
-            "description": "Optional one-sentence justification (debug aid; not surfaced to the PR)."
+            "description": "One-sentence justification (debug aid; not surfaced to the PR). Emit an empty string if no rationale is needed."
           }
         }
       }

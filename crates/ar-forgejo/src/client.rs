@@ -307,6 +307,11 @@ impl Client {
     /// Paginates internally — chatty PR threads with > 50
     /// comments now return the full set instead of the first
     /// page only.
+    /// List top-level conversation-tab comments on a PR. Forgejo treats
+    /// PRs as issues for the conversation thread, so this hits the
+    /// issues endpoint — `pulls/{n}/comments` does not exist in Forgejo
+    /// (verified against 15.0.0; returns 404). The chat poller uses this
+    /// to detect new `@<bot>` mentions on the PR.
     pub async fn list_pr_review_comments(
         &self,
         owner: &str,
@@ -316,7 +321,7 @@ impl Client {
         let mut all = Vec::new();
         for page in 1..=PAGINATION_MAX_PAGES {
             let url = self.url(&format!(
-                "repos/{owner}/{repo}/pulls/{n}/comments?page={page}&limit={PAGINATION_PAGE_SIZE}"
+                "repos/{owner}/{repo}/issues/{n}/comments?page={page}&limit={PAGINATION_PAGE_SIZE}"
             ))?;
             let chunk: Vec<crate::types::PrReviewComment> = json_get(&self.http, url).await?;
             let chunk_len = chunk.len();
@@ -926,14 +931,14 @@ mod tests {
             })
             .collect();
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/o/r/pulls/7/comments"))
+            .and(path("/api/v1/repos/o/r/issues/7/comments"))
             .and(query_param("page", "1"))
             .respond_with(ResponseTemplate::new(200).set_body_json(&page1))
             .expect(1)
             .mount(&server)
             .await;
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/o/r/pulls/7/comments"))
+            .and(path("/api/v1/repos/o/r/issues/7/comments"))
             .and(query_param("page", "2"))
             .respond_with(ResponseTemplate::new(200).set_body_json(&page2))
             .expect(1)

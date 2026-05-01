@@ -45,9 +45,27 @@ jobs:
                 --extra-conf "experimental-features = nix-command flakes" \
                 --extra-conf "accept-flake-config = true"
           fi
+          # The persistent /nix volume retains the store and nix
+          # binary across runs, but each runner container is fresh
+          # so /etc/{group,passwd} have been wiped — including the
+          # `nixbld` build group/users that nix.conf references via
+          # `build-users-group = nixbld`. Without these, `nix flake
+          # check` exits 2s in with "the group 'nixbld' ... does not
+          # exist". Recreate idempotently.
+          if ! getent group nixbld > /dev/null; then
+            groupadd -r nixbld
+          fi
+          for i in $(seq 1 32); do
+            if ! id -u "nixbld$i" > /dev/null 2>&1; then
+              useradd -r -g nixbld -G nixbld -d /var/empty \
+                -s /usr/sbin/nologin -c "Nix build user $i" "nixbld$i"
+            fi
+          done
           # GITHUB_PATH (honored by Forgejo Actions) makes the PATH
           # change durable across steps.
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
 
       - name: Run all checks (fmt, clippy, nextest, deny)
-        run: nix flake check --print-build-logs
+        run: |
+          export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+          nix flake check --print-build-logs

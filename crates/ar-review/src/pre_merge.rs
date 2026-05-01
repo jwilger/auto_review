@@ -180,12 +180,12 @@ fn check_no_new_todos(diff: &str) -> CheckResult {
 /// Matches whole words case-sensitively (lowercase `todo` in URLs
 /// like `todoist.com` shouldn't trip us up).
 fn contains_todo_marker(line: &str) -> bool {
+    let bytes = line.as_bytes();
     for marker in ["TODO", "FIXME", "XXX", "HACK"] {
-        if let Some(idx) = line.find(marker) {
-            let before_ok = idx == 0 || !line.as_bytes()[idx - 1].is_ascii_alphanumeric();
+        for (idx, _) in line.match_indices(marker) {
+            let before_ok = idx == 0 || !bytes[idx - 1].is_ascii_alphanumeric();
             let after_idx = idx + marker.len();
-            let after_ok =
-                after_idx >= line.len() || !line.as_bytes()[after_idx].is_ascii_alphanumeric();
+            let after_ok = after_idx >= bytes.len() || !bytes[after_idx].is_ascii_alphanumeric();
             if before_ok && after_ok {
                 return true;
             }
@@ -402,6 +402,31 @@ mod tests {
         // match FIXME.
         let diff = "+let url = \"https://todoist.com\";\n+let id = MERMAIDFIX;\n";
         assert_eq!(check_no_new_todos(diff).status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn no_new_todos_finds_real_marker_after_substring_collision() {
+        // Regression: `find()` only returns the first hit. When the first
+        // hit is the *suffix* of a longer identifier (here `suppressFIXME`
+        // → fails the leading word-boundary), the real marker later on the
+        // same line was missed.
+        let diff = "+// suppressFIXME and a real FIXME after\n";
+        let r = check_no_new_todos(diff);
+        assert_eq!(
+            r.status,
+            CheckStatus::Fail,
+            "real FIXME after a substring collision should still trip the check"
+        );
+        assert!(r.detail.contains("1 new TODO"));
+    }
+
+    #[test]
+    fn no_new_todos_finds_real_marker_after_prefix_collision() {
+        // The first hit is the *prefix* of a longer identifier
+        // (`TODOmarker` → fails the trailing word-boundary). The real
+        // standalone marker after it must still be detected.
+        let diff = "+// TODOmarker, then TODO again\n";
+        assert_eq!(check_no_new_todos(diff).status, CheckStatus::Fail);
     }
 
     #[test]
