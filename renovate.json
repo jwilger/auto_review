@@ -1,0 +1,55 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "extends": [
+    "config:recommended",
+    ":dependencyDashboard",
+    ":semanticCommits"
+  ],
+  "description": "auto_review dependency-update config. Renovate runs on Forgejo via the bot's own webhook surface (operators self-hosting can deploy mend/renovate-runner alongside).",
+  "labels": ["dependencies"],
+  "rangeStrategy": "bump",
+  "rebaseWhen": "behind-base-branch",
+  "schedule": ["before 4am on monday"],
+  "packageRules": [
+    {
+      "description": "Group Tokio ecosystem so Renovate doesn't open 4 PRs for tokio + tokio-util + ... etc.",
+      "matchPackagePatterns": ["^tokio"],
+      "groupName": "tokio ecosystem"
+    },
+    {
+      "description": "Group serde + serde_json + serde_yaml together — they tend to need synchronised bumps.",
+      "matchPackageNames": ["serde", "serde_json", "serde_yaml"],
+      "groupName": "serde"
+    },
+    {
+      "description": "Group tree-sitter grammars together; they bump in lockstep with core tree-sitter.",
+      "matchPackagePatterns": ["^tree-sitter"],
+      "groupName": "tree-sitter"
+    },
+    {
+      "description": "Hold tower-http back from automatic majors — middleware behaviour changes can be subtle.",
+      "matchPackageNames": ["tower-http"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    },
+    {
+      "description": "sqlx majors can include schema-incompatible behaviour; require manual review.",
+      "matchPackageNames": ["sqlx"],
+      "matchUpdateTypes": ["major"],
+      "enabled": false
+    },
+    {
+      "description": "Auto-merge patches on dev-deps once CI is green.",
+      "matchDepTypes": ["dev-dependencies"],
+      "matchUpdateTypes": ["patch"],
+      "automerge": true
+    }
+  ],
+  "vulnerabilityAlerts": {
+    "labels": ["security"],
+    "schedule": []
+  },
+  "rust": {
+    "enabled": true
+  }
+}

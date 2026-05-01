@@ -1,0 +1,33 @@
+# Keep the docker build context small. Without this, every
+# `docker build` re-tars target/ and .git/ into the daemon —
+# slow on a fresh checkout, painful on repeated builds.
+
+# Build artefacts.
+target/
+**/target/
+
+# Git metadata.
+.git/
+.gitignore
+
+# Editor / IDE state.
+.vscode/
+.idea/
+*.swp
+
+# Test snapshots and ephemeral test artefacts.
+.remember/
+.claude/
+
+# Workspace-level docs that don't need to ride into the image.
+# (The Dockerfile builds from `crates/`; docs are surfaced via
+# the website, not the binary.)
+docs/
+bench/
+deploy/
+*.md
+!README.md
+
+# Rust toolchain pin doesn't affect the runtime image (the
+# builder stage installs the toolchain itself).
+rust-toolchain.toml

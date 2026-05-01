@@ -878,6 +878,29 @@ default in-memory store to the SQLite-backed one.
   operator-controlled configuration). Cross-referenced from
   the README.
 
+#### Project-tooling polish (M5)
+
+- `.dockerignore`: keeps `target/`, `.git/`, editor state,
+  and ephemeral test directories out of the docker build
+  context. Without this, every `docker build` re-tars the
+  whole workspace into the daemon — slow on cold builds,
+  painful on hot rebuild loops. Filters `*.md` but
+  whitelists `README.md` so the runtime image still ships
+  with its top-level doc.
+- `.forgejo/pull_request_template.md`: default PR
+  description with sections for summary, type-of-change,
+  verification (cargo test / clippy / fmt / deny),
+  pre-merge checklist (CHANGELOG / rustdoc / red-team
+  tests / metrics-rules contract), and Related links.
+- `renovate.json`: dependency-update config for operators
+  who run mend/renovate-runner alongside their Forgejo
+  deploy. Groups tokio / serde / tree-sitter ecosystems
+  so they bump in lockstep; holds `tower-http` and `sqlx`
+  back from automatic majors (middleware-behaviour-
+  sensitive); auto-merges dev-dependency patches once CI
+  is green; tags vulnerability alerts with the
+  `security` label.
+
 #### Per-crate READMEs (M5 docs)
 
 - Every workspace crate now has its own `README.md`
