@@ -217,6 +217,8 @@ dependencies = [
  "async-trait",
  "serde",
  "serde_json",
+ "sqlx",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",

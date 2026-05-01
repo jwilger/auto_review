@@ -8,6 +8,7 @@
 
 pub mod dispatcher;
 pub mod review_history;
+pub mod sqlite_history;
 pub mod state;
 
 pub use dispatcher::{
@@ -15,3 +16,4 @@ pub use dispatcher::{
     SpawningDispatcher,
 };
 pub use review_history::{HistoryError, InMemoryReviewHistory, PrKey, ReviewHistory};
+pub use sqlite_history::SqliteReviewHistory;

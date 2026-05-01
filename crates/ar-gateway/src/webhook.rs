@@ -395,6 +395,7 @@ mod tests {
             bot_name: "pr-bot".into(),
             sandbox: "podman",
             learnings: "sqlite",
+            history: "sqlite",
             llm_tiers: vec!["reasoning", "cheap", "embedding"],
             reasoning_model: "qwen2.5-coder:32b".into(),
             poller_enabled: true,

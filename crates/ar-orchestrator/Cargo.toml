@@ -21,6 +21,8 @@ ar-llm = { path = "../ar-llm" }
 ar-review = { path = "../ar-review" }
 ar-sandbox = { path = "../ar-sandbox" }
 ar-tools = { path = "../ar-tools" }
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tempfile = "3"

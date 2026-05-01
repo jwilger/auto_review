@@ -8,6 +8,7 @@ use ar_gateway::{build_router, AppState, ChatDeps, GatewayInfo, ReadinessProbe};
 use ar_index::{InMemoryLearningsStore, SqliteLearningsStore};
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::review_history::{InMemoryReviewHistory, ReviewHistory};
+use ar_orchestrator::sqlite_history::SqliteReviewHistory;
 use ar_orchestrator::SpawningDispatcher;
 use ar_sandbox::{DirectSandbox, PodmanSandbox, PodmanSandboxConfig, Sandbox};
 use std::env;
@@ -105,8 +106,24 @@ async fn main() -> Result<()> {
     // Shared review history. Both the orchestrator's incremental-
     // review dedup AND the chat poller need to enumerate the PRs
     // we've reviewed; constructing one Arc and threading it through
-    // both keeps them consistent.
-    let history: Arc<dyn ReviewHistory> = Arc::new(InMemoryReviewHistory::new());
+    // both keeps them consistent. Set AR_HISTORY_DB to a filesystem
+    // path to persist across restarts; otherwise an in-memory store
+    // is used (every restart triggers a fresh full review on the
+    // next webhook for any open PR).
+    let history: Arc<dyn ReviewHistory> = match env::var("AR_HISTORY_DB").ok() {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            let store = SqliteReviewHistory::open(&path)
+                .await
+                .with_context(|| format!("open history db at {}", path.display()))?;
+            tracing::info!(path = %path.display(), "review history: SQLite (persistent)");
+            Arc::new(store)
+        }
+        None => {
+            tracing::info!("review history: in-memory (volatile across restarts)");
+            Arc::new(InMemoryReviewHistory::new())
+        }
+    };
 
     let metrics = Arc::new(Metrics::new());
     let observer: Arc<dyn ar_orchestrator::ReviewObserver> =
@@ -196,6 +213,11 @@ async fn main() -> Result<()> {
             "direct"
         },
         learnings: if env::var("AR_LEARNINGS_DB").is_ok() {
+            "sqlite"
+        } else {
+            "in-memory"
+        },
+        history: if env::var("AR_HISTORY_DB").is_ok() {
             "sqlite"
         } else {
             "in-memory"

@@ -392,6 +392,31 @@ Five shapes:
 `@auto_review` prefix, and dispatched through the chat handler
 on the same axum server as PR webhooks.
 
+#### Persistent review history (Milestone 5)
+
+- New SQLite-backed `SqliteReviewHistory` in
+  `ar-orchestrator`. Set `AR_HISTORY_DB` to a filesystem
+  path and the orchestrator's per-PR "last reviewed SHA"
+  tracking survives `systemctl restart`. Without this
+  (the previous default), every restart triggers a fresh
+  full review on the next webhook for any open PR — wasted
+  tokens + duplicated inline comments on lines that
+  haven't changed.
+- Schema is one row per PR keyed by
+  `(owner, repo, pr_number)`. `record` is an UPSERT so
+  retries don't duplicate rows. Same sqlx feature set
+  as the existing `SqliteLearningsStore` (no new deps).
+- `GatewayInfo` and `auto_review status` now expose
+  `history: "sqlite"` vs `"in-memory"` so operators
+  glance at status output and see whether their dedup
+  state will survive restart.
+- 8 unit tests cover unknown-PR returns None,
+  record-then-lookup, UPSERT-replaces-without-row-leak,
+  clear, clear-on-unknown-noop, distinct-PRs-isolation,
+  list_known returns every recorded PR sorted, and a
+  file-backed persists-across-handle-drops test that
+  verifies actual disk persistence.
+
 #### Persistent learnings (Milestone 5)
 
 `SqliteLearningsStore` provides a drop-in `LearningsStore`

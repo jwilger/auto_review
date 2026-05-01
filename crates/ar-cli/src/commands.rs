@@ -333,6 +333,7 @@ pub(crate) struct StatusSummary {
     pub bot_login: String,
     pub sandbox: String,
     pub learnings: String,
+    pub history: String,
     pub poller_enabled: bool,
     pub readiness_enabled: bool,
     pub jobs_dispatched_total: u64,
@@ -375,6 +376,7 @@ impl StatusSummary {
             bot_login: info["bot_login"].as_str().unwrap_or("unknown").to_string(),
             sandbox: info["sandbox"].as_str().unwrap_or("unknown").to_string(),
             learnings: info["learnings"].as_str().unwrap_or("unknown").to_string(),
+            history: info["history"].as_str().unwrap_or("unknown").to_string(),
             poller_enabled: info["poller_enabled"].as_bool().unwrap_or(false),
             readiness_enabled: info["readiness_enabled"].as_bool().unwrap_or(false),
             jobs_dispatched_total: parsed.get("auto_review_jobs_dispatched_total").copied().unwrap_or(0),
@@ -403,6 +405,7 @@ impl StatusSummary {
             }
         );
         println!("  learnings        {}", self.learnings);
+        println!("  history          {}", self.history);
         println!(
             "  poller           {}",
             if self.poller_enabled { "running" } else { "disabled" }
@@ -1394,6 +1397,7 @@ auto_review_reviews_completed_count 10
             bot_name: "pr-bot".into(),
             sandbox: "podman",
             learnings: "sqlite",
+            history: "sqlite",
             llm_tiers: vec!["reasoning"],
             reasoning_model: "test-model".into(),
             poller_enabled: true,

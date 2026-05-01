@@ -83,6 +83,10 @@ pub struct GatewayInfo {
     /// Which `LearningsStore` impl is wired up. `"sqlite"` =
     /// persistent across restart; `"in-memory"` = volatile.
     pub learnings: &'static str,
+    /// Which `ReviewHistory` impl is wired up. `"sqlite"` =
+    /// persistent (incremental-review dedup survives restarts);
+    /// `"in-memory"` = volatile.
+    pub history: &'static str,
     /// Which LLM tiers have a provider configured. Order is
     /// stable: `["reasoning", "cheap", "embedding"]`.
     pub llm_tiers: Vec<&'static str>,
