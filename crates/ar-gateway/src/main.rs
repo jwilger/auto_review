@@ -27,6 +27,39 @@ async fn main() -> Result<()> {
         .init();
 
     let bind = env::var("AR_GATEWAY_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
+
+    // git is required for the workspace clone phase. Probe up
+    // front so a missing-git deploy surfaces in the first log
+    // scrape rather than the first failed review's opaque
+    // "No such file or directory" io error. Don't bail — the
+    // gateway should still serve /healthz and /metrics for
+    // operators investigating; reviews just fail loudly per-PR.
+    match tokio::process::Command::new("git")
+        .arg("--version")
+        .output()
+        .await
+    {
+        Ok(out) if out.status.success() => {
+            tracing::info!(
+                version = %String::from_utf8_lossy(&out.stdout).trim(),
+                "git OK"
+            );
+        }
+        Ok(out) => {
+            tracing::warn!(
+                status = %out.status,
+                "git --version exited non-zero; reviews will fail at the clone phase"
+            );
+        }
+        Err(e) => {
+            tracing::warn!(
+                error = %e,
+                "git not found in PATH; every review will fail at prepare_workspace. \
+                 Install git or add it to PATH."
+            );
+        }
+    }
+
     let secret = env::var("WEBHOOK_SECRET").context("WEBHOOK_SECRET is required")?;
     // Forgejo's webhook docs recommend a strong random secret; HMAC-
     // SHA256 with a short shared key is brute-forceable. Warn at
