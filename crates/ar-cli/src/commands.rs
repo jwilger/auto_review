@@ -789,6 +789,20 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         None => report.skip("webhook-secret", "set --webhook-secret to enable"),
     }
 
+    // Git: required for the workspace clone phase. Without it, every
+    // review fails at prepare_workspace with a confusing
+    // "No such file or directory" io error from
+    // Command::new("git"). Catch the missing-git case here so
+    // operators see a clear "install git" message instead of
+    // chasing an opaque os error.
+    match probe_git(timeout).await {
+        Ok(version) => report.pass("git", format!("{version} (in PATH)")),
+        Err(e) => report.fail(
+            "git",
+            format!("{e} — install git or add it to PATH (every review needs `git clone`)"),
+        ),
+    }
+
     report.print();
     if report.has_failures() {
         anyhow::bail!("one or more required checks failed; see report above");
@@ -892,6 +906,24 @@ async fn probe_llm(
         detail: format!("{status}; {} model(s) listed", model_ids.len()),
         model_ids,
     })
+}
+
+async fn probe_git(timeout: std::time::Duration) -> Result<String> {
+    let fut = tokio::process::Command::new("git")
+        .arg("--version")
+        .output();
+    let output = tokio::time::timeout(timeout, fut)
+        .await
+        .context("git --version timeout")?
+        .context("spawn git --version (is git installed and on PATH?)")?;
+    if !output.status.success() {
+        anyhow::bail!(
+            "git --version exited with status {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_string())
 }
 
 fn check_webhook_secret(s: &str) -> std::result::Result<String, String> {
