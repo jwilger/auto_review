@@ -9,6 +9,7 @@ use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::{run_review_job, InMemoryReviewHistory, ReviewJob};
 use ar_prompts::{render_review_prompt, ReviewPromptInputs};
 use ar_review::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
+use ar_sandbox::DirectSandbox;
 use std::sync::Arc;
 
 const WEBHOOK_PATH: &str = "/webhooks/forgejo";
@@ -98,6 +99,9 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
     // shot debug command, so the no-incremental fall-through is what
     // we want.
     let history = InMemoryReviewHistory::new();
+    // CLI debug command: no isolation. The user's host already has
+    // the linter binaries; that's what they're testing.
+    let sandbox = DirectSandbox::new();
     run_review_job(
         &forgejo,
         &llm,
@@ -107,6 +111,7 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
         // review-once is a one-shot debug command — no learnings
         // store wired in. Future: take a path to a SQLite file.
         None,
+        &sandbox,
         job,
     )
     .await;

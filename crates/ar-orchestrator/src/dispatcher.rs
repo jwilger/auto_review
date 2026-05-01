@@ -3,10 +3,11 @@ use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullR
 use ar_index::LearningsStore;
 use ar_llm::Router as LlmRouter;
 use ar_review::{
-    build_glob_set, build_review_context, filter_reviewable, lint_workspace_with, load_repo_config,
+    build_glob_set, build_review_context, filter_reviewable, lint_workspace_via, load_repo_config,
     pr_is_skippable, prepare_workspace, review_pull_request, triage_files_with_llm, GlobSet,
     ReviewArgs, ReviewError, WorkspaceError,
 };
+use ar_sandbox::{DirectSandbox, Sandbox};
 use ar_tools::Finding;
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -76,6 +77,7 @@ pub struct SpawningDispatcher {
     forgejo_token: Arc<String>,
     history: Arc<dyn ReviewHistory>,
     learnings: Option<Arc<dyn LearningsStore>>,
+    sandbox: Arc<dyn Sandbox>,
 }
 
 impl SpawningDispatcher {
@@ -92,6 +94,9 @@ impl SpawningDispatcher {
             forgejo_token: Arc::new(forgejo_token.into()),
             history: Arc::new(InMemoryReviewHistory::new()),
             learnings: None,
+            // Default: no isolation. Override with `with_sandbox` in
+            // production to wrap linter spawns in a hardened container.
+            sandbox: Arc::new(DirectSandbox::new()),
         }
     }
 
@@ -109,6 +114,15 @@ impl SpawningDispatcher {
         self.learnings = Some(learnings);
         self
     }
+
+    /// Override the default direct sandbox. Production deployments
+    /// should pass a [`PodmanSandbox`](ar_sandbox::PodmanSandbox) so
+    /// linter binaries run with no network, dropped caps, and resource
+    /// limits.
+    pub fn with_sandbox(mut self, sandbox: Arc<dyn Sandbox>) -> Self {
+        self.sandbox = sandbox;
+        self
+    }
 }
 
 #[async_trait]
@@ -120,6 +134,7 @@ impl JobDispatcher for SpawningDispatcher {
         let token = self.forgejo_token.clone();
         let history = self.history.clone();
         let learnings = self.learnings.clone();
+        let sandbox = self.sandbox.clone();
         // Outer spawn returns immediately so the webhook handler can ack.
         // Inner spawn runs the actual review; the outer awaits the inner's
         // JoinHandle so panics or cancellations get logged AND surface to
@@ -140,6 +155,7 @@ impl JobDispatcher for SpawningDispatcher {
                     &token,
                     history.as_ref(),
                     learnings.as_deref(),
+                    sandbox.as_ref(),
                     job,
                 )
                 .await;
@@ -193,6 +209,7 @@ pub async fn run_review_job(
     forgejo_token: &str,
     history: &dyn ReviewHistory,
     learnings: Option<&dyn LearningsStore>,
+    sandbox: &dyn Sandbox,
     job: ReviewJob,
 ) {
     let pr_key = PrKey {
@@ -301,8 +318,16 @@ pub async fn run_review_job(
         }
     }
 
-    let lint_outcome =
-        prepare_and_lint(forgejo, llm, forgejo_base, forgejo_token, learnings, &job).await;
+    let lint_outcome = prepare_and_lint(
+        forgejo,
+        llm,
+        forgejo_base,
+        forgejo_token,
+        learnings,
+        sandbox,
+        &job,
+    )
+    .await;
     let (findings, ignored_paths, guidelines, repo_context) = match lint_outcome {
         Ok(LintPhaseOutput {
             skipped_by_config: true,
@@ -422,12 +447,14 @@ struct LintPhaseOutput {
     repo_context: String,
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn prepare_and_lint(
     forgejo: &ForgejoClient,
     llm: &LlmRouter,
     base: &str,
     token: &str,
     learnings: Option<&dyn LearningsStore>,
+    sandbox: &dyn Sandbox,
     job: &ReviewJob,
 ) -> Result<LintPhaseOutput, LintPhaseError> {
     let files = forgejo
@@ -483,7 +510,8 @@ async fn prepare_and_lint(
         files
     };
 
-    let findings = lint_workspace_with(workspace.path(), &files, &config.disabled_tools).await;
+    let findings =
+        lint_workspace_via(sandbox, workspace.path(), &files, &config.disabled_tools).await;
 
     // Build the RAG context (best-effort): walks the workspace,
     // embeds symbols, queries top-K against the diff. Returns empty

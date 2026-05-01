@@ -23,3 +23,4 @@ ar-llm = { path = "../ar-llm" }
 ar-orchestrator = { path = "../ar-orchestrator" }
 ar-prompts = { path = "../ar-prompts" }
 ar-review = { path = "../ar-review" }
+ar-sandbox = { path = "../ar-sandbox" }

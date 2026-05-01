@@ -4,9 +4,11 @@ use ar_gateway::{build_router, AppState, ChatDeps};
 use ar_index::{InMemoryLearningsStore, SqliteLearningsStore};
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::SpawningDispatcher;
+use ar_sandbox::{DirectSandbox, PodmanSandbox, PodmanSandboxConfig, Sandbox};
 use std::env;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::net::TcpListener;
 
 #[tokio::main]
@@ -93,6 +95,8 @@ async fn main() -> Result<()> {
         }
     };
 
+    let sandbox = build_sandbox()?;
+
     let dispatcher = Arc::new(
         SpawningDispatcher::new(
             forgejo.clone(),
@@ -100,7 +104,8 @@ async fn main() -> Result<()> {
             forgejo_base.clone(),
             forgejo_token.clone(),
         )
-        .with_learnings(learnings.clone()),
+        .with_learnings(learnings.clone())
+        .with_sandbox(sandbox),
     );
 
     let chat_deps = ChatDeps {
@@ -118,4 +123,56 @@ async fn main() -> Result<()> {
     tracing::info!(%bind, "ar-gateway listening");
     axum::serve(listener, app).await?;
     Ok(())
+}
+
+/// Choose a sandbox based on env vars. Setting `AR_SANDBOX_IMAGE`
+/// switches the gateway from the unsafe direct-spawn path to a
+/// hardened [`PodmanSandbox`] that wraps every linter invocation
+/// in `podman run --network=none --read-only ...`.
+///
+/// Without `AR_SANDBOX_IMAGE`, linter binaries spawn directly on the
+/// host. That's fine for local dev but exposes the operator to the
+/// Kudelski-class RCE risk for any internet-facing deploy.
+fn build_sandbox() -> Result<Arc<dyn Sandbox>> {
+    if let Ok(image) = env::var("AR_SANDBOX_IMAGE") {
+        let memory_mib = env::var("AR_SANDBOX_MEMORY_MIB")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(512);
+        let cpus = env::var("AR_SANDBOX_CPUS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(1.0);
+        let pids_limit = env::var("AR_SANDBOX_PIDS_LIMIT")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(128);
+        let wall_clock_secs = env::var("AR_SANDBOX_TIMEOUT_SECS")
+            .ok()
+            .and_then(|s| s.parse().ok())
+            .unwrap_or(60);
+        let podman_bin = env::var("AR_SANDBOX_PODMAN_BIN").unwrap_or_else(|_| "podman".into());
+        let cfg = PodmanSandboxConfig {
+            image: image.clone(),
+            memory_mib,
+            cpus,
+            pids_limit,
+            wall_clock: Duration::from_secs(wall_clock_secs),
+            podman_bin,
+        };
+        tracing::info!(
+            image,
+            memory_mib,
+            cpus,
+            pids_limit,
+            wall_clock_secs,
+            "sandbox: podman (hardened)"
+        );
+        Ok(Arc::new(PodmanSandbox::new(cfg)))
+    } else {
+        tracing::warn!(
+            "sandbox: direct (NO ISOLATION). Set AR_SANDBOX_IMAGE for production deploys."
+        );
+        Ok(Arc::new(DirectSandbox::new()))
+    }
 }

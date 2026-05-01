@@ -34,7 +34,7 @@ pub use llm_triage::{filter_reviewable, triage_files_with_llm};
 pub use mapping::output_to_review_request;
 pub use pipeline::{review_pull_request, ReviewArgs, ReviewOutcome};
 pub use rag_context::format_repo_context;
-pub use routing::{lint_workspace, lint_workspace_with, select_runners};
+pub use routing::{lint_workspace, lint_workspace_via, lint_workspace_with, select_runners};
 pub use triage::{classify, pr_is_skippable, FileClass};
 pub use verify::verify_findings;
 pub use workspace::{build_clone_url, prepare_workspace, PreparedWorkspace, WorkspaceError};
