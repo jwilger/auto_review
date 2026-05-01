@@ -1,10 +1,11 @@
 use anyhow::{Context, Result};
 use ar_forgejo::Client as ForgejoClient;
 use ar_gateway::{build_router, AppState, ChatDeps};
-use ar_index::InMemoryLearningsStore;
+use ar_index::{InMemoryLearningsStore, SqliteLearningsStore};
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::SpawningDispatcher;
 use std::env;
+use std::path::PathBuf;
 use std::sync::Arc;
 use tokio::net::TcpListener;
 
@@ -75,9 +76,22 @@ async fn main() -> Result<()> {
 
     // Single shared learnings store: writes from the chat handler
     // (remember/forget) become visible to RAG retrieval in subsequent
-    // reviews. Currently in-memory only — restarts wipe it. A
-    // SQLite/LanceDB backing is pending.
-    let learnings: Arc<dyn ar_index::LearningsStore> = Arc::new(InMemoryLearningsStore::new());
+    // reviews. Set AR_LEARNINGS_DB to a filesystem path to persist
+    // across restarts; otherwise an in-memory store is used.
+    let learnings: Arc<dyn ar_index::LearningsStore> = match env::var("AR_LEARNINGS_DB").ok() {
+        Some(path) => {
+            let path = PathBuf::from(path);
+            let store = SqliteLearningsStore::open(&path)
+                .await
+                .with_context(|| format!("open learnings db at {}", path.display()))?;
+            tracing::info!(path = %path.display(), "learnings store: SQLite (persistent)");
+            Arc::new(store)
+        }
+        None => {
+            tracing::info!("learnings store: in-memory (volatile across restarts)");
+            Arc::new(InMemoryLearningsStore::new())
+        }
+    };
 
     let dispatcher = Arc::new(
         SpawningDispatcher::new(
