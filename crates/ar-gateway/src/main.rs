@@ -28,6 +28,18 @@ async fn main() -> Result<()> {
 
     let bind = env::var("AR_GATEWAY_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
     let secret = env::var("WEBHOOK_SECRET").context("WEBHOOK_SECRET is required")?;
+    // Forgejo's webhook docs recommend a strong random secret; HMAC-
+    // SHA256 with a short shared key is brute-forceable. Warn at
+    // startup rather than at first verify so operators see this in
+    // their first log scrape, not a production failure window.
+    if secret.len() < 16 {
+        tracing::warn!(
+            length = secret.len(),
+            "WEBHOOK_SECRET is shorter than 16 bytes; HMAC verification \
+             will work but the secret is weakly resistant to brute-force \
+             attack. Recommend 32+ random bytes (e.g. `openssl rand -hex 32`)"
+        );
+    }
     let forgejo_base = env::var("FORGEJO_BASE_URL").context("FORGEJO_BASE_URL is required")?;
     let forgejo_token = env::var("FORGEJO_TOKEN").context("FORGEJO_TOKEN is required")?;
     let llm_base = env::var("LLM_BASE_URL").context("LLM_BASE_URL is required")?;
