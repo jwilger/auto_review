@@ -1053,6 +1053,33 @@ default in-memory store to the SQLite-backed one.
   forget-learning behavioural (drop existing record,
   unknown-id errors clearly).
 
+#### purge-history subcommand (M5)
+
+- `auto_review purge-history --older-than-days N` drops
+  review-history rows older than N days. Long-running
+  deployments accumulate one row per PR ever reviewed;
+  closed PRs don't need their `last_reviewed_sha` kept
+  forever. Wire into a systemd timer / cron for periodic
+  cleanup.
+- `--dry-run` reports the current total row count + the
+  cutoff timestamp without deleting, so operators can
+  gauge volume on first run.
+- New `SqliteReviewHistory::purge_older_than(cutoff)` —
+  returns the deleted row count so the CLI prints exact
+  numbers. Schema gains a
+  `review_history_updated_at_idx` index on `updated_at`
+  to keep purges fast.
+- New `SqliteReviewHistory::record_at` — test helper that
+  takes an explicit timestamp so tests can deterministically
+  position rows before/after a cutoff. Doc comment marks it
+  test-only; not gated under `#[cfg(test)]` so downstream
+  crate tests can use it.
+- 9 new tests: 4 on the SQLite store
+  (cutoff drops older row, strict `<` keeps row at exact
+  cutoff, keeps recent rows, empty table no-op), 2 CLI
+  parse, 3 CLI behaviour (drops old, keeps recent, dry-run
+  preserves rows).
+
 #### reset-pr subcommand (M5)
 
 - `auto_review reset-pr --history-db <PATH> --owner X

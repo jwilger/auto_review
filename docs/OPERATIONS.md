@@ -359,6 +359,30 @@ section. Validate locally:
 auto_review validate-config .auto_review.yaml
 ```
 
+### 7.1.4 Purge old review-history rows
+
+Long-running deployments accumulate one row per PR ever
+reviewed; closed PRs from months ago don't need their
+`last_reviewed_sha` kept forever. Wire a periodic cleanup:
+
+```bash
+# Run weekly via systemd timer or cron
+auto_review purge-history --older-than-days 90
+```
+
+`--history-db` reads `AR_HISTORY_DB` by default. Use
+`--dry-run` to see the row count before deleting (the
+deletion semantics are: rows whose `updated_at` is strictly
+older than the cutoff are dropped; the indexed query is
+fast enough that scheduling weekly is fine for any sane
+table size).
+
+Safe to run while the gateway is up — SQLite handles
+concurrent access. A row dropped here just means the next
+review on that PR (if it ever happens) will be a fresh full
+review instead of an incremental compare-diff, which is the
+right behaviour for a stale row anyway.
+
 ### 7.1.5 Force a fresh full review on a specific PR
 
 After a guideline / model change, or to recover from a botched

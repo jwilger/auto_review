@@ -93,6 +93,13 @@ pub enum Command {
     /// gateway is up — SQLite handles concurrent access.
     ResetPr(ResetPrArgs),
 
+    /// Drop review-history rows older than N days. Long-running
+    /// deployments accumulate one row per PR ever reviewed;
+    /// closed PRs don't need their last_reviewed_sha kept
+    /// forever. Wire into a periodic cleanup (systemd timer,
+    /// cron) for high-traffic instances. Idempotent.
+    PurgeHistory(PurgeHistoryArgs),
+
     /// List every learning stored in the persistent
     /// `LearningsStore`. Operators currently can only audit
     /// learnings by inspecting Forgejo PR threads (where
@@ -189,6 +196,29 @@ pub struct ForgetLearningArgs {
     /// Learning id, as printed by `list-learnings`.
     #[arg(long)]
     pub id: u64,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct PurgeHistoryArgs {
+    /// Path to the gateway's SQLite review-history database.
+    /// Reads `AR_HISTORY_DB` by default — same env var the
+    /// gateway uses, so an operator on the gateway host runs
+    /// with just `--older-than-days N`.
+    #[arg(long, env = "AR_HISTORY_DB")]
+    pub history_db: std::path::PathBuf,
+
+    /// Drop rows whose `updated_at` is older than this many
+    /// days. 90 is a reasonable default for repos where
+    /// most PRs close within a quarter; raise for repos with
+    /// long-lived feature branches.
+    #[arg(long)]
+    pub older_than_days: u64,
+
+    /// Print what would be dropped without actually deleting.
+    /// Useful for first-time runs to gauge the cleanup volume
+    /// before committing.
+    #[arg(long)]
+    pub dry_run: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -704,6 +734,44 @@ mod tests {
                 assert_eq!(a.id, 42);
             }
             _ => panic!("expected ForgetLearning"),
+        }
+    }
+
+    #[test]
+    fn purge_history_required_args() {
+        let cli = Cli::try_parse_from([
+            "auto_review",
+            "purge-history",
+            "--history-db",
+            "/tmp/h.db",
+            "--older-than-days",
+            "90",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::PurgeHistory(a) => {
+                assert_eq!(a.older_than_days, 90);
+                assert!(!a.dry_run);
+            }
+            _ => panic!("expected PurgeHistory"),
+        }
+    }
+
+    #[test]
+    fn purge_history_dry_run_flag() {
+        let cli = Cli::try_parse_from([
+            "auto_review",
+            "purge-history",
+            "--history-db",
+            "/tmp/h.db",
+            "--older-than-days",
+            "30",
+            "--dry-run",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::PurgeHistory(a) => assert!(a.dry_run),
+            _ => panic!("expected PurgeHistory"),
         }
     }
 

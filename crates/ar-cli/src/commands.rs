@@ -2,8 +2,8 @@
 
 use crate::cli::{
     DoctorArgs, ForgetLearningArgs, InitArgs, ListLearningsArgs, ListLintersArgs,
-    ListWebhooksArgs, RegisterWebhookArgs, ResetPrArgs, ReviewOnceArgs, StatusArgs,
-    TestWebhookArgs, UnregisterWebhookArgs, ValidateConfigArgs,
+    ListWebhooksArgs, PurgeHistoryArgs, RegisterWebhookArgs, ResetPrArgs, ReviewOnceArgs,
+    StatusArgs, TestWebhookArgs, UnregisterWebhookArgs, ValidateConfigArgs,
 };
 use anyhow::{Context, Result};
 use ar_forgejo::{
@@ -344,6 +344,53 @@ pub async fn forget_learning(args: ForgetLearningArgs) -> Result<()> {
         .await
         .with_context(|| format!("remove learning {}", args.id))?;
     println!("Forgot learning {}.", args.id);
+    Ok(())
+}
+
+/// Drop review-history rows older than `older_than_days` days.
+/// Operators wire this into a periodic cleanup; long-running
+/// deployments accumulate one row per PR ever reviewed.
+pub async fn purge_history(args: PurgeHistoryArgs) -> Result<()> {
+    use ar_orchestrator::ReviewHistory;
+    let store = ar_orchestrator::SqliteReviewHistory::open(&args.history_db)
+        .await
+        .with_context(|| format!("open history db at {}", args.history_db.display()))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .context("system clock before unix epoch")?;
+    let cutoff = now - (args.older_than_days as i64) * 86_400;
+
+    if args.dry_run {
+        // Count rows that *would* be dropped. We don't have a
+        // count helper; list_known + a fresh in-memory shaped
+        // query would be ugly. Use a direct sqlx query via a
+        // reopened pool — but we'd be duplicating the schema. The
+        // pragmatic fix: list everything, then re-look up each
+        // updated_at by adding a method. For v1 we report the
+        // total row count and the cutoff, so operators see the
+        // upper bound.
+        let total = store.list_known().await?.len();
+        println!(
+            "Dry run: would drop rows with updated_at < {} ({} day(s) ago).",
+            cutoff, args.older_than_days
+        );
+        println!("  Current total rows: {total}");
+        println!(
+            "  (Re-run without --dry-run to perform the deletion; \
+             actual count printed then.)"
+        );
+        return Ok(());
+    }
+
+    let dropped = store
+        .purge_older_than(cutoff)
+        .await
+        .with_context(|| format!("purge rows older than {} days", args.older_than_days))?;
+    println!(
+        "Purged {} review-history row(s) older than {} days.",
+        dropped, args.older_than_days
+    );
     Ok(())
 }
 
@@ -1541,6 +1588,100 @@ mod tests {
         };
         let err = forget_learning(args).await.expect_err("not found");
         assert!(err.to_string().contains("999"));
+    }
+
+    #[tokio::test]
+    async fn purge_history_drops_old_rows() {
+        use ar_orchestrator::{PrKey, ReviewHistory, SqliteReviewHistory};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review_history.db");
+        {
+            let store = SqliteReviewHistory::open(&path).await.unwrap();
+            // Record at unix epoch — guaranteed older than any
+            // reasonable `older_than_days` cutoff.
+            store
+                .record_at(
+                    &PrKey {
+                        owner: "o".into(),
+                        repo: "r".into(),
+                        pr_number: 1,
+                    },
+                    "x",
+                    100,
+                )
+                .await
+                .unwrap();
+        }
+        let args = PurgeHistoryArgs {
+            history_db: path.clone(),
+            older_than_days: 90,
+            dry_run: false,
+        };
+        purge_history(args).await.expect("ok");
+        let store = SqliteReviewHistory::open(&path).await.unwrap();
+        assert!(store.list_known().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn purge_history_keeps_recent_rows() {
+        use ar_orchestrator::{PrKey, ReviewHistory, SqliteReviewHistory};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review_history.db");
+        {
+            let store = SqliteReviewHistory::open(&path).await.unwrap();
+            // Record with `now` so it's well past the 90-day
+            // cutoff that the CLI computes.
+            store
+                .record(
+                    &PrKey {
+                        owner: "o".into(),
+                        repo: "r".into(),
+                        pr_number: 1,
+                    },
+                    "x",
+                )
+                .await
+                .unwrap();
+        }
+        let args = PurgeHistoryArgs {
+            history_db: path.clone(),
+            older_than_days: 90,
+            dry_run: false,
+        };
+        purge_history(args).await.expect("ok");
+        let store = SqliteReviewHistory::open(&path).await.unwrap();
+        assert_eq!(store.list_known().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn purge_history_dry_run_does_not_delete() {
+        use ar_orchestrator::{PrKey, ReviewHistory, SqliteReviewHistory};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review_history.db");
+        {
+            let store = SqliteReviewHistory::open(&path).await.unwrap();
+            store
+                .record_at(
+                    &PrKey {
+                        owner: "o".into(),
+                        repo: "r".into(),
+                        pr_number: 1,
+                    },
+                    "x",
+                    100, // ancient row
+                )
+                .await
+                .unwrap();
+        }
+        let args = PurgeHistoryArgs {
+            history_db: path.clone(),
+            older_than_days: 90,
+            dry_run: true,
+        };
+        purge_history(args).await.expect("ok");
+        let store = SqliteReviewHistory::open(&path).await.unwrap();
+        // Row still exists despite being well past the cutoff.
+        assert_eq!(store.list_known().await.unwrap().len(), 1);
     }
 
     #[tokio::test]

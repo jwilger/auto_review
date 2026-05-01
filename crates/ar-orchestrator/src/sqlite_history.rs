@@ -19,7 +19,7 @@ use sqlx::{Pool, Row, Sqlite};
 use std::path::Path;
 use std::str::FromStr;
 
-const SCHEMA: &str = r#"
+const SCHEMA_TABLE: &str = r#"
 CREATE TABLE IF NOT EXISTS review_history (
     owner TEXT NOT NULL,
     repo TEXT NOT NULL,
@@ -28,6 +28,11 @@ CREATE TABLE IF NOT EXISTS review_history (
     updated_at INTEGER NOT NULL,
     PRIMARY KEY (owner, repo, pr_number)
 );
+"#;
+
+const SCHEMA_INDEX: &str = r#"
+CREATE INDEX IF NOT EXISTS review_history_updated_at_idx
+    ON review_history (updated_at);
 "#;
 
 pub struct SqliteReviewHistory {
@@ -49,11 +54,63 @@ impl SqliteReviewHistory {
             .connect_with(opts)
             .await
             .map_err(|e| HistoryError::Storage(e.to_string()))?;
-        sqlx::query(SCHEMA)
+        sqlx::query(SCHEMA_TABLE)
+            .execute(&pool)
+            .await
+            .map_err(|e| HistoryError::Storage(e.to_string()))?;
+        sqlx::query(SCHEMA_INDEX)
             .execute(&pool)
             .await
             .map_err(|e| HistoryError::Storage(e.to_string()))?;
         Ok(Self { pool })
+    }
+
+    /// Test-only: record a SHA at an explicit timestamp.
+    /// Production code calls `record` (which uses
+    /// `SystemTime::now`); tests use this to deterministically
+    /// position rows before/after a cutoff. Not gated under
+    /// `#[cfg(test)]` so downstream crate tests can use it; the
+    /// doc comment is the only signal that production code
+    /// shouldn't.
+    pub async fn record_at(
+        &self,
+        key: &PrKey,
+        sha: &str,
+        updated_at: i64,
+    ) -> Result<(), HistoryError> {
+        sqlx::query(
+            "INSERT INTO review_history (owner, repo, pr_number, head_sha, updated_at) \
+             VALUES (?1, ?2, ?3, ?4, ?5) \
+             ON CONFLICT(owner, repo, pr_number) DO UPDATE \
+             SET head_sha = excluded.head_sha, updated_at = excluded.updated_at",
+        )
+        .bind(&key.owner)
+        .bind(&key.repo)
+        .bind(key.pr_number as i64)
+        .bind(sha)
+        .bind(updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| HistoryError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Drop every row whose `updated_at` is older than
+    /// `cutoff_unix_secs`. Returns the number of rows deleted.
+    /// Operators wire this into a periodic cleanup (cron, systemd
+    /// timer, or `auto_review purge-history`) for long-running
+    /// deployments — closed PRs accumulate over months/years and
+    /// the dedup table doesn't need their old SHAs.
+    pub async fn purge_older_than(
+        &self,
+        cutoff_unix_secs: i64,
+    ) -> Result<u64, HistoryError> {
+        let result = sqlx::query("DELETE FROM review_history WHERE updated_at < ?1")
+            .bind(cutoff_unix_secs)
+            .execute(&self.pool)
+            .await
+            .map_err(|e| HistoryError::Storage(e.to_string()))?;
+        Ok(result.rows_affected())
     }
 
     /// Open a fresh in-memory database. Used by tests; useful as
@@ -67,7 +124,11 @@ impl SqliteReviewHistory {
             .connect_with(opts)
             .await
             .map_err(|e| HistoryError::Storage(e.to_string()))?;
-        sqlx::query(SCHEMA)
+        sqlx::query(SCHEMA_TABLE)
+            .execute(&pool)
+            .await
+            .map_err(|e| HistoryError::Storage(e.to_string()))?;
+        sqlx::query(SCHEMA_INDEX)
             .execute(&pool)
             .await
             .map_err(|e| HistoryError::Storage(e.to_string()))?;
@@ -231,6 +292,46 @@ mod tests {
         assert_eq!(listed[0], key("alice", "x", 1));
         assert_eq!(listed[1], key("alice", "y", 2));
         assert_eq!(listed[2], key("bob", "z", 3));
+    }
+
+    #[tokio::test]
+    async fn purge_drops_rows_older_than_cutoff() {
+        let h = SqliteReviewHistory::in_memory().await.unwrap();
+        h.record_at(&key("o", "r", 1), "deadbeef", 100).await.unwrap();
+        h.record_at(&key("o", "r", 2), "cafef00d", 200).await.unwrap();
+        // Cutoff = 150: only the first row qualifies.
+        let dropped = h.purge_older_than(150).await.unwrap();
+        assert_eq!(dropped, 1);
+        let remaining = h.list_known().await.unwrap();
+        assert_eq!(remaining.len(), 1);
+        assert_eq!(remaining[0].pr_number, 2);
+    }
+
+    #[tokio::test]
+    async fn purge_strict_less_than_keeps_row_at_exact_cutoff() {
+        let h = SqliteReviewHistory::in_memory().await.unwrap();
+        h.record_at(&key("o", "r", 1), "x", 100).await.unwrap();
+        // Cutoff equals the row's timestamp: row stays.
+        let dropped = h.purge_older_than(100).await.unwrap();
+        assert_eq!(dropped, 0);
+        assert_eq!(h.list_known().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn purge_keeps_rows_at_or_after_cutoff() {
+        let h = SqliteReviewHistory::in_memory().await.unwrap();
+        h.record_at(&key("o", "r", 1), "x", 1000).await.unwrap();
+        // Cutoff is far in the past; nothing should drop.
+        let dropped = h.purge_older_than(0).await.unwrap();
+        assert_eq!(dropped, 0);
+        assert_eq!(h.list_known().await.unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn purge_returns_zero_on_empty_table() {
+        let h = SqliteReviewHistory::in_memory().await.unwrap();
+        let dropped = h.purge_older_than(i64::MAX).await.unwrap();
+        assert_eq!(dropped, 0);
     }
 
     #[tokio::test]
