@@ -23,6 +23,11 @@ pub enum Command {
     /// Register a webhook on a repository so PR events flow to the
     /// reviewer.
     RegisterWebhook(RegisterWebhookArgs),
+
+    /// Run the full review pipeline once against a specific PR. No
+    /// gateway or webhook required — useful for development, demos, and
+    /// reproducing reported issues.
+    ReviewOnce(ReviewOnceArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -47,6 +52,34 @@ pub struct InitArgs {
     /// for review posting + webhook registration).
     #[arg(long, value_delimiter = ',', default_values_t = default_scopes())]
     pub scopes: Vec<String>,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ReviewOnceArgs {
+    #[arg(long, env = "FORGEJO_BASE_URL")]
+    pub forgejo_url: String,
+
+    #[arg(long, env = "FORGEJO_TOKEN")]
+    pub token: String,
+
+    #[arg(long)]
+    pub owner: String,
+
+    #[arg(long)]
+    pub repo: String,
+
+    /// Pull-request number.
+    #[arg(long)]
+    pub pr: u64,
+
+    #[arg(long, env = "LLM_BASE_URL")]
+    pub llm_base_url: String,
+
+    #[arg(long, env = "LLM_API_KEY")]
+    pub llm_api_key: Option<String>,
+
+    #[arg(long, env = "LLM_REASONING_MODEL", default_value = "qwen2.5-coder:32b")]
+    pub llm_model: String,
 }
 
 #[derive(clap::Args, Debug)]
@@ -159,6 +192,38 @@ mod tests {
                 assert_eq!(a.gateway_url, "https://g.example");
             }
             _ => panic!("expected RegisterWebhook"),
+        }
+    }
+
+    #[test]
+    fn review_once_parses_required_args() {
+        let cli = Cli::try_parse_from([
+            "auto_review",
+            "review-once",
+            "--forgejo-url",
+            "https://x",
+            "--token",
+            "tok",
+            "--owner",
+            "alice",
+            "--repo",
+            "widgets",
+            "--pr",
+            "42",
+            "--llm-base-url",
+            "http://localhost:11434",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::ReviewOnce(a) => {
+                assert_eq!(a.owner, "alice");
+                assert_eq!(a.repo, "widgets");
+                assert_eq!(a.pr, 42);
+                assert_eq!(a.llm_base_url, "http://localhost:11434");
+                assert_eq!(a.llm_model, "qwen2.5-coder:32b");
+                assert!(a.llm_api_key.is_none());
+            }
+            _ => panic!("expected ReviewOnce"),
         }
     }
 

@@ -19,3 +19,5 @@ anyhow.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 rpassword = "7"
 ar-forgejo = { path = "../ar-forgejo" }
+ar-llm = { path = "../ar-llm" }
+ar-orchestrator = { path = "../ar-orchestrator" }

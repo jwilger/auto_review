@@ -1,10 +1,13 @@
 //! Implementations of the CLI subcommands.
 
-use crate::cli::{InitArgs, RegisterWebhookArgs};
+use crate::cli::{InitArgs, RegisterWebhookArgs, ReviewOnceArgs};
 use anyhow::{Context, Result};
 use ar_forgejo::{
     Client, CreateAccessTokenRequest, CreateWebhookRequest, InitClient, WebhookConfig,
 };
+use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
+use ar_orchestrator::{run_review_job, ReviewJob};
+use std::sync::Arc;
 
 const WEBHOOK_PATH: &str = "/webhooks/forgejo";
 
@@ -38,6 +41,51 @@ pub async fn init(args: InitArgs) -> Result<()> {
     println!("        --forgejo-url {} \\", args.forgejo_url);
     println!("        --gateway-url https://reviewer.example.com \\");
     println!("        --webhook-secret <pick a strong secret>");
+    Ok(())
+}
+
+/// Run the full review pipeline once against a specific PR. Builds the
+/// same Forgejo client + LLM router the gateway uses and invokes
+/// orchestrator::run_review_job synchronously (no spawn) so the user can
+/// observe the outcome in their terminal.
+pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
+    let forgejo =
+        Arc::new(Client::new(&args.forgejo_url, &args.token).context("build forgejo client")?);
+    let provider = Arc::new(
+        OpenAiProvider::new(
+            &args.llm_base_url,
+            args.llm_api_key.as_deref(),
+            &args.llm_model,
+        )
+        .context("build LLM provider")?,
+    );
+    let llm = Arc::new(LlmRouter::new().with(ModelTier::Reasoning, provider));
+
+    let pr = forgejo
+        .get_pull_request(&args.owner, &args.repo, args.pr)
+        .await
+        .context("fetch pull request")?;
+
+    if pr.draft {
+        println!("PR #{} is a draft; not reviewing.", pr.number);
+        return Ok(());
+    }
+
+    let job = ReviewJob {
+        owner: args.owner.clone(),
+        repo: args.repo.clone(),
+        pr_number: pr.number,
+        head_sha: pr.head.sha,
+        pr_title: pr.title,
+        pr_body: pr.body,
+    };
+
+    println!(
+        "Reviewing {}/{} #{} at {}",
+        args.owner, args.repo, args.pr, job.head_sha
+    );
+    run_review_job(&forgejo, &llm, &args.forgejo_url, &args.token, job).await;
+    println!("Done. Check the PR for the posted review.");
     Ok(())
 }
 
