@@ -1,8 +1,8 @@
 use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullRequestEvent};
 use ar_llm::Router as LlmRouter;
 use ar_review::{
-    lint_workspace_with, load_repo_config, pr_is_skippable, prepare_workspace, review_pull_request,
-    ReviewError, WorkspaceError,
+    build_glob_set, lint_workspace_with, load_repo_config, pr_is_skippable, prepare_workspace,
+    review_pull_request, GlobSet, ReviewError, WorkspaceError,
 };
 use ar_tools::Finding;
 use async_trait::async_trait;
@@ -162,7 +162,7 @@ pub async fn run_review_job(
     }
 
     let lint_outcome = prepare_and_lint(forgejo, forgejo_base, forgejo_token, &job).await;
-    let findings = match lint_outcome {
+    let (findings, ignored_paths) = match lint_outcome {
         Ok(LintPhaseOutput {
             skipped_by_config: true,
             ..
@@ -187,13 +187,17 @@ pub async fn run_review_job(
                 .await;
             return;
         }
-        Ok(LintPhaseOutput { findings, .. }) => {
+        Ok(LintPhaseOutput {
+            findings,
+            ignored_paths,
+            ..
+        }) => {
             tracing::debug!(count = findings.len(), "linter findings collected");
-            findings
+            (findings, ignored_paths)
         }
         Err(e) => {
             tracing::warn!(error = %e, "lint phase failed; continuing without findings");
-            Vec::new()
+            (Vec::new(), GlobSet::empty())
         }
     };
 
@@ -207,6 +211,7 @@ pub async fn run_review_job(
         &job.pr_title,
         &job.pr_body,
         &findings,
+        &ignored_paths,
     )
     .await;
 
@@ -259,6 +264,7 @@ enum LintPhaseError {
 struct LintPhaseOutput {
     findings: Vec<Finding>,
     skipped_by_config: bool,
+    ignored_paths: GlobSet,
 }
 
 async fn prepare_and_lint(
@@ -272,16 +278,19 @@ async fn prepare_and_lint(
         .await?;
     let workspace = prepare_workspace(base, token, &job.owner, &job.repo, &job.head_sha).await?;
     let config = load_repo_config(workspace.path());
+    let ignored_paths = build_glob_set(&config.ignored_paths);
     if !config.enabled {
         return Ok(LintPhaseOutput {
             findings: Vec::new(),
             skipped_by_config: true,
+            ignored_paths,
         });
     }
     let findings = lint_workspace_with(workspace.path(), &files, &config.disabled_tools).await;
     Ok(LintPhaseOutput {
         findings,
         skipped_by_config: false,
+        ignored_paths,
     })
 }
 

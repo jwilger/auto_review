@@ -1,11 +1,13 @@
 use crate::diff::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 use crate::error::ReviewError;
 use crate::heal::{generate_with_self_heal, HealConfig};
+use crate::ignored::{filter_changed_files, filter_diff_paths};
 use crate::mapping::output_to_review_request;
 use ar_forgejo::Client as ForgejoClient;
 use ar_llm::Router as LlmRouter;
 use ar_prompts::{render_review_prompt, system_prompt, ReviewPromptInputs};
 use ar_tools::Finding;
+use globset::GlobSet;
 
 #[derive(Debug, Clone)]
 pub struct ReviewOutcome {
@@ -31,17 +33,21 @@ pub async fn review_pull_request(
     pr_title: &str,
     pr_body: &str,
     linter_findings: &[Finding],
+    ignored_paths: &GlobSet,
 ) -> Result<ReviewOutcome, ReviewError> {
     let raw_diff = forgejo.get_pr_diff(owner, repo, pr_number).await?;
-    let diff = cap_diff(&raw_diff, DEFAULT_MAX_DIFF_BYTES);
+    let pruned = filter_diff_paths(&raw_diff, ignored_paths);
+    let diff = cap_diff(&pruned, DEFAULT_MAX_DIFF_BYTES);
     if diff.len() < raw_diff.len() {
         tracing::info!(
             original = raw_diff.len(),
-            capped = diff.len(),
-            "diff capped before sending to LLM"
+            after_ignore = pruned.len(),
+            after_cap = diff.len(),
+            "diff filtered/capped before sending to LLM"
         );
     }
-    let files = forgejo.list_changed_files(owner, repo, pr_number).await?;
+    let raw_files = forgejo.list_changed_files(owner, repo, pr_number).await?;
+    let files = filter_changed_files(&raw_files, ignored_paths);
     let changed_filenames: Vec<String> = files.iter().map(|f| f.filename.clone()).collect();
 
     let prompt = render_review_prompt(&ReviewPromptInputs {
@@ -173,6 +179,7 @@ mod tests {
             "title",
             "body",
             &[],
+            &GlobSet::empty(),
         )
         .await
         .expect("review ok");
@@ -194,9 +201,20 @@ mod tests {
         let provider = Arc::new(CannedProvider::new(vec![]));
         let llm = router_with(provider);
 
-        let err = review_pull_request(&forgejo, &llm, "o", "r", 7, "x", "t", "b", &[])
-            .await
-            .expect_err("err");
+        let err = review_pull_request(
+            &forgejo,
+            &llm,
+            "o",
+            "r",
+            7,
+            "x",
+            "t",
+            "b",
+            &[],
+            &GlobSet::empty(),
+        )
+        .await
+        .expect_err("err");
         assert!(matches!(err, ReviewError::Forgejo(_)));
     }
 
@@ -232,9 +250,20 @@ mod tests {
         let provider = Arc::new(CannedProvider::new(vec![bad]));
         let llm = router_with(provider);
 
-        let outcome = review_pull_request(&forgejo, &llm, "o", "r", 7, "sha", "t", "b", &[])
-            .await
-            .expect("ok");
+        let outcome = review_pull_request(
+            &forgejo,
+            &llm,
+            "o",
+            "r",
+            7,
+            "sha",
+            "t",
+            "b",
+            &[],
+            &GlobSet::empty(),
+        )
+        .await
+        .expect("ok");
         assert_eq!(outcome.findings_count, 1);
     }
 
@@ -275,9 +304,20 @@ mod tests {
             message: "var unused".into(),
         }];
 
-        review_pull_request(&forgejo, &llm, "o", "r", 7, "sha", "t", "b", &findings)
-            .await
-            .expect("ok");
+        review_pull_request(
+            &forgejo,
+            &llm,
+            "o",
+            "r",
+            7,
+            "sha",
+            "t",
+            "b",
+            &findings,
+            &GlobSet::empty(),
+        )
+        .await
+        .expect("ok");
 
         let prompt = provider
             .last_user_prompt()

@@ -22,6 +22,7 @@ pub mod workspace;
 pub use config::{load_repo_config, RepoConfig};
 pub use diff::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 pub use error::ReviewError;
+pub use globset::GlobSet;
 pub use heal::{generate_with_self_heal, HealConfig};
 pub use ignored::{build_glob_set, filter_changed_files, filter_diff_paths};
 pub use mapping::output_to_review_request;
