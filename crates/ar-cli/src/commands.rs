@@ -122,6 +122,7 @@ async fn print_dry_run_prompt(
         changed_files: &changed_files,
         linter_findings: &[],
         guidelines: "",
+        repo_context: "",
     });
     println!("{prompt}");
     Ok(())

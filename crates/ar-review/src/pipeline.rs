@@ -60,6 +60,9 @@ pub async fn review_pull_request(
         changed_files: &changed_filenames,
         linter_findings,
         guidelines,
+        // RAG-retrieved context: when the index integration lands,
+        // this becomes a formatted snippet from ar-index.
+        repo_context: "",
     });
 
     let output =

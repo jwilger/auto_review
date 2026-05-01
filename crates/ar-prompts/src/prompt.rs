@@ -17,6 +17,11 @@ pub struct ReviewPromptInputs<'a> {
     /// as a top-level section so the model treats them as authoritative
     /// project conventions. Empty when no config is present.
     pub guidelines: &'a str,
+    /// RAG-retrieved context: relevant code snippets from the index,
+    /// matching learnings, co-change neighbors, etc. Free-form markdown
+    /// — the orchestrator decides how to format it. Empty when the
+    /// index hasn't been built or returned no matches.
+    pub repo_context: &'a str,
 }
 
 const SYSTEM_PROMPT: &str = "\
@@ -88,6 +93,14 @@ pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
         }
     }
 
+    if !inputs.repo_context.is_empty() {
+        out.push_str("\nRepository context (retrieved from index):\n");
+        out.push_str(inputs.repo_context);
+        if !inputs.repo_context.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+
     if !inputs.linter_findings.is_empty() {
         out.push_str("\nStatic-analysis findings:\n");
         for f in inputs.linter_findings {
@@ -129,6 +142,7 @@ mod tests {
             changed_files: files,
             linter_findings: findings,
             guidelines: "",
+            repo_context: "",
         }
     }
 
@@ -176,8 +190,33 @@ mod tests {
             changed_files: &files,
             linter_findings: &[],
             guidelines: "",
+            repo_context: "",
         });
         assert!(p.contains("t"));
+    }
+
+    #[test]
+    fn includes_repo_context_section_when_provided() {
+        let files: Vec<String> = vec![];
+        let p = render_review_prompt(&ReviewPromptInputs {
+            repo_full_name: "x/y",
+            pr_number: 1,
+            pr_title: "t",
+            pr_body: "",
+            diff: "d",
+            changed_files: &files,
+            linter_findings: &[],
+            guidelines: "",
+            repo_context: "Function `foo` is called by 14 callers in this repo.",
+        });
+        assert!(p.contains("Repository context"));
+        assert!(p.contains("14 callers"));
+    }
+
+    #[test]
+    fn omits_repo_context_when_empty() {
+        let p = render_review_prompt(&sample("d", &[], &[]));
+        assert!(!p.contains("Repository context"));
     }
 
     #[test]
@@ -192,6 +231,7 @@ mod tests {
             changed_files: &files,
             linter_findings: &[],
             guidelines: "Always prefer total functions over partial.",
+            repo_context: "",
         });
         assert!(p.contains("Repository guidelines"));
         assert!(p.contains("total functions"));
