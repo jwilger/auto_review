@@ -239,6 +239,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn version_endpoint_returns_name_and_version() {
+        let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)));
+        let req = Request::get("/version").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["name"], "auto_review");
+        assert!(!json["version"].as_str().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn healthz_returns_ok() {
+        let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)));
+        let req = Request::get("/healthz").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
     async fn ping_is_pong() {
         let body = b"{}".to_vec();
         let sig = sign("s", &body);

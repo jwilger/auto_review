@@ -131,6 +131,18 @@ impl Client {
         let url = self.url(&format!("repos/{owner}/{repo}/hooks"))?;
         json_post(&self.http, url, request).await
     }
+
+    /// Fetch the Forgejo server's reported version string. Used as a
+    /// cheap connectivity probe by readiness checks at gateway startup.
+    pub async fn get_server_version(&self) -> Result<String, Error> {
+        #[derive(serde::Deserialize)]
+        struct VersionResponse {
+            version: String,
+        }
+        let url = self.url("version")?;
+        let resp: VersionResponse = json_get(&self.http, url).await?;
+        Ok(resp.version)
+    }
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -278,6 +290,37 @@ mod tests {
             .post_commit_status("o", "r", "abc123", &status)
             .await
             .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn get_server_version_returns_version_string() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/version"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "version": "8.0.3"
+            })))
+            .mount(&server)
+            .await;
+
+        let v = client.get_server_version().await.expect("ok");
+        assert_eq!(v, "8.0.3");
+    }
+
+    #[tokio::test]
+    async fn get_server_version_propagates_5xx_errors() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/version"))
+            .respond_with(ResponseTemplate::new(503).set_body_string("down"))
+            .mount(&server)
+            .await;
+
+        let err = client.get_server_version().await.expect_err("err");
+        match err {
+            Error::Api { status, .. } => assert_eq!(status, 503),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[tokio::test]

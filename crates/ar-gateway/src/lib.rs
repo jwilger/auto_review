@@ -31,6 +31,14 @@ impl AppState {
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
+        .route("/version", get(version_handler))
         .route("/webhooks/forgejo", post(webhook::handle))
         .with_state(state)
+}
+
+async fn version_handler() -> axum::response::Json<serde_json::Value> {
+    axum::response::Json(serde_json::json!({
+        "name": "auto_review",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
 }
