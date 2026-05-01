@@ -32,6 +32,13 @@ pub struct AppState {
     /// be parsed-but-not-handled.
     pub chat: Option<ChatDeps>,
     pub metrics: Arc<Metrics>,
+    /// Forgejo username the bot authenticates as. Used for self-loop
+    /// detection (don't act on the bot's own comments). Defaults to
+    /// `auto_review`.
+    pub bot_login: Arc<String>,
+    /// Mention-handle the bot listens for (`@<bot_name>`). Often the
+    /// same as `bot_login`. Defaults to `auto_review`.
+    pub bot_name: Arc<String>,
 }
 
 /// Dependencies the chat handler needs. Bundled so the optional-ness
@@ -50,11 +57,25 @@ impl AppState {
             dispatcher,
             chat: None,
             metrics: Arc::new(Metrics::new()),
+            bot_login: Arc::new("auto_review".into()),
+            bot_name: Arc::new("auto_review".into()),
         }
     }
 
     pub fn with_chat(mut self, chat: ChatDeps) -> Self {
         self.chat = Some(chat);
+        self
+    }
+
+    /// Override the bot identity used for self-loop detection and
+    /// `@<bot_name>` mention parsing.
+    pub fn with_bot_identity(
+        mut self,
+        bot_login: impl Into<String>,
+        bot_name: impl Into<String>,
+    ) -> Self {
+        self.bot_login = Arc::new(bot_login.into());
+        self.bot_name = Arc::new(bot_name.into());
         self
     }
 }

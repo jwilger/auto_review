@@ -69,12 +69,11 @@ async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
         // Plain issue (not PR) — ignored.
         return (StatusCode::ACCEPTED, "").into_response();
     }
-    if is_bot_self(&evt.sender.login) {
+    if is_bot_self(&evt.sender.login, &state.bot_login) {
         // Bot's own comments must be ignored to avoid loops.
         return (StatusCode::ACCEPTED, "").into_response();
     }
-    let bot_name = "auto_review";
-    let cmd = parse_chat_command(&evt.comment.body, bot_name);
+    let cmd = parse_chat_command(&evt.comment.body, &state.bot_name);
     if matches!(cmd, ChatCommand::NotMentioned) {
         return (StatusCode::ACCEPTED, "").into_response();
     }
@@ -121,12 +120,8 @@ async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
     (StatusCode::ACCEPTED, "").into_response()
 }
 
-fn is_bot_self(sender_login: &str) -> bool {
-    // Conservative: don't act on any comment whose author starts with
-    // "auto_review" or "auto-review" (covers bot users named
-    // auto-review, auto-reviewer, etc.).
-    let lower = sender_login.to_ascii_lowercase();
-    lower.starts_with("auto_review") || lower.starts_with("auto-review")
+fn is_bot_self(sender_login: &str, bot_login: &str) -> bool {
+    sender_login.eq_ignore_ascii_case(bot_login)
 }
 
 async fn handle_pull_request(state: &AppState, body: &[u8]) -> Response {
@@ -446,7 +441,8 @@ mod tests {
 
     #[tokio::test]
     async fn issue_comment_from_bot_self_is_ignored() {
-        // Sender starts with "auto_review" — must not act (would loop).
+        // Sender matches the default bot_login (`auto_review`) —
+        // must not act (would loop).
         let body = comment_payload("created", "@auto_review help", "auto_review");
         let sig = sign("s", &body);
         let (status, _) = send(
@@ -458,6 +454,54 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::ACCEPTED);
+    }
+
+    #[tokio::test]
+    async fn issue_comment_self_detection_uses_configured_bot_login() {
+        // Operator runs the bot under a different account
+        // (`pr-bot`); a comment from that account must be filtered,
+        // and a comment from a user named `auto_review_helper` must
+        // NOT be filtered (it's not the bot).
+        let secret = "s";
+        let app = build_router(
+            AppState::new(secret, Arc::new(NoOpDispatcher))
+                .with_bot_identity("pr-bot", "pr-bot"),
+        );
+
+        // Bot's own comment: ignored (no chat command counter
+        // increment).
+        let body = comment_payload("created", "@pr-bot help", "pr-bot");
+        let sig = sign(secret, &body);
+        let req = Request::post("/webhooks/forgejo")
+            .header(EVENT_HEADER, "issue_comment")
+            .header(SIG_HEADER, &sig)
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        // Non-bot user with "auto_review_helper" name: not the bot
+        // any more under the new behaviour.
+        let body = comment_payload("created", "@pr-bot help", "auto_review_helper");
+        let sig = sign(secret, &body);
+        let req = Request::post("/webhooks/forgejo")
+            .header(EVENT_HEADER, "issue_comment")
+            .header(SIG_HEADER, &sig)
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        let req = Request::get("/metrics").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        // The bot's own message must not register; the
+        // helper's message MUST register, totalling 1.
+        assert!(
+            text.contains("auto_review_chat_commands_received_total 1\n"),
+            "expected exactly one chat command, got:\n{text}"
+        );
     }
 
     #[tokio::test]

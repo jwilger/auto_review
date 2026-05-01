@@ -446,6 +446,24 @@ default in-memory store to the SQLite-backed one.
   count as spurious), so the precision number penalises
   noise correctly.
 
+#### Configurable bot identity in webhook chat path
+
+- The webhook handler's chat-mention parsing and self-loop
+  detection previously hardcoded `auto_review`, while the
+  background poller already honoured `AR_BOT_LOGIN` /
+  `AR_BOT_NAME`. Operators running the bot under a different
+  Forgejo account (which is the recommended pattern, since
+  `auto_review` is a project name not a username) got a
+  silently-broken chat surface: `@<their-bot>` mentions
+  weren't parsed, and the bot might re-act on its own
+  comments. Both code paths now read the same env-vars and
+  thread the values through `AppState::with_bot_identity`,
+  so behaviour is consistent. Self-detection moves from a
+  prefix match (`starts_with("auto_review")`) to an exact
+  case-insensitive match against the configured login,
+  which is correct (a user named `auto_review_helper` was
+  previously silently ignored).
+
 #### Threat model (M5 docs)
 
 - `docs/THREAT-MODEL.md`: living document enumerating

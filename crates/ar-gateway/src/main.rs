@@ -155,7 +155,14 @@ async fn main() -> Result<()> {
         learnings,
     };
 
-    let state = AppState::new(secret, dispatcher).with_chat(chat_deps);
+    // Same bot identity used by the poller above. Falls back to
+    // `auto_review` when the operator hasn't customised it.
+    let bot_login = env::var("AR_BOT_LOGIN").unwrap_or_else(|_| "auto_review".into());
+    let bot_name = env::var("AR_BOT_NAME").unwrap_or_else(|_| bot_login.clone());
+
+    let state = AppState::new(secret, dispatcher)
+        .with_chat(chat_deps)
+        .with_bot_identity(bot_login, bot_name);
     let app = build_router(state);
 
     let listener = TcpListener::bind(&bind)
