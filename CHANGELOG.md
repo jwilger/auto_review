@@ -510,6 +510,22 @@ default in-memory store to the SQLite-backed one.
   drive-by PRs. Includes guidance for keeping the document
   in sync as new components are added.
 
+#### test-webhook subcommand (M5)
+
+- `auto_review test-webhook --gateway-url <URL> --webhook-secret <S>`
+  posts an HMAC-signed `ping` event to a running gateway and
+  prints the response. Smoke-tests the webhook intake path
+  (network reachability + signature secret + header forwarding
+  through any reverse-proxy) without firing a real review.
+  Exit 0 on 2xx; non-zero with a hint about secret + header
+  stripping otherwise. `--event pull_request` substitutes a
+  stub PR event for round-tripping the dispatcher path.
+  Useful immediately after `register-webhook` to confirm the
+  deploy works before waiting for an actual PR. Four
+  end-to-end tests bring up an in-process gateway with
+  `NoOpDispatcher` and verify success, wrong-secret failure,
+  PR-event round-trip, and unsupported-event rejection.
+
 #### list-linters subcommand (M5)
 
 - `auto_review list-linters` prints the bundled linter

@@ -85,6 +85,15 @@ for either secret drift or active probing.
    reject lines — `signature: mismatch` means wrong secret;
    `signature: not hex` means malformed sender; `signature: missing`
    means the header isn't being sent (proxy stripping it?).
+3. Smoke-test the intake path with a fresh signature:
+   ```bash
+   auto_review test-webhook \
+       --gateway-url https://reviewer.example.com \
+       --webhook-secret "$WEBHOOK_SECRET"
+   ```
+   A 200 confirms the secret + headers + path work end-to-end.
+   A 401 with the gateway's WEBHOOK_SECRET still proves the path
+   itself is healthy and points at Forgejo's stored secret.
 
 **Fix:** rotate (see §6.1).
 

@@ -49,6 +49,14 @@ pub enum Command {
     /// tag (e.g. `--language python`) to see only what runs on a
     /// specific stack; pass `--json` for machine-readable output.
     ListLinters(ListLintersArgs),
+
+    /// Send an HMAC-signed `ping` webhook to a running gateway and
+    /// print the response. Smoke-tests the intake path (network
+    /// reachability + signature secret + header forwarding through
+    /// any reverse-proxy) without firing a real review. Run after
+    /// `register-webhook` to confirm the deploy works before waiting
+    /// for an actual PR.
+    TestWebhook(TestWebhookArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -107,6 +115,32 @@ pub struct ReviewOnceArgs {
     /// prompt content without burning tokens or touching the PR.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct TestWebhookArgs {
+    /// Gateway URL the webhook should be POSTed to. The path
+    /// `/webhooks/forgejo` is appended (mirroring `register-webhook`).
+    #[arg(long)]
+    pub gateway_url: String,
+
+    /// Webhook secret. Must match the gateway's `WEBHOOK_SECRET`.
+    #[arg(long, env = "WEBHOOK_SECRET")]
+    pub webhook_secret: String,
+
+    /// Override the event sent (defaults to `ping`, which the gateway
+    /// answers with `200 pong` and never enqueues a review). Use
+    /// `pull_request` to round-trip a synthetic PR event through the
+    /// dispatcher; the spawned review will fail to reach the (fake)
+    /// PR's clone URL but the webhook response still proves intake.
+    #[arg(long, default_value = "ping")]
+    pub event: String,
+
+    /// Connect timeout in seconds. The gateway acks webhooks
+    /// quickly; a slow response means a misconfigured proxy or
+    /// network egress problem.
+    #[arg(long, default_value_t = 10)]
+    pub timeout_secs: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -303,6 +337,52 @@ mod tests {
                 assert!(a.llm_api_key.is_none());
             }
             _ => panic!("expected ReviewOnce"),
+        }
+    }
+
+    #[test]
+    fn test_webhook_required_args() {
+        let cli = Cli::try_parse_from([
+            "auto_review",
+            "test-webhook",
+            "--gateway-url",
+            "http://localhost:8080",
+            "--webhook-secret",
+            "s",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::TestWebhook(a) => {
+                assert_eq!(a.gateway_url, "http://localhost:8080");
+                assert_eq!(a.webhook_secret, "s");
+                assert_eq!(a.event, "ping");
+                assert_eq!(a.timeout_secs, 10);
+            }
+            _ => panic!("expected TestWebhook"),
+        }
+    }
+
+    #[test]
+    fn test_webhook_with_pr_event() {
+        let cli = Cli::try_parse_from([
+            "auto_review",
+            "test-webhook",
+            "--gateway-url",
+            "http://x.example",
+            "--webhook-secret",
+            "s",
+            "--event",
+            "pull_request",
+            "--timeout-secs",
+            "30",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::TestWebhook(a) => {
+                assert_eq!(a.event, "pull_request");
+                assert_eq!(a.timeout_secs, 30);
+            }
+            _ => panic!("expected TestWebhook"),
         }
     }
 

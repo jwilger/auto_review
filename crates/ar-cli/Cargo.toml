@@ -20,6 +20,10 @@ serde.workspace = true
 serde_json.workspace = true
 clap = { version = "4", features = ["derive", "env"] }
 rpassword = "7"
+reqwest.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+hex.workspace = true
 ar-forgejo = { path = "../ar-forgejo" }
 ar-llm = { path = "../ar-llm" }
 ar-orchestrator = { path = "../ar-orchestrator" }
@@ -30,3 +34,6 @@ ar-tools = { path = "../ar-tools" }
 
 [dev-dependencies]
 tempfile = "3"
+ar-gateway = { path = "../ar-gateway" }
+axum = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

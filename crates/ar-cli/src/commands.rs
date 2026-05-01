@@ -1,12 +1,15 @@
 //! Implementations of the CLI subcommands.
 
 use crate::cli::{
-    InitArgs, ListLintersArgs, RegisterWebhookArgs, ReviewOnceArgs, ValidateConfigArgs,
+    InitArgs, ListLintersArgs, RegisterWebhookArgs, ReviewOnceArgs, TestWebhookArgs,
+    ValidateConfigArgs,
 };
 use anyhow::{Context, Result};
 use ar_forgejo::{
     Client, CreateAccessTokenRequest, CreateWebhookRequest, InitClient, WebhookConfig,
 };
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::{run_review_job, InMemoryReviewHistory, ReviewJob};
 use ar_prompts::{render_review_prompt, ReviewPromptInputs};
@@ -187,6 +190,87 @@ pub fn build_webhook_url(gateway_url: &str) -> String {
     format!("{trimmed}{WEBHOOK_PATH}")
 }
 
+/// Send an HMAC-signed `ping` webhook (or, with `--event`, a
+/// stub `pull_request` event) to a running gateway and print
+/// the response. Exits 0 only when the gateway returns a 2xx.
+pub async fn test_webhook(args: TestWebhookArgs) -> Result<()> {
+    let webhook_url = build_webhook_url(&args.gateway_url);
+    let body = match args.event.as_str() {
+        "ping" => br#"{"hook_id":0}"#.to_vec(),
+        "pull_request" => stub_pr_event_body(),
+        other => anyhow::bail!(
+            "unsupported event `{other}` (only `ping` and `pull_request` are supported)"
+        ),
+    };
+    let signature = sign_body(&args.webhook_secret, &body);
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(args.timeout_secs))
+        .build()
+        .context("build http client")?;
+    let resp = client
+        .post(&webhook_url)
+        .header("X-Forgejo-Signature", &signature)
+        .header("X-Forgejo-Event", &args.event)
+        .header("Content-Type", "application/json")
+        .body(body)
+        .send()
+        .await
+        .with_context(|| format!("POST {webhook_url}"))?;
+    let status = resp.status();
+    let body = resp.text().await.unwrap_or_default();
+    println!("URL: {webhook_url}");
+    println!("Event: {}", args.event);
+    println!("Status: {status}");
+    if !body.is_empty() {
+        println!("Body: {body}");
+    }
+    if status.is_success() {
+        println!("OK — webhook intake path is healthy.");
+        Ok(())
+    } else {
+        anyhow::bail!(
+            "gateway returned {status}; check the WEBHOOK_SECRET on both sides and confirm \
+             nothing is stripping the X-Forgejo-Signature header in transit."
+        )
+    }
+}
+
+/// Minimal but schema-valid `pull_request` event body. The numbers
+/// and SHAs are intentionally fake; the gateway will accept the
+/// event, dispatch a job to the orchestrator, and the orchestrator
+/// will fail the clone phase with `workspace: clone failed`. The
+/// webhook ack still proves the intake path works — that's all this
+/// subcommand cares about.
+fn stub_pr_event_body() -> Vec<u8> {
+    serde_json::to_vec(&serde_json::json!({
+        "action": "opened",
+        "number": 0,
+        "pull_request": {
+            "number": 0,
+            "title": "auto_review test-webhook (stub event)",
+            "body": "synthetic event from `auto_review test-webhook`",
+            "draft": false,
+            "user": {"login": "auto_review-test", "id": 0},
+            "head": {"ref": "test", "sha": "0000000000000000000000000000000000000000"},
+            "base": {"ref": "main", "sha": "1111111111111111111111111111111111111111"}
+        },
+        "repository": {
+            "name": "test", "full_name": "test/test",
+            "default_branch": "main",
+            "owner": {"login": "test", "id": 0}
+        },
+        "sender": {"login": "auto_review-test", "id": 0}
+    }))
+    .expect("stub serializes")
+}
+
+fn sign_body(secret: &str, body: &[u8]) -> String {
+    let mut mac =
+        Hmac::<Sha256>::new_from_slice(secret.as_bytes()).expect("HMAC accepts any-length key");
+    mac.update(body);
+    hex::encode(mac.finalize().into_bytes())
+}
+
 /// Print the bundled linter catalogue. With `--json`, emits one
 /// JSON object per line (newline-delimited JSON). Otherwise renders
 /// a human-readable table grouped by language.
@@ -319,6 +403,113 @@ fn expand_config_paths(paths: &[std::path::PathBuf]) -> Result<Vec<std::path::Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sign_body_is_deterministic_and_hex_encoded() {
+        let a = sign_body("secret", b"payload");
+        let b = sign_body("secret", b"payload");
+        assert_eq!(a, b);
+        assert_eq!(a.len(), 64); // sha256 hex
+        assert!(a.chars().all(|c| c.is_ascii_hexdigit()));
+        // Different secret → different signature.
+        let c = sign_body("other", b"payload");
+        assert_ne!(a, c);
+    }
+
+    #[test]
+    fn stub_pr_event_body_is_valid_json() {
+        let body = stub_pr_event_body();
+        let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(v["action"], "opened");
+        assert_eq!(v["pull_request"]["draft"], false);
+        assert_eq!(v["repository"]["full_name"], "test/test");
+    }
+
+    /// Wire up an in-process gateway with NoOpDispatcher and verify
+    /// `test_webhook` round-trips successfully. Catches real bugs:
+    /// signature header name, content-type, body framing.
+    #[tokio::test]
+    async fn end_to_end_test_webhook_succeeds_against_real_gateway() {
+        use ar_gateway::{build_router, AppState};
+        use ar_orchestrator::NoOpDispatcher;
+        use std::sync::Arc;
+
+        let secret = "shared-secret";
+        let app = build_router(AppState::new(secret, Arc::new(NoOpDispatcher)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let args = TestWebhookArgs {
+            gateway_url: format!("http://{addr}"),
+            webhook_secret: secret.into(),
+            event: "ping".into(),
+            timeout_secs: 5,
+        };
+        test_webhook(args).await.expect("ping should be 200 pong");
+    }
+
+    #[tokio::test]
+    async fn end_to_end_test_webhook_fails_with_wrong_secret() {
+        use ar_gateway::{build_router, AppState};
+        use ar_orchestrator::NoOpDispatcher;
+        use std::sync::Arc;
+
+        let app = build_router(AppState::new("right", Arc::new(NoOpDispatcher)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let args = TestWebhookArgs {
+            gateway_url: format!("http://{addr}"),
+            webhook_secret: "wrong".into(),
+            event: "ping".into(),
+            timeout_secs: 5,
+        };
+        let err = test_webhook(args).await.expect_err("wrong secret should fail");
+        assert!(err.to_string().contains("401") || err.to_string().contains("WEBHOOK_SECRET"));
+    }
+
+    #[tokio::test]
+    async fn end_to_end_pr_event_round_trips() {
+        use ar_gateway::{build_router, AppState};
+        use ar_orchestrator::NoOpDispatcher;
+        use std::sync::Arc;
+
+        let secret = "s";
+        let app = build_router(AppState::new(secret, Arc::new(NoOpDispatcher)));
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let args = TestWebhookArgs {
+            gateway_url: format!("http://{addr}"),
+            webhook_secret: secret.into(),
+            event: "pull_request".into(),
+            timeout_secs: 5,
+        };
+        test_webhook(args)
+            .await
+            .expect("stub PR event should be 202 ACCEPTED");
+    }
+
+    #[tokio::test]
+    async fn test_webhook_rejects_unsupported_event() {
+        let args = TestWebhookArgs {
+            gateway_url: "http://127.0.0.1:0".into(),
+            webhook_secret: "s".into(),
+            event: "release".into(),
+            timeout_secs: 1,
+        };
+        let err = test_webhook(args).await.expect_err("unsupported event");
+        assert!(err.to_string().contains("release"));
+    }
 
     #[test]
     fn list_linters_no_filter_succeeds() {
