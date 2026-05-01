@@ -141,6 +141,30 @@ pub fn extract_tsx_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
     )
 }
 
+/// Pick the right extractor for a path's extension and run it.
+/// Returns `Ok(vec![])` for paths in unsupported languages so a
+/// repo-wide walk doesn't fail on the first JSON file it hits.
+pub fn extract_symbols_for_path(path: &str, source: &str) -> Result<Vec<Symbol>, ExtractError> {
+    let lower = path.to_ascii_lowercase();
+    if lower.ends_with(".rs") {
+        extract_rust_symbols(source)
+    } else if lower.ends_with(".py") {
+        extract_python_symbols(source)
+    } else if lower.ends_with(".tsx") {
+        extract_tsx_symbols(source)
+    } else if lower.ends_with(".ts")
+        || lower.ends_with(".js")
+        || lower.ends_with(".jsx")
+        || lower.ends_with(".cjs")
+        || lower.ends_with(".mjs")
+    {
+        // tree-sitter-typescript also parses JS sources (TS is a superset).
+        extract_typescript_symbols(source)
+    } else {
+        Ok(Vec::new())
+    }
+}
+
 fn extract_with(
     source: &str,
     lang: tree_sitter::Language,
@@ -415,6 +439,39 @@ export class App extends React.Component {
         let n = names(&s);
         assert!(n.contains(&"Greeting"));
         assert!(n.contains(&"App"));
+    }
+
+    #[test]
+    fn extract_symbols_for_path_dispatches_by_extension() {
+        let rust = "fn x() {}";
+        let py = "def x(): pass";
+        let ts = "function x() {}";
+        let tsx = "const X = () => <div/>;";
+        let unknown = "anything goes";
+
+        assert!(!extract_symbols_for_path("src/main.rs", rust)
+            .unwrap()
+            .is_empty());
+        assert!(!extract_symbols_for_path("foo.py", py).unwrap().is_empty());
+        assert!(!extract_symbols_for_path("a.ts", ts).unwrap().is_empty());
+        // .tsx parses JSX
+        let _ = extract_symbols_for_path("a.tsx", tsx).unwrap();
+        // .js/.jsx/.mjs/.cjs route to TypeScript grammar (TS is a JS superset)
+        let _ = extract_symbols_for_path("a.js", ts).unwrap();
+        let _ = extract_symbols_for_path("a.jsx", ts).unwrap();
+        let _ = extract_symbols_for_path("a.mjs", ts).unwrap();
+        let _ = extract_symbols_for_path("a.cjs", ts).unwrap();
+        // Unknown extension → empty, not error
+        assert!(extract_symbols_for_path("data.json", unknown)
+            .unwrap()
+            .is_empty());
+        assert!(extract_symbols_for_path("README", "").unwrap().is_empty());
+    }
+
+    #[test]
+    fn extract_symbols_for_path_is_case_insensitive_on_extension() {
+        let rust = "fn x() {}";
+        assert!(!extract_symbols_for_path("Foo.RS", rust).unwrap().is_empty());
     }
 
     #[test]
