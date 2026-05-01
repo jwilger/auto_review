@@ -326,10 +326,29 @@ async fn main() -> Result<()> {
     let burst = env::var("AR_WEBHOOK_BURST")
         .ok()
         .and_then(|s| s.parse::<u32>().ok());
-    if let (Some(rate), Some(burst)) = (rate_per_sec, burst) {
-        let bucket = Arc::new(TokenBucket::new(burst, rate));
-        state = state.with_webhook_rate_limit(bucket);
-        tracing::info!(rate, burst, "webhook rate limiter enabled");
+    match (rate_per_sec, burst) {
+        (Some(rate), Some(burst)) => {
+            let bucket = Arc::new(TokenBucket::new(burst, rate));
+            state = state.with_webhook_rate_limit(bucket);
+            tracing::info!(rate, burst, "webhook rate limiter enabled");
+        }
+        // Only one half set — operator probably meant to enable
+        // the limiter but missed the partner var. Without this
+        // warning the rate limit is silently off and the operator
+        // discovers it during an incident.
+        (Some(_), None) => {
+            tracing::warn!(
+                "AR_WEBHOOK_RATE_PER_SEC is set but AR_WEBHOOK_BURST is not; \
+                 rate limiter requires both — DISABLED. Set both or unset both."
+            );
+        }
+        (None, Some(_)) => {
+            tracing::warn!(
+                "AR_WEBHOOK_BURST is set but AR_WEBHOOK_RATE_PER_SEC is not; \
+                 rate limiter requires both — DISABLED. Set both or unset both."
+            );
+        }
+        (None, None) => {} // intentional: no rate limit
     }
 
     let app = build_router(state);
