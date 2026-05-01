@@ -327,6 +327,7 @@ impl ChatHandler<'_> {
         // random). Either failure mode is worse than dropping the
         // bad patch.
         let diff_paths = paths_in_diff(&diff);
+        let raw_patch_count = parsed.patches.len();
         let patches: Vec<AutofixPatch> = parsed
             .patches
             .into_iter()
@@ -339,7 +340,20 @@ impl ChatHandler<'_> {
             .take(AUTOFIX_MAX_PATCHES)
             .collect();
         if patches.is_empty() {
-            let msg = format!("{} found nothing to suggest.", kind.label());
+            // Distinguish "model found nothing" from "model
+            // proposed N patches that all failed validation"
+            // — the latter is operator-actionable signal that
+            // the model is hallucinating paths.
+            let msg = if raw_patch_count == 0 {
+                format!("{} found nothing to suggest.", kind.label())
+            } else {
+                format!(
+                    "{} proposed {raw_patch_count} patch{} but none referenced \
+                     a file in this PR's diff (all dropped as hallucinated paths).",
+                    kind.label(),
+                    if raw_patch_count == 1 { "" } else { "es" }
+                )
+            };
             self.post(ctx, &msg).await?;
             return Ok(());
         }
@@ -1742,11 +1756,14 @@ mod tests {
         // and this test would fail because there's no mock for it
         // (or, worse, if a mock did exist, we'd be silently posting
         // to wrong files in production).
+        // The reply distinguishes "model proposed 1 patch but it
+        // was dropped as a hallucinated path" from "model proposed
+        // nothing" — the former is operator-actionable signal.
         Mock::given(method("POST"))
             .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
-            .and(body_partial_json(
-                serde_json::json!({"body": "Autofix found nothing to suggest."}),
-            ))
+            .and(body_partial_json(serde_json::json!({
+                "body": "Autofix proposed 1 patch but none referenced a file in this PR's diff (all dropped as hallucinated paths)."
+            })))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
             .mount(&server)
             .await;
