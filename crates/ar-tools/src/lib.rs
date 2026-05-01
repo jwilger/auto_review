@@ -17,6 +17,7 @@ pub mod hadolint;
 pub mod markdownlint;
 pub mod ruff;
 pub mod runner;
+pub mod semgrep;
 pub mod shellcheck;
 pub mod yamllint;
 

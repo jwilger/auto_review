@@ -9,6 +9,7 @@ use ar_tools::hadolint::HadolintRunner;
 use ar_tools::markdownlint::MarkdownLintRunner;
 use ar_tools::ruff::RuffRunner;
 use ar_tools::runner::{run_all, LinterRunner};
+use ar_tools::semgrep::SemgrepRunner;
 use ar_tools::shellcheck::ShellCheckRunner;
 use ar_tools::yamllint::YamlLintRunner;
 use ar_tools::Finding;
@@ -52,6 +53,13 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
     // Always run gitleaks: secrets can land in any file type.
     if !surviving.is_empty() {
         runners.push(Box::new(GitleaksRunner));
+    }
+
+    // Always run semgrep when there are surviving files: it's
+    // multi-language and uses --config=auto for reasonable defaults
+    // plus any .semgrep.yml the repo provides.
+    if !surviving.is_empty() {
+        runners.push(Box::new(SemgrepRunner));
     }
 
     if surviving.iter().any(|f| has_python_ext(&f.filename)) {
@@ -200,7 +208,7 @@ mod tests {
         let runners = select_runners(&files);
         let mut got = names(&runners);
         got.sort();
-        assert_eq!(got, vec!["gitleaks", "ruff"]);
+        assert_eq!(got, vec!["gitleaks", "ruff", "semgrep"]);
     }
 
     #[test]
@@ -209,7 +217,7 @@ mod tests {
         let runners = select_runners(&files);
         let mut got = names(&runners);
         got.sort();
-        assert_eq!(got, vec!["gitleaks", "shellcheck"]);
+        assert_eq!(got, vec!["gitleaks", "semgrep", "shellcheck"]);
     }
 
     #[test]
@@ -219,7 +227,11 @@ mod tests {
             let runners = select_runners(&files);
             let mut got = names(&runners);
             got.sort();
-            assert_eq!(got, vec!["gitleaks", "hadolint"], "name = {name}");
+            assert_eq!(
+                got,
+                vec!["gitleaks", "hadolint", "semgrep"],
+                "name = {name}"
+            );
         }
     }
 
@@ -229,7 +241,7 @@ mod tests {
         let runners = select_runners(&files);
         let mut got = names(&runners);
         got.sort();
-        assert_eq!(got, vec!["gitleaks", "markdownlint"]);
+        assert_eq!(got, vec!["gitleaks", "markdownlint", "semgrep"]);
     }
 
     #[test]
@@ -252,6 +264,7 @@ mod tests {
                 "hadolint",
                 "markdownlint",
                 "ruff",
+                "semgrep",
                 "shellcheck"
             ]
         );
@@ -270,7 +283,7 @@ mod tests {
             got.sort();
             assert_eq!(
                 got,
-                vec!["actionlint", "gitleaks", "yamllint"],
+                vec!["actionlint", "gitleaks", "semgrep", "yamllint"],
                 "name = {name}"
             );
         }
@@ -282,7 +295,7 @@ mod tests {
         let runners = select_runners(&files);
         let mut got = names(&runners);
         got.sort();
-        assert_eq!(got, vec!["gitleaks", "yamllint"]);
+        assert_eq!(got, vec!["gitleaks", "semgrep", "yamllint"]);
         assert!(!got.contains(&"actionlint"));
     }
 
@@ -300,7 +313,7 @@ mod tests {
             let runners = select_runners(&files);
             let mut got = names(&runners);
             got.sort();
-            assert_eq!(got, vec!["eslint", "gitleaks"], "name = {name}");
+            assert_eq!(got, vec!["eslint", "gitleaks", "semgrep"], "name = {name}");
         }
     }
 
@@ -308,7 +321,9 @@ mod tests {
     fn unknown_extensions_select_only_gitleaks() {
         let files = vec![cf("src/main.rs", "modified"), cf("Cargo.toml", "modified")];
         let runners = select_runners(&files);
-        assert_eq!(names(&runners), vec!["gitleaks"]);
+        let mut got = names(&runners);
+        got.sort();
+        assert_eq!(got, vec!["gitleaks", "semgrep"]);
     }
 
     #[test]
@@ -364,6 +379,6 @@ mod tests {
         let _ = sc;
         let mut got: Vec<&str> = runners.iter().map(|r| r.name()).collect();
         got.sort();
-        assert_eq!(got, vec!["gitleaks", "ruff", "shellcheck"]);
+        assert_eq!(got, vec!["gitleaks", "ruff", "semgrep", "shellcheck"]);
     }
 }
