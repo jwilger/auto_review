@@ -9,3 +9,5 @@
 /.vscode
 .DS_Store
 /.remember/
+/.claude/ralph-loop.local.md
+/.claude/settings.local.json
