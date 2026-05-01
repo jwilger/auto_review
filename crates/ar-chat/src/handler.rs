@@ -704,12 +704,19 @@ fn format_test_scaffolds_body(scaffolds: &[TestScaffold]) -> String {
         } else {
             out.push('\n');
         }
-        out.push_str("```\n");
+        // Same fence-sizing rationale as format_suggestion_body:
+        // a Rust doctest source contains literal ```rust...```
+        // markers and would otherwise prematurely close the
+        // outer fence here.
+        let fence = pick_fence(&s.source);
+        out.push_str(&fence);
+        out.push('\n');
         out.push_str(&s.source);
         if !s.source.ends_with('\n') {
             out.push('\n');
         }
-        out.push_str("```\n\n");
+        out.push_str(&fence);
+        out.push_str("\n\n");
     }
     out
 }
@@ -1897,6 +1904,25 @@ mod tests {
         assert!(body.contains("### `fn render`"));
         // Source code is fenced.
         assert!(body.contains("```\n#[test]\nfn parses_ok() {}\n```"));
+    }
+
+    #[test]
+    fn format_test_scaffolds_body_grows_fence_for_doctests() {
+        // Rust doctests embed ```rust...``` inside their source.
+        // A fixed-3 fence around the scaffold body would close
+        // prematurely on the inner ``` and Forgejo would render
+        // the rest as plain text.
+        let scaffolds = vec![TestScaffold {
+            item_name: "fn frobnicate".into(),
+            item_path: "src/lib.rs".into(),
+            framework: "cargo-test".into(),
+            source: "/// ```rust\n/// frobnicate(1);\n/// ```\nfn frobnicate(x: i32) {}".into(),
+        }];
+        let body = format_test_scaffolds_body(&scaffolds);
+        assert!(
+            body.contains("````\n"),
+            "expected ≥4-backtick fence around doctest source, got:\n{body}"
+        );
     }
 
     #[test]
