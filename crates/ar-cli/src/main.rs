@@ -1,10 +1,23 @@
 use anyhow::Result;
+use clap::Parser;
+
+mod cli;
+mod commands;
+
+use cli::{Cli, Command};
 
 #[tokio::main]
 async fn main() -> Result<()> {
     tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_env_filter(
+            tracing_subscriber::EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info")),
+        )
         .init();
-    println!("auto_review CLI (skeleton). Subcommands: init, register-webhook, replay, run-once.");
-    Ok(())
+
+    let cli = Cli::parse();
+    match cli.command {
+        Command::Init(args) => commands::init(args).await,
+        Command::RegisterWebhook(args) => commands::register_webhook(args).await,
+    }
 }

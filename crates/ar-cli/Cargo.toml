@@ -16,3 +16,6 @@ tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 anyhow.workspace = true
+clap = { version = "4", features = ["derive", "env"] }
+rpassword = "7"
+ar-forgejo = { path = "../ar-forgejo" }
