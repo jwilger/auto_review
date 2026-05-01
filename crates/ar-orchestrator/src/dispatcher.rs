@@ -1,8 +1,8 @@
 use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullRequestEvent};
 use ar_llm::Router as LlmRouter;
 use ar_review::{
-    build_glob_set, lint_workspace_with, load_repo_config, pr_is_skippable, prepare_workspace,
-    review_pull_request, GlobSet, ReviewArgs, ReviewError, WorkspaceError,
+    build_glob_set, build_review_context, lint_workspace_with, load_repo_config, pr_is_skippable,
+    prepare_workspace, review_pull_request, GlobSet, ReviewArgs, ReviewError, WorkspaceError,
 };
 use ar_tools::Finding;
 use async_trait::async_trait;
@@ -201,8 +201,8 @@ pub async fn run_review_job(
         }
     }
 
-    let lint_outcome = prepare_and_lint(forgejo, forgejo_base, forgejo_token, &job).await;
-    let (findings, ignored_paths, guidelines) = match lint_outcome {
+    let lint_outcome = prepare_and_lint(forgejo, llm, forgejo_base, forgejo_token, &job).await;
+    let (findings, ignored_paths, guidelines, repo_context) = match lint_outcome {
         Ok(LintPhaseOutput {
             skipped_by_config: true,
             ..
@@ -231,14 +231,15 @@ pub async fn run_review_job(
             findings,
             ignored_paths,
             guidelines,
+            repo_context,
             ..
         }) => {
             tracing::debug!(count = findings.len(), "linter findings collected");
-            (findings, ignored_paths, guidelines)
+            (findings, ignored_paths, guidelines, repo_context)
         }
         Err(e) => {
             tracing::warn!(error = %e, "lint phase failed; continuing without findings");
-            (Vec::new(), GlobSet::empty(), String::new())
+            (Vec::new(), GlobSet::empty(), String::new(), String::new())
         }
     };
 
@@ -254,9 +255,7 @@ pub async fn run_review_job(
         linter_findings: &findings,
         ignored_paths: &ignored_paths,
         guidelines: &guidelines,
-        // RAG-retrieved context lands here once build_review_context
-        // is wired in.
-        repo_context: "",
+        repo_context: &repo_context,
     })
     .await;
 
@@ -311,10 +310,12 @@ struct LintPhaseOutput {
     skipped_by_config: bool,
     ignored_paths: GlobSet,
     guidelines: String,
+    repo_context: String,
 }
 
 async fn prepare_and_lint(
     forgejo: &ForgejoClient,
+    llm: &LlmRouter,
     base: &str,
     token: &str,
     job: &ReviewJob,
@@ -332,14 +333,42 @@ async fn prepare_and_lint(
             skipped_by_config: true,
             ignored_paths,
             guidelines,
+            repo_context: String::new(),
         });
     }
     let findings = lint_workspace_with(workspace.path(), &files, &config.disabled_tools).await;
+
+    // Build the RAG context (best-effort): walks the workspace,
+    // embeds symbols, queries top-K against the diff. Returns empty
+    // string when no Embedding tier is configured or the workspace
+    // has no extractable symbols.
+    let raw_diff = match forgejo
+        .get_pr_diff(&job.owner, &job.repo, job.pr_number)
+        .await
+    {
+        Ok(d) => d,
+        Err(e) => {
+            tracing::warn!(error = %e, "diff fetch for context build failed; continuing");
+            String::new()
+        }
+    };
+    let repo_context = if raw_diff.is_empty() {
+        String::new()
+    } else {
+        build_review_context(workspace.path(), llm, &raw_diff, None, 5)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "RAG context build failed; continuing");
+                String::new()
+            })
+    };
+
     Ok(LintPhaseOutput {
         findings,
         skipped_by_config: false,
         ignored_paths,
         guidelines,
+        repo_context,
     })
 }
 
