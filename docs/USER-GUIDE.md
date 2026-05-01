@@ -135,6 +135,11 @@ ignored_paths:
 disabled_tools:
   - markdownlint
 
+# Review behaviour. `full` (default) runs the LLM review with
+# linter context. `linter_only` skips the LLM entirely and posts
+# linter findings as inline comments — zero token cost.
+mode: full
+
 # Free-form English checks evaluated by the cheap LLM tier. Each
 # one renders as a checklist item under the "Pre-merge checks"
 # section of the review body. Skipped when no cheap-tier model

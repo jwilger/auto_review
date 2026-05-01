@@ -5,7 +5,7 @@ use ar_llm::Router as LlmRouter;
 use ar_review::{
     build_glob_set, build_review_context, filter_reviewable, lint_workspace_via, load_repo_config,
     pr_is_skippable, prepare_workspace, review_pull_request, triage_files_with_llm, GlobSet,
-    PreparedWorkspace, ReviewArgs, ReviewError, VerifyMode, WorkspaceError,
+    PreparedWorkspace, ReviewArgs, ReviewError, ReviewMode, VerifyMode, WorkspaceError,
 };
 use ar_sandbox::{DirectSandbox, Sandbox};
 use ar_tools::Finding;
@@ -399,8 +399,15 @@ pub async fn run_review_job(
         &job,
     )
     .await;
-    let (findings, ignored_paths, guidelines, repo_context, pre_merge_checks, workspace) =
-        match lint_outcome {
+    let (
+        findings,
+        ignored_paths,
+        guidelines,
+        repo_context,
+        pre_merge_checks,
+        review_mode,
+        workspace,
+    ) = match lint_outcome {
             Ok(LintPhaseOutput {
                 skipped_by_config: true,
                 ..
@@ -434,6 +441,7 @@ pub async fn run_review_job(
                 guidelines,
                 repo_context,
                 pre_merge_checks,
+                review_mode,
                 workspace,
                 ..
             }) => {
@@ -444,6 +452,7 @@ pub async fn run_review_job(
                     guidelines,
                     repo_context,
                     pre_merge_checks,
+                    review_mode,
                     workspace,
                 )
             }
@@ -455,6 +464,7 @@ pub async fn run_review_job(
                     String::new(),
                     String::new(),
                     Vec::new(),
+                    ReviewMode::Full,
                     None,
                 )
             }
@@ -488,6 +498,7 @@ pub async fn run_review_job(
         linter_findings: &findings,
         ignored_paths: &ignored_paths,
         custom_pre_merge_checks: &pre_merge_checks,
+        review_mode,
         guidelines: &guidelines,
         repo_context: &repo_context,
         diff_override: incremental_diff.as_deref(),
@@ -566,6 +577,9 @@ struct LintPhaseOutput {
     /// From `.auto_review.yaml`'s `pre_merge_checks:` — passed through
     /// to the review pipeline so the LLM can evaluate them.
     pre_merge_checks: Vec<String>,
+    /// From `.auto_review.yaml`'s `mode:` — switches the pipeline
+    /// between Full (LLM-driven) and LinterOnly (no LLM call).
+    review_mode: ReviewMode,
     /// Held by the orchestrator until the review pipeline finishes
     /// so the agentic verifier (when enabled) can inspect the
     /// cloned working tree. `None` when the lint phase exited
@@ -598,6 +612,7 @@ async fn prepare_and_lint(
             guidelines,
             repo_context: String::new(),
             pre_merge_checks: Vec::new(),
+            review_mode: ReviewMode::Full,
             workspace: None,
         });
     }
@@ -663,6 +678,7 @@ async fn prepare_and_lint(
         guidelines,
         repo_context,
         pre_merge_checks: config.pre_merge_checks.clone(),
+        review_mode: config.mode,
         workspace: Some(workspace),
     })
 }

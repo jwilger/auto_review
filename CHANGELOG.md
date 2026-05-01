@@ -533,6 +533,36 @@ default in-memory store to the SQLite-backed one.
   which is correct (a user named `auto_review_helper` was
   previously silently ignored).
 
+#### Linter-only review mode (M3 cost lever)
+
+- New `.auto_review.yaml` field `mode:` (default `full`,
+  alternative `linter_only`). When set to `linter_only` the
+  pipeline:
+  - Still clones the workspace, runs the full bundled linter
+    pipeline through the configured sandbox, and applies
+    `disabled_tools` / `ignored_paths` filters.
+  - **Skips** the LLM call (`generate_with_self_heal` and
+    both verifier paths) entirely. Linter findings are
+    mapped straight to inline review comments via the new
+    `ar_review::linter_only::build_linter_only_output`.
+  - **Skips** the verifier — there's no LLM output to drop;
+    linter findings are trusted as-is. Repos that want noisy
+    linters silenced should use `disabled_tools:`.
+- Each comment is prefixed with `[<tool>]` or
+  `[<tool>/<rule>]` so PR authors can see exactly which
+  linter raised what. Severity (Note/Warning/Error) maps
+  one-to-one between `ar_tools::Severity` and
+  `ar_prompts::ReviewSeverity`.
+- Useful for: repos that want centralized linter aggregation
+  without LLM cost; teams trialing `auto_review` who want to
+  start deterministic before opting into LLM review;
+  monorepos where the LLM context budget is too tight for
+  meaningful semantic review.
+- 8 unit tests in `linter_only.rs` cover the mapping
+  (severity, line ranges, prefix format, summary
+  pluralisation). 3 config-parsing tests cover the new
+  `mode:` field including invalid-value fallback.
+
 #### Pre-merge checks (M4 finishing-touches)
 
 - Three deterministic gates run alongside the LLM review and

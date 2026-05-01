@@ -40,3 +40,12 @@ ignored_paths:
 disabled_tools:
   # - markdownlint
   # - eslint
+
+# Review behaviour. `full` (default) runs the LLM-driven review with
+# linter findings as supplementary context. `linter_only` skips the LLM
+# entirely — the bot still clones the workspace, runs every applicable
+# linter, and posts findings as inline comments, but no LLM tokens are
+# spent. Useful for repos that want centralized linter aggregation
+# without the cost of LLM review, or as a stepping stone before opting
+# into the full review.
+# mode: linter_only

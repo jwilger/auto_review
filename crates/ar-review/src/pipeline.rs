@@ -4,6 +4,8 @@ use crate::error::ReviewError;
 use crate::heal::{generate_with_self_heal, HealConfig};
 use crate::ignored::{filter_changed_files, filter_diff_paths};
 use crate::mapping::output_to_review_request;
+use crate::config::ReviewMode;
+use crate::linter_only::build_linter_only_output;
 use crate::pre_merge::{evaluate as evaluate_pre_merge_checks, render_combined_section};
 use crate::pre_merge_llm::evaluate_custom_checks;
 use crate::verify::verify_findings;
@@ -70,6 +72,11 @@ pub struct ReviewArgs<'a> {
     /// Path to the cloned PR workspace. Required for the agentic
     /// verifier; ignored by the simple one.
     pub workspace_path: Option<&'a Path>,
+    /// Review behaviour. `Full` runs the LLM pipeline (default).
+    /// `LinterOnly` posts linter findings as-is, no LLM call —
+    /// zero token cost, no semantic review. Selected per-repo via
+    /// `.auto_review.yaml`'s `mode:` field.
+    pub review_mode: ReviewMode,
 }
 
 /// End-to-end review activity for one PR.
@@ -118,21 +125,36 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         repo_context: args.repo_context,
     });
 
-    let output =
-        generate_with_self_heal(args.llm, system_prompt(), &prompt, HealConfig::default()).await?;
-
-    // Optional second pass: when a Cheap tier is configured, verify
-    // each finding against the diff and drop the ones the verifier
-    // doesn't corroborate. Fails open — verifier issues never drop
-    // real findings.
-    let output = match (args.verify_mode, args.workspace_path) {
-        (VerifyMode::Agentic, Some(workspace)) => {
-            verify_findings_agentic(args.llm, output, workspace, &diff).await?
+    let output = match args.review_mode {
+        ReviewMode::LinterOnly => {
+            // Skip the LLM entirely. The orchestrator already ran the
+            // linters; map their findings straight to the review
+            // output and continue. No verifier — there's nothing
+            // hallucinated to drop.
+            build_linter_only_output(args.linter_findings)
         }
-        // Agentic was requested but the orchestrator didn't supply a
-        // workspace; downgrade to the simple verifier silently rather
-        // than failing the review.
-        _ => verify_findings(args.llm, output, &diff).await?,
+        ReviewMode::Full => {
+            let output = generate_with_self_heal(
+                args.llm,
+                system_prompt(),
+                &prompt,
+                HealConfig::default(),
+            )
+            .await?;
+            // Optional second pass: when a Cheap tier is configured,
+            // verify each finding against the diff and drop the ones
+            // the verifier doesn't corroborate. Fails open — verifier
+            // issues never drop real findings.
+            match (args.verify_mode, args.workspace_path) {
+                (VerifyMode::Agentic, Some(workspace)) => {
+                    verify_findings_agentic(args.llm, output, workspace, &diff).await?
+                }
+                // Agentic was requested but the orchestrator didn't
+                // supply a workspace; downgrade to the simple verifier
+                // silently rather than failing the review.
+                _ => verify_findings(args.llm, output, &diff).await?,
+            }
+        }
     };
     let findings_count = output.findings.len();
 
@@ -287,6 +309,7 @@ mod tests {
             diff_override: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
+            review_mode: ReviewMode::Full,
         })
         .await
         .expect("review ok");
@@ -325,6 +348,7 @@ mod tests {
             diff_override: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
+            review_mode: ReviewMode::Full,
         })
         .await
         .expect_err("err");
@@ -380,6 +404,7 @@ mod tests {
             diff_override: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
+            review_mode: ReviewMode::Full,
         })
         .await
         .expect("ok");
@@ -440,6 +465,7 @@ mod tests {
             diff_override: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
+            review_mode: ReviewMode::Full,
         })
         .await
         .expect("ok");
