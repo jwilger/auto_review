@@ -14,6 +14,36 @@
 /// even a small reasoning model's context window.
 pub const DEFAULT_MAX_DIFF_BYTES: usize = 100_000;
 
+/// Shared cap for cheap-tier prompts (triage, verifier, agentic
+/// verifier, pre-merge custom checks). Cheap-tier models often have
+/// 32K-token windows; 40 KiB stays comfortably inside.
+pub const CHEAP_TIER_DIFF_CAP: usize = 40 * 1024;
+
+/// Cap `body` at `max_bytes` for inclusion in an LLM prompt.
+///
+/// When the body fits, returns it unchanged. When it exceeds the
+/// cap, returns the prefix walked back to a UTF-8 character
+/// boundary, plus a single trailing line containing `marker` (so
+/// the model can see the body was abridged). Used by every
+/// cheap-tier prompt builder that embeds the PR's unified diff.
+pub fn cap_for_prompt(body: &str, max_bytes: usize, marker: &str) -> String {
+    if body.len() <= max_bytes {
+        return body.to_string();
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !body.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut out = String::with_capacity(cut + marker.len() + 2);
+    out.push_str(&body[..cut]);
+    if !out.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str(marker);
+    out.push('\n');
+    out
+}
+
 /// Cap a unified diff at `max_bytes`, splitting at `diff --git ` file
 /// boundaries. Returns the original diff unchanged when it already fits.
 pub fn cap_diff(diff: &str, max_bytes: usize) -> String {
@@ -160,5 +190,30 @@ diff --git a/b b/b
     #[test]
     fn empty_diff_passes_through_unchanged() {
         assert_eq!(cap_diff("", 100), "");
+    }
+
+    #[test]
+    fn cap_for_prompt_passes_short_input_through() {
+        assert_eq!(cap_for_prompt("brief", 100, "[trunc]"), "brief");
+    }
+
+    #[test]
+    fn cap_for_prompt_appends_marker_on_overflow() {
+        let big = "x".repeat(200);
+        let out = cap_for_prompt(&big, 100, "[trunc]");
+        assert!(out.contains("[trunc]"));
+        // 100 byte prefix + newline + marker + newline ≈ 110 bytes.
+        assert!(out.len() < 120, "got {} bytes", out.len());
+    }
+
+    #[test]
+    fn cap_for_prompt_walks_back_to_utf8_boundary() {
+        // 4-byte emoji at the cut boundary must not be split.
+        let mut s = "x".repeat(98);
+        s.push_str("🦀tail");
+        let out = cap_for_prompt(&s, 100, "[m]");
+        // Result must be valid UTF-8.
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+        assert!(out.contains("[m]"));
     }
 }

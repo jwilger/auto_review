@@ -91,16 +91,13 @@ pub async fn verify_findings(
     })
 }
 
-/// Cap on the diff bytes embedded in the verifier prompt. The
-/// reasoning-tier diff cap (100 KiB) is too generous for cheap-tier
-/// models that often have 32K-token windows; a 100 KiB diff would
-/// trip context-overflow refusals. 40 KiB matches the triage and
-/// freeform caps and stays comfortably inside any cheap-tier
-/// context budget.
-const VERIFY_DIFF_CAP: usize = 40 * 1024;
-
 fn render_user_prompt(output: &ReviewOutput, diff: &str) -> String {
-    let mut out = String::with_capacity(diff.len().min(VERIFY_DIFF_CAP) + 1024);
+    let capped = crate::diff::cap_for_prompt(
+        diff,
+        crate::diff::CHEAP_TIER_DIFF_CAP,
+        "[diff truncated for verifier]",
+    );
+    let mut out = String::with_capacity(capped.len() + 1024);
     out.push_str("Findings to verify:\n");
     for (i, f) in output.findings.iter().enumerate() {
         let _ = writeln!(
@@ -110,21 +107,9 @@ fn render_user_prompt(output: &ReviewOutput, diff: &str) -> String {
         );
     }
     out.push_str("\nUnified diff:\n```diff\n");
-    if diff.len() <= VERIFY_DIFF_CAP {
-        out.push_str(diff);
-        if !diff.ends_with('\n') {
-            out.push('\n');
-        }
-    } else {
-        let mut cut = VERIFY_DIFF_CAP;
-        while cut > 0 && !diff.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        out.push_str(&diff[..cut]);
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str("[diff truncated for verifier]\n");
+    out.push_str(&capped);
+    if !capped.ends_with('\n') {
+        out.push('\n');
     }
     out.push_str("```\n\nFor each finding above, decide whether the diff corroborates it.\n");
     out

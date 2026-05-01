@@ -246,14 +246,13 @@ fn action_for_logging(messages: &[Message]) -> Option<&str> {
         .map(|m| m.content.as_str())
 }
 
-/// Same cheap-tier context-budget rationale as
-/// `verify::VERIFY_DIFF_CAP`. The agentic verifier embeds the diff
-/// once per finding and walks tool calls — each turn re-sends the
-/// growing message vec, so an oversized initial prompt compounds.
-const AGENTIC_DIFF_CAP: usize = 40 * 1024;
-
 fn initial_user_prompt(finding: &ReviewFinding, diff: &str) -> String {
-    let mut out = String::with_capacity(diff.len().min(AGENTIC_DIFF_CAP) + 512);
+    let capped = crate::diff::cap_for_prompt(
+        diff,
+        crate::diff::CHEAP_TIER_DIFF_CAP,
+        "[diff truncated for agentic verifier]",
+    );
+    let mut out = String::with_capacity(capped.len() + 512);
     out.push_str("Finding to verify:\n");
     let _ = writeln!(
         out,
@@ -261,21 +260,9 @@ fn initial_user_prompt(finding: &ReviewFinding, diff: &str) -> String {
         finding.path, finding.line_start, finding.severity, finding.message
     );
     out.push_str("\nUnified diff:\n```diff\n");
-    if diff.len() <= AGENTIC_DIFF_CAP {
-        out.push_str(diff);
-        if !diff.ends_with('\n') {
-            out.push('\n');
-        }
-    } else {
-        let mut cut = AGENTIC_DIFF_CAP;
-        while cut > 0 && !diff.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        out.push_str(&diff[..cut]);
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str("[diff truncated for agentic verifier]\n");
+    out.push_str(&capped);
+    if !capped.ends_with('\n') {
+        out.push('\n');
     }
     out.push_str("```\n\nIssue your first tool call now.\n");
     out

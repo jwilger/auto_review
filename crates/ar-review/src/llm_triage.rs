@@ -76,16 +76,13 @@ pub fn filter_reviewable(files: &[ChangedFile], triage: &TriageOutput) -> Vec<Ch
         .collect()
 }
 
-/// Cap on the diff bytes embedded in the triage prompt. The
-/// cheap-tier model classifies files as trivial / simple / complex;
-/// it doesn't need the full diff to do that — file paths plus
-/// representative hunks are enough. 40 KiB stays comfortably under
-/// any cheap-model context limit and avoids burning a triage call
-/// on a payload the model would just refuse anyway.
-const TRIAGE_DIFF_CAP: usize = 40 * 1024;
-
 fn render_user_prompt(files: &[ChangedFile], diff: &str) -> String {
-    let mut out = String::with_capacity(diff.len().min(TRIAGE_DIFF_CAP) + 256);
+    let capped = crate::diff::cap_for_prompt(
+        diff,
+        crate::diff::CHEAP_TIER_DIFF_CAP,
+        "[diff truncated for triage]",
+    );
+    let mut out = String::with_capacity(capped.len() + 256);
     out.push_str("Files changed in this PR:\n");
     for f in files {
         out.push_str("- ");
@@ -93,21 +90,9 @@ fn render_user_prompt(files: &[ChangedFile], diff: &str) -> String {
         out.push('\n');
     }
     out.push_str("\nUnified diff:\n```diff\n");
-    if diff.len() <= TRIAGE_DIFF_CAP {
-        out.push_str(diff);
-        if !diff.ends_with('\n') {
-            out.push('\n');
-        }
-    } else {
-        let mut cut = TRIAGE_DIFF_CAP;
-        while cut > 0 && !diff.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        out.push_str(&diff[..cut]);
-        if !out.ends_with('\n') {
-            out.push('\n');
-        }
-        out.push_str("[diff truncated for triage]\n");
+    out.push_str(&capped);
+    if !capped.ends_with('\n') {
+        out.push('\n');
     }
     out.push_str("```\n\nClassify each file using the schema.\n");
     out
