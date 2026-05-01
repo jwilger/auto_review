@@ -644,6 +644,81 @@ mod tests {
     }
 
     #[test]
+    fn render_exposes_every_known_counter() {
+        // Pin the full set of counter names. If you add a counter
+        // field to the struct, this test reminds you to also wire
+        // it into render() — otherwise it'd be invisible to ops.
+        // The list is alphabetised for easy diff review when
+        // counters are added.
+        const EXPECTED: &[&str] = &[
+            "auto_review_chat_commands_received_total",
+            "auto_review_chat_handler_unconfigured_total",
+            "auto_review_jobs_dispatched_total",
+            "auto_review_poll_chat_failures_total",
+            "auto_review_poll_cycles_total",
+            "auto_review_poll_history_failures_total",
+            "auto_review_poll_mentions_dispatched_total",
+            "auto_review_poll_pr_failures_total",
+            "auto_review_review_duration_ms_sum",
+            "auto_review_review_findings_sum",
+            "auto_review_review_queue_waits_total",
+            "auto_review_reviews_completed_count",
+            "auto_review_reviews_failed_forgejo_total",
+            "auto_review_reviews_failed_llm_total",
+            "auto_review_reviews_failed_unhealable_total",
+            "auto_review_reviews_failed_unknown_total",
+            "auto_review_reviews_failed_workspace_total",
+            "auto_review_reviews_skipped_disabled_total",
+            "auto_review_reviews_skipped_same_sha_total",
+            "auto_review_reviews_skipped_trivial_total",
+            "auto_review_reviews_skipped_unknown_total",
+            "auto_review_reviews_started_total",
+            "auto_review_reviews_succeeded_total",
+            "auto_review_verifier_findings_dropped_total",
+            "auto_review_webhook_duplicates_total",
+            "auto_review_webhook_payload_failures_total",
+            "auto_review_webhook_rate_limited_total",
+            "auto_review_webhook_signature_failures_total",
+            "auto_review_webhooks_issue_comment_total",
+            "auto_review_webhooks_other_total",
+            "auto_review_webhooks_ping_total",
+            "auto_review_webhooks_pull_request_total",
+        ];
+
+        let m = Metrics::new();
+        let out = m.render();
+        for name in EXPECTED {
+            // Each counter family must show up as both a # TYPE
+            // line and a sample line.
+            let type_line = format!("# TYPE {name} counter");
+            assert!(
+                out.contains(&type_line),
+                "render() missing # TYPE for {name}"
+            );
+            let sample_line = format!("{name} 0\n");
+            assert!(
+                out.contains(&sample_line),
+                "render() missing zero-value sample for {name}"
+            );
+        }
+
+        // Also assert no unexpected counter families appear — if
+        // someone adds one without updating EXPECTED, this catches
+        // drift in the other direction.
+        let actual: std::collections::BTreeSet<&str> = out
+            .lines()
+            .filter_map(|line| line.strip_prefix("# TYPE "))
+            .filter_map(|rest| rest.strip_suffix(" counter"))
+            .collect();
+        let expected: std::collections::BTreeSet<&str> = EXPECTED.iter().copied().collect();
+        let extra: Vec<&&str> = actual.difference(&expected).collect();
+        assert!(
+            extra.is_empty(),
+            "render() exposes counters not in EXPECTED: {extra:?}"
+        );
+    }
+
+    #[test]
     fn render_emits_zero_counters_with_help_and_type_lines() {
         let m = Metrics::new();
         let out = m.render();
