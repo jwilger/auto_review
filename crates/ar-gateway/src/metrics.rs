@@ -45,6 +45,12 @@ pub struct Metrics {
     pub reviews_skipped_same_sha: AtomicU64,
     pub reviews_skipped_trivial: AtomicU64,
     pub reviews_skipped_disabled: AtomicU64,
+    /// Skip reasons we don't recognise. Routes here instead of
+    /// silently misbucketing into `reviews_skipped_disabled`. Drift
+    /// alarm: a non-zero value here means the dispatcher emitted a
+    /// new `Skipped { reason }` string this metric sink wasn't
+    /// updated to handle.
+    pub reviews_skipped_unknown: AtomicU64,
     /// Sum of all completed review durations (succeeded + failed) in
     /// milliseconds. Pair with `reviews_completed_count` to compute
     /// the running average. Not a proper histogram — operators who
@@ -198,7 +204,15 @@ impl Metrics {
         let counter = match reason {
             "same_sha" => &self.reviews_skipped_same_sha,
             "trivial_files" => &self.reviews_skipped_trivial,
-            _ => &self.reviews_skipped_disabled,
+            "disabled_by_config" => &self.reviews_skipped_disabled,
+            other => {
+                tracing::warn!(
+                    reason = other,
+                    "unknown skip reason; routing to reviews_skipped_unknown — \
+                     update the metrics map to track this reason explicitly"
+                );
+                &self.reviews_skipped_unknown
+            }
         };
         counter.fetch_add(1, Ordering::Relaxed);
     }
@@ -309,6 +323,11 @@ impl Metrics {
                 "auto_review_reviews_skipped_disabled_total",
                 "Reviews skipped because .auto_review.yaml has enabled: false.",
                 &self.reviews_skipped_disabled,
+            ),
+            (
+                "auto_review_reviews_skipped_unknown_total",
+                "Reviews skipped for a reason this metrics sink doesn't recognise. Non-zero indicates dispatcher/metrics drift; update the skip-reason map.",
+                &self.reviews_skipped_unknown,
             ),
             (
                 "auto_review_review_duration_ms_sum",
@@ -807,6 +826,41 @@ mod tests {
         assert!(out.contains("auto_review_reviews_completed_count 4\n"));
         // 3 + 1 = 4 findings across the two successes.
         assert!(out.contains("auto_review_review_findings_sum 4\n"));
+    }
+
+    #[test]
+    fn unknown_skip_reason_routes_to_unknown_bucket_not_disabled() {
+        // Defense-in-depth: a new Skipped reason added in the
+        // dispatcher must NOT silently land in
+        // reviews_skipped_disabled. Unknown reasons go to a separate
+        // bucket and tick reviews_skipped_unknown so operators can
+        // alert on the drift.
+        let m = Metrics::new();
+        m.record_review_skipped("definitely_not_a_real_reason");
+        let out = m.render();
+        assert!(
+            out.contains("auto_review_reviews_skipped_unknown_total 1\n"),
+            "unknown reason should bucket to skipped_unknown, got:\n{out}"
+        );
+        assert!(
+            out.contains("auto_review_reviews_skipped_disabled_total 0\n"),
+            "unknown reason must not land in skipped_disabled (silent misclassification), got:\n{out}"
+        );
+        assert!(out.contains("auto_review_reviews_skipped_same_sha_total 0\n"));
+        assert!(out.contains("auto_review_reviews_skipped_trivial_total 0\n"));
+    }
+
+    #[test]
+    fn known_skip_reasons_route_to_their_dedicated_buckets() {
+        let m = Metrics::new();
+        m.record_review_skipped("same_sha");
+        m.record_review_skipped("trivial_files");
+        m.record_review_skipped("disabled_by_config");
+        let out = m.render();
+        assert!(out.contains("auto_review_reviews_skipped_same_sha_total 1\n"));
+        assert!(out.contains("auto_review_reviews_skipped_trivial_total 1\n"));
+        assert!(out.contains("auto_review_reviews_skipped_disabled_total 1\n"));
+        assert!(out.contains("auto_review_reviews_skipped_unknown_total 0\n"));
     }
 
     #[test]
