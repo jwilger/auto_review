@@ -38,6 +38,15 @@ pub fn output_to_review_request(out: &ReviewOutput, head_sha: &str) -> CreateRev
     }
 }
 
+/// Cap on the rendered review body posted to Forgejo. Forgejo
+/// accepts large review bodies but a multi-MB markdown blob from
+/// a misbehaving LLM (no length cap on the schema's `summary` /
+/// `walkthrough` / `mermaid` fields) would either 422 the
+/// `create_review` POST or render unreadably. Cap at 32 KiB to
+/// fit comfortably under any practical Forgejo limit while
+/// holding any reasonable summary + walkthrough + mermaid block.
+const REVIEW_BODY_MAX_BYTES: usize = 32 * 1024;
+
 fn render_body(out: &ReviewOutput) -> String {
     let mut body = out.summary.clone();
     if !out.walkthrough.is_empty() {
@@ -54,6 +63,18 @@ fn render_body(out: &ReviewOutput) -> String {
         body.push_str("```mermaid\n");
         body.push_str(out.mermaid.trim());
         body.push_str("\n```");
+    }
+    if body.len() > REVIEW_BODY_MAX_BYTES {
+        let mut cut = REVIEW_BODY_MAX_BYTES;
+        while cut > 0 && !body.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        let mut truncated = body[..cut].to_string();
+        if !truncated.ends_with('\n') {
+            truncated.push('\n');
+        }
+        truncated.push_str("\n[review body truncated]\n");
+        body = truncated;
     }
     body
 }
@@ -227,5 +248,35 @@ mod tests {
         let req = output_to_review_request(&out, "x");
         // No leading blank lines from concatenating "" + "\n\n" + walkthrough.
         assert!(req.body.starts_with("## Walkthrough"));
+    }
+
+    #[test]
+    fn oversized_body_is_truncated_with_marker() {
+        // The schema doesn't bound summary/walkthrough/mermaid
+        // length; a misbehaving LLM could emit a multi-MB body
+        // that 422s the create_review POST. Cap defensively.
+        let out = ReviewOutput {
+            summary: "x".repeat(50_000),
+            walkthrough: String::new(),
+            mermaid: String::new(),
+            findings: vec![],
+        };
+        let req = output_to_review_request(&out, "x");
+        assert!(req.body.contains("[review body truncated]"));
+        // Bounded by cap + framing.
+        assert!(req.body.len() <= REVIEW_BODY_MAX_BYTES + 64);
+    }
+
+    #[test]
+    fn body_under_cap_passes_through_unchanged() {
+        let out = ReviewOutput {
+            summary: "short summary".into(),
+            walkthrough: "brief walkthrough".into(),
+            mermaid: String::new(),
+            findings: vec![],
+        };
+        let req = output_to_review_request(&out, "x");
+        assert!(!req.body.contains("[review body truncated]"));
+        assert!(req.body.contains("short summary"));
     }
 }
