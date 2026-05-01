@@ -44,13 +44,14 @@ since the start of the project.
   `run_review_job` posts pending → final commit statuses around the
   triage → clone → lint → review → post sequence.
 
-#### Linters (12 of CodeRabbit's ~45 set)
+#### Linters (14 of CodeRabbit's ~45 set)
 
 | Tool | Languages / files | Source-tool name |
 |---|---|---|
 | `gitleaks` | Any (secret detection across the tree) | `gitleaks` |
 | `semgrep` | Multi-language SAST via `--config=auto` | `semgrep` |
 | `trivy` | Vulnerabilities, misconfigs, secrets | `trivy` |
+| `osv-scanner` | Dependency CVEs against Google's OSV DB | `osv-scanner` |
 | `ruff` | Python | `ruff` |
 | `eslint` | JS / JSX / TS / TSX / CJS / MJS | `eslint` |
 | `golangci-lint` | Go (errcheck, govet, staticcheck, …) | `golangci-lint` |
@@ -58,6 +59,7 @@ since the start of the project.
 | `shellcheck` | Bash / sh | `shellcheck` |
 | `hadolint` | Dockerfiles | `hadolint` |
 | `markdownlint` | `*.md` / `*.markdown` | `markdownlint` |
+| `sqlfluff` | SQL (.sql / .dml / .ddl, multi-dialect) | `sqlfluff` |
 | `actionlint` | `.github/workflows/`, `.forgejo/workflows/`, `.gitea/workflows/` | `actionlint` |
 | `yamllint` | `*.yml` / `*.yaml` (workflow + general) | `yamllint` |
 
@@ -251,8 +253,8 @@ default in-memory store to the SQLite-backed one.
   paths cover correctness; LanceDB is the scale lever).
 - youki-based `Sandbox` impl as a lighter alternative to the
   podman shell-out.
-- Remaining ~32 linters from CodeRabbit's set
-  (sqlfluff, biome, oxlint, phpstan, languagetool, …).
+- Remaining ~31 linters from CodeRabbit's set
+  (biome, oxlint, phpstan, languagetool, ast-grep, …).
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
   wiremock + canned LLM providers.

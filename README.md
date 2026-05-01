@@ -10,15 +10,17 @@ you control, with optional support for fully local LLMs.
 
 **Alpha.** End-to-end review pipeline works: webhook intake → LLM
 triage (skip lockfile-only PRs, route trivial files away from the
-reasoning model) → shallow-clone → 12 bundled linters fanned out
+reasoning model) → shallow-clone → 14 bundled linters fanned out
 in parallel inside an optional sandbox → tree-sitter + embedding
 RAG context + persistent learnings memory → reasoning-tier LLM
 with strict-JSON-schema output and self-heal validation → cheap-
 tier verifier drops unfounded findings → post inline review
 comments + commit status. The `@auto_review` chat handler accepts
 `help`, `remember <text>`, `forget <id>`, `re-review`, and free-
-form questions answered by the cheap-tier model. CLI helpers
-mint the bot's PAT and register the webhook on a repo.
+form questions answered by the cheap-tier model. The `bench`
+CLI subcommand replays PR fixtures through the LLM-review path
+for regression tracking and model comparison. CLI helpers mint
+the bot's PAT and register the webhook on a repo.
 
 To deploy: see [QUICKSTART.md](./QUICKSTART.md). For background,
 the [feasibility study](./docs/FEASIBILITY.md) lays out the broader
@@ -27,10 +29,11 @@ architecture decision.
 
 What's still on the roadmap: a LanceDB-backed vector store
 (currently in-memory + SQLite-backed for learnings), the full
-~45-linter set (12 bundled today), a YOUKI-based sandbox in
-addition to the podman path, and a public quality benchmark
-suite. Real-world verification on a production Forgejo instance
-is also pending.
+~45-linter set (14 bundled today), a youki-based sandbox in
+addition to the podman path, and a labelled-corpus benchmark
+(the bench harness handles regression tracking; precision/recall
+needs ground-truth fixtures someone has to build). Real-world
+verification on a production Forgejo instance is also pending.
 
 ### Production sandbox
 
