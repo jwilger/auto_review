@@ -6,4 +6,7 @@
 
 pub mod symbols;
 
-pub use symbols::{extract_python_symbols, extract_rust_symbols, ExtractError, Symbol, SymbolKind};
+pub use symbols::{
+    extract_python_symbols, extract_rust_symbols, extract_tsx_symbols, extract_typescript_symbols,
+    ExtractError, Symbol, SymbolKind,
+};

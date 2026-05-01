@@ -92,6 +92,55 @@ pub fn extract_python_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError>
     extract_with(source, tree_sitter_python::LANGUAGE.into(), python_query()?)
 }
 
+const TS_QUERY_SOURCE: &str = r#"
+(function_declaration  name: (identifier) @name)            @function
+(class_declaration     name: (type_identifier) @name)       @struct
+(interface_declaration name: (type_identifier) @name)       @trait
+(enum_declaration      name: (identifier) @name)            @enum
+(type_alias_declaration name: (type_identifier) @name)      @type_alias
+(method_definition     name: (property_identifier) @name)   @function
+"#;
+
+fn ts_query() -> Result<&'static Query, ExtractError> {
+    static QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
+    let entry = QUERY.get_or_init(|| {
+        let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+        Query::new(&lang, TS_QUERY_SOURCE).map_err(|e| e.to_string())
+    });
+    entry.as_ref().map_err(|e| ExtractError::Query(e.clone()))
+}
+
+fn tsx_query() -> Result<&'static Query, ExtractError> {
+    static QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
+    let entry = QUERY.get_or_init(|| {
+        let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TSX.into();
+        Query::new(&lang, TS_QUERY_SOURCE).map_err(|e| e.to_string())
+    });
+    entry.as_ref().map_err(|e| ExtractError::Query(e.clone()))
+}
+
+/// Extract top-level symbols from a TypeScript (`.ts`) source file.
+/// Interfaces map to [`SymbolKind::Trait`] for cross-language uniformity
+/// (they're the closest analog to Rust's trait concept).
+pub fn extract_typescript_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
+    extract_with(
+        source,
+        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        ts_query()?,
+    )
+}
+
+/// Extract top-level symbols from a TSX (`.tsx`) source file. Same
+/// semantics as [`extract_typescript_symbols`] but with the TSX
+/// grammar so JSX expressions parse correctly.
+pub fn extract_tsx_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
+    extract_with(
+        source,
+        tree_sitter_typescript::LANGUAGE_TSX.into(),
+        tsx_query()?,
+    )
+}
+
 fn extract_with(
     source: &str,
     lang: tree_sitter::Language,
@@ -309,6 +358,69 @@ def helper():
         let n = names(&s);
         assert!(n.contains(&"value"));
         assert!(n.contains(&"helper"));
+    }
+
+    #[test]
+    fn extracts_typescript_function_class_interface_enum() {
+        let src = "\
+export function add(a: number, b: number): number {
+    return a + b;
+}
+
+export class User {
+    constructor(public name: string) {}
+}
+
+export interface Greeter {
+    hello(): string;
+}
+
+export enum Direction {
+    Up,
+    Down,
+}
+
+export type UserId = string;
+";
+        let s = extract_typescript_symbols(src).expect("ok");
+        let n = names(&s);
+        assert!(n.contains(&"add"));
+        assert!(n.contains(&"User"));
+        assert!(n.contains(&"Greeter"));
+        assert!(n.contains(&"Direction"));
+        assert!(n.contains(&"UserId"));
+        assert!(kinds(&s, "add").contains(&SymbolKind::Function));
+        assert!(kinds(&s, "User").contains(&SymbolKind::Struct));
+        assert!(kinds(&s, "Greeter").contains(&SymbolKind::Trait));
+        assert!(kinds(&s, "Direction").contains(&SymbolKind::Enum));
+        assert!(kinds(&s, "UserId").contains(&SymbolKind::TypeAlias));
+    }
+
+    #[test]
+    fn extracts_tsx_with_jsx_expressions() {
+        let src = "\
+import * as React from 'react';
+
+export function Greeting({ name }: { name: string }) {
+    return <div>Hello, {name}!</div>;
+}
+
+export class App extends React.Component {
+    render() {
+        return <Greeting name=\"world\" />;
+    }
+}
+";
+        let s = extract_tsx_symbols(src).expect("ok");
+        let n = names(&s);
+        assert!(n.contains(&"Greeting"));
+        assert!(n.contains(&"App"));
+    }
+
+    #[test]
+    fn typescript_empty_source_yields_zero_symbols() {
+        let s = extract_typescript_symbols("").expect("ok");
+        assert!(s.is_empty());
     }
 
     #[test]
