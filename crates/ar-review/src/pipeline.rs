@@ -4,6 +4,7 @@ use crate::error::ReviewError;
 use crate::heal::{generate_with_self_heal, HealConfig};
 use crate::ignored::{filter_changed_files, filter_diff_paths};
 use crate::mapping::output_to_review_request;
+use crate::pre_merge::{evaluate as evaluate_pre_merge_checks, render_section as render_pre_merge_section};
 use crate::verify::verify_findings;
 use ar_forgejo::Client as ForgejoClient;
 use ar_llm::Router as LlmRouter;
@@ -128,7 +129,22 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
     };
     let findings_count = output.findings.len();
 
-    let req = output_to_review_request(&output, args.head_sha);
+    let mut req = output_to_review_request(&output, args.head_sha);
+
+    // Pre-merge checks: deterministic gates (CHANGELOG / tests /
+    // TODOs) appended to the review body as an advisory checklist.
+    // Failing a check does not change the review event; it just
+    // surfaces a nudge to the PR author.
+    let pre_merge_results =
+        evaluate_pre_merge_checks(&diff, &files, args.workspace_path);
+    let section = render_pre_merge_section(&pre_merge_results);
+    if !section.is_empty() {
+        if !req.body.is_empty() {
+            req.body.push_str("\n\n");
+        }
+        req.body.push_str(&section);
+    }
+
     let created = args
         .forgejo
         .create_review(args.owner, args.repo, args.pr_number, &req)
@@ -216,12 +232,17 @@ mod tests {
             ])))
             .mount(&server)
             .await;
+        // Body now ends in `## Pre-merge checks` because the
+        // pipeline appends the deterministic check section.
+        // The body field stays excluded from the matcher so this
+        // test focuses on the integration contract (event +
+        // commit_id) — body composition is covered by
+        // mapping/pre_merge tests.
         Mock::given(method("POST"))
             .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
             .and(body_partial_json(serde_json::json!({
                 "commit_id": "deadbeef",
-                "event": "COMMENT",
-                "body": "looks fine"
+                "event": "COMMENT"
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "id": 1234,

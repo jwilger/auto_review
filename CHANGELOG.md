@@ -510,6 +510,34 @@ default in-memory store to the SQLite-backed one.
   which is correct (a user named `auto_review_helper` was
   previously silently ignored).
 
+#### Pre-merge checks (M4 finishing-touches)
+
+- Three deterministic gates run alongside the LLM review and
+  appear as a markdown checklist appended to the review body:
+  - **CHANGELOG updated**: workspace has CHANGELOG.md AND
+    non-trivial source changed AND CHANGELOG isn't in the diff
+    → fail. Doc-only or lockfile-only diffs skip silently.
+  - **Tests touched**: any source file changed but no test
+    file is in the diff → fail. Recognises `*_test.*`,
+    `test_*.*`, `*.test.*`, `*.spec.*`, and `tests/` /
+    `__tests__/` / `spec/` directory conventions.
+  - **No new TODO/FIXME comments**: scans added lines for
+    `TODO`, `FIXME`, `XXX`, `HACK` markers (whole-word, so
+    `todoist.com` doesn't trip it).
+- Each check's status renders as a markdown checkbox
+  (`[x]` pass, `[ ]` fail, `[~]` skip). Failing a check is
+  **advisory** — it does not change the review event from
+  `COMMENT` to `RequestChanges`. Repos with their own
+  merge-gating CI keep using that; auto_review's pre-merge
+  checks are nudges.
+- `ar_review::pre_merge::evaluate` is the public entry
+  point; pipeline wires it after the LLM verifier.
+- Custom natural-language pre-merge checks (the second half
+  of the milestone-4 spec) are deferred to a future
+  iteration; this ships only the deterministic built-ins.
+- 18 new tests cover each check's pass/fail/skip paths plus
+  the markdown renderer.
+
 #### Grafana dashboard (M5 deploy)
 
 - `deploy/grafana/auto_review.dashboard.json`: drop-in
