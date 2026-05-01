@@ -8,9 +8,23 @@ you control, with optional support for fully local LLMs.
 
 ## Status
 
-**Pre-alpha.** Workspace skeleton only — no functionality yet. See the
-[feasibility study](./docs/FEASIBILITY.md) for the full plan and
-[ADR-0001](./docs/ADR-0001-architecture.md) for the architecture.
+**Alpha.** End-to-end review pipeline works: webhook intake → triage
+(skip lockfile-only PRs) → shallow-clone the repo → run language-
+appropriate linters → call the LLM with a strict-JSON-schema prompt
+and self-heal validation → post inline review comments and a
+top-level summary. CLI helpers mint the bot's PAT and register the
+webhook on a repo.
+
+To deploy: see [QUICKSTART.md](./QUICKSTART.md). For background,
+the [feasibility study](./docs/FEASIBILITY.md) lays out the broader
+plan; [ADR-0001](./docs/ADR-0001-architecture.md) captures the
+architecture decision.
+
+What's still on the roadmap (per the feasibility study's later
+milestones): RAG with tree-sitter + LanceDB, persistent learnings
+memory, OCI sandbox for linter execution, agentic `@auto_review`
+chat, and the full ~45-linter set CodeRabbit ships. Real-world
+verification on a live Forgejo instance is also pending.
 
 ## Architecture (one-paragraph)
 
