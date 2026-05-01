@@ -21,6 +21,7 @@ pub mod eslint;
 pub mod finding;
 pub mod gitleaks;
 pub mod golangci_lint;
+pub mod gosec;
 pub mod hadolint;
 pub mod kubeconform;
 pub mod markdownlint;

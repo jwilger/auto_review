@@ -14,6 +14,7 @@ use ar_tools::dotenv_linter::DotenvLinterRunner;
 use ar_tools::eslint::EslintRunner;
 use ar_tools::gitleaks::GitleaksRunner;
 use ar_tools::golangci_lint::GolangciLintRunner;
+use ar_tools::gosec::GosecRunner;
 use ar_tools::hadolint::HadolintRunner;
 use ar_tools::kubeconform::KubeconformRunner;
 use ar_tools::markdownlint::MarkdownLintRunner;
@@ -143,6 +144,7 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
 
     if surviving.iter().any(|f| has_go_ext(&f.filename)) {
         runners.push(Box::new(GolangciLintRunner));
+        runners.push(Box::new(GosecRunner));
     }
 
     let ruby_files: Vec<String> = surviving
@@ -493,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn go_files_select_golangci_lint() {
+    fn go_files_select_golangci_lint_and_gosec() {
         let files = vec![cf("cmd/main.go", "modified")];
         let runners = select_runners(&files);
         let mut got = names(&runners);
@@ -504,6 +506,7 @@ mod tests {
                 "ast-grep",
                 "gitleaks",
                 "golangci-lint",
+                "gosec",
                 "osv-scanner",
                 "semgrep",
                 "trivy",
