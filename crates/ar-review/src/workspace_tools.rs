@@ -162,6 +162,16 @@ pub fn search(
     Ok(hits)
 }
 
+/// Cap on directory-tree recursion depth. A malicious PR could
+/// commit `a/b/c/.../z/` nested thousands of levels deep (most
+/// filesystems allow it even though POSIX PATH_MAX = 4096
+/// usually prevents the path string from being usable). Each
+/// `walk_dir` frame uses a few hundred bytes of stack, so an
+/// unbounded recursion eventually overflows the default 8 MiB
+/// stack. 64 covers any reasonable repo and matches what
+/// `find -maxdepth` operators typically use.
+const WALK_MAX_DEPTH: usize = 64;
+
 fn walk_dir(
     workspace_root: &Path,
     dir: &Path,
@@ -169,7 +179,18 @@ fn walk_dir(
     hits: &mut Vec<SearchHit>,
     max_hits: usize,
 ) -> Result<(), WorkspaceToolError> {
-    if hits.len() >= max_hits {
+    walk_dir_at_depth(workspace_root, dir, regex, hits, max_hits, 0)
+}
+
+fn walk_dir_at_depth(
+    workspace_root: &Path,
+    dir: &Path,
+    regex: &Regex,
+    hits: &mut Vec<SearchHit>,
+    max_hits: usize,
+    depth: usize,
+) -> Result<(), WorkspaceToolError> {
+    if hits.len() >= max_hits || depth >= WALK_MAX_DEPTH {
         return Ok(());
     }
     let entries = match fs::read_dir(dir) {
@@ -202,7 +223,7 @@ fn walk_dir(
             continue;
         }
         if file_type.is_dir() {
-            walk_dir(workspace_root, &path, regex, hits, max_hits)?;
+            walk_dir_at_depth(workspace_root, &path, regex, hits, max_hits, depth + 1)?;
         } else if file_type.is_file() {
             scan_file(workspace_root, &path, regex, hits, max_hits)?;
         }
@@ -456,6 +477,38 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let r = search(dir.path(), "x", Some("../etc"), 100);
         assert!(matches!(r, Err(WorkspaceToolError::PathEscape(_))));
+    }
+
+    #[test]
+    fn walk_dir_caps_recursion_depth() {
+        // A malicious PR could commit a path nested thousands of
+        // levels deep. Without the depth cap, walk_dir would
+        // recurse until the stack overflows. With the cap (64),
+        // the search returns silently with no hits past the cap.
+        let dir = tempfile::tempdir().unwrap();
+        // Build a 70-level deep tree; place a "needle" file at
+        // each level so we can count how many levels were scanned.
+        let mut path = dir.path().to_path_buf();
+        for i in 0..70 {
+            path = path.join(format!("d{i}"));
+            std::fs::create_dir(&path).unwrap();
+            std::fs::write(path.join("file.txt"), "needle\n").unwrap();
+        }
+        let hits = search(dir.path(), "needle", None, 1000).expect("ok");
+        // Depth 0 is the root; depth 64 means we processed 64
+        // levels of subdirectories. Each level has one file. So
+        // we expect <= 64 hits (depending on whether the cap
+        // counts inclusive or exclusive), never 70.
+        assert!(
+            hits.len() <= WALK_MAX_DEPTH,
+            "expected ≤ {WALK_MAX_DEPTH} hits, got {}",
+            hits.len()
+        );
+        assert!(
+            hits.len() >= 30,
+            "expected at least some hits to verify the walk worked, got {}",
+            hits.len()
+        );
     }
 
     #[test]
