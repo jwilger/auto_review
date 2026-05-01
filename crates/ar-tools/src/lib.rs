@@ -24,6 +24,7 @@ pub mod gitleaks;
 pub mod golangci_lint;
 pub mod gosec;
 pub mod hadolint;
+pub mod ktlint;
 pub mod kubeconform;
 pub mod markdownlint;
 pub mod mypy;

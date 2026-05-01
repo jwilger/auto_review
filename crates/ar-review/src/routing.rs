@@ -17,6 +17,7 @@ use ar_tools::gitleaks::GitleaksRunner;
 use ar_tools::golangci_lint::GolangciLintRunner;
 use ar_tools::gosec::GosecRunner;
 use ar_tools::hadolint::HadolintRunner;
+use ar_tools::ktlint::KtlintRunner;
 use ar_tools::kubeconform::KubeconformRunner;
 use ar_tools::markdownlint::MarkdownLintRunner;
 use ar_tools::mypy::MypyRunner;
@@ -186,6 +187,17 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         .collect();
     if !java_files.is_empty() {
         runners.push(Box::new(PmdRunner { files: java_files }));
+    }
+
+    let kotlin_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| f.filename.ends_with(".kt") || f.filename.ends_with(".kts"))
+        .map(|f| f.filename.clone())
+        .collect();
+    if !kotlin_files.is_empty() {
+        runners.push(Box::new(KtlintRunner {
+            files: kotlin_files,
+        }));
     }
 
     let js_files: Vec<String> = surviving
@@ -843,6 +855,29 @@ mod tests {
                     "gitleaks",
                     "osv-scanner",
                     "phpstan",
+                    "semgrep",
+                    "trivy",
+                    "typos"
+                ],
+                "name = {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn kotlin_files_select_ktlint() {
+        for name in ["src/main/kotlin/Foo.kt", "build.gradle.kts"] {
+            let files = vec![cf(name, "modified")];
+            let runners = select_runners(&files);
+            let mut got = names(&runners);
+            got.sort();
+            assert_eq!(
+                got,
+                vec![
+                    "ast-grep",
+                    "gitleaks",
+                    "ktlint",
+                    "osv-scanner",
                     "semgrep",
                     "trivy",
                     "typos"

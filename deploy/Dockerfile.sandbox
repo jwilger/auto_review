@@ -16,10 +16,10 @@
 # Linter set (in alphabetical order):
 #   actionlint, ansible-lint, ast-grep, bandit, biome, buf, checkov,
 #   cppcheck, dotenv-linter, eslint, gitleaks, golangci-lint, gosec,
-#   hadolint, kubeconform, markdownlint, mypy, osv-scanner, oxlint,
-#   phpstan, pmd, rubocop, ruff, semgrep, shellcheck, sqlfluff,
-#   staticcheck, stylelint, swiftlint, taplo, tflint, trivy, typos,
-#   vale, yamllint
+#   hadolint, ktlint, kubeconform, markdownlint, mypy, osv-scanner,
+#   oxlint, phpstan, pmd, rubocop, ruff, semgrep, shellcheck,
+#   sqlfluff, staticcheck, stylelint, swiftlint, taplo, tflint,
+#   trivy, typos, vale, yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -120,6 +120,8 @@ RUN set -eux; \
         && unzip -q /tmp/pmd.zip -d /opt \
         && ln -sf /opt/pmd-bin-7.0.0/bin/pmd /usr/local/bin/pmd \
         && rm /tmp/pmd.zip; \
+    curl -fsSL "https://github.com/pinterest/ktlint/releases/latest/download/ktlint" \
+        -o /usr/local/bin/ktlint; \
     chmod +x /usr/local/bin/*
 
 # Linters never need to write to the rootfs.
