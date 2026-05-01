@@ -638,7 +638,7 @@ pub async fn run_review_job(
             CommitStatus {
                 state: error_state(e),
                 target_url: String::new(),
-                description: format!("auto_review failed: {e}"),
+                description: truncate_status_description(&format!("auto_review failed: {e}")),
                 context: STATUS_CONTEXT.into(),
             }
         }
@@ -848,6 +848,30 @@ fn severity_floor_from_env() -> ar_review::ReviewSeverity {
     }
 }
 
+/// Forgejo's commit-status `description` is capped at 255 chars.
+/// Posting more returns 422 and the user sees no status update at
+/// all — leaving the PR stuck on "Pending" with no operator-visible
+/// signal that the review actually completed (with an error). LLM
+/// errors in particular can dump multi-hundred-char provider response
+/// bodies into the format string. Cap at 240 to leave room for the
+/// status badge UI's own padding and end with an ellipsis so users
+/// know it was truncated.
+const MAX_STATUS_DESCRIPTION: usize = 240;
+
+fn truncate_status_description(s: &str) -> String {
+    if s.len() <= MAX_STATUS_DESCRIPTION {
+        return s.to_string();
+    }
+    // The ellipsis '…' is 3 bytes in UTF-8; reserve room so the
+    // total output still fits under MAX_STATUS_DESCRIPTION.
+    const ELLIPSIS_BYTES: usize = '…'.len_utf8();
+    let mut cut = MAX_STATUS_DESCRIPTION.saturating_sub(ELLIPSIS_BYTES);
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}…", &s[..cut])
+}
+
 fn error_state(err: &ReviewError) -> CommitStatusState {
     match err {
         ReviewError::Forgejo(_) | ReviewError::Workspace(_) => CommitStatusState::Error,
@@ -1051,5 +1075,40 @@ mod tests {
             review_summary(&outcome(1, 0, 1)),
             "auto_review: 1 error, 1 note"
         );
+    }
+
+    #[test]
+    fn truncate_status_description_passes_short_strings_through() {
+        assert_eq!(
+            truncate_status_description("short message"),
+            "short message"
+        );
+    }
+
+    #[test]
+    fn truncate_status_description_caps_long_strings_with_ellipsis() {
+        // A typical LLM error response body can be 500+ chars.
+        // Forgejo would 422 the post and the PR stays on "Pending"
+        // forever.
+        let long = format!(
+            "auto_review failed: LLM error: provider returned 500: {}",
+            "x".repeat(400)
+        );
+        let out = truncate_status_description(&long);
+        assert!(out.len() <= MAX_STATUS_DESCRIPTION);
+        assert!(out.ends_with('…'));
+        assert!(out.starts_with("auto_review failed:"));
+    }
+
+    #[test]
+    fn truncate_status_description_respects_utf8_codepoints() {
+        // Multi-byte char near the cut boundary must not be split.
+        // Build a string ending in a 4-byte emoji right at the cap.
+        let mut s = "x".repeat(MAX_STATUS_DESCRIPTION - 2);
+        s.push_str("🦀tail"); // 🦀 is 4 bytes; "tail" pushes past the cap
+        let out = truncate_status_description(&s);
+        // Result must be valid UTF-8 (decode without error).
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+        assert!(out.ends_with('…'));
     }
 }
