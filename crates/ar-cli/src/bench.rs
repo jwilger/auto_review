@@ -296,20 +296,16 @@ fn fmt_int_delta(d: i64) -> String {
     format!("{sign}{d}")
 }
 
-/// Pull every `*.json` file out of any directory entries in `paths`,
-/// keep file entries as-is, and return the deduplicated sorted list.
+/// Pull every `*.json` file out of any directory entries in `paths`
+/// (recursively, so users can organise fixtures into subdirectories
+/// like `fixtures/sqli/`, `fixtures/xss/`), keep file entries as-is,
+/// and return the deduplicated sorted list.
 fn expand_fixture_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     let mut out: Vec<PathBuf> = Vec::new();
     for p in paths {
         let meta = std::fs::metadata(p).with_context(|| format!("stat {}", p.display()))?;
         if meta.is_dir() {
-            for entry in std::fs::read_dir(p).with_context(|| format!("readdir {}", p.display()))? {
-                let entry = entry?;
-                let entry_path = entry.path();
-                if entry_path.extension().and_then(|s| s.to_str()) == Some("json") {
-                    out.push(entry_path);
-                }
-            }
+            collect_json_recursive(p, &mut out)?;
         } else {
             out.push(p.clone());
         }
@@ -317,6 +313,24 @@ fn expand_fixture_paths(paths: &[PathBuf]) -> Result<Vec<PathBuf>> {
     out.sort();
     out.dedup();
     Ok(out)
+}
+
+fn collect_json_recursive(dir: &Path, out: &mut Vec<PathBuf>) -> Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("readdir {}", dir.display()))? {
+        let entry = entry?;
+        let path = entry.path();
+        let ft = entry
+            .file_type()
+            .with_context(|| format!("file_type {}", path.display()))?;
+        if ft.is_dir() {
+            collect_json_recursive(&path, out)?;
+        } else if ft.is_file() && path.extension().and_then(|s| s.to_str()) == Some("json") {
+            out.push(path);
+        }
+        // Skip symlinks and other types — fixture trees shouldn't
+        // need them, and traversing symlinks risks infinite loops.
+    }
+    Ok(())
 }
 
 fn build_router(args: &BenchArgs) -> Result<LlmRouter> {
@@ -1031,6 +1045,49 @@ mod tests {
             1,
             "explicit.json appeared twice"
         );
+    }
+
+    #[test]
+    fn expand_fixture_paths_recurses_into_subdirectories() {
+        // Operators commonly group fixtures by category
+        // (`fixtures/sqli/case1.json`, `fixtures/xss/case1.json`).
+        // A non-recursive walk would silently return zero
+        // matches when handed `fixtures/`.
+        let dir = tempfile::tempdir().unwrap();
+        let sqli = dir.path().join("sqli");
+        let xss = dir.path().join("xss");
+        let nested = sqli.join("more");
+        std::fs::create_dir_all(&nested).unwrap();
+        std::fs::create_dir_all(&xss).unwrap();
+        for p in [
+            sqli.join("case1.json"),
+            xss.join("case1.json"),
+            nested.join("case2.json"),
+        ] {
+            std::fs::File::create(&p).unwrap().write_all(b"{}").unwrap();
+        }
+        // Drop a non-JSON file in there too — should be ignored.
+        std::fs::File::create(sqli.join("README.md"))
+            .unwrap()
+            .write_all(b"docs")
+            .unwrap();
+
+        let resolved = expand_fixture_paths(&[dir.path().into()]).unwrap();
+        let names: Vec<String> = resolved
+            .iter()
+            .map(|p| {
+                p.strip_prefix(dir.path())
+                    .unwrap()
+                    .display()
+                    .to_string()
+                    .replace('\\', "/")
+            })
+            .collect();
+        assert!(names.contains(&"sqli/case1.json".to_string()));
+        assert!(names.contains(&"xss/case1.json".to_string()));
+        assert!(names.contains(&"sqli/more/case2.json".to_string()));
+        assert!(!names.iter().any(|n| n.ends_with(".md")));
+        assert_eq!(resolved.len(), 3);
     }
 
     #[test]
