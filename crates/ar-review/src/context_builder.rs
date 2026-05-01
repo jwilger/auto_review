@@ -81,21 +81,13 @@ pub async fn build_review_context(
     // at 8191 tokens (~32 KiB English). A multi-MB diff would
     // otherwise burn the embed call on a refused request. Cap
     // explicitly so the cheap path stays cheap.
+    //
+    // Empty marker: the embed endpoint doesn't need a "[truncated]"
+    // signal — embeddings represent semantic content, not literal
+    // text — so we just feed the prefix.
     const EMBED_QUERY_CAP: usize = 32 * 1024;
-    let mut query_text: &str = diff;
-    let owned_capped: String;
-    if diff.len() > EMBED_QUERY_CAP {
-        let mut cut = EMBED_QUERY_CAP;
-        while cut > 0 && !diff.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        owned_capped = diff[..cut].to_string();
-        query_text = &owned_capped;
-    }
-    let query_vec = match router
-        .embed(ModelTier::Embedding, &[query_text.to_string()])
-        .await
-    {
+    let query_text = crate::diff::cap_for_prompt(diff, EMBED_QUERY_CAP, "");
+    let query_vec = match router.embed(ModelTier::Embedding, &[query_text]).await {
         Ok(mut vecs) => vecs.pop().unwrap_or_default(),
         Err(e) => {
             tracing::warn!(error = %e, "diff embedding failed; skipping RAG context");
