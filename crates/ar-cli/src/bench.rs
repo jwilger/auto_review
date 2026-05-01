@@ -395,4 +395,46 @@ mod tests {
         let result = expand_fixture_paths(&[PathBuf::from("/no/such/path/xyz")]);
         assert!(result.is_err());
     }
+
+    /// The shipped `bench/fixtures/*.json` files double as documentation
+    /// of the fixture format. If the `Fixture` struct shape changes in a
+    /// way that breaks them, the bench harness silently rejects every
+    /// fixture in the wild as "parse fixture" errors. This test catches
+    /// that at PR time instead of at-deploy time.
+    #[test]
+    fn shipped_fixtures_all_parse() {
+        let workspace_root = std::env::var("CARGO_MANIFEST_DIR")
+            .map(PathBuf::from)
+            .ok()
+            .and_then(|p| {
+                // CARGO_MANIFEST_DIR is .../crates/ar-cli; the bench
+                // directory lives at the workspace root.
+                p.parent()?.parent().map(Path::to_path_buf)
+            });
+        let Some(root) = workspace_root else {
+            // Should never happen in cargo's test runner, but skip
+            // gracefully if the env var is missing rather than failing
+            // mysteriously.
+            return;
+        };
+        let fixtures_dir = root.join("bench/fixtures");
+        if !fixtures_dir.is_dir() {
+            return; // No fixtures shipped — nothing to verify.
+        }
+
+        let entries = std::fs::read_dir(&fixtures_dir).expect("read bench/fixtures/");
+        let mut count = 0usize;
+        for entry in entries {
+            let path = entry.unwrap().path();
+            if path.extension().and_then(|s| s.to_str()) != Some("json") {
+                continue;
+            }
+            let raw = std::fs::read_to_string(&path)
+                .unwrap_or_else(|e| panic!("read {}: {e}", path.display()));
+            let _: Fixture = serde_json::from_str(&raw)
+                .unwrap_or_else(|e| panic!("parse {}: {e}", path.display()));
+            count += 1;
+        }
+        assert!(count > 0, "no fixtures matched bench/fixtures/*.json");
+    }
 }
