@@ -8,6 +8,7 @@
 //! (triage → summarize → review → verify), with the pipeline becoming a thin
 //! coordinator over them.
 
+pub mod diff;
 pub mod error;
 pub mod heal;
 pub mod mapping;
@@ -16,6 +17,7 @@ pub mod routing;
 pub mod triage;
 pub mod workspace;
 
+pub use diff::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 pub use error::ReviewError;
 pub use heal::{generate_with_self_heal, HealConfig};
 pub use mapping::output_to_review_request;

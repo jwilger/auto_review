@@ -1,3 +1,4 @@
+use crate::diff::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 use crate::error::ReviewError;
 use crate::heal::{generate_with_self_heal, HealConfig};
 use crate::mapping::output_to_review_request;
@@ -31,7 +32,15 @@ pub async fn review_pull_request(
     pr_body: &str,
     linter_findings: &[Finding],
 ) -> Result<ReviewOutcome, ReviewError> {
-    let diff = forgejo.get_pr_diff(owner, repo, pr_number).await?;
+    let raw_diff = forgejo.get_pr_diff(owner, repo, pr_number).await?;
+    let diff = cap_diff(&raw_diff, DEFAULT_MAX_DIFF_BYTES);
+    if diff.len() < raw_diff.len() {
+        tracing::info!(
+            original = raw_diff.len(),
+            capped = diff.len(),
+            "diff capped before sending to LLM"
+        );
+    }
     let files = forgejo.list_changed_files(owner, repo, pr_number).await?;
     let changed_filenames: Vec<String> = files.iter().map(|f| f.filename.clone()).collect();
 
