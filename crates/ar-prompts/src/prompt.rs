@@ -57,6 +57,19 @@ pub fn system_prompt() -> &'static str {
     SYSTEM_PROMPT
 }
 
+/// Cap the rendered PR body. Forgejo lets PR descriptions grow to
+/// ~64 KiB, but the LLM context budget is dominated by the diff —
+/// reserve most of it for code rather than letting a verbose
+/// description crowd the diff out. 8 KiB comfortably holds any
+/// real PR description; longer ones tend to be auto-generated
+/// release notes / template forms that don't add reviewer signal.
+const PR_BODY_MAX_BYTES: usize = 8_192;
+
+/// Same justification for PR titles. Forgejo titles are typically
+/// short, but a misbehaving caller could pass anything; cap so the
+/// prompt header stays compact.
+const PR_TITLE_MAX_BYTES: usize = 512;
+
 /// Render the user-facing prompt the LLM will see. The system prompt is
 /// returned separately by [`system_prompt`].
 pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
@@ -67,7 +80,7 @@ pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
     out.push_str("\nPull request: #");
     out.push_str(&inputs.pr_number.to_string());
     out.push_str(" — ");
-    out.push_str(inputs.pr_title);
+    push_capped(&mut out, inputs.pr_title, PR_TITLE_MAX_BYTES, "[truncated]");
     out.push('\n');
 
     if !inputs.guidelines.is_empty() {
@@ -80,7 +93,12 @@ pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
 
     if !inputs.pr_body.is_empty() {
         out.push_str("\nPR description:\n");
-        out.push_str(inputs.pr_body);
+        push_capped(
+            &mut out,
+            inputs.pr_body,
+            PR_BODY_MAX_BYTES,
+            "\n[PR description truncated]",
+        );
         out.push('\n');
     }
 
@@ -121,6 +139,23 @@ pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
 
     out.push_str("\nReview the diff above and emit the JSON object described by the schema.\n");
     out
+}
+
+/// Append `s` to `out`, capping at `max_bytes`. When the cap fires,
+/// the truncated prefix is appended followed by `marker` (no
+/// trailing newline — the caller decides how to frame). Walks back
+/// to a UTF-8 char boundary so multi-byte codepoints aren't split.
+fn push_capped(out: &mut String, s: &str, max_bytes: usize, marker: &str) {
+    if s.len() <= max_bytes {
+        out.push_str(s);
+        return;
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    out.push_str(&s[..cut]);
+    out.push_str(marker);
 }
 
 #[cfg(test)]
@@ -303,5 +338,78 @@ mod tests {
         }];
         let p = render_review_prompt(&sample("d", &files, &findings));
         assert!(p.contains("[custom/-]"));
+    }
+
+    #[test]
+    fn pr_body_is_capped_at_8kib() {
+        // Forgejo accepts ~64 KiB PR descriptions. Without a cap,
+        // a release-notes-style body would crowd out the diff in
+        // the LLM's context. Cap at 8 KiB and emit a truncation
+        // marker so the model can see the description was abridged.
+        let files: Vec<String> = vec![];
+        let findings: Vec<Finding> = vec![];
+        let huge_body = "x".repeat(20_000);
+        let inputs = ReviewPromptInputs {
+            repo_full_name: "o/r",
+            pr_number: 1,
+            pr_title: "t",
+            pr_body: &huge_body,
+            diff: "diff",
+            changed_files: &files,
+            linter_findings: &findings,
+            guidelines: "",
+            repo_context: "",
+        };
+        let p = render_review_prompt(&inputs);
+        assert!(p.contains("[PR description truncated]"));
+        // Total prompt should be under ~9 KiB plus boilerplate,
+        // not the full 20 KiB body.
+        assert!(
+            p.len() < 12_000,
+            "expected capped prompt, got {} bytes",
+            p.len()
+        );
+    }
+
+    #[test]
+    fn pr_title_is_capped_at_512_bytes() {
+        let files: Vec<String> = vec![];
+        let findings: Vec<Finding> = vec![];
+        let huge_title = "T".repeat(2_000);
+        let inputs = ReviewPromptInputs {
+            repo_full_name: "o/r",
+            pr_number: 1,
+            pr_title: &huge_title,
+            pr_body: "",
+            diff: "diff",
+            changed_files: &files,
+            linter_findings: &findings,
+            guidelines: "",
+            repo_context: "",
+        };
+        let p = render_review_prompt(&inputs);
+        assert!(p.contains("[truncated]"));
+        // The title should not appear in full.
+        assert!(!p.contains(&"T".repeat(1_000)));
+    }
+
+    #[test]
+    fn pr_body_under_cap_passes_through_unchanged() {
+        let files: Vec<String> = vec![];
+        let findings: Vec<Finding> = vec![];
+        let inputs = ReviewPromptInputs {
+            repo_full_name: "o/r",
+            pr_number: 1,
+            pr_title: "Fix",
+            pr_body: "Closes #42 — thanks!",
+            diff: "diff",
+            changed_files: &files,
+            linter_findings: &findings,
+            guidelines: "",
+            repo_context: "",
+        };
+        let p = render_review_prompt(&inputs);
+        assert!(p.contains("Closes #42 — thanks!"));
+        assert!(!p.contains("[PR description truncated]"));
     }
 }
