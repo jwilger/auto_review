@@ -1,8 +1,8 @@
 use anyhow::{Context, Result};
 use ar_forgejo::Client as ForgejoClient;
+use ar_gateway::dedup::RecentDeliveries;
 use ar_gateway::metrics::{Metrics, MetricsObserver};
 use ar_gateway::poller::{ChatPoller, DEFAULT_POLL_INTERVAL};
-use ar_gateway::dedup::RecentDeliveries;
 use ar_gateway::ratelimit::TokenBucket;
 use ar_gateway::{build_router, AppState, ChatDeps, GatewayInfo, ReadinessProbe};
 use ar_index::{InMemoryLearningsStore, SqliteLearningsStore};
@@ -326,15 +326,14 @@ async fn shutdown_signal() {
 
     #[cfg(unix)]
     let terminate = async {
-        let mut term = match tokio::signal::unix::signal(
-            tokio::signal::unix::SignalKind::terminate(),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                tracing::warn!(error = %e, "SIGTERM handler init failed");
-                return;
-            }
-        };
+        let mut term =
+            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!(error = %e, "SIGTERM handler init failed");
+                    return;
+                }
+            };
         term.recv().await;
     };
 

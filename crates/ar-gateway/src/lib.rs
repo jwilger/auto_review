@@ -182,10 +182,7 @@ impl AppState {
     /// Wire in a global token-bucket rate limiter for the
     /// `/webhooks/forgejo` route. Without this, the route accepts
     /// every well-signed request.
-    pub fn with_webhook_rate_limit(
-        mut self,
-        bucket: Arc<crate::ratelimit::TokenBucket>,
-    ) -> Self {
+    pub fn with_webhook_rate_limit(mut self, bucket: Arc<crate::ratelimit::TokenBucket>) -> Self {
         self.webhook_rate_limit = Some(bucket);
         self
     }
@@ -193,10 +190,7 @@ impl AppState {
     /// Wire in a recently-seen-delivery LRU so retried webhooks
     /// (same `X-Forgejo-Delivery` UUID) are answered 200 OK
     /// without re-dispatching to the orchestrator.
-    pub fn with_webhook_dedup(
-        mut self,
-        dedup: Arc<crate::dedup::RecentDeliveries>,
-    ) -> Self {
+    pub fn with_webhook_dedup(mut self, dedup: Arc<crate::dedup::RecentDeliveries>) -> Self {
         self.webhook_dedup = Some(dedup);
         self
     }
@@ -255,7 +249,10 @@ pub fn build_router(state: AppState) -> Router {
 
 async fn info_handler(State(state): State<AppState>) -> impl IntoResponse {
     match state.info {
-        Some(info) => (StatusCode::OK, axum::Json(serde_json::to_value(&*info).unwrap()))
+        Some(info) => (
+            StatusCode::OK,
+            axum::Json(serde_json::to_value(&*info).unwrap()),
+        )
             .into_response(),
         // No info wired (tests, partial setups). Fall back to the
         // same {name, version} the /version endpoint emits so the

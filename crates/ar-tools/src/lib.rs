@@ -11,11 +11,11 @@
 
 pub mod actionlint;
 pub mod ansible_lint;
-pub mod catalog;
 pub mod ast_grep;
 pub mod bandit;
 pub mod biome;
 pub mod buf;
+pub mod catalog;
 pub mod checkov;
 pub mod cppcheck;
 pub mod dotenv_linter;

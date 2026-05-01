@@ -34,17 +34,20 @@ pub use config::{
     load_repo_config, parse_repo_config, parse_repo_config_strict, RepoConfig,
     RepoConfigStrictError, ReviewMode,
 };
-pub use linter_only::build_linter_only_output;
 pub use context_builder::{build_review_context, ContextBuildError};
 pub use diff::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 pub use error::ReviewError;
 pub use globset::GlobSet;
 pub use heal::{generate_with_self_heal, HealConfig};
 pub use ignored::{build_glob_set, filter_changed_files, filter_diff_paths};
+pub use linter_only::build_linter_only_output;
 pub use llm_triage::{filter_reviewable, triage_files_with_llm};
 pub use mapping::output_to_review_request;
 pub use pipeline::{review_pull_request, ReviewArgs, ReviewOutcome, VerifyMode};
-pub use pre_merge::{evaluate as evaluate_pre_merge_checks, render_section as render_pre_merge_section, CheckName, CheckResult, CheckStatus};
+pub use pre_merge::{
+    evaluate as evaluate_pre_merge_checks, render_section as render_pre_merge_section, CheckName,
+    CheckResult, CheckStatus,
+};
 pub use pre_merge_llm::{evaluate_custom_checks, CustomCheckResult};
 pub use rag_context::format_repo_context;
 pub use routing::{lint_workspace, lint_workspace_via, lint_workspace_with, select_runners};

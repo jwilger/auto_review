@@ -43,12 +43,9 @@ impl SqliteReviewHistory {
     /// Open or create a database at `path`. Schema is applied
     /// idempotently on first connect.
     pub async fn open(path: &Path) -> Result<Self, HistoryError> {
-        let opts = SqliteConnectOptions::from_str(&format!(
-            "sqlite://{}",
-            path.to_string_lossy()
-        ))
-        .map_err(|e| HistoryError::Storage(e.to_string()))?
-        .create_if_missing(true);
+        let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.to_string_lossy()))
+            .map_err(|e| HistoryError::Storage(e.to_string()))?
+            .create_if_missing(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
             .connect_with(opts)
@@ -101,10 +98,7 @@ impl SqliteReviewHistory {
     /// timer, or `auto_review purge-history`) for long-running
     /// deployments — closed PRs accumulate over months/years and
     /// the dedup table doesn't need their old SHAs.
-    pub async fn purge_older_than(
-        &self,
-        cutoff_unix_secs: i64,
-    ) -> Result<u64, HistoryError> {
+    pub async fn purge_older_than(&self, cutoff_unix_secs: i64) -> Result<u64, HistoryError> {
         let result = sqlx::query("DELETE FROM review_history WHERE updated_at < ?1")
             .bind(cutoff_unix_secs)
             .execute(&self.pool)
@@ -297,8 +291,12 @@ mod tests {
     #[tokio::test]
     async fn purge_drops_rows_older_than_cutoff() {
         let h = SqliteReviewHistory::in_memory().await.unwrap();
-        h.record_at(&key("o", "r", 1), "deadbeef", 100).await.unwrap();
-        h.record_at(&key("o", "r", 2), "cafef00d", 200).await.unwrap();
+        h.record_at(&key("o", "r", 1), "deadbeef", 100)
+            .await
+            .unwrap();
+        h.record_at(&key("o", "r", 2), "cafef00d", 200)
+            .await
+            .unwrap();
         // Cutoff = 150: only the first row qualifies.
         let dropped = h.purge_older_than(150).await.unwrap();
         assert_eq!(dropped, 1);

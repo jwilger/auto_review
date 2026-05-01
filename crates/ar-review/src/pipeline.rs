@@ -1,11 +1,11 @@
 use crate::agentic_verify::verify_findings_agentic;
+use crate::config::ReviewMode;
 use crate::diff::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 use crate::error::ReviewError;
 use crate::heal::{generate_with_self_heal, HealConfig};
 use crate::ignored::{filter_changed_files, filter_diff_paths};
-use crate::mapping::output_to_review_request;
-use crate::config::ReviewMode;
 use crate::linter_only::build_linter_only_output;
+use crate::mapping::output_to_review_request;
 use crate::pre_merge::{evaluate as evaluate_pre_merge_checks, render_combined_section};
 use crate::pre_merge_llm::evaluate_custom_checks;
 use crate::verify::verify_findings;
@@ -187,13 +187,9 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
             build_linter_only_output(args.linter_findings)
         }
         ReviewMode::Full => {
-            let mut output = generate_with_self_heal(
-                args.llm,
-                system_prompt(),
-                &prompt,
-                HealConfig::default(),
-            )
-            .await?;
+            let mut output =
+                generate_with_self_heal(args.llm, system_prompt(), &prompt, HealConfig::default())
+                    .await?;
             // Severity-floor filter runs BEFORE the verifier so we
             // don't burn cheap-tier LLM calls verifying findings
             // we'll drop anyway. Operators who set
@@ -232,8 +228,7 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
     // evaluated by the cheap LLM tier. Both surface as a single
     // markdown checklist appended to the review body. Failing a
     // check is advisory and does not change the review event.
-    let pre_merge_results =
-        evaluate_pre_merge_checks(&diff, &files, args.workspace_path);
+    let pre_merge_results = evaluate_pre_merge_checks(&diff, &files, args.workspace_path);
     let custom_results = if args.custom_pre_merge_checks.is_empty() {
         Vec::new()
     } else {
@@ -361,25 +356,25 @@ mod tests {
         // which findings made it through the floor.
         Mock::given(method("POST"))
             .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
-            .respond_with(
-                ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                    "id": 1, "state": "COMMENT"
-                })),
-            )
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1, "state": "COMMENT"
+            })))
             .mount(&server)
             .await;
 
         let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
         // The reasoning model emits three findings spanning every
         // severity. Floor should drop the Note one.
-        let provider = Arc::new(CannedProvider::new(vec![r#"{
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{
             "summary": "mixed",
             "findings": [
                 {"path":"x","line_start":1,"severity":"note","message":"style"},
                 {"path":"x","line_start":2,"severity":"warning","message":"bad"},
                 {"path":"x","line_start":2,"severity":"error","message":"unsafe"}
             ]
-        }"#]));
+        }"#,
+        ]));
         let llm = router_with(provider);
 
         let outcome = review_pull_request(ReviewArgs {
@@ -430,33 +425,35 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
-            .respond_with(
-                ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                    "id": 1, "state": "COMMENT"
-                })),
-            )
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1, "state": "COMMENT"
+            })))
             .mount(&server)
             .await;
 
         let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
-        let reasoning = Arc::new(CannedProvider::new(vec![r#"{
+        let reasoning = Arc::new(CannedProvider::new(vec![
+            r#"{
             "summary":"mixed",
             "findings": [
                 {"path":"x","line_start":1,"severity":"note","message":"style"},
                 {"path":"x","line_start":2,"severity":"warning","message":"bad"},
                 {"path":"x","line_start":3,"severity":"error","message":"unsafe"}
             ]
-        }"#]));
+        }"#,
+        ]));
         // Cheap-tier verifier records what it's asked to verify.
         // It returns "keep" for everything (so post-verifier count
         // = post-floor count). The assertion is that it received
         // only 2 findings, not 3.
-        let cheap = Arc::new(CannedProvider::new(vec![r#"{
+        let cheap = Arc::new(CannedProvider::new(vec![
+            r#"{
             "verdicts": [
                 {"finding_index":0,"keep":true,"reasoning":""},
                 {"finding_index":1,"keep":true,"reasoning":""}
             ]
-        }"#]));
+        }"#,
+        ]));
         let llm = Router::new()
             .with(ModelTier::Reasoning, reasoning)
             .with(ModelTier::Cheap, cheap.clone());
@@ -505,9 +502,9 @@ mod tests {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/repos/o/r/pulls/7.diff"))
-            .respond_with(ResponseTemplate::new(200).set_body_string(
-                "diff --git a/x b/x\n@@ -1 +1 @@\n+x\n",
-            ))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("diff --git a/x b/x\n@@ -1 +1 @@\n+x\n"),
+            )
             .mount(&server)
             .await;
         Mock::given(method("GET"))
@@ -519,22 +516,22 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
-            .respond_with(
-                ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                    "id": 1, "state": "COMMENT"
-                })),
-            )
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1, "state": "COMMENT"
+            })))
             .mount(&server)
             .await;
 
         let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
-        let provider = Arc::new(CannedProvider::new(vec![r#"{
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{
             "summary": "minor",
             "findings": [
                 {"path":"x","line_start":1,"severity":"note","message":"a"},
                 {"path":"x","line_start":1,"severity":"warning","message":"b"}
             ]
-        }"#]));
+        }"#,
+        ]));
         let llm = router_with(provider);
 
         let outcome = review_pull_request(ReviewArgs {

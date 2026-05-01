@@ -532,8 +532,8 @@ mod tests {
                 // Reject tokens that are just the bare prefix
                 // (`auto_review` with no trailing identifier).
                 let after_prefix = &token["auto_review".len()..];
-                let starts_with_separator = after_prefix.starts_with('_')
-                    || after_prefix.starts_with(':');
+                let starts_with_separator =
+                    after_prefix.starts_with('_') || after_prefix.starts_with(':');
                 if starts_with_separator && after_prefix.len() > 1 {
                     let canonical = token
                         .trim_end_matches("_bucket")

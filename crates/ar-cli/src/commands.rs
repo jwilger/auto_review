@@ -9,13 +9,13 @@ use anyhow::{Context, Result};
 use ar_forgejo::{
     Client, CreateAccessTokenRequest, CreateWebhookRequest, InitClient, WebhookConfig,
 };
-use hmac::{Hmac, Mac};
-use sha2::Sha256;
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::{run_review_job, InMemoryReviewHistory, ReviewJob};
 use ar_prompts::{render_review_prompt, ReviewPromptInputs};
 use ar_review::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 use ar_sandbox::DirectSandbox;
+use hmac::{Hmac, Mac};
+use sha2::Sha256;
 use std::sync::Arc;
 
 const WEBHOOK_PATH: &str = "/webhooks/forgejo";
@@ -164,8 +164,7 @@ async fn print_dry_run_prompt(
 /// to audit which webhooks the bot's PAT can see and to find the
 /// id `unregister-webhook` needs.
 pub async fn list_webhooks(args: ListWebhooksArgs) -> Result<()> {
-    let client =
-        Client::new(&args.forgejo_url, &args.token).context("build forgejo client")?;
+    let client = Client::new(&args.forgejo_url, &args.token).context("build forgejo client")?;
     let hooks = client
         .list_webhooks(&args.owner, &args.repo)
         .await
@@ -207,8 +206,7 @@ pub async fn list_webhooks(args: ListWebhooksArgs) -> Result<()> {
 /// the substring). The `--match-url` form is the safe choice for
 /// deploy scripts that don't know ids ahead of time.
 pub async fn unregister_webhook(args: UnregisterWebhookArgs) -> Result<()> {
-    let client =
-        Client::new(&args.forgejo_url, &args.token).context("build forgejo client")?;
+    let client = Client::new(&args.forgejo_url, &args.token).context("build forgejo client")?;
     let to_delete: Vec<u64> = match (args.id, args.match_url.as_deref()) {
         (Some(id), _) => vec![id],
         (None, Some(needle)) => {
@@ -281,9 +279,7 @@ pub async fn list_learnings(args: ListLearningsArgs) -> Result<()> {
     use ar_index::LearningsStore;
     let store = ar_index::SqliteLearningsStore::open(&args.learnings_db)
         .await
-        .with_context(|| {
-            format!("open learnings db at {}", args.learnings_db.display())
-        })?;
+        .with_context(|| format!("open learnings db at {}", args.learnings_db.display()))?;
     let learnings = store.list().await.context("list learnings")?;
     if args.json {
         for l in &learnings {
@@ -336,9 +332,7 @@ pub async fn forget_learning(args: ForgetLearningArgs) -> Result<()> {
     use ar_index::LearningsStore;
     let store = ar_index::SqliteLearningsStore::open(&args.learnings_db)
         .await
-        .with_context(|| {
-            format!("open learnings db at {}", args.learnings_db.display())
-        })?;
+        .with_context(|| format!("open learnings db at {}", args.learnings_db.display()))?;
     store
         .remove(args.id)
         .await
@@ -400,12 +394,7 @@ pub async fn reset_pr(args: ResetPrArgs) -> Result<()> {
     use ar_orchestrator::ReviewHistory;
     let store = ar_orchestrator::SqliteReviewHistory::open(&args.history_db)
         .await
-        .with_context(|| {
-            format!(
-                "open history db at {}",
-                args.history_db.display()
-            )
-        })?;
+        .with_context(|| format!("open history db at {}", args.history_db.display()))?;
     let key = ar_orchestrator::PrKey {
         owner: args.owner.clone(),
         repo: args.repo.clone(),
@@ -514,17 +503,44 @@ impl StatusSummary {
         metrics_text: &str,
     ) -> Self {
         let parsed = parse_metric_counters(metrics_text);
-        let succeeded = parsed.get("auto_review_reviews_succeeded_total").copied().unwrap_or(0);
-        let failed_forgejo = parsed.get("auto_review_reviews_failed_forgejo_total").copied().unwrap_or(0);
-        let failed_workspace = parsed.get("auto_review_reviews_failed_workspace_total").copied().unwrap_or(0);
-        let failed_llm = parsed.get("auto_review_reviews_failed_llm_total").copied().unwrap_or(0);
-        let failed_unhealable = parsed.get("auto_review_reviews_failed_unhealable_total").copied().unwrap_or(0);
+        let succeeded = parsed
+            .get("auto_review_reviews_succeeded_total")
+            .copied()
+            .unwrap_or(0);
+        let failed_forgejo = parsed
+            .get("auto_review_reviews_failed_forgejo_total")
+            .copied()
+            .unwrap_or(0);
+        let failed_workspace = parsed
+            .get("auto_review_reviews_failed_workspace_total")
+            .copied()
+            .unwrap_or(0);
+        let failed_llm = parsed
+            .get("auto_review_reviews_failed_llm_total")
+            .copied()
+            .unwrap_or(0);
+        let failed_unhealable = parsed
+            .get("auto_review_reviews_failed_unhealable_total")
+            .copied()
+            .unwrap_or(0);
         let failed_total = failed_forgejo + failed_workspace + failed_llm + failed_unhealable;
-        let skipped_same = parsed.get("auto_review_reviews_skipped_same_sha_total").copied().unwrap_or(0);
-        let skipped_trivial = parsed.get("auto_review_reviews_skipped_trivial_total").copied().unwrap_or(0);
-        let skipped_disabled = parsed.get("auto_review_reviews_skipped_disabled_total").copied().unwrap_or(0);
+        let skipped_same = parsed
+            .get("auto_review_reviews_skipped_same_sha_total")
+            .copied()
+            .unwrap_or(0);
+        let skipped_trivial = parsed
+            .get("auto_review_reviews_skipped_trivial_total")
+            .copied()
+            .unwrap_or(0);
+        let skipped_disabled = parsed
+            .get("auto_review_reviews_skipped_disabled_total")
+            .copied()
+            .unwrap_or(0);
         let skipped_total = skipped_same + skipped_trivial + skipped_disabled;
-        let completed = parsed.get("auto_review_reviews_completed_count").copied().unwrap_or(0);
+        let completed = parsed
+            .get("auto_review_reviews_completed_count")
+            .copied()
+            .unwrap_or(0);
         let success_rate = if completed > 0 {
             Some(succeeded as f64 / completed as f64)
         } else {
@@ -538,15 +554,30 @@ impl StatusSummary {
             history: info["history"].as_str().unwrap_or("unknown").to_string(),
             poller_enabled: info["poller_enabled"].as_bool().unwrap_or(false),
             readiness_enabled: info["readiness_enabled"].as_bool().unwrap_or(false),
-            jobs_dispatched_total: parsed.get("auto_review_jobs_dispatched_total").copied().unwrap_or(0),
+            jobs_dispatched_total: parsed
+                .get("auto_review_jobs_dispatched_total")
+                .copied()
+                .unwrap_or(0),
             reviews_succeeded_total: succeeded,
             reviews_failed_total: failed_total,
             reviews_completed_count: completed,
             reviews_skipped_total: skipped_total,
-            webhook_signature_failures_total: parsed.get("auto_review_webhook_signature_failures_total").copied().unwrap_or(0),
-            webhook_payload_failures_total: parsed.get("auto_review_webhook_payload_failures_total").copied().unwrap_or(0),
-            webhook_rate_limited_total: parsed.get("auto_review_webhook_rate_limited_total").copied().unwrap_or(0),
-            poll_cycles_total: parsed.get("auto_review_poll_cycles_total").copied().unwrap_or(0),
+            webhook_signature_failures_total: parsed
+                .get("auto_review_webhook_signature_failures_total")
+                .copied()
+                .unwrap_or(0),
+            webhook_payload_failures_total: parsed
+                .get("auto_review_webhook_payload_failures_total")
+                .copied()
+                .unwrap_or(0),
+            webhook_rate_limited_total: parsed
+                .get("auto_review_webhook_rate_limited_total")
+                .copied()
+                .unwrap_or(0),
+            poll_cycles_total: parsed
+                .get("auto_review_poll_cycles_total")
+                .copied()
+                .unwrap_or(0),
             success_rate,
         }
     }
@@ -567,7 +598,11 @@ impl StatusSummary {
         println!("  history          {}", self.history);
         println!(
             "  poller           {}",
-            if self.poller_enabled { "running" } else { "disabled" }
+            if self.poller_enabled {
+                "running"
+            } else {
+                "disabled"
+            }
         );
         println!(
             "  readiness probe  {}",
@@ -593,14 +628,8 @@ impl StatusSummary {
             "  signature fails  {}",
             self.webhook_signature_failures_total
         );
-        println!(
-            "  payload fails    {}",
-            self.webhook_payload_failures_total
-        );
-        println!(
-            "  rate-limited     {}",
-            self.webhook_rate_limited_total
-        );
+        println!("  payload fails    {}", self.webhook_payload_failures_total);
+        println!("  rate-limited     {}", self.webhook_rate_limited_total);
         println!();
         println!("Poller:");
         println!("  cycles total     {}", self.poll_cycles_total);
@@ -776,10 +805,7 @@ async fn probe_forgejo(
     Ok(version)
 }
 
-async fn probe_forgejo_anonymous(
-    base_url: &str,
-    timeout: std::time::Duration,
-) -> Result<String> {
+async fn probe_forgejo_anonymous(base_url: &str, timeout: std::time::Duration) -> Result<String> {
     let url = format!("{}/api/v1/version", base_url.trim_end_matches('/'));
     let http = reqwest::Client::builder()
         .timeout(timeout)
@@ -927,17 +953,10 @@ impl DoctorReport {
         });
     }
     fn has_failures(&self) -> bool {
-        self.results
-            .iter()
-            .any(|r| r.status == CheckStatus::Fail)
+        self.results.iter().any(|r| r.status == CheckStatus::Fail)
     }
     fn print(&self) {
-        let widest = self
-            .results
-            .iter()
-            .map(|r| r.name.len())
-            .max()
-            .unwrap_or(0);
+        let widest = self.results.iter().map(|r| r.name.len()).max().unwrap_or(0);
         for r in &self.results {
             println!(
                 "  [{}] {:width$}  {}",
@@ -1390,7 +1409,9 @@ mod tests {
             webhook_secret: Some("aaaaaaaaaaaaaaaaaaaa".into()),
             timeout_secs: 5,
         };
-        doctor(args).await.expect("weak secret should warn, not fail");
+        doctor(args)
+            .await
+            .expect("weak secret should warn, not fail");
     }
 
     #[test]
@@ -1579,12 +1600,7 @@ mod tests {
         {
             let store = SqliteLearningsStore::open(&path).await.unwrap();
             store
-                .add(
-                    "x".into(),
-                    LearningSource::Chat,
-                    vec![1.0; 3],
-                    100,
-                )
+                .add("x".into(), LearningSource::Chat, vec![1.0; 3], 100)
                 .await
                 .unwrap();
         }
@@ -1890,9 +1906,7 @@ auto_review_reviews_completed_count 10
             poller_enabled: true,
             readiness_enabled: true,
         });
-        let app = build_router(
-            AppState::new("s", Arc::new(NoOpDispatcher)).with_info(info),
-        );
+        let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)).with_info(info));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
         tokio::spawn(async move {
@@ -1952,7 +1966,9 @@ auto_review_reviews_completed_count 10
             event: "ping".into(),
             timeout_secs: 5,
         };
-        let err = test_webhook(args).await.expect_err("wrong secret should fail");
+        let err = test_webhook(args)
+            .await
+            .expect_err("wrong secret should fail");
         assert!(err.to_string().contains("401") || err.to_string().contains("WEBHOOK_SECRET"));
     }
 
@@ -2089,11 +2105,7 @@ auto_review_reviews_completed_count 10
     fn validate_config_strict_rejects_unknown_top_level_keys() {
         let dir = tempfile::tempdir().unwrap();
         // Typo: `enabld` instead of `enabled`.
-        std::fs::write(
-            dir.path().join(".auto_review.yaml"),
-            "enabld: true\n",
-        )
-        .unwrap();
+        std::fs::write(dir.path().join(".auto_review.yaml"), "enabld: true\n").unwrap();
         // Permissive mode (default): silently parses, returns Ok.
         let args = ValidateConfigArgs {
             paths: vec![dir.path().to_path_buf()],

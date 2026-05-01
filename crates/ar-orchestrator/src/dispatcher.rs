@@ -50,9 +50,7 @@ pub enum ReviewObservation {
     /// reviewed (and not forced), all-trivial files, or
     /// `enabled: false`. Distinguished from Failed because operators
     /// shouldn't alert on these.
-    Skipped {
-        reason: &'static str,
-    },
+    Skipped { reason: &'static str },
     /// The dispatch had to wait on the concurrency-cap semaphore
     /// before the review could begin. Counts how often the cap is
     /// engaging — sustained increases mean
@@ -372,9 +370,7 @@ pub async fn run_review_job(
                     sha = %job.head_sha,
                     "no new commits since last review; skipping"
                 );
-                observe(ReviewObservation::Skipped {
-                    reason: "same_sha",
-                });
+                observe(ReviewObservation::Skipped { reason: "same_sha" });
                 return;
             }
         } else if job.force {
@@ -476,34 +472,45 @@ pub async fn run_review_job(
         review_mode,
         workspace,
     ) = match lint_outcome {
-            Ok(LintPhaseOutput {
-                skipped_by_config: true,
-                ..
-            }) => {
-                tracing::info!(
-                    repo = format!("{}/{}", job.owner, job.repo),
-                    pr = job.pr_number,
-                    "skipping review: disabled by .auto_review.yaml"
-                );
-                let _ = forgejo
-                    .post_commit_status(
-                        &job.owner,
-                        &job.repo,
-                        &job.head_sha,
-                        &CommitStatus {
-                            state: CommitStatusState::Success,
-                            target_url: String::new(),
-                            description: "auto_review: disabled by repo config".into(),
-                            context: STATUS_CONTEXT.into(),
-                        },
-                    )
-                    .await;
-                observe(ReviewObservation::Skipped {
-                    reason: "disabled_by_config",
-                });
-                return;
-            }
-            Ok(LintPhaseOutput {
+        Ok(LintPhaseOutput {
+            skipped_by_config: true,
+            ..
+        }) => {
+            tracing::info!(
+                repo = format!("{}/{}", job.owner, job.repo),
+                pr = job.pr_number,
+                "skipping review: disabled by .auto_review.yaml"
+            );
+            let _ = forgejo
+                .post_commit_status(
+                    &job.owner,
+                    &job.repo,
+                    &job.head_sha,
+                    &CommitStatus {
+                        state: CommitStatusState::Success,
+                        target_url: String::new(),
+                        description: "auto_review: disabled by repo config".into(),
+                        context: STATUS_CONTEXT.into(),
+                    },
+                )
+                .await;
+            observe(ReviewObservation::Skipped {
+                reason: "disabled_by_config",
+            });
+            return;
+        }
+        Ok(LintPhaseOutput {
+            findings,
+            ignored_paths,
+            guidelines,
+            repo_context,
+            pre_merge_checks,
+            review_mode,
+            workspace,
+            ..
+        }) => {
+            tracing::debug!(count = findings.len(), "linter findings collected");
+            (
                 findings,
                 ignored_paths,
                 guidelines,
@@ -511,32 +518,21 @@ pub async fn run_review_job(
                 pre_merge_checks,
                 review_mode,
                 workspace,
-                ..
-            }) => {
-                tracing::debug!(count = findings.len(), "linter findings collected");
-                (
-                    findings,
-                    ignored_paths,
-                    guidelines,
-                    repo_context,
-                    pre_merge_checks,
-                    review_mode,
-                    workspace,
-                )
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "lint phase failed; continuing without findings");
-                (
-                    Vec::new(),
-                    GlobSet::empty(),
-                    String::new(),
-                    String::new(),
-                    Vec::new(),
-                    ReviewMode::Full,
-                    None,
-                )
-            }
-        };
+            )
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "lint phase failed; continuing without findings");
+            (
+                Vec::new(),
+                GlobSet::empty(),
+                String::new(),
+                String::new(),
+                Vec::new(),
+                ReviewMode::Full,
+                None,
+            )
+        }
+    };
 
     // The agentic verifier needs the cloned workspace to inspect.
     // Operators opt in by setting AR_AGENTIC_VERIFIER=1; without it,
@@ -931,10 +927,7 @@ mod tests {
             .with_sandbox(Arc::new(DirectSandbox::new()))
             .with_concurrency_limit(0);
         // Available permits should be 1, not 0 (clamped).
-        let sem = dispatcher
-            .concurrency_limit
-            .as_ref()
-            .expect("limit set");
+        let sem = dispatcher.concurrency_limit.as_ref().expect("limit set");
         assert_eq!(sem.available_permits(), 1);
     }
 
@@ -962,10 +955,7 @@ mod tests {
         let dispatcher = SpawningDispatcher::new(forgejo, llm, "http://x", "tok")
             .with_sandbox(Arc::new(DirectSandbox::new()))
             .with_concurrency_limit(2);
-        let sem = dispatcher
-            .concurrency_limit
-            .as_ref()
-            .expect("limit set");
+        let sem = dispatcher.concurrency_limit.as_ref().expect("limit set");
         // Initially 2 permits available.
         assert_eq!(sem.available_permits(), 2);
 
@@ -994,7 +984,10 @@ mod tests {
 
     #[test]
     fn review_summary_zero_findings_message() {
-        assert_eq!(review_summary(&outcome(0, 0, 0)), "auto_review: no findings");
+        assert_eq!(
+            review_summary(&outcome(0, 0, 0)),
+            "auto_review: no findings"
+        );
     }
 
     #[test]
@@ -1006,10 +999,7 @@ mod tests {
 
     #[test]
     fn review_summary_pluralises_above_one() {
-        assert_eq!(
-            review_summary(&outcome(0, 3, 0)),
-            "auto_review: 3 warnings"
-        );
+        assert_eq!(review_summary(&outcome(0, 3, 0)), "auto_review: 3 warnings");
     }
 
     #[test]

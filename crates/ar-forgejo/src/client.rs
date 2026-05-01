@@ -773,7 +773,10 @@ mod tests {
         let hooks = client.list_webhooks("o", "r").await.expect("ok");
         assert_eq!(hooks.len(), 2);
         assert_eq!(hooks[0].id, 7);
-        assert_eq!(hooks[0].url, "https://reviewer.example.com/webhooks/forgejo");
+        assert_eq!(
+            hooks[0].url,
+            "https://reviewer.example.com/webhooks/forgejo"
+        );
         assert!(hooks[0].active);
         assert_eq!(hooks[0].events, vec!["pull_request", "issue_comment"]);
         assert_eq!(hooks[1].id, 12);

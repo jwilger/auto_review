@@ -11,12 +11,10 @@
 //! `Ok(Vec::new())`. Custom checks are advisory and best-effort —
 //! the review still posts.
 
-use ar_llm::{
-    CompleteRequest, ModelTier, ResponseFormat, Role, Router as LlmRouter,
-};
+use ar_llm::{CompleteRequest, ModelTier, ResponseFormat, Role, Router as LlmRouter};
 use ar_prompts::{
-    pre_merge_custom_schema, pre_merge_custom_system_prompt,
-    validate_pre_merge_custom_output, PreMergeCustomStatus,
+    pre_merge_custom_schema, pre_merge_custom_system_prompt, validate_pre_merge_custom_output,
+    PreMergeCustomStatus,
 };
 
 #[derive(Debug, Clone)]
@@ -126,24 +124,17 @@ mod tests {
             }
         }
         fn last_user_prompt(&self) -> Option<String> {
-            self.seen
-                .lock()
-                .unwrap()
-                .first()
-                .and_then(|req| {
-                    req.messages
-                        .iter()
-                        .find(|m| matches!(m.role, Role::User))
-                        .map(|m| m.content.clone())
-                })
+            self.seen.lock().unwrap().first().and_then(|req| {
+                req.messages
+                    .iter()
+                    .find(|m| matches!(m.role, Role::User))
+                    .map(|m| m.content.clone())
+            })
         }
     }
     #[async_trait]
     impl LlmProvider for CannedProvider {
-        async fn complete(
-            &self,
-            req: CompleteRequest,
-        ) -> Result<CompleteResponse, LlmError> {
+        async fn complete(&self, req: CompleteRequest) -> Result<CompleteResponse, LlmError> {
             self.seen.lock().unwrap().push(req);
             let next = self
                 .responses
@@ -174,12 +165,8 @@ mod tests {
     #[tokio::test]
     async fn no_cheap_tier_returns_empty_results() {
         let llm = LlmRouter::new();
-        let out = evaluate_custom_checks(
-            &llm,
-            &["always use Result".to_string()],
-            "+let x = 1;\n",
-        )
-        .await;
+        let out =
+            evaluate_custom_checks(&llm, &["always use Result".to_string()], "+let x = 1;\n").await;
         assert!(out.is_empty());
     }
 
@@ -212,7 +199,9 @@ mod tests {
 
     #[tokio::test]
     async fn schema_violation_returns_empty_results() {
-        let provider = Arc::new(CannedProvider::new(vec![r#"{"checks":[{"status":"maybe"}]}"#]));
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{"checks":[{"status":"maybe"}]}"#,
+        ]));
         let llm = router_with(provider);
         let checks = vec!["x".to_string()];
         let out = evaluate_custom_checks(&llm, &checks, "diff").await;

@@ -22,9 +22,7 @@ pub fn build_linter_only_output(findings: &[Finding]) -> ReviewOutput {
     let summary = match findings.len() {
         0 => "auto_review (linter-only mode): no findings.".to_string(),
         1 => "auto_review (linter-only mode): 1 finding from the bundled linters.".to_string(),
-        n => format!(
-            "auto_review (linter-only mode): {n} findings from the bundled linters."
-        ),
+        n => format!("auto_review (linter-only mode): {n} findings from the bundled linters."),
     };
     let review_findings = findings.iter().map(finding_to_review_finding).collect();
     ReviewOutput {

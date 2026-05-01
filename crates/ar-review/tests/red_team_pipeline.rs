@@ -80,8 +80,7 @@ fn t9_review_json_with_unexpected_fields_is_rejected() {
         "findings": [],
         "auto_merge": true
     }"#;
-    let err =
-        validate_review_output(raw).expect_err("unknown field must be rejected by schema");
+    let err = validate_review_output(raw).expect_err("unknown field must be rejected by schema");
     let msg = format!("{err}");
     assert!(
         msg.to_lowercase().contains("auto_merge")

@@ -182,11 +182,10 @@ fn check_no_new_todos(diff: &str) -> CheckResult {
 fn contains_todo_marker(line: &str) -> bool {
     for marker in ["TODO", "FIXME", "XXX", "HACK"] {
         if let Some(idx) = line.find(marker) {
-            let before_ok = idx == 0
-                || !line.as_bytes()[idx - 1].is_ascii_alphanumeric();
+            let before_ok = idx == 0 || !line.as_bytes()[idx - 1].is_ascii_alphanumeric();
             let after_idx = idx + marker.len();
-            let after_ok = after_idx >= line.len()
-                || !line.as_bytes()[after_idx].is_ascii_alphanumeric();
+            let after_ok =
+                after_idx >= line.len() || !line.as_bytes()[after_idx].is_ascii_alphanumeric();
             if before_ok && after_ok {
                 return true;
             }
@@ -295,10 +294,7 @@ mod tests {
     fn changelog_check_passes_when_changelog_in_diff() {
         let dir = tempdir().unwrap();
         std::fs::write(dir.path().join("CHANGELOG.md"), "# CHANGELOG").unwrap();
-        let files = vec![
-            cf("src/x.rs", "modified"),
-            cf("CHANGELOG.md", "modified"),
-        ];
+        let files = vec![cf("src/x.rs", "modified"), cf("CHANGELOG.md", "modified")];
         let r = check_changelog(&files, Some(dir.path()));
         assert_eq!(r.status, CheckStatus::Pass);
     }
@@ -340,10 +336,7 @@ mod tests {
 
     #[test]
     fn tests_check_recognises_python_naming_convention() {
-        let files = vec![
-            cf("src/foo.py", "modified"),
-            cf("test_foo.py", "modified"),
-        ];
+        let files = vec![cf("src/foo.py", "modified"), cf("test_foo.py", "modified")];
         assert_eq!(check_tests(&files).status, CheckStatus::Pass);
     }
 

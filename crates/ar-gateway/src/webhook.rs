@@ -75,7 +75,10 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
                 crate::dedup::CheckResult::Duplicate
             ) {
                 state.metrics.record_duplicate();
-                tracing::debug!(delivery_id = id, "duplicate delivery; replying OK without dispatch");
+                tracing::debug!(
+                    delivery_id = id,
+                    "duplicate delivery; replying OK without dispatch"
+                );
                 return (StatusCode::OK, "duplicate").into_response();
             }
         }
@@ -401,9 +404,7 @@ mod tests {
             poller_enabled: true,
             readiness_enabled: true,
         });
-        let app = build_router(
-            AppState::new("s", Arc::new(NoOpDispatcher)).with_info(info),
-        );
+        let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)).with_info(info));
         let req = Request::get("/info").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -455,9 +456,7 @@ mod tests {
 
         let forgejo = Arc::new(ForgejoClient::new(&server.uri(), "tok").unwrap());
         let probe = Arc::new(ReadinessProbe::with_ttl(forgejo, Duration::from_secs(60)));
-        let app = build_router(
-            AppState::new("s", Arc::new(NoOpDispatcher)).with_readiness(probe),
-        );
+        let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)).with_readiness(probe));
         let req = Request::get("/readyz").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
@@ -484,9 +483,7 @@ mod tests {
 
         let forgejo = Arc::new(ForgejoClient::new(&server.uri(), "tok").unwrap());
         let probe = Arc::new(ReadinessProbe::with_ttl(forgejo, Duration::from_secs(60)));
-        let app = build_router(
-            AppState::new("s", Arc::new(NoOpDispatcher)).with_readiness(probe),
-        );
+        let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)).with_readiness(probe));
         let req = Request::get("/readyz").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
@@ -547,8 +544,10 @@ mod tests {
         let body = pr_payload("opened", false);
         let sig = sign("s", &body);
         let recorder = RecordingDispatcher::new();
-        let app =
-            build_router(AppState::new("s", recorder.clone() as Arc<dyn JobDispatcher>));
+        let app = build_router(AppState::new(
+            "s",
+            recorder.clone() as Arc<dyn JobDispatcher>,
+        ));
         let req = Request::post("/webhooks/forgejo")
             .header(EVENT_HEADER, "pull_request")
             .header(SIG_HEADER, sig)
@@ -645,8 +644,7 @@ mod tests {
         // Burst=2: first two webhooks pass; the third is throttled.
         let bucket = Arc::new(TokenBucket::new(2, 1));
         let app = build_router(
-            AppState::new("s", Arc::new(NoOpDispatcher))
-                .with_webhook_rate_limit(bucket),
+            AppState::new("s", Arc::new(NoOpDispatcher)).with_webhook_rate_limit(bucket),
         );
         let body = pr_payload("opened", false);
         let sig = sign("s", &body);
@@ -687,8 +685,7 @@ mod tests {
         // throttle on next try.
         let bucket = Arc::new(TokenBucket::new(1, 1));
         let app = build_router(
-            AppState::new("s", Arc::new(NoOpDispatcher))
-                .with_webhook_rate_limit(bucket),
+            AppState::new("s", Arc::new(NoOpDispatcher)).with_webhook_rate_limit(bucket),
         );
         // First unsigned request: throttle passes (token spent),
         // HMAC verify fails → 401.
@@ -794,8 +791,7 @@ mod tests {
         // NOT be filtered (it's not the bot).
         let secret = "s";
         let app = build_router(
-            AppState::new(secret, Arc::new(NoOpDispatcher))
-                .with_bot_identity("pr-bot", "pr-bot"),
+            AppState::new(secret, Arc::new(NoOpDispatcher)).with_bot_identity("pr-bot", "pr-bot"),
         );
 
         // Bot's own comment: ignored (no chat command counter

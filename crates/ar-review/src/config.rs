@@ -315,10 +315,8 @@ disabled_tools:
         let cfg = RepoConfig::default();
         let value = serde_yaml::to_value(&cfg).unwrap();
         let map = value.as_mapping().unwrap();
-        let serialised: std::collections::BTreeSet<&str> = map
-            .iter()
-            .filter_map(|(k, _)| k.as_str())
-            .collect();
+        let serialised: std::collections::BTreeSet<&str> =
+            map.iter().filter_map(|(k, _)| k.as_str()).collect();
         let allowed: std::collections::BTreeSet<&str> = KNOWN_KEYS.iter().copied().collect();
         assert_eq!(
             serialised, allowed,

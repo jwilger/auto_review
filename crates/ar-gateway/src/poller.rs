@@ -460,10 +460,7 @@ mod tests {
 
         let out = metrics.render();
         // Two complete cycles ran.
-        assert!(
-            out.contains("auto_review_poll_cycles_total 2\n"),
-            "{out}"
-        );
+        assert!(out.contains("auto_review_poll_cycles_total 2\n"), "{out}");
         // The broken PR failed both cycles.
         assert!(
             out.contains("auto_review_poll_pr_failures_total 2\n"),

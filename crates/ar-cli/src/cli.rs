@@ -715,7 +715,10 @@ mod tests {
             "--match-url",
             "reviewer",
         ]);
-        assert!(both.is_err(), "--id and --match-url must be mutually exclusive");
+        assert!(
+            both.is_err(),
+            "--id and --match-url must be mutually exclusive"
+        );
     }
 
     #[test]
@@ -813,7 +816,10 @@ mod tests {
         .expect("parse");
         match cli.command {
             Command::ResetPr(a) => {
-                assert_eq!(a.history_db.to_string_lossy(), "/var/lib/auto_review/review_history.db");
+                assert_eq!(
+                    a.history_db.to_string_lossy(),
+                    "/var/lib/auto_review/review_history.db"
+                );
                 assert_eq!(a.owner, "alice");
                 assert_eq!(a.repo, "widgets");
                 assert_eq!(a.pr, 42);

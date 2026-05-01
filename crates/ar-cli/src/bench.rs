@@ -218,17 +218,11 @@ fn compare(baseline: &Aggregate, current: &Aggregate) -> Comparison {
         (Some(b), Some(c)) => Some(c - b),
         _ => None,
     };
-    let precision_delta = match (
-        baseline.label_score.as_ref(),
-        current.label_score.as_ref(),
-    ) {
+    let precision_delta = match (baseline.label_score.as_ref(), current.label_score.as_ref()) {
         (Some(b), Some(c)) => Some(c.precision - b.precision),
         _ => None,
     };
-    let recall_delta = match (
-        baseline.label_score.as_ref(),
-        current.label_score.as_ref(),
-    ) {
+    let recall_delta = match (baseline.label_score.as_ref(), current.label_score.as_ref()) {
         (Some(b), Some(c)) => Some(c.recall - b.recall),
         _ => None,
     };
@@ -236,10 +230,8 @@ fn compare(baseline: &Aggregate, current: &Aggregate) -> Comparison {
         success_rate_delta,
         precision_delta,
         recall_delta,
-        mean_latency_ms_delta: current.mean_latency_ms as i128
-            - baseline.mean_latency_ms as i128,
-        p99_latency_ms_delta: current.p99_latency_ms as i128
-            - baseline.p99_latency_ms as i128,
+        mean_latency_ms_delta: current.mean_latency_ms as i128 - baseline.mean_latency_ms as i128,
+        p99_latency_ms_delta: current.p99_latency_ms as i128 - baseline.p99_latency_ms as i128,
         total_findings_delta: current.total_findings_after_verify as i64
             - baseline.total_findings_after_verify as i64,
     }
@@ -764,11 +756,7 @@ mod tests {
                 "{}: labelled fixture has empty `expected` array",
                 path.display()
             );
-            assert!(
-                !fix.diff.is_empty(),
-                "{}: empty diff",
-                path.display()
-            );
+            assert!(!fix.diff.is_empty(), "{}: empty diff", path.display());
             // Every expected entry must reference a path that's in
             // the changed_files list (otherwise the model can never
             // possibly hit it through normal review).

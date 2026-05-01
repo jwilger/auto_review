@@ -159,7 +159,10 @@ mod tests {
         let err = validate_pre_merge_custom_output(json, 2).expect_err("err");
         assert!(matches!(
             err,
-            PreMergeCustomValidationError::LengthMismatch { expected: 2, got: 1 }
+            PreMergeCustomValidationError::LengthMismatch {
+                expected: 2,
+                got: 1
+            }
         ));
     }
 
