@@ -129,18 +129,30 @@ async fn main() -> Result<()> {
     let observer: Arc<dyn ar_orchestrator::ReviewObserver> =
         Arc::new(MetricsObserver::new(metrics.clone()));
 
-    let dispatcher = Arc::new(
-        SpawningDispatcher::new(
-            forgejo.clone(),
-            llm_router.clone(),
-            forgejo_base.clone(),
-            forgejo_token.clone(),
-        )
-        .with_history(history.clone())
-        .with_learnings(learnings.clone())
-        .with_sandbox(sandbox)
-        .with_observer(observer),
-    );
+    let mut dispatcher_builder = SpawningDispatcher::new(
+        forgejo.clone(),
+        llm_router.clone(),
+        forgejo_base.clone(),
+        forgejo_token.clone(),
+    )
+    .with_history(history.clone())
+    .with_learnings(learnings.clone())
+    .with_sandbox(sandbox)
+    .with_observer(observer);
+
+    // Optional concurrency cap on in-flight reviews. Without this,
+    // a burst of N PRs spawns N tmpdirs + N in-flight LLM calls.
+    // For high-traffic instances or expensive cloud LLMs the
+    // operator wants a cap; small deployments leave it unset.
+    if let Some(max) = env::var("AR_REVIEW_CONCURRENCY")
+        .ok()
+        .and_then(|s| s.parse::<usize>().ok())
+    {
+        dispatcher_builder = dispatcher_builder.with_concurrency_limit(max);
+        tracing::info!(max, "review concurrency cap enabled");
+    }
+
+    let dispatcher = Arc::new(dispatcher_builder);
 
     // Background poller for inline review-thread `@auto_review`
     // mentions. Forgejo doesn't fire pull_request_review_comment

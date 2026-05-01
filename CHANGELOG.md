@@ -1096,6 +1096,29 @@ default in-memory store to the SQLite-backed one.
   forget-learning behavioural (drop existing record,
   unknown-id errors clearly).
 
+#### Optional review concurrency cap
+
+- New `AR_REVIEW_CONCURRENCY=N` env var puts a global ceiling
+  on in-flight reviews. Without it (the default), a burst of
+  N PRs spawns N tmpdirs + N concurrent LLM calls. On
+  high-traffic instances or expensive cloud LLMs this can
+  blow through cost limits or exhaust workspace disk.
+- Implementation: `tokio::sync::Semaphore` inside the
+  `SpawningDispatcher`. Acquired at the top of the spawned
+  task, released when the review completes. Webhook handler
+  still acks 202 immediately — excess tasks queue on the
+  semaphore rather than getting dropped or failing.
+- New `SpawningDispatcher::with_concurrency_limit(max)`
+  builder. Defensive: clamps `max=0` to 1 so a typo doesn't
+  permanently lock out reviews.
+- 2 new tests pin behaviour: zero-clamp guard and the
+  permit-count-drops-as-expected for `cap=2` (uses
+  `available_permits()` rather than time-based assertions
+  to avoid flakiness on shared CI).
+- OPERATIONS.md §5.1.5 documents the tuning rule of thumb;
+  `deploy/systemd/auto_review.env.example` documents the
+  env var alongside other AR_* knobs.
+
 #### Verifier-dropped findings counter
 
 - New `auto_review_verifier_findings_dropped_total` counter

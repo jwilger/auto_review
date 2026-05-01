@@ -272,6 +272,25 @@ Tune the limits per-linter empirically — `golangci-lint` on a large
 Go monorepo will need more memory and a longer timeout than
 `shellcheck`.
 
+### 5.1.5 Cap concurrent in-flight reviews
+
+Without `AR_REVIEW_CONCURRENCY` set, a burst of N PRs spawns N
+tmpdirs + N in-flight LLM calls. On a small bot reviewing
+~tens of PRs/day this is fine. On high-traffic instances (a
+shared org reviewer with hundreds of PRs/day) or expensive
+cloud LLMs, the unbounded burst can blow through cost limits
+or exhaust workspace disk.
+
+```
+AR_REVIEW_CONCURRENCY=4
+```
+
+The webhook handler still acks immediately (returns 202). The
+excess spawned tasks wait on the semaphore — they don't get
+dropped, just queued. Pick a value matching your worker
+capacity (CPU cores × something; rule of thumb: start at the
+number of CPU cores, raise if LLM I/O dominates).
+
 ### 5.2 Long-running reviews
 
 The orchestrator has no global per-PR timeout; each phase has its
