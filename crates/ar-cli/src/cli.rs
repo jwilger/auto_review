@@ -260,6 +260,21 @@ pub struct BenchArgs {
     /// tracker.
     #[arg(long)]
     pub json: bool,
+
+    /// Path to a previous bench run's JSON aggregate (typically
+    /// from `auto_review bench --json > baseline.json`). When set,
+    /// the current run is compared against this baseline and the
+    /// deltas — precision, recall, success rate, mean/p99 latency,
+    /// total findings — are printed alongside the aggregate.
+    #[arg(long)]
+    pub baseline: Option<std::path::PathBuf>,
+
+    /// When set with `--baseline`, exit non-zero on a regression:
+    /// precision or recall drops by > 5 percentage points, or p99
+    /// latency increases by > 50%. Useful in CI to gate prompt /
+    /// model changes.
+    #[arg(long, requires = "baseline")]
+    pub fail_on_regression: bool,
 }
 
 #[derive(clap::Args, Debug)]

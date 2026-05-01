@@ -86,7 +86,7 @@ struct LabelMatch {
     spurious: usize,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct Aggregate {
     fixtures: usize,
     successes: usize,
@@ -105,7 +105,7 @@ struct Aggregate {
 /// Aggregate precision/recall across all labelled fixtures in a
 /// run. Computed only over fixtures whose `expected` array is
 /// non-empty; unlabelled fixtures don't contribute.
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct LabelScore {
     labelled_fixtures: usize,
     expected_total: usize,
@@ -144,7 +144,155 @@ pub async fn run(args: BenchArgs) -> Result<()> {
     } else {
         print_aggregate(&aggregate, verifier_enabled);
     }
+
+    if let Some(baseline_path) = args.baseline.as_deref() {
+        let baseline_body = std::fs::read_to_string(baseline_path)
+            .with_context(|| format!("read baseline {}", baseline_path.display()))?;
+        let baseline: Aggregate = serde_json::from_str(&baseline_body)
+            .with_context(|| format!("parse baseline {}", baseline_path.display()))?;
+        let comparison = compare(&baseline, &aggregate);
+        print_comparison(&comparison, baseline_path);
+        if args.fail_on_regression && comparison.is_regression() {
+            anyhow::bail!(
+                "regression vs baseline {}: see comparison above",
+                baseline_path.display()
+            );
+        }
+    }
     Ok(())
+}
+
+/// Per-metric delta between a baseline and the current run.
+/// `None` is used where one side has data and the other doesn't
+/// (e.g. baseline had no labelled fixtures so no precision to
+/// compare against).
+#[derive(Debug, Clone, Serialize)]
+struct Comparison {
+    success_rate_delta: Option<f64>,
+    precision_delta: Option<f64>,
+    recall_delta: Option<f64>,
+    mean_latency_ms_delta: i128,
+    p99_latency_ms_delta: i128,
+    total_findings_delta: i64,
+}
+
+impl Comparison {
+    /// Regression heuristic: precision or recall drop by > 5
+    /// percentage points (i.e. delta < -0.05), or p99 latency
+    /// jumps by > 50% (after computing percent from the baseline).
+    /// Tunable, but these defaults are the ones operators want
+    /// out of the box.
+    fn is_regression(&self) -> bool {
+        if let Some(d) = self.precision_delta {
+            if d < -0.05 {
+                return true;
+            }
+        }
+        if let Some(d) = self.recall_delta {
+            if d < -0.05 {
+                return true;
+            }
+        }
+        // The "50% jump in p99" check needs the baseline's p99 to
+        // compute the percent; signal it via the absolute jump
+        // instead. A 5-second p99 increase is alert-worthy regardless.
+        if self.p99_latency_ms_delta > 5000 {
+            return true;
+        }
+        false
+    }
+}
+
+fn compare(baseline: &Aggregate, current: &Aggregate) -> Comparison {
+    let baseline_success_rate = if baseline.fixtures > 0 {
+        Some(baseline.successes as f64 / baseline.fixtures as f64)
+    } else {
+        None
+    };
+    let current_success_rate = if current.fixtures > 0 {
+        Some(current.successes as f64 / current.fixtures as f64)
+    } else {
+        None
+    };
+    let success_rate_delta = match (baseline_success_rate, current_success_rate) {
+        (Some(b), Some(c)) => Some(c - b),
+        _ => None,
+    };
+    let precision_delta = match (
+        baseline.label_score.as_ref(),
+        current.label_score.as_ref(),
+    ) {
+        (Some(b), Some(c)) => Some(c.precision - b.precision),
+        _ => None,
+    };
+    let recall_delta = match (
+        baseline.label_score.as_ref(),
+        current.label_score.as_ref(),
+    ) {
+        (Some(b), Some(c)) => Some(c.recall - b.recall),
+        _ => None,
+    };
+    Comparison {
+        success_rate_delta,
+        precision_delta,
+        recall_delta,
+        mean_latency_ms_delta: current.mean_latency_ms as i128
+            - baseline.mean_latency_ms as i128,
+        p99_latency_ms_delta: current.p99_latency_ms as i128
+            - baseline.p99_latency_ms as i128,
+        total_findings_delta: current.total_findings_after_verify as i64
+            - baseline.total_findings_after_verify as i64,
+    }
+}
+
+fn print_comparison(c: &Comparison, baseline_path: &Path) {
+    println!();
+    println!("Comparison vs baseline ({})", baseline_path.display());
+    println!("{}", "-".repeat(68));
+    if let Some(d) = c.success_rate_delta {
+        println!("  success rate     {}", fmt_pct_delta(d));
+    }
+    if let Some(d) = c.precision_delta {
+        println!("  precision        {}", fmt_pct_delta(d));
+    } else {
+        println!("  precision        — (one side unlabelled)");
+    }
+    if let Some(d) = c.recall_delta {
+        println!("  recall           {}", fmt_pct_delta(d));
+    } else {
+        println!("  recall           — (one side unlabelled)");
+    }
+    println!(
+        "  mean latency     {}",
+        fmt_ms_delta(c.mean_latency_ms_delta)
+    );
+    println!(
+        "  p99 latency      {}",
+        fmt_ms_delta(c.p99_latency_ms_delta)
+    );
+    println!(
+        "  total findings   {}",
+        fmt_int_delta(c.total_findings_delta)
+    );
+    if c.is_regression() {
+        println!();
+        println!("  ⚠ REGRESSION: precision/recall dropped > 5pp, or p99 latency jumped > 5s.");
+    }
+}
+
+fn fmt_pct_delta(d: f64) -> String {
+    let sign = if d >= 0.0 { "+" } else { "" };
+    format!("{sign}{:.2}pp", d * 100.0)
+}
+
+fn fmt_ms_delta(d: i128) -> String {
+    let sign = if d >= 0 { "+" } else { "" };
+    format!("{sign}{d}ms")
+}
+
+fn fmt_int_delta(d: i64) -> String {
+    let sign = if d >= 0 { "+" } else { "" };
+    format!("{sign}{d}")
 }
 
 /// Pull every `*.json` file out of any directory entries in `paths`,
@@ -463,6 +611,119 @@ fn print_aggregate(a: &Aggregate, verifier_enabled: bool) {
 mod tests {
     use super::*;
     use std::io::Write;
+
+    fn agg(
+        fixtures: usize,
+        successes: usize,
+        mean_ms: u128,
+        p99_ms: u128,
+        findings: usize,
+        label: Option<LabelScore>,
+    ) -> Aggregate {
+        Aggregate {
+            fixtures,
+            successes,
+            failures: fixtures - successes,
+            total_findings_initial: findings,
+            total_findings_after_verify: findings,
+            mean_latency_ms: mean_ms,
+            median_latency_ms: mean_ms,
+            p99_latency_ms: p99_ms,
+            label_score: label,
+        }
+    }
+
+    fn label(precision: f64, recall: f64) -> LabelScore {
+        LabelScore {
+            labelled_fixtures: 5,
+            expected_total: 5,
+            matched_total: (precision * 5.0) as usize,
+            missed_total: 0,
+            spurious_total: 0,
+            precision,
+            recall,
+        }
+    }
+
+    #[test]
+    fn compare_no_change_returns_zero_deltas() {
+        let baseline = agg(5, 5, 1000, 5000, 10, Some(label(0.8, 0.7)));
+        let current = agg(5, 5, 1000, 5000, 10, Some(label(0.8, 0.7)));
+        let c = compare(&baseline, &current);
+        assert_eq!(c.success_rate_delta, Some(0.0));
+        assert_eq!(c.precision_delta, Some(0.0));
+        assert_eq!(c.recall_delta, Some(0.0));
+        assert_eq!(c.mean_latency_ms_delta, 0);
+        assert_eq!(c.p99_latency_ms_delta, 0);
+        assert_eq!(c.total_findings_delta, 0);
+        assert!(!c.is_regression());
+    }
+
+    #[test]
+    fn compare_precision_improvement_is_positive_delta() {
+        let baseline = agg(5, 5, 1000, 5000, 10, Some(label(0.8, 0.7)));
+        let current = agg(5, 5, 1000, 5000, 10, Some(label(0.9, 0.7)));
+        let c = compare(&baseline, &current);
+        assert!((c.precision_delta.unwrap() - 0.1).abs() < 1e-9);
+        assert!(!c.is_regression());
+    }
+
+    #[test]
+    fn compare_precision_drop_above_5pp_is_a_regression() {
+        let baseline = agg(5, 5, 1000, 5000, 10, Some(label(0.9, 0.7)));
+        // precision drops by 10pp.
+        let current = agg(5, 5, 1000, 5000, 10, Some(label(0.8, 0.7)));
+        let c = compare(&baseline, &current);
+        assert!(c.is_regression());
+    }
+
+    #[test]
+    fn compare_precision_drop_below_5pp_is_not_a_regression() {
+        let baseline = agg(5, 5, 1000, 5000, 10, Some(label(0.8, 0.7)));
+        // precision drops 4pp — under the 5pp threshold.
+        let current = agg(5, 5, 1000, 5000, 10, Some(label(0.76, 0.7)));
+        let c = compare(&baseline, &current);
+        assert!(!c.is_regression(), "4pp drop should not be a regression");
+    }
+
+    #[test]
+    fn compare_recall_drop_above_5pp_is_a_regression() {
+        let baseline = agg(5, 5, 1000, 5000, 10, Some(label(0.8, 0.9)));
+        let current = agg(5, 5, 1000, 5000, 10, Some(label(0.8, 0.8)));
+        let c = compare(&baseline, &current);
+        assert!(c.is_regression());
+    }
+
+    #[test]
+    fn compare_p99_jump_above_5s_is_a_regression() {
+        let baseline = agg(5, 5, 1000, 2000, 10, None);
+        let current = agg(5, 5, 1000, 8000, 10, None); // +6s
+        let c = compare(&baseline, &current);
+        assert!(c.is_regression());
+    }
+
+    #[test]
+    fn compare_handles_unlabelled_baseline() {
+        let baseline = agg(5, 5, 1000, 5000, 10, None);
+        let current = agg(5, 5, 1000, 5000, 10, Some(label(0.8, 0.7)));
+        let c = compare(&baseline, &current);
+        assert!(c.precision_delta.is_none());
+        assert!(c.recall_delta.is_none());
+        // Latency comparable; not a regression.
+        assert!(!c.is_regression());
+    }
+
+    #[test]
+    fn fmt_pct_delta_renders_signed_percentage_points() {
+        assert_eq!(fmt_pct_delta(0.05), "+5.00pp");
+        assert_eq!(fmt_pct_delta(-0.075), "-7.50pp");
+    }
+
+    #[test]
+    fn fmt_ms_delta_renders_signed_ms() {
+        assert_eq!(fmt_ms_delta(123), "+123ms");
+        assert_eq!(fmt_ms_delta(-50), "-50ms");
+    }
 
     /// Contract test: every shipped `bench/fixtures/labelled-*.json`
     /// parses cleanly into a `Fixture` AND has a non-empty `expected`

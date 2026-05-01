@@ -43,6 +43,37 @@ auto_review bench bench/fixtures \
 `--json` switches the aggregate output to a single line of JSON,
 suitable for piping into a regression dashboard.
 
+## Baseline comparison
+
+`--baseline <FILE>` compares the current run against a stored
+baseline (typically a previous `--json` run) and prints the
+deltas alongside the regular aggregate:
+
+```sh
+# Capture today's numbers as the baseline.
+auto_review bench bench/fixtures \
+    --llm-base-url http://localhost:11434 \
+    --llm-model qwen2.5-coder:32b \
+    --json > baseline.json
+
+# Tomorrow, after a prompt change, compare:
+auto_review bench bench/fixtures \
+    --llm-base-url http://localhost:11434 \
+    --llm-model qwen2.5-coder:32b \
+    --baseline baseline.json
+```
+
+Output deltas: success rate, precision, recall, mean latency,
+p99 latency, total findings — each rendered with sign so a
+regression is visually obvious.
+
+`--fail-on-regression` (requires `--baseline`) makes the
+command exit non-zero on a regression. Heuristic: precision
+or recall drop > 5 percentage points, OR p99 latency jumps
+> 5 seconds. Tunable in source if your traffic profile
+needs different thresholds; the defaults are conservative
+enough to drop into CI on prompt-change PRs.
+
 ## Fixture format
 
 One JSON file per PR fixture. Required fields:

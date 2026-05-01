@@ -516,6 +516,30 @@ default in-memory store to the SQLite-backed one.
   cloned `PreparedWorkspace` alive past `review_pull_request` so
   the agentic loop can `read_file` and `search` against it.
 
+#### Bench baseline comparison (M5)
+
+- `auto_review bench --baseline <FILE>` compares the current
+  run against a previous `--json` aggregate. Prints deltas
+  for success rate, precision, recall, mean and p99
+  latency, and total findings — each with explicit sign so
+  a regression is visually obvious. Cells where one side
+  has data and the other doesn't (e.g. baseline had no
+  labelled fixtures) render as `— (one side unlabelled)`
+  rather than misleading 0-deltas.
+- `--fail-on-regression` (requires `--baseline`) makes the
+  command exit non-zero on a regression. Heuristic:
+  precision or recall drop > 5 percentage points, OR p99
+  latency jumps > 5 seconds. Designed to drop into CI on
+  prompt-change PRs.
+- `Aggregate` and `LabelScore` now derive `Deserialize` so
+  the same JSON shape that `--json` emits round-trips
+  through the loader.
+- 8 unit tests cover the comparison logic: no-change,
+  improvement, precision drop above and below the 5pp
+  threshold, recall drop, p99 jump, unlabelled-baseline
+  graceful degrade, and the formatters (signed-pp, signed-
+  ms).
+
 #### Expanded labelled bench corpus (M5)
 
 - Four new labelled fixtures ship under `bench/fixtures/`:
