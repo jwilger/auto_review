@@ -246,6 +246,11 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
             }
         }
     };
+    // Snapshot the post-verifier count BEFORE the severity-floor /
+    // path-guard passes. `verifier_dropped` reports specifically
+    // what the verifier removed, not what later filters did, or the
+    // metric drifts every time we add a new post-verifier filter.
+    let post_verify_count = output.findings.len();
     // Apply the severity floor again for the LinterOnly path
     // (which doesn't run a verifier, so the pre-verifier
     // application above wouldn't run). Idempotent for Full mode:
@@ -297,7 +302,7 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
             ReviewSeverity::Note => notes += 1,
         }
     }
-    let verifier_dropped = pre_verify_count.saturating_sub(output.findings.len());
+    let verifier_dropped = pre_verify_count.saturating_sub(post_verify_count);
     Ok(ReviewOutcome {
         findings_count,
         review_id: created.id,
