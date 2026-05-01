@@ -471,6 +471,24 @@ impl ChatHandler<'_> {
     }
 
     async fn handle_remember(&self, ctx: ChatContext<'_>, text: &str) -> Result<(), ChatError> {
+        // Cap remembered text. Operators get a clear error rather
+        // than silently embedding 10MB of pasted log output and
+        // bloating future review prompts. 4 KiB comfortably holds
+        // any intended guidance ("prefer Result over panic", "no
+        // raw SQL", a paragraph of style notes); anything past
+        // that is almost certainly a paste mistake.
+        const REMEMBER_MAX_BYTES: usize = 4_096;
+        if text.len() > REMEMBER_MAX_BYTES {
+            let reply = format!(
+                "That's {} bytes — capped at {} bytes per learning. \
+                 Re-issue with a shorter snippet or break it into multiple \
+                 `remember` calls.",
+                text.len(),
+                REMEMBER_MAX_BYTES
+            );
+            self.post(ctx, &reply).await?;
+            return Ok(());
+        }
         let embedding = self.embed(text).await?;
         let now = current_unix_seconds()?;
         let record = self
@@ -956,6 +974,39 @@ mod tests {
         assert_eq!(stored[0].text, "prefer Result");
         assert_eq!(stored[0].source, LearningSource::Chat);
         assert_eq!(stored[0].embedding, vec![0.5, 0.5]);
+    }
+
+    #[tokio::test]
+    async fn remember_rejects_oversized_text_without_storing() {
+        // Defence: a user pasting a 10MB log into `@bot remember`
+        // shouldn't silently embed and persist it (cost + storage
+        // bloat for the lifetime of the deployment). Cap with a
+        // visible error so the user knows to shorten.
+        let (server, forgejo, learnings, llm) = setup().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(serde_json::json!({})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &llm,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        // 5 KiB > the 4 KiB cap.
+        let huge_text = "x".repeat(5_000);
+        handler
+            .handle(ctx(), ChatCommand::Remember(huge_text))
+            .await
+            .expect("ok");
+        // Nothing should have been stored.
+        let stored = learnings.list().await.expect("list");
+        assert!(
+            stored.is_empty(),
+            "oversized remember text must not have been stored; got {stored:?}"
+        );
     }
 
     #[tokio::test]
