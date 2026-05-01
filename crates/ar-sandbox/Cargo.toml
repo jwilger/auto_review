@@ -5,10 +5,15 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 rust-version.workspace = true
-description = "OCI sandbox launcher: youki + seccomp + netns + resource limits"
+description = "Sandbox launcher: podman/youki with no-net, read-only, resource limits"
 
 [dependencies]
 anyhow.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
 serde.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

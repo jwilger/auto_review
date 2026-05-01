@@ -248,6 +248,8 @@ dependencies = [
  "anyhow",
  "async-trait",
  "serde",
+ "thiserror",
+ "tokio",
  "tracing",
 ]
 
