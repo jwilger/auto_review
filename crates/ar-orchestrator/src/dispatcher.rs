@@ -1,8 +1,8 @@
 use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullRequestEvent};
 use ar_llm::Router as LlmRouter;
 use ar_review::{
-    lint_workspace, pr_is_skippable, prepare_workspace, review_pull_request, ReviewError,
-    WorkspaceError,
+    lint_workspace_with, load_repo_config, pr_is_skippable, prepare_workspace, review_pull_request,
+    ReviewError, WorkspaceError,
 };
 use ar_tools::Finding;
 use async_trait::async_trait;
@@ -161,8 +161,33 @@ pub async fn run_review_job(
         }
     }
 
-    let findings = match prepare_and_lint(forgejo, forgejo_base, forgejo_token, &job).await {
-        Ok(findings) => {
+    let lint_outcome = prepare_and_lint(forgejo, forgejo_base, forgejo_token, &job).await;
+    let findings = match lint_outcome {
+        Ok(LintPhaseOutput {
+            skipped_by_config: true,
+            ..
+        }) => {
+            tracing::info!(
+                repo = format!("{}/{}", job.owner, job.repo),
+                pr = job.pr_number,
+                "skipping review: disabled by .auto_review.yaml"
+            );
+            let _ = forgejo
+                .post_commit_status(
+                    &job.owner,
+                    &job.repo,
+                    &job.head_sha,
+                    &CommitStatus {
+                        state: CommitStatusState::Success,
+                        target_url: String::new(),
+                        description: "auto_review: disabled by repo config".into(),
+                        context: STATUS_CONTEXT.into(),
+                    },
+                )
+                .await;
+            return;
+        }
+        Ok(LintPhaseOutput { findings, .. }) => {
             tracing::debug!(count = findings.len(), "linter findings collected");
             findings
         }
@@ -231,17 +256,33 @@ enum LintPhaseError {
     Workspace(#[from] WorkspaceError),
 }
 
+struct LintPhaseOutput {
+    findings: Vec<Finding>,
+    skipped_by_config: bool,
+}
+
 async fn prepare_and_lint(
     forgejo: &ForgejoClient,
     base: &str,
     token: &str,
     job: &ReviewJob,
-) -> Result<Vec<Finding>, LintPhaseError> {
+) -> Result<LintPhaseOutput, LintPhaseError> {
     let files = forgejo
         .list_changed_files(&job.owner, &job.repo, job.pr_number)
         .await?;
     let workspace = prepare_workspace(base, token, &job.owner, &job.repo, &job.head_sha).await?;
-    Ok(lint_workspace(workspace.path(), &files).await)
+    let config = load_repo_config(workspace.path());
+    if !config.enabled {
+        return Ok(LintPhaseOutput {
+            findings: Vec::new(),
+            skipped_by_config: true,
+        });
+    }
+    let findings = lint_workspace_with(workspace.path(), &files, &config.disabled_tools).await;
+    Ok(LintPhaseOutput {
+        findings,
+        skipped_by_config: false,
+    })
 }
 
 fn review_summary(findings_count: usize) -> String {

@@ -17,7 +17,20 @@ use std::path::Path;
 /// `ar_tools::run_all` for parallel execution; missing binaries and
 /// individual runner failures are absorbed (they don't fail the review).
 pub async fn lint_workspace(repo_dir: &Path, files: &[ChangedFile]) -> Vec<Finding> {
-    let runners = select_runners(files);
+    lint_workspace_with(repo_dir, files, &[]).await
+}
+
+/// Like [`lint_workspace`] but skips runners whose `name()` matches any
+/// entry in `disabled_tools` (typically loaded from `.auto_review.yaml`).
+pub async fn lint_workspace_with(
+    repo_dir: &Path,
+    files: &[ChangedFile],
+    disabled_tools: &[String],
+) -> Vec<Finding> {
+    let mut runners = select_runners(files);
+    if !disabled_tools.is_empty() {
+        runners.retain(|r| !disabled_tools.iter().any(|d| d == r.name()));
+    }
     if runners.is_empty() {
         return Vec::new();
     }
@@ -231,6 +244,19 @@ mod tests {
     fn removed_files_are_ignored() {
         let files = vec![cf("a.py", "removed"), cf("b.sh", "removed")];
         assert!(select_runners(&files).is_empty());
+    }
+
+    #[tokio::test]
+    async fn lint_workspace_with_disables_named_tools() {
+        let dir = tempfile::tempdir().unwrap();
+        // Files routed to multiple linters but all linters disabled.
+        let files = vec![cf("a.py", "modified"), cf("b.sh", "modified")];
+        let disabled: Vec<String> = vec!["gitleaks", "ruff", "shellcheck"]
+            .into_iter()
+            .map(String::from)
+            .collect();
+        let findings = lint_workspace_with(dir.path(), &files, &disabled).await;
+        assert!(findings.is_empty());
     }
 
     #[tokio::test]
