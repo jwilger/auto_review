@@ -44,7 +44,7 @@ since the start of the project.
   `run_review_job` posts pending → final commit statuses around the
   triage → clone → lint → review → post sequence.
 
-#### Linters (21 of CodeRabbit's ~45 set)
+#### Linters (22 of CodeRabbit's ~45 set)
 
 | Tool | Languages / files | Source-tool name |
 |---|---|---|
@@ -69,6 +69,7 @@ since the start of the project.
 | `dotenv-linter` | `.env` / `.env.*` files | `dotenv-linter` |
 | `actionlint` | `.github/workflows/`, `.forgejo/workflows/`, `.gitea/workflows/` | `actionlint` |
 | `yamllint` | `*.yml` / `*.yaml` (workflow + general) | `yamllint` |
+| `kubeconform` | Kubernetes manifests (validates against k8s JSON schema) | `kubeconform` |
 
 `ar-tools::run_all` runs them in parallel; missing binaries are silently
 skipped so a missing linter doesn't break the review.
@@ -267,8 +268,8 @@ default in-memory store to the SQLite-backed one.
   paths cover correctness; LanceDB is the scale lever).
 - youki-based `Sandbox` impl as a lighter alternative to the
   podman shell-out.
-- Remaining ~24 linters from CodeRabbit's set
-  (languagetool, terragrunt, detekt, swiftlint, kubeval, …).
+- Remaining ~23 linters from CodeRabbit's set
+  (languagetool, terragrunt, detekt, swiftlint, prettier-check, …).
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
   wiremock + canned LLM providers.

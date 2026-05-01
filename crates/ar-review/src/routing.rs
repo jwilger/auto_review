@@ -12,6 +12,7 @@ use ar_tools::eslint::EslintRunner;
 use ar_tools::gitleaks::GitleaksRunner;
 use ar_tools::golangci_lint::GolangciLintRunner;
 use ar_tools::hadolint::HadolintRunner;
+use ar_tools::kubeconform::KubeconformRunner;
 use ar_tools::markdownlint::MarkdownLintRunner;
 use ar_tools::osv_scanner::OsvScannerRunner;
 use ar_tools::oxlint::OxlintRunner;
@@ -248,7 +249,14 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         .map(|f| f.filename.clone())
         .collect();
     if !yaml_files.is_empty() {
-        runners.push(Box::new(YamlLintRunner { files: yaml_files }));
+        runners.push(Box::new(YamlLintRunner {
+            files: yaml_files.clone(),
+        }));
+        // kubeconform runs against the same YAML set; it skips
+        // anything that isn't a Kubernetes manifest, so the cost
+        // for a non-k8s repo is one container spawn that returns
+        // an empty resources array.
+        runners.push(Box::new(KubeconformRunner { files: yaml_files }));
     }
 
     runners
@@ -523,7 +531,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_yaml_selects_actionlint_and_yamllint() {
+    fn workflow_yaml_selects_actionlint_yamllint_and_kubeconform() {
         for name in [
             ".github/workflows/ci.yml",
             ".forgejo/workflows/release.yaml",
@@ -539,6 +547,7 @@ mod tests {
                     "actionlint",
                     "ast-grep",
                     "gitleaks",
+                    "kubeconform",
                     "osv-scanner",
                     "semgrep",
                     "trivy",
@@ -550,7 +559,7 @@ mod tests {
     }
 
     #[test]
-    fn arbitrary_yaml_selects_yamllint_but_not_actionlint() {
+    fn arbitrary_yaml_selects_yamllint_and_kubeconform_but_not_actionlint() {
         let files = vec![cf("config/app.yml", "modified")];
         let runners = select_runners(&files);
         let mut got = names(&runners);
@@ -560,6 +569,7 @@ mod tests {
             vec![
                 "ast-grep",
                 "gitleaks",
+                "kubeconform",
                 "osv-scanner",
                 "semgrep",
                 "trivy",

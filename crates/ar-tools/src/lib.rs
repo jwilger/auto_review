@@ -19,6 +19,7 @@ pub mod finding;
 pub mod gitleaks;
 pub mod golangci_lint;
 pub mod hadolint;
+pub mod kubeconform;
 pub mod markdownlint;
 pub mod osv_scanner;
 pub mod oxlint;
