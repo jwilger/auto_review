@@ -17,10 +17,10 @@
 #   actionlint, ansible-lint, ast-grep, bandit, biome, buf, checkov,
 #   cppcheck, dotenv-linter, eslint, gitleaks, golangci-lint, gosec,
 #   hadolint, helm, htmlhint, ktlint, kubeconform, markdownlint,
-#   mypy, osv-scanner, oxlint, phpstan, pmd, prettier, pylint,
-#   rubocop, ruff, semgrep, shellcheck, shfmt, sqlfluff, staticcheck,
-#   stylelint, swiftlint, taplo, tflint, trivy, typos, vale, vint,
-#   yamllint
+#   mypy, nilaway, osv-scanner, oxlint, phpstan, pmd, prettier,
+#   pylint, rubocop, ruff, semgrep, shellcheck, shfmt, sqlfluff,
+#   staticcheck, stylelint, swiftlint, taplo, tflint, trivy, typos,
+#   vale, vint, yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -89,6 +89,10 @@ RUN set -eux; \
         | tar -xz -C /tmp \
         && mv /tmp/staticcheck/staticcheck /usr/local/bin/ \
         && rm -rf /tmp/staticcheck; \
+    # nilaway has no release binary — `go install` only. Operators
+    # who want it can derive an image with a Go toolchain and run
+    # `go install go.uber.org/nilaway/cmd/nilaway@latest`. The
+    # runner gracefully no-ops when the binary is missing.
     curl -fsSL "https://github.com/terraform-linters/tflint/releases/latest/download/tflint_linux_amd64.zip" \
         -o /tmp/tflint.zip \
         && unzip -q /tmp/tflint.zip -d /tmp/tflint \

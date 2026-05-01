@@ -23,6 +23,7 @@ use ar_tools::ktlint::KtlintRunner;
 use ar_tools::kubeconform::KubeconformRunner;
 use ar_tools::markdownlint::MarkdownLintRunner;
 use ar_tools::mypy::MypyRunner;
+use ar_tools::nilaway::NilawayRunner;
 use ar_tools::osv_scanner::OsvScannerRunner;
 use ar_tools::oxlint::OxlintRunner;
 use ar_tools::phpstan::PhpstanRunner;
@@ -158,6 +159,7 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         runners.push(Box::new(GolangciLintRunner));
         runners.push(Box::new(GosecRunner));
         runners.push(Box::new(StaticcheckRunner));
+        runners.push(Box::new(NilawayRunner));
     }
 
     let ruby_files: Vec<String> = surviving
@@ -646,7 +648,7 @@ mod tests {
     }
 
     #[test]
-    fn go_files_select_golangci_lint_gosec_and_staticcheck() {
+    fn go_files_select_full_go_lint_stack() {
         let files = vec![cf("cmd/main.go", "modified")];
         let runners = select_runners(&files);
         let mut got = names(&runners);
@@ -658,6 +660,7 @@ mod tests {
                 "gitleaks",
                 "golangci-lint",
                 "gosec",
+                "nilaway",
                 "osv-scanner",
                 "semgrep",
                 "staticcheck",

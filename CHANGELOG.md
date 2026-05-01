@@ -44,7 +44,7 @@ since the start of the project.
   `run_review_job` posts pending → final commit statuses around the
   triage → clone → lint → review → post sequence.
 
-#### Linters (42 of CodeRabbit's ~45 set)
+#### Linters (43 of CodeRabbit's ~45 set)
 
 | Tool | Languages / files | Source-tool name |
 |---|---|---|
@@ -68,6 +68,7 @@ since the start of the project.
 | `golangci-lint` | Go (errcheck, govet, staticcheck, …) | `golangci-lint` |
 | `gosec` | Go security scanner (subprocess injection, weak crypto, …) | `gosec` |
 | `staticcheck` | Go static analysis (deprecation, simplification, …) | `staticcheck` |
+| `nilaway` | Go nil-pointer flow analysis (Uber) | `nilaway` |
 | `rubocop` | Ruby (.rb / .rake / Gemfile / Rakefile) | `rubocop` |
 | `phpstan` | PHP (.php / .phtml / .php3-7 / .phps) | `phpstan` |
 | `swiftlint` | Swift (.swift) | `swiftlint` |
@@ -288,8 +289,8 @@ default in-memory store to the SQLite-backed one.
   paths cover correctness; LanceDB is the scale lever).
 - youki-based `Sandbox` impl as a lighter alternative to the
   podman shell-out.
-- Remaining ~3 linters from CodeRabbit's set
-  (languagetool, jsonlint, nilaway).
+- Remaining ~2 linters from CodeRabbit's set
+  (languagetool, jsonlint).
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
   wiremock + canned LLM providers.

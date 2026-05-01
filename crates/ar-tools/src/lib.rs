@@ -30,6 +30,7 @@ pub mod ktlint;
 pub mod kubeconform;
 pub mod markdownlint;
 pub mod mypy;
+pub mod nilaway;
 pub mod osv_scanner;
 pub mod oxlint;
 pub mod phpstan;
