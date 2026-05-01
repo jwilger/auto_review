@@ -176,9 +176,22 @@ fn walk_dir(
         if is_skipped_dirname(name) {
             continue;
         }
-        if path.is_dir() {
+        // Skip symlinks. A malicious PR could commit a directory
+        // symlink that points back into the workspace (or itself);
+        // following it would either spin indefinitely or escape
+        // workspace_root via the canonicalize path. The agentic
+        // verifier reads source code, not symlinked content, so
+        // dropping them is safe.
+        let file_type = match entry.file_type() {
+            Ok(ft) => ft,
+            Err(_) => continue,
+        };
+        if file_type.is_symlink() {
+            continue;
+        }
+        if file_type.is_dir() {
             walk_dir(workspace_root, &path, regex, hits, max_hits)?;
-        } else if path.is_file() {
+        } else if file_type.is_file() {
             scan_file(workspace_root, &path, regex, hits, max_hits)?;
         }
     }
@@ -415,5 +428,29 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let r = search(dir.path(), "x", Some("../etc"), 100);
         assert!(matches!(r, Err(WorkspaceToolError::PathEscape(_))));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn walk_dir_skips_symlink_loop_without_spinning() {
+        // A malicious PR could commit a directory symlink that
+        // points back into the workspace (or itself). Without
+        // skipping symlinks, walk_dir would either recurse forever
+        // or canonicalize through the symlink and escape the
+        // workspace root. The fix: skip every symlink entry.
+        let dir = tempfile::tempdir().unwrap();
+        write(dir.path(), "real.rs", "needle\n");
+
+        // Create a self-referential symlink: dir/loop -> dir/
+        std::os::unix::fs::symlink(dir.path(), dir.path().join("loop")).unwrap();
+        // And a file symlink to a real file.
+        std::os::unix::fs::symlink(dir.path().join("real.rs"), dir.path().join("alias.rs"))
+            .unwrap();
+
+        // Search would loop / multi-count without symlink skipping.
+        // With the fix it returns once for the real file.
+        let hits = search(dir.path(), "needle", None, 100).expect("ok");
+        assert_eq!(hits.len(), 1, "expected one hit; got: {hits:?}");
+        assert_eq!(hits[0].path, "real.rs");
     }
 }
