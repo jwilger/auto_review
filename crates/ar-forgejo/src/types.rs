@@ -102,3 +102,25 @@ pub struct CreatedWebhook {
     #[serde(default)]
     pub events: Vec<String>,
 }
+
+/// Compact view of a pull request, returned by `Client::get_pull_request`.
+/// Mirrors the subset of Forgejo's PR-detail payload we actually need to
+/// drive `run_review_job` from a CLI invocation (no webhook).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PullRequestSummary {
+    pub number: u64,
+    pub title: String,
+    #[serde(default)]
+    pub body: String,
+    #[serde(default)]
+    pub draft: bool,
+    pub head: PullRequestRefSummary,
+    pub base: PullRequestRefSummary,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PullRequestRefSummary {
+    #[serde(rename = "ref")]
+    pub ref_name: String,
+    pub sha: String,
+}

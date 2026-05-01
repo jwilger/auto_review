@@ -1,5 +1,6 @@
 use crate::types::{
     ChangedFile, CommitStatus, CreateReviewRequest, CreateWebhookRequest, CreatedWebhook,
+    PullRequestSummary,
 };
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
@@ -130,6 +131,20 @@ impl Client {
     ) -> Result<CreatedWebhook, Error> {
         let url = self.url(&format!("repos/{owner}/{repo}/hooks"))?;
         json_post(&self.http, url, request).await
+    }
+
+    /// Fetch a compact summary of a pull request — used by ad-hoc CLI
+    /// invocations (e.g. `auto_review review-once`) to drive the same
+    /// pipeline the webhook flow uses, without needing the webhook
+    /// payload.
+    pub async fn get_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        n: u64,
+    ) -> Result<PullRequestSummary, Error> {
+        let url = self.url(&format!("repos/{owner}/{repo}/pulls/{n}"))?;
+        json_get(&self.http, url).await
     }
 
     /// Fetch the Forgejo server's reported version string. Used as a
@@ -290,6 +305,50 @@ mod tests {
             .post_commit_status("o", "r", "abc123", &status)
             .await
             .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn get_pull_request_decodes_summary() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 7,
+                "title": "fix: thing",
+                "body": "details here",
+                "draft": false,
+                "user": {"login": "alice", "id": 1},
+                "head": {"ref": "topic", "sha": "deadbeef"},
+                "base": {"ref": "main", "sha": "cafef00d"}
+            })))
+            .mount(&server)
+            .await;
+
+        let pr = client.get_pull_request("o", "r", 7).await.expect("ok");
+        assert_eq!(pr.number, 7);
+        assert_eq!(pr.title, "fix: thing");
+        assert_eq!(pr.body, "details here");
+        assert!(!pr.draft);
+        assert_eq!(pr.head.sha, "deadbeef");
+        assert_eq!(pr.base.ref_name, "main");
+    }
+
+    #[tokio::test]
+    async fn get_pull_request_propagates_404() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/9999"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+        let err = client
+            .get_pull_request("o", "r", 9999)
+            .await
+            .expect_err("err");
+        match err {
+            Error::Api { status, .. } => assert_eq!(status, 404),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[tokio::test]
