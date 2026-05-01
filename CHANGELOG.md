@@ -188,6 +188,20 @@ PR's changed file extensions.
     histogram (8 cumulative buckets: 1s / 5s / 15s / 30s /
     60s / 120s / 300s / 600s plus `+Inf`) so SREs can compute
     `histogram_quantile(0.95, ...)` directly.
+  - **Background poller:** `poll_cycles_total` ticks once
+    per completed pass, paired with
+    `poll_history_failures_total` (full-pass failures at
+    the history-list step) and `poll_pr_failures_total`
+    (per-PR failures within a pass; one PR's failure
+    doesn't abort the pass). Mentions dispatched from the
+    poller are tracked separately as
+    `poll_mentions_dispatched_total` (disjoint from
+    `chat_commands_received_total`, which is webhook-path
+    only) and `poll_chat_failures_total` (chat-handler errors
+    on poll dispatch). Until now the poller's progress was
+    invisible to Prometheus — operators couldn't see whether
+    inline-thread mentions were being picked up at all.
+
     Wired through a new `ReviewObserver` trait on
     `SpawningDispatcher`, so the dispatcher remains
     independent of the metrics format and the dependency

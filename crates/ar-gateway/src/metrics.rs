@@ -53,6 +53,16 @@ pub struct Metrics {
     /// operators chart total bot-flagged issues over time.
     pub review_findings_sum: AtomicU64,
 
+    // Poller counters: track the background ChatPoller's progress
+    // so operators can see whether inline-thread mentions are being
+    // picked up. Disjoint from `chat_commands_received_total` (which
+    // tracks webhook-path mentions).
+    pub poll_cycles: AtomicU64,
+    pub poll_history_failures: AtomicU64,
+    pub poll_pr_failures: AtomicU64,
+    pub poll_mentions_dispatched: AtomicU64,
+    pub poll_chat_failures: AtomicU64,
+
     /// Cumulative-bucket counters for the review-duration histogram.
     /// Each entry counts reviews whose duration was <= the
     /// corresponding `DURATION_BUCKETS_SECS` bound. Cumulative
@@ -138,6 +148,27 @@ impl Metrics {
                 self.duration_buckets[i].fetch_add(1, Ordering::Relaxed);
             }
         }
+    }
+
+    pub fn record_poll_cycle(&self) {
+        self.poll_cycles.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_poll_history_failure(&self) {
+        self.poll_history_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_poll_pr_failure(&self) {
+        self.poll_pr_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_poll_mention_dispatched(&self) {
+        self.poll_mentions_dispatched
+            .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_poll_chat_failure(&self) {
+        self.poll_chat_failures.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_review_skipped(&self, reason: &str) {
@@ -260,6 +291,31 @@ impl Metrics {
                 "auto_review_review_findings_sum",
                 "Sum of findings_count across successful reviews. Useful for charting bot-flagged issue volume.",
                 &self.review_findings_sum,
+            ),
+            (
+                "auto_review_poll_cycles_total",
+                "Background-poller passes that completed successfully. Compare against the configured AR_POLL_INTERVAL_SECS to spot a stalled poller.",
+                &self.poll_cycles,
+            ),
+            (
+                "auto_review_poll_history_failures_total",
+                "Poll passes that failed at the review-history list step. Sustained increases mean the SQLite/in-memory store is broken.",
+                &self.poll_history_failures,
+            ),
+            (
+                "auto_review_poll_pr_failures_total",
+                "Per-PR poll failures (e.g. 5xx from Forgejo on list-review-comments). One PR's failure doesn't abort the whole pass.",
+                &self.poll_pr_failures,
+            ),
+            (
+                "auto_review_poll_mentions_dispatched_total",
+                "Inline-thread mentions the poller picked up and dispatched to the chat handler. Disjoint from chat_commands_received_total (webhook path).",
+                &self.poll_mentions_dispatched,
+            ),
+            (
+                "auto_review_poll_chat_failures_total",
+                "Chat-handler errors when the poller dispatched a polled mention.",
+                &self.poll_chat_failures,
             ),
         ];
         for (name, help, counter) in metrics {

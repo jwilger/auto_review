@@ -144,6 +144,7 @@ async fn main() -> Result<()> {
             bot_login.clone(),
             bot_name.clone(),
         )
+        .with_metrics(metrics.clone())
         .spawn(Duration::from_secs(poll_interval_secs));
         tracing::info!(
             interval_secs = poll_interval_secs,

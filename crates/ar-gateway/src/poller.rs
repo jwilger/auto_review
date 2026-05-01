@@ -18,6 +18,7 @@
 //! Bot's own comments are filtered out by login, so reading a comment
 //! the bot itself posted doesn't trigger an infinite reply loop.
 
+use crate::metrics::Metrics;
 use ar_chat::command::parse_chat_command;
 use ar_chat::{ChatContext, ChatError, ChatHandler};
 use ar_forgejo::Client as ForgejoClient;
@@ -46,6 +47,9 @@ pub struct ChatPoller {
     bot_login: Arc<String>,
     bot_name: Arc<String>,
     cursors: Arc<Mutex<HashMap<PrKey, u64>>>,
+    /// Optional. When wired, the poller increments cycle / failure /
+    /// dispatch counters that the gateway exposes on `/metrics`.
+    metrics: Option<Arc<Metrics>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -68,7 +72,16 @@ impl ChatPoller {
             bot_login: Arc::new(bot_login.into()),
             bot_name: Arc::new(bot_name.into()),
             cursors: Arc::new(Mutex::new(HashMap::new())),
+            metrics: None,
         }
+    }
+
+    /// Wire in the shared Metrics handle so poll outcomes flow to
+    /// `/metrics`. Without it, the poller still functions but its
+    /// progress is invisible to Prometheus.
+    pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
+        self.metrics = Some(metrics);
+        self
     }
 
     /// Spawn the polling loop on the current tokio runtime. Runs
@@ -97,13 +110,20 @@ impl ChatPoller {
     /// pass. The `Result` here is reserved for failures fetching the
     /// PR list itself.
     pub async fn poll_once(&self) -> Result<(), PollerError> {
-        let known = self
-            .history
-            .list_known()
-            .await
-            .map_err(|e| PollerError::History(e.to_string()))?;
+        let known = match self.history.list_known().await {
+            Ok(k) => k,
+            Err(e) => {
+                if let Some(m) = &self.metrics {
+                    m.record_poll_history_failure();
+                }
+                return Err(PollerError::History(e.to_string()));
+            }
+        };
         for key in known {
             if let Err(e) = self.poll_pr(&key).await {
+                if let Some(m) = &self.metrics {
+                    m.record_poll_pr_failure();
+                }
                 tracing::warn!(
                     repo = format!("{}/{}", key.owner, key.repo),
                     pr = key.pr_number,
@@ -111,6 +131,9 @@ impl ChatPoller {
                     "poll_pr failed; continuing with next PR",
                 );
             }
+        }
+        if let Some(m) = &self.metrics {
+            m.record_poll_cycle();
         }
         Ok(())
     }
@@ -163,14 +186,24 @@ impl ChatPoller {
                 repo: &key.repo,
                 issue_number: key.pr_number,
             };
-            if let Err(e) = handler.handle(ctx, command).await {
-                tracing::warn!(
-                    repo = format!("{}/{}", key.owner, key.repo),
-                    pr = key.pr_number,
-                    comment = id,
-                    error = %e,
-                    "chat dispatch from poller failed",
-                );
+            match handler.handle(ctx, command).await {
+                Ok(()) => {
+                    if let Some(m) = &self.metrics {
+                        m.record_poll_mention_dispatched();
+                    }
+                }
+                Err(e) => {
+                    if let Some(m) = &self.metrics {
+                        m.record_poll_chat_failure();
+                    }
+                    tracing::warn!(
+                        repo = format!("{}/{}", key.owner, key.repo),
+                        pr = key.pr_number,
+                        comment = id,
+                        error = %e,
+                        "chat dispatch from poller failed",
+                    );
+                }
             }
         }
         Ok(())
@@ -395,6 +428,95 @@ mod tests {
         assert_eq!(poller.cursor_for(&k).await, Some(11));
         // But no dispatch occurred — we filtered the bot out.
         assert!(dispatcher.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn poll_metrics_count_cycles_and_pr_failures() {
+        let server = MockServer::start().await;
+        let history = Arc::new(InMemoryReviewHistory::new());
+        let k_bad = key("alice", "broken", 1);
+        let k_good = key("alice", "widgets", 2);
+        history.record(&k_bad, "x").await.unwrap();
+        history.record(&k_good, "y").await.unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/broken/pulls/1/comments"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/2/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+
+        let metrics = Arc::new(Metrics::new());
+        let dispatcher = Arc::new(NoOpDispatcher);
+        let poller = poller_for(&server, history, dispatcher)
+            .await
+            .with_metrics(metrics.clone());
+        poller.run_once_for_tests().await.expect("ok");
+        poller.run_once_for_tests().await.expect("ok");
+
+        let out = metrics.render();
+        // Two complete cycles ran.
+        assert!(
+            out.contains("auto_review_poll_cycles_total 2\n"),
+            "{out}"
+        );
+        // The broken PR failed both cycles.
+        assert!(
+            out.contains("auto_review_poll_pr_failures_total 2\n"),
+            "{out}"
+        );
+        // Nothing dispatched (no mentions).
+        assert!(
+            out.contains("auto_review_poll_mentions_dispatched_total 0\n"),
+            "{out}"
+        );
+    }
+
+    #[tokio::test]
+    async fn poll_metrics_count_dispatched_mentions() {
+        let server = MockServer::start().await;
+        let history = Arc::new(InMemoryReviewHistory::new());
+        let k = key("alice", "widgets", 1);
+        history.record(&k, "deadbeef").await.unwrap();
+
+        // First poll: empty, seeds cursor to 0.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/1/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // Second poll: a `help` mention. The chat handler posts a
+        // confirmation comment to /issues/<n>/comments.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/1/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": 9, "body": "@auto_review help", "user": {"login": "bob"}}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 99})))
+            .mount(&server)
+            .await;
+
+        let metrics = Arc::new(Metrics::new());
+        let dispatcher = Arc::new(NoOpDispatcher);
+        let poller = poller_for(&server, history, dispatcher)
+            .await
+            .with_metrics(metrics.clone());
+        poller.run_once_for_tests().await.expect("seed");
+        poller.run_once_for_tests().await.expect("dispatch");
+
+        let out = metrics.render();
+        assert!(out.contains("auto_review_poll_cycles_total 2\n"));
+        assert!(out.contains("auto_review_poll_pr_failures_total 0\n"));
+        assert!(out.contains("auto_review_poll_mentions_dispatched_total 1\n"));
     }
 
     #[tokio::test]

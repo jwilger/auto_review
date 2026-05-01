@@ -103,6 +103,19 @@ runbook. `doctor` exits non-zero when any check fails;
   generated), `disabled_by_config` (`enabled: false`). Operators
   shouldn't alert on these.
 
+*Background poller:*
+- `auto_review_poll_cycles_total` — should tick at
+  `1 / AR_POLL_INTERVAL_SECS` per second when the poller is
+  running. A flat counter means the poller is wedged or
+  stopped; alert on `rate(poll_cycles_total[5m]) == 0`.
+- `auto_review_poll_history_failures_total` and
+  `auto_review_poll_pr_failures_total` — Forgejo-side or
+  storage-side errors during polling. Spikes track Forgejo
+  outages.
+- `auto_review_poll_mentions_dispatched_total` — inline-thread
+  mentions the poller picked up. Disjoint from
+  `chat_commands_received_total` (webhook path).
+
 **Tail logs** for anomalies:
 ```
 journalctl -u auto-review -f --since "1 hour ago" | grep -E 'WARN|ERROR'
