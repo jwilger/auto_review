@@ -432,11 +432,20 @@ pub async fn run_review_job(
 
     // Triage: if every changed file is trivial (lockfile bumps, vendored,
     // generated), skip the LLM call entirely and post a success status.
-    match forgejo
+    // Fetch once and reuse — prepare_and_lint downstream needed the
+    // same list and was duplicating the API call.
+    let changed_files = match forgejo
         .list_changed_files(&job.owner, &job.repo, job.pr_number)
         .await
     {
-        Ok(files) if pr_is_skippable(&files) => {
+        Ok(files) => Some(files),
+        Err(e) => {
+            tracing::warn!(error = %e, "triage file-list failed; proceeding to lint+review");
+            None
+        }
+    };
+    if let Some(files) = changed_files.as_ref() {
+        if pr_is_skippable(files) {
             tracing::info!(
                 repo = format!("{}/{}", job.owner, job.repo),
                 pr = job.pr_number,
@@ -461,10 +470,6 @@ pub async fn run_review_job(
             });
             return;
         }
-        Ok(_) => {}
-        Err(e) => {
-            tracing::warn!(error = %e, "triage file-list failed; proceeding to lint+review");
-        }
     }
 
     let lint_outcome = prepare_and_lint(
@@ -475,6 +480,7 @@ pub async fn run_review_job(
         learnings,
         sandbox,
         &job,
+        changed_files,
     )
     .await;
     let (
@@ -708,10 +714,19 @@ async fn prepare_and_lint(
     learnings: Option<&dyn LearningsStore>,
     sandbox: &dyn Sandbox,
     job: &ReviewJob,
+    prefetched_files: Option<Vec<ar_forgejo::ChangedFile>>,
 ) -> Result<LintPhaseOutput, LintPhaseError> {
-    let files = forgejo
-        .list_changed_files(&job.owner, &job.repo, job.pr_number)
-        .await?;
+    // Reuse the file list the caller already fetched for the
+    // trivial-skip check. If they didn't (the API failed up there
+    // and they passed None), refetch — the lint phase needs it.
+    let files = match prefetched_files {
+        Some(f) => f,
+        None => {
+            forgejo
+                .list_changed_files(&job.owner, &job.repo, job.pr_number)
+                .await?
+        }
+    };
     let workspace = prepare_workspace(base, token, &job.owner, &job.repo, &job.head_sha).await?;
     let config = load_repo_config(workspace.path());
     let ignored_paths = build_glob_set(&config.ignored_paths);
