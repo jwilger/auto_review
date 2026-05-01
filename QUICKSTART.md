@@ -10,7 +10,9 @@ Get `auto_review` reviewing PRs on a Forgejo instance you control.
     such as `qwen2.5-coder:32b`.
   - **Cloud**: an OpenAI-compatible API (OpenAI, OpenRouter,
     Together.ai, Groq, etc.) and an API key.
-- A Rust toolchain (1.85+) **or** Docker.
+- To build from source: [Nix](https://nixos.org/download.html)
+  with flakes enabled (recommended — pins the toolchain) **or**
+  Docker (for the pre-built sandbox image).
 - `git` on the host the gateway runs on (the orchestrator clones
   repositories at the PR's head SHA before running linters).
 - The optional linters that match your codebases: `ruff`, `eslint`,
@@ -29,14 +31,24 @@ repo it should review.
 ## 2. Build the gateway and CLI
 
 ```sh
-git clone https://codeberg.org/jwilger/auto_review
+git clone https://git.johnwilger.com/jwilger/auto_review
 cd auto_review
-cargo build --release --workspace
+
+# Recommended: flake-pinned build. No system Rust install
+# needed; reproducible across machines.
+nix build .#ar-gateway .#ar-cli
+
+# Alternative: cargo from inside the dev shell.
+nix develop --command cargo build --release --workspace
 ```
 
-This produces:
-- `target/release/ar-gateway` — the long-running HTTP server.
-- `target/release/auto_review` — the operator CLI.
+`nix build` produces:
+- `result/bin/ar-gateway` — the long-running HTTP server.
+- `result-1/bin/auto_review` — the operator CLI.
+
+The cargo path produces:
+- `target/release/ar-gateway`
+- `target/release/auto_review`
 
 ## 3. Mint a personal access token for the bot
 

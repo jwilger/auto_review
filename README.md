@@ -10,7 +10,7 @@ you control, with optional support for fully local LLMs.
 
 **Alpha.** End-to-end review pipeline works: webhook intake → LLM
 triage (skip lockfile-only PRs, route trivial files away from the
-reasoning model) → shallow-clone → 44 bundled linters fanned out
+reasoning model) → shallow-clone → 45 bundled linters fanned out
 in parallel inside an optional sandbox → tree-sitter + embedding
 RAG context + persistent learnings memory → reasoning-tier LLM
 with strict-JSON-schema output and self-heal validation → cheap-
@@ -22,6 +22,11 @@ answered by the cheap-tier model. The `bench`
 CLI subcommand replays PR fixtures through the LLM-review path
 for regression tracking and model comparison. CLI helpers mint
 the bot's PAT and register the webhook on a repo.
+
+Build, dev, and CI all run through one `flake.nix` so local
+work and CI exercise identical derivations bit-for-bit
+(see [CONTRIBUTING.md](./CONTRIBUTING.md) for the dev setup,
+or `nix flake check` for the same gates CI runs).
 
 To deploy: see [QUICKSTART.md](./QUICKSTART.md). To run on an
 ongoing basis (rotation, upgrades, alerts, repo config),
@@ -38,19 +43,22 @@ enumerates attacker profiles, trust boundaries, and per-class
 mitigations (read this before exposing the bot to drive-by PRs).
 [ADR-0002](./docs/ADR-0002-sandbox.md) documents why every linter
 spawn is sandboxed; [ADR-0003](./docs/ADR-0003-observability.md)
-documents the metrics / readiness / runtime-introspection design.
+documents the metrics / readiness / runtime-introspection design;
+[ADR-0004](./docs/ADR-0004-vector-store.md) explains why
+embeddings persist via SQLite today rather than LanceDB.
 
-What's still on the roadmap: a LanceDB-backed vector store
-(currently in-memory cosine over the SQLite-backed learnings,
-which scales to thousands of rows but not millions); the
-remaining linter from the catalogue (`languagetool`, deferred —
-needs a Java HTTP-server companion); a youki-based pure-Rust
-sandbox in addition to the Podman path; a larger labelled-
-corpus benchmark (5 fixtures ship today across SQLi / command
-injection / hardcoded secrets / path traversal / XSS, but a
-production-quality precision-recall sweep needs more).
-Real-world verification on a production Forgejo instance with
-real PR traffic is also pending.
+What's still on the roadmap: real-world verification on a
+production Forgejo instance with real PR traffic; a larger
+labelled-corpus benchmark (5 fixtures ship today across SQLi /
+command injection / hardcoded secrets / path traversal / XSS,
+but a production-quality precision-recall sweep needs more); a
+LanceDB-backed vector store as a drop-in for the SQLite path
+(documented in ADR-0004) when a deployment outgrows
+brute-force cosine. The languagetool prose linter ships behind
+an opt-in `LANGUAGETOOL_URL` (HTTP API, no JVM dep); a
+youki-based pure-Rust sandbox is documented as future-work in
+ADR-0002 — not blocking today since podman OR docker apply the
+same hardening flag set.
 
 ### Production sandbox
 
@@ -87,8 +95,8 @@ OpenAI, Ollama, vLLM, OpenRouter, Together, Groq, etc.).
 | `ar-forgejo` | Forgejo REST client |
 | `ar-llm` | LLM provider trait + implementations |
 | `ar-index` | Tree-sitter parsers + embeddings + co-change graph + learnings store |
-| `ar-tools` | Static-analysis runners + result normalization (44 linters) |
-| `ar-sandbox` | Podman-based linter sandbox |
+| `ar-tools` | Static-analysis runners + result normalization (45 linters) |
+| `ar-sandbox` | Podman / docker linter sandbox |
 | `ar-prompts` | Prompt templates and JSON schemas |
 | `ar-review` | Review pipeline activities |
 | `ar-chat` | Agentic `@auto_review` chat handler |

@@ -6,38 +6,63 @@ Thanks for considering a contribution to `auto_review`.
 
 ### Prerequisites
 
-- Rust toolchain. The repo pins the channel via `rust-toolchain.toml`
-  to `stable`; rustup will install it on first build.
-- `git`, plus any of the 44 bundled linter binaries you want
-  exercised end-to-end. Run `auto_review list-linters` for the
-  current set with install homepages, or browse
-  `crates/ar-tools/src/catalog.rs`. Missing linters are silently
-  skipped at
-  runtime, so absence isn't a build blocker.
+- **[Nix](https://nixos.org/download.html) with flakes enabled.**
+  This is the supported path: it pins the Rust toolchain (nightly,
+  resolved by `flake.lock`'s rust-overlay revision), supplies
+  `cargo-deny`, `cargo-nextest`, `git`, `pkg-config`, `openssl`,
+  and the rest. Local dev and CI run identical derivations
+  bit-for-bit.
+- Optional: [direnv](https://direnv.net/) for automatic shell
+  setup — `direnv allow` from this directory loads the flake's
+  dev shell on every `cd`.
+- Optional: any of the 45 bundled linter binaries you want
+  exercised end-to-end (`auto_review list-linters` for the set;
+  missing binaries are silently skipped, so absence isn't a
+  build blocker).
+
+The dev shell does NOT use any system rustup, cargo, or rust
+binaries. Project-local `CARGO_HOME` / `RUSTUP_HOME` directories
+under `.dependencies/` keep everything reproducible.
 
 ### First build
 
 ```sh
-cargo check --workspace
+# One-time: enter the dev shell (or `direnv allow` once).
+nix develop
+
+# Run every CI check locally — same derivations as CI.
+nix flake check
+
+# Run individual checks (faster iteration, since flake check
+# rebuilds all four):
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace --all-targets
+cargo nextest run --workspace --no-tests=pass
+cargo deny check licenses bans sources
 ```
 
-The order matches the CI pipeline (see
-`.forgejo/workflows/ci.yml`): cheap checks first so a failing
-fmt or clippy short-circuits before you wait on the test
-suite. Land no commit that fails any of them.
+`nix flake check` exercises four derivations: rustfmt, clippy
+(with `-D warnings`), the full nextest test suite, and
+cargo-deny (licenses + bans + sources — advisories require
+network access blocked by the Nix sandbox, so run them
+separately when bumping a dep). Land no commit that fails any
+of them.
 
-CI additionally runs `cargo deny check` against the
-supply-chain config in [`deny.toml`](./deny.toml) — license
-compatibility, RUSTSEC advisories, source allowlist. Run it
-locally before bumping a dep:
+### Bumping the toolchain or a dep
 
 ```sh
-cargo install --locked cargo-deny
-cargo deny check
+# Bump the resolved nightly:
+nix flake update rust-overlay
+
+# Bump every flake input (nixpkgs, crane, rust-overlay):
+nix flake update
+
+# Bump a Rust dep (use cargo as usual):
+cargo update -p some-crate
 ```
+
+Commit `flake.lock` and `Cargo.lock` after any update so
+everyone (and CI) picks up the same versions.
 
 ## Workflow
 
@@ -218,8 +243,12 @@ The history follows `feat(scope): summary` / `fix(scope): summary` /
 ("add X", "fix Y") and include a body explaining the why. Sign-off
 trailers and `Co-Authored-By:` lines are welcome.
 
-## License
+## License & CLA
 
-By submitting a contribution you agree to license it under the
-AGPL-3.0-or-later (see [LICENSE](./LICENSE)). The intent of the
-copyleft is documented there.
+The project is published under AGPL-3.0-or-later (see
+[LICENSE](./LICENSE)). Every contribution is also subject to the
+[Contributor License Agreement](./CLA.md), which grants the
+copyright holder broader-rights so future relicensing remains
+possible. Read CLA.md once; afterwards a `Signed-off-by:` trailer
+on every commit (set automatically with `git commit -s`) carries
+both the DCO certification and CLA acceptance.

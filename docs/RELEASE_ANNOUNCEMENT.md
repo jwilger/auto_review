@@ -18,7 +18,7 @@ numbers, "today") before posting.
 > **What it does:**
 > - Listens for `pull_request` webhooks from your Forgejo
 >   instance.
-> - Runs ~44 bundled linters in a hardened OCI sandbox
+> - Runs 45 bundled linters in a hardened OCI sandbox
 >   (no network, dropped capabilities, read-only repo mount).
 > - Sends the diff + findings + repo-level `.auto_review.yaml`
 >   guidance to a reasoning LLM.
@@ -41,7 +41,9 @@ numbers, "today") before posting.
 > shell commands run in a podman or docker container with
 > `--network=none --read-only --cap-drop=ALL --user 65534:65534
 > --pids-limit=128` — direct response to the Kudelski-class
-> RCE that bit a SaaS competitor in 2024.
+> RCE that bit a SaaS competitor in 2024. Auto-detect picks
+> whichever runtime is on PATH; operators can pin via
+> `AR_SANDBOX_RUNTIME`.
 >
 > **What makes this different from PR-Agent:** verification
 > agent (drops hallucinated findings before they hit your PR),
@@ -81,8 +83,9 @@ numbers, "today") before posting.
 >   posted review.
 > - 45 bundled linters (ruff, eslint, golangci-lint, clippy via
 >   the repo's own CI, semgrep, trivy, gitleaks, hadolint,
->   shellcheck, markdownlint, vale, languagetool, …) routed
->   per-language.
+>   shellcheck, markdownlint, vale, …) routed per-language.
+>   languagetool is opt-in via `LANGUAGETOOL_URL` (HTTP API,
+>   no JVM dep on the gateway host).
 > - **Hardened sandbox** for every linter and every LLM-issued
 >   shell call: podman/docker with `--network=none --read-only
 >   --cap-drop=ALL --user nobody --pids-limit=128`. Sandbox-
@@ -96,9 +99,11 @@ numbers, "today") before posting.
 > - **Verification agent** that double-checks each finding
 >   against the actual code before posting; drops hallucinations
 >   silently.
-> - **Persistent learnings store** (SQLite-backed; LanceDB
->   drop-in behind the trait). `@auto_review remember "do X"`
->   in any PR comment to add a guideline.
+> - **Persistent learnings + symbol embeddings** (SQLite-backed;
+>   ADR-0004 explains why SQLite is the default and how a
+>   LanceDB drop-in fits behind the same trait).
+>   `@auto_review remember "do X"` in any PR comment to add a
+>   guideline.
 > - Per-repo `.auto_review.yaml` for ignored paths, custom
 >   pre-merge checks, and disabled tools.
 > - `/metrics` endpoint with Prometheus counters; Grafana
@@ -162,6 +167,12 @@ with hardened sandboxing and local LLMs`
 >   abstraction holds, and the rationale (no `protoc`
 >   build dep, our scale doesn't need ANN) is recorded in
 >   ADR-0004.
+>
+> - **Reproducible build via `flake.nix`.** Local dev
+>   (`direnv allow` or `nix develop`) and CI
+>   (`nix flake check`) run identical derivations; the rust
+>   nightly snapshot is pinned by `flake.lock` so the whole
+>   stack is hermetic.
 >
 > AGPL-3.0-or-later. `<repo URL>`.
 

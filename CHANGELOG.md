@@ -12,6 +12,84 @@ since the start of the project.
 
 ### Added
 
+#### Reproducible build via Nix flake
+
+- **`flake.nix`** pins the entire toolchain (rust nightly via
+  rust-overlay, cargo-deny, cargo-nextest, git, openssl,
+  pkg-config) so local dev (`nix develop` or `direnv allow`) and
+  CI (`nix flake check`) run identical derivations bit-for-bit.
+- **`rust-toolchain.toml`** switched to `channel = "nightly"`;
+  the actual nightly snapshot is locked by `flake.lock`'s
+  rust-overlay revision. Bumping is `nix flake update
+  rust-overlay`.
+- **Forgejo CI** rewritten to use the `nixos/nix:2.34.6` image
+  with a single `nix flake check --print-build-logs` step.
+  Replaces the prior `rust:1.85-slim-bookworm` + four-step
+  pipeline.
+- **Crane-based** dep-only build artefact reused across all
+  four checks (cargo-fmt, cargo-clippy, cargo-nextest,
+  cargo-deny) for incremental builds.
+- **`publish = false`** on every workspace crate so cargo-deny's
+  `wildcards = "deny"` rule doesn't trip on internal path-deps.
+- **`CLA.md`** added so external contributions arrive with
+  explicit broader-rights grant; the AGPL-3.0 publication on
+  the repo doesn't bind the copyright holder's reuse of their
+  own code, but does bind merged third-party patches without
+  this CLA.
+
+#### LanguageTool runner (opt-in HTTP)
+
+- **`crates/ar-tools/src/languagetool.rs`** — POSTs prose to a
+  configured `LANGUAGETOOL_URL`. No-op when env unset, mirroring
+  the CLI runners' "missing tool is fine" semantics. Catalogue
+  grows from 44 to 45 linters.
+
+#### Persistent vector store
+
+- **`crates/ar-index/src/sqlite_vector_store.rs`** — SQLite-
+  backed `VectorStore` impl mirroring the `SqliteLearningsStore`
+  pattern. Embeddings round-trip as little-endian f32 BLOBs;
+  cosine ranking is full-table-scan, sufficient for the
+  ≤50k-symbol scale this project actually targets.
+- **ADR-0004** records the LanceDB-vs-SQLite decision: LanceDB
+  would have added `protoc` as a build prerequisite and ~150
+  transitive crates; the trait abstraction means a
+  `LanceDbVectorStore` drops in later when scale demands it.
+
+#### Sandbox dual-runtime support
+
+- **`PodmanSandbox`** accepts either `podman` or `docker` via
+  the `podman_bin` config field; the flag set
+  (`--network=none --read-only --cap-drop=ALL
+  --security-opt=no-new-privileges --user 65534:65534
+  --memory --cpus --pids-limit -v ...:ro -w`) is identical
+  between the two.
+- **`AR_SANDBOX_RUNTIME`** env var as the new neutral name
+  (legacy `AR_SANDBOX_PODMAN_BIN` still works); when neither is
+  set, the gateway auto-detects at startup, preferring podman
+  (rootless, no daemon) and falling back to docker.
+
+#### Container-escape harness
+
+- **`crates/ar-sandbox/tests/escape.rs`** — seven
+  `#[ignore]`-gated integration tests verifying the production
+  hardening flags hold up against hostile inputs: network
+  egress denial, fork-bomb containment, wall-clock termination,
+  read-only repo mount, unprivileged uid, no-new-privileges,
+  dropped capabilities. Auto-detects podman OR docker.
+
+#### End-to-end verification
+
+- **`tests/features/end_to_end_review.feature`** — Gherkin
+  scenarios capturing the contract (happy path, HMAC rejection,
+  transient LLM 5xx recovery).
+- **`docs/E2E_RUNBOOK.md`** — step-by-step manual e2e against a
+  real Forgejo container (install bootstrap, bot user, PAT,
+  webhook, gateway boot, PR open, success verification).
+- **`crates/ar-orchestrator/tests/synthetic_e2e.rs`** — single
+  in-process Rust test driving webhook → dispatcher → mocked
+  Forgejo+LLM → posted review.
+
 #### End-to-end review pipeline
 
 - **Webhook intake** (`ar-gateway`): axum HTTP server with constant-time
