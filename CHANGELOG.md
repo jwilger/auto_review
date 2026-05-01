@@ -1053,6 +1053,29 @@ default in-memory store to the SQLite-backed one.
   forget-learning behavioural (drop existing record,
   unknown-id errors clearly).
 
+#### Severity breakdown in commit-status descriptions
+
+- The bot's commit-status description used to read
+  `auto_review: 5 findings` regardless of severity mix.
+  Operators viewing GitHub-style PR-list pages saw only the
+  flat count and had to click through to know whether they
+  were five errors (block-the-merge) or five notes (style
+  nits). Now reads:
+  - `auto_review: no findings` (zero case unchanged)
+  - `auto_review: 1 error`
+  - `auto_review: 1 error, 2 warnings`
+  - `auto_review: 1 error, 2 warnings, 3 notes`
+- Order is error → warning → note (most-to-least operator-
+  relevant). Zero buckets are omitted (a 1-error review
+  doesn't render `1 error, 0 warnings, 0 notes`).
+- Singular vs plural is correct (`1 error` not `1 errors`).
+- `ReviewOutcome` gains `errors` / `warnings` / `notes`
+  counters that sum to `findings_count`. Pipeline computes
+  them after the verifier runs (so the post-verifier set is
+  what's reported).
+- 5 unit tests pin the format: zero, single-severity (×3),
+  pluralisation, all-three combined, zero-bucket omission.
+
 #### purge-history subcommand (M5)
 
 - `auto_review purge-history --older-than-days N` drops

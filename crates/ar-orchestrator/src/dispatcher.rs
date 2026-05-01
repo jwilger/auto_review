@@ -524,7 +524,7 @@ pub async fn run_review_job(
             CommitStatus {
                 state: CommitStatusState::Success,
                 target_url: String::new(),
-                description: review_summary(outcome.findings_count),
+                description: review_summary(outcome),
                 context: STATUS_CONTEXT.into(),
             }
         }
@@ -684,12 +684,44 @@ async fn prepare_and_lint(
     })
 }
 
-fn review_summary(findings_count: usize) -> String {
-    match findings_count {
-        0 => "auto_review: no findings".into(),
-        1 => "auto_review: 1 finding".into(),
-        n => format!("auto_review: {n} findings"),
+fn review_summary(outcome: &ar_review::ReviewOutcome) -> String {
+    if outcome.findings_count == 0 {
+        return "auto_review: no findings".into();
     }
+    // Build the breakdown showing only non-zero severity counts so
+    // a "1 error" review doesn't read as "1 error, 0 warnings, 0
+    // notes". Order: error first (most operator-relevant), then
+    // warning, then note.
+    let mut parts: Vec<String> = Vec::with_capacity(3);
+    if outcome.errors > 0 {
+        parts.push(format!(
+            "{} error{}",
+            outcome.errors,
+            if outcome.errors == 1 { "" } else { "s" }
+        ));
+    }
+    if outcome.warnings > 0 {
+        parts.push(format!(
+            "{} warning{}",
+            outcome.warnings,
+            if outcome.warnings == 1 { "" } else { "s" }
+        ));
+    }
+    if outcome.notes > 0 {
+        parts.push(format!(
+            "{} note{}",
+            outcome.notes,
+            if outcome.notes == 1 { "" } else { "s" }
+        ));
+    }
+    if parts.is_empty() {
+        // findings_count > 0 but no severities ticked — defensive
+        // fallback in case the pipeline ever emits a finding with
+        // a severity outside the enum (it can't today, but the
+        // total-fallback path stays cheap).
+        return format!("auto_review: {} findings", outcome.findings_count);
+    }
+    format!("auto_review: {}", parts.join(", "))
 }
 
 /// Read `AR_SEVERITY_FLOOR` from the environment. Values:
@@ -812,5 +844,55 @@ mod tests {
     async fn no_op_dispatcher_does_nothing_and_does_not_panic() {
         let d = NoOpDispatcher;
         d.dispatch(ReviewJob::from(&sample_event())).await;
+    }
+
+    fn outcome(errors: usize, warnings: usize, notes: usize) -> ar_review::ReviewOutcome {
+        ar_review::ReviewOutcome {
+            findings_count: errors + warnings + notes,
+            review_id: 1,
+            errors,
+            warnings,
+            notes,
+        }
+    }
+
+    #[test]
+    fn review_summary_zero_findings_message() {
+        assert_eq!(review_summary(&outcome(0, 0, 0)), "auto_review: no findings");
+    }
+
+    #[test]
+    fn review_summary_single_severity_uses_singular_label() {
+        assert_eq!(review_summary(&outcome(1, 0, 0)), "auto_review: 1 error");
+        assert_eq!(review_summary(&outcome(0, 1, 0)), "auto_review: 1 warning");
+        assert_eq!(review_summary(&outcome(0, 0, 1)), "auto_review: 1 note");
+    }
+
+    #[test]
+    fn review_summary_pluralises_above_one() {
+        assert_eq!(
+            review_summary(&outcome(0, 3, 0)),
+            "auto_review: 3 warnings"
+        );
+    }
+
+    #[test]
+    fn review_summary_combines_all_three_severities() {
+        // Order: error first, then warning, then note (most-to-
+        // least operator-relevant).
+        assert_eq!(
+            review_summary(&outcome(1, 2, 3)),
+            "auto_review: 1 error, 2 warnings, 3 notes"
+        );
+    }
+
+    #[test]
+    fn review_summary_skips_zero_severity_buckets() {
+        // 1 error + 0 warnings + 1 note → no "0 warnings" in
+        // the output.
+        assert_eq!(
+            review_summary(&outcome(1, 0, 1)),
+            "auto_review: 1 error, 1 note"
+        );
     }
 }

@@ -32,6 +32,13 @@ pub enum VerifyMode {
 pub struct ReviewOutcome {
     pub findings_count: usize,
     pub review_id: u64,
+    /// Per-severity breakdown of the findings actually posted.
+    /// Sums to `findings_count`. Used to enrich the commit-status
+    /// description with "1 error, 3 warnings, 1 note" rather than
+    /// just a flat count.
+    pub errors: usize,
+    pub warnings: usize,
+    pub notes: usize,
 }
 
 /// Rank for ordered comparison: higher = more severe. Lets the
@@ -234,9 +241,22 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         .create_review(args.owner, args.repo, args.pr_number, &req)
         .await?;
 
+    let mut errors = 0usize;
+    let mut warnings = 0usize;
+    let mut notes = 0usize;
+    for f in &output.findings {
+        match f.severity {
+            ReviewSeverity::Error => errors += 1,
+            ReviewSeverity::Warning => warnings += 1,
+            ReviewSeverity::Note => notes += 1,
+        }
+    }
     Ok(ReviewOutcome {
         findings_count,
         review_id: created.id,
+        errors,
+        warnings,
+        notes,
     })
 }
 
