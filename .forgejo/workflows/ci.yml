@@ -11,32 +11,38 @@ permissions:
 jobs:
   flake-check:
     name: Nix flake check
-    # `ubuntu-latest` is the label this Forgejo runner advertises;
-    # the previous `docker` label didn't match any registered runner
-    # and stalled at "Set up job".
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
+    # `docker` is a confirmed-registered label on this Forgejo
+    # instance: commits with `runs-on: docker` create tasks (the
+    # b216906 attempt produced run #97). The earlier
+    # `ubuntu-latest` label did not register at all (commit
+    # 6e11c18 produced zero tasks).
+    runs-on: docker
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
-      # Install Nix on the standard runner image. The Determinate
-      # Systems installer is the de-facto standard for CI Nix
-      # installs — fast, deterministic, supports flakes out of the
-      # box. Pinned commit SHA so a future tag move can't change
-      # the installer mid-flight.
+      # Install Nix via the upstream installer script rather than
+      # a third-party action (no assumption about which GitHub
+      # Marketplace actions this Forgejo runner can fetch). The
+      # determinate.systems script is the canonical multi-arch
+      # installer; --no-confirm skips the interactive prompt.
+      # `extra-conf` flips on flakes + nix-command for this host.
       - name: Install Nix
-        uses: DeterminateSystems/nix-installer-action@92148bb48b9a0c5458c53dd0b368fbfbfbaa3210
-        with:
-          determinate: false
-
-      # Magic-nix-cache: warms /nix/store from a pull-through cache
-      # so we don't rebuild rustc + crane + dep layer from scratch
-      # on every run. Pinned SHA. `use-flakehub: false` keeps us on
-      # the public store cache rather than the FlakeHub one.
-      - name: Nix Cache
-        uses: DeterminateSystems/magic-nix-cache-action@b4a9864e3a8ab8179be30f2e70fd71fe9996bb9d
-        with:
-          use-flakehub: false
+        run: |
+          set -euo pipefail
+          curl --proto '=https' --tlsv1.2 -sSf -L \
+            https://install.determinate.systems/nix \
+            | sh -s -- install linux \
+              --init none \
+              --no-confirm \
+              --extra-conf "experimental-features = nix-command flakes" \
+              --extra-conf "accept-flake-config = true"
+          # The installer drops binaries under /nix/var/nix/profiles/
+          # default/bin which isn't on PATH for the next step. The
+          # standard /etc/profile.d/nix.sh sets it up; source it.
+          # GITHUB_PATH (also honored by Forgejo Actions) makes the
+          # change durable across steps.
+          echo "/nix/var/nix/profiles/default/bin" >> "$GITHUB_PATH"
 
       - name: Run all checks (fmt, clippy, nextest, deny)
         run: nix flake check --print-build-logs
