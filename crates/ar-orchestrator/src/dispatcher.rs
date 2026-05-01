@@ -91,10 +91,15 @@ impl JobDispatcher for SpawningDispatcher {
         let token = self.forgejo_token.clone();
         // Outer spawn returns immediately so the webhook handler can ack.
         // Inner spawn runs the actual review; the outer awaits the inner's
-        // JoinHandle so panics or cancellations get logged instead of
-        // disappearing silently into the runtime.
+        // JoinHandle so panics or cancellations get logged AND surface to
+        // the PR as a failure status — silent crashes make ops debugging
+        // miserable.
         let repo = format!("{}/{}", job.owner, job.repo);
         let pr = job.pr_number;
+        let owner_for_status = job.owner.clone();
+        let repo_for_status = job.repo.clone();
+        let sha_for_status = job.head_sha.clone();
+        let forgejo_for_status = forgejo.clone();
         tokio::spawn(async move {
             let inner = tokio::spawn(async move {
                 run_review_job(&forgejo, &llm, &base, &token, job).await;
@@ -106,6 +111,25 @@ impl JobDispatcher for SpawningDispatcher {
                     error = %e,
                     "review task panicked or was cancelled"
                 );
+                // Best-effort failure-status post; if this fails too, we
+                // log and give up.
+                let status = CommitStatus {
+                    state: CommitStatusState::Error,
+                    target_url: String::new(),
+                    description: "auto_review crashed; check logs".into(),
+                    context: STATUS_CONTEXT.into(),
+                };
+                let _ = forgejo_for_status
+                    .post_commit_status(
+                        &owner_for_status,
+                        &repo_for_status,
+                        &sha_for_status,
+                        &status,
+                    )
+                    .await
+                    .inspect_err(|err| {
+                        tracing::warn!(error = %err, "failed to post crash status");
+                    });
             }
         });
     }
