@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use ar_forgejo::Client as ForgejoClient;
 use ar_gateway::metrics::{Metrics, MetricsObserver};
 use ar_gateway::poller::{ChatPoller, DEFAULT_POLL_INTERVAL};
-use ar_gateway::{build_router, AppState, ChatDeps};
+use ar_gateway::{build_router, AppState, ChatDeps, ReadinessProbe};
 use ar_index::{InMemoryLearningsStore, SqliteLearningsStore};
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::review_history::{InMemoryReviewHistory, ReviewHistory};
@@ -166,10 +166,24 @@ async fn main() -> Result<()> {
     let bot_login = env::var("AR_BOT_LOGIN").unwrap_or_else(|_| "auto_review".into());
     let bot_name = env::var("AR_BOT_NAME").unwrap_or_else(|_| bot_login.clone());
 
+    // Wire the readiness probe to the same Forgejo client the chat
+    // handler uses. The TTL (default 10s) is tuneable via env so
+    // operators with aggressive k8s probe schedules can lengthen it
+    // to avoid hammering Forgejo.
+    let readiness_ttl_secs = env::var("AR_READINESS_TTL_SECS")
+        .ok()
+        .and_then(|s| s.parse().ok())
+        .unwrap_or(10);
+    let readiness = Arc::new(ReadinessProbe::with_ttl(
+        forgejo.clone(),
+        Duration::from_secs(readiness_ttl_secs),
+    ));
+
     let state = AppState::new(secret, dispatcher)
         .with_chat(chat_deps)
         .with_bot_identity(bot_login, bot_name)
-        .with_metrics(metrics);
+        .with_metrics(metrics)
+        .with_readiness(readiness);
     let app = build_router(state);
 
     let listener = TcpListener::bind(&bind)

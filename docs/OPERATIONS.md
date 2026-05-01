@@ -25,6 +25,24 @@ keep it healthy.
 
 ---
 
+## 0a. Kubernetes probes
+
+If you deploy via the bundled Helm chart, both probes are
+already wired:
+
+| Probe       | Path       | Semantics                                                |
+|-------------|------------|----------------------------------------------------------|
+| liveness    | `/healthz` | Process is up. Restart the pod when it fails.            |
+| readiness   | `/readyz`  | Forgejo is reachable. Removes pod from service rotation. |
+
+`/readyz` caches its check (default 10s) so probes don't hammer
+Forgejo. If Forgejo is briefly unreachable, the pod is taken out of
+the service mesh's rotation but **not** restarted — that's the
+correct k8s semantics for transient downstream failures.
+
+Tune the cache with `AR_READINESS_TTL_SECS` (set to 0 effectively
+disables caching, but typical values are 10-30s).
+
 ## 0. Pre-deploy and post-deploy validation
 
 Before exposing a freshly-deployed gateway to Forgejo:

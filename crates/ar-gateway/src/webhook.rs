@@ -335,6 +335,103 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn readyz_without_probe_returns_200() {
+        let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)));
+        let req = Request::get("/readyz").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("no probe configured"));
+    }
+
+    #[tokio::test]
+    async fn readyz_with_healthy_probe_returns_200() {
+        use crate::ReadinessProbe;
+        use ar_forgejo::Client as ForgejoClient;
+        use std::sync::Arc;
+        use std::time::Duration;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/version"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": "9.0.0"})),
+            )
+            .mount(&server)
+            .await;
+
+        let forgejo = Arc::new(ForgejoClient::new(&server.uri(), "tok").unwrap());
+        let probe = Arc::new(ReadinessProbe::with_ttl(forgejo, Duration::from_secs(60)));
+        let app = build_router(
+            AppState::new("s", Arc::new(NoOpDispatcher)).with_readiness(probe),
+        );
+        let req = Request::get("/readyz").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("9.0.0"), "{text}");
+    }
+
+    #[tokio::test]
+    async fn readyz_with_failing_probe_returns_503() {
+        use crate::ReadinessProbe;
+        use ar_forgejo::Client as ForgejoClient;
+        use std::sync::Arc;
+        use std::time::Duration;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/version"))
+            .respond_with(ResponseTemplate::new(500))
+            .mount(&server)
+            .await;
+
+        let forgejo = Arc::new(ForgejoClient::new(&server.uri(), "tok").unwrap());
+        let probe = Arc::new(ReadinessProbe::with_ttl(forgejo, Duration::from_secs(60)));
+        let app = build_router(
+            AppState::new("s", Arc::new(NoOpDispatcher)).with_readiness(probe),
+        );
+        let req = Request::get("/readyz").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    }
+
+    #[tokio::test]
+    async fn readiness_cache_serves_repeat_calls_without_re_probing() {
+        use crate::ReadinessProbe;
+        use ar_forgejo::Client as ForgejoClient;
+        use std::sync::Arc;
+        use std::time::Duration;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        // `expect(1)` asserts the upstream is hit exactly once even
+        // though we call `check()` three times within the TTL.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/version"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({"version": "9.0.0"})),
+            )
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let forgejo = Arc::new(ForgejoClient::new(&server.uri(), "tok").unwrap());
+        let probe = ReadinessProbe::with_ttl(forgejo, Duration::from_secs(60));
+        let (h1, _) = probe.check().await;
+        let (h2, _) = probe.check().await;
+        let (h3, _) = probe.check().await;
+        assert!(h1 && h2 && h3);
+    }
+
+    #[tokio::test]
     async fn metrics_endpoint_emits_prometheus_text_format() {
         let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)));
         let req = Request::get("/metrics").body(Body::empty()).unwrap();

@@ -149,7 +149,18 @@ PR's changed file extensions.
 
 #### Operations endpoints
 
-- `GET /healthz` — cheap liveness check.
+- `GET /healthz` — cheap liveness check (process up).
+- `GET /readyz` — readiness check that probes Forgejo
+  reachability through the same client used by the chat
+  handler and review pipeline. Returns `200 ok` (with the
+  reported Forgejo version) when reachable, `503 Service
+  Unavailable` otherwise. Backed by an async-Mutex-guarded
+  TTL cache (default 10s, tuneable via `AR_READINESS_TTL_SECS`)
+  so high-frequency k8s probes don't hammer Forgejo. Lets
+  k8s deployments wire `livenessProbe: /healthz` separately
+  from `readinessProbe: /readyz` — the Helm chart is updated
+  to do that. When no probe is wired (single-pod systemd
+  deploy), `/readyz` degrades safely to `/healthz` semantics.
 - `GET /version` — JSON `{"name", "version"}` from `CARGO_PKG_VERSION`.
 - `GET /metrics` — Prometheus-format counters spanning the
   webhook layer AND the review pipeline.
