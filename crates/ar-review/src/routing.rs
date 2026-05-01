@@ -12,6 +12,7 @@ use ar_tools::golangci_lint::GolangciLintRunner;
 use ar_tools::hadolint::HadolintRunner;
 use ar_tools::markdownlint::MarkdownLintRunner;
 use ar_tools::osv_scanner::OsvScannerRunner;
+use ar_tools::phpstan::PhpstanRunner;
 use ar_tools::rubocop::RubocopRunner;
 use ar_tools::ruff::RuffRunner;
 use ar_tools::runner::{run_all, LinterRunner};
@@ -131,6 +132,15 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         runners.push(Box::new(RubocopRunner { files: ruby_files }));
     }
 
+    let php_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| has_php_ext(&f.filename))
+        .map(|f| f.filename.clone())
+        .collect();
+    if !php_files.is_empty() {
+        runners.push(Box::new(PhpstanRunner { files: php_files }));
+    }
+
     let js_files: Vec<String> = surviving
         .iter()
         .filter(|f| has_js_ext(&f.filename))
@@ -223,6 +233,16 @@ fn has_ruby_ext(name: &str) -> bool {
         || lower.ends_with("/rakefile")
         || lower == "gemfile"
         || lower == "rakefile"
+}
+
+fn has_php_ext(name: &str) -> bool {
+    name.ends_with(".php")
+        || name.ends_with(".phtml")
+        || name.ends_with(".php3")
+        || name.ends_with(".php4")
+        || name.ends_with(".php5")
+        || name.ends_with(".php7")
+        || name.ends_with(".phps")
 }
 
 fn has_js_ext(name: &str) -> bool {
@@ -541,6 +561,28 @@ mod tests {
             got,
             vec!["ast-grep", "gitleaks", "osv-scanner", "semgrep", "trivy"]
         );
+    }
+
+    #[test]
+    fn php_files_select_phpstan() {
+        for name in ["src/Controller.php", "lib/Foo.phtml", "legacy/old.php3"] {
+            let files = vec![cf(name, "modified")];
+            let runners = select_runners(&files);
+            let mut got = names(&runners);
+            got.sort();
+            assert_eq!(
+                got,
+                vec![
+                    "ast-grep",
+                    "gitleaks",
+                    "osv-scanner",
+                    "phpstan",
+                    "semgrep",
+                    "trivy"
+                ],
+                "name = {name}"
+            );
+        }
     }
 
     #[test]

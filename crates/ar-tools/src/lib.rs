@@ -19,6 +19,7 @@ pub mod golangci_lint;
 pub mod hadolint;
 pub mod markdownlint;
 pub mod osv_scanner;
+pub mod phpstan;
 pub mod rubocop;
 pub mod ruff;
 pub mod runner;
