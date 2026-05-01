@@ -102,7 +102,7 @@ impl Client {
         if !status.is_success() {
             return Err(Error::Api {
                 status: status.as_u16(),
-                body,
+                body: cap_for_error(&body),
             });
         }
         Ok(body)
@@ -157,9 +157,10 @@ impl Client {
         let resp = self.http.post(url).json(status).send().await?;
         let s = resp.status();
         if !s.is_success() {
+            let body = resp.text().await.unwrap_or_default();
             return Err(Error::Api {
                 status: s.as_u16(),
-                body: resp.text().await.unwrap_or_default(),
+                body: cap_for_error(&body),
             });
         }
         Ok(())
@@ -212,7 +213,7 @@ impl Client {
             let body = resp.text().await.unwrap_or_default();
             return Err(Error::Api {
                 status: status.as_u16(),
-                body,
+                body: cap_for_error(&body),
             });
         }
         Ok(())
@@ -260,7 +261,7 @@ impl Client {
         if !status.is_success() {
             return Err(Error::Api {
                 status: status.as_u16(),
-                body,
+                body: cap_for_error(&body),
             });
         }
         Ok(body)
@@ -392,7 +393,7 @@ async fn json_post<I: Serialize, T: for<'de> Deserialize<'de>>(
 /// Including it verbatim in `Error::Api` holds that much in memory
 /// and pollutes operator logs. 1 KiB easily covers any real
 /// Forgejo error response while bounding the worst case.
-fn cap_for_error(s: &str) -> String {
+pub(crate) fn cap_for_error(s: &str) -> String {
     const CAP: usize = 1024;
     if s.len() <= CAP {
         return s.to_string();

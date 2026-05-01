@@ -6,7 +6,7 @@
 //! complicate the main token-based [`Client`](crate::Client) for a
 //! once-per-install operation.
 
-use crate::client::Error;
+use crate::client::{cap_for_error, Error};
 use crate::types::{CreateAccessTokenRequest, CreatedAccessToken};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use url::Url;
@@ -70,12 +70,12 @@ impl InitClient {
         if !status.is_success() {
             return Err(Error::Api {
                 status: status.as_u16(),
-                body,
+                body: cap_for_error(&body),
             });
         }
         serde_json::from_str(&body).map_err(|e| Error::Api {
             status: 200,
-            body: format!("decode error: {e}: {body}"),
+            body: format!("decode error: {e}: {}", cap_for_error(&body)),
         })
     }
 }
