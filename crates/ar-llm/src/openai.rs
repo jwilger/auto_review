@@ -83,11 +83,11 @@ impl LlmProvider for OpenAiProvider {
         if !status.is_success() {
             return Err(Error::Provider {
                 status: status.as_u16(),
-                body: text,
+                body: cap_for_error(&text),
             });
         }
-        let parsed: ChatResponse =
-            serde_json::from_str(&text).map_err(|e| Error::Decode(format!("{e}: {text}")))?;
+        let parsed: ChatResponse = serde_json::from_str(&text)
+            .map_err(|e| Error::Decode(format!("{e}: {}", cap_for_error(&text))))?;
         let content = parsed
             .choices
             .into_iter()
@@ -115,13 +115,31 @@ impl LlmProvider for OpenAiProvider {
         if !status.is_success() {
             return Err(Error::Provider {
                 status: status.as_u16(),
-                body: text,
+                body: cap_for_error(&text),
             });
         }
-        let parsed: EmbedResponse =
-            serde_json::from_str(&text).map_err(|e| Error::Decode(format!("{e}: {text}")))?;
+        let parsed: EmbedResponse = serde_json::from_str(&text)
+            .map_err(|e| Error::Decode(format!("{e}: {}", cap_for_error(&text))))?;
         Ok(parsed.data.into_iter().map(|d| d.embedding).collect())
     }
+}
+
+/// Cap the response body included in error messages. A misbehaving
+/// proxy or provider can return an HTML error page that's hundreds
+/// of KB; including it verbatim in `Error::Provider` / `Error::Decode`
+/// holds that much in memory and pollutes operator logs. 1 KiB is
+/// enough to surface the actual error message at the top of the
+/// body without dragging the whole HTML stub along.
+fn cap_for_error(s: &str) -> String {
+    const CAP: usize = 1024;
+    if s.len() <= CAP {
+        return s.to_string();
+    }
+    let mut cut = CAP;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}… [+{} bytes]", &s[..cut], s.len() - cut)
 }
 
 // ---- wire types ----
@@ -277,6 +295,31 @@ mod tests {
                 "input = {input}"
             );
         }
+    }
+
+    #[test]
+    fn cap_for_error_passes_short_strings_through() {
+        assert_eq!(cap_for_error("brief error"), "brief error");
+    }
+
+    #[test]
+    fn cap_for_error_truncates_long_bodies_with_byte_count() {
+        // A proxy returning a 200KB HTML error page would otherwise
+        // hold 200KB in Error::Provider and pollute operator logs.
+        let big = "<html>".to_string() + &"x".repeat(200_000) + "</html>";
+        let out = cap_for_error(&big);
+        assert!(out.len() < 1300, "output was {} bytes", out.len());
+        assert!(out.starts_with("<html>"));
+        assert!(out.contains("[+"));
+        assert!(out.contains("bytes]"));
+    }
+
+    #[test]
+    fn cap_for_error_respects_utf8_boundaries() {
+        let mut s = "x".repeat(1022);
+        s.push_str("🦀tail"); // emoji at the boundary
+        let out = cap_for_error(&s);
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
 
     #[tokio::test]
