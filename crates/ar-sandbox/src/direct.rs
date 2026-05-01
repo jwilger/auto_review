@@ -48,11 +48,17 @@ mod tests {
 
     #[tokio::test]
     async fn echoes_args_to_stdout() {
+        // Invoke via `sh -c` rather than `Command::new("echo")` so
+        // the test stays hermetic in environments (e.g. the Nix
+        // sandbox) where `env_clear` strips PATH and `echo` isn't
+        // found by name. The contract under test is "DirectSandbox
+        // runs a command and captures stdout"; the choice of
+        // command is incidental.
         let sb = DirectSandbox::new();
         let out = sb
             .run(&SandboxCommand {
-                program: "echo".into(),
-                args: vec!["hello".into(), "world".into()],
+                program: "sh".into(),
+                args: vec!["-c".into(), "printf '%s' 'hello world'".into()],
                 working_dir: cwd(),
                 env: vec![],
             })

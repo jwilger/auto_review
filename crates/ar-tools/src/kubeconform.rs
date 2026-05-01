@@ -62,7 +62,7 @@ pub fn parse_kubeconform_output(json: &str) -> Result<Vec<Finding>, RunnerError>
         };
         let detail = r.msg.unwrap_or_default();
         let message = if detail.is_empty() {
-            format!("kubeconform: {} flagged {header}", lower)
+            format!("kubeconform: {lower} flagged {header}")
         } else {
             format!("{header}: {detail}")
         };

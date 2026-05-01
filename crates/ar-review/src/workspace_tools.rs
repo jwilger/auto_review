@@ -70,8 +70,7 @@ pub fn read_file(
     if let Ok(meta) = fs::metadata(&resolved) {
         if meta.len() > SCAN_FILE_MAX_BYTES {
             return Err(WorkspaceToolError::NotFound(format!(
-                "{rel_path} (exceeds {} byte read cap)",
-                SCAN_FILE_MAX_BYTES
+                "{rel_path} (exceeds {SCAN_FILE_MAX_BYTES} byte read cap)"
             )));
         }
     }

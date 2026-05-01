@@ -11,3 +11,8 @@
 /.remember/
 /.claude/ralph-loop.local.md
 /.claude/settings.local.json
+# Nix dev environment
+/.direnv/
+/.dependencies/
+result
+result-*

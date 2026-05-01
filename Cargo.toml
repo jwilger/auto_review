@@ -18,8 +18,17 @@ members = [
 version = "0.0.1"
 edition = "2021"
 license = "AGPL-3.0-or-later"
-repository = "https://codeberg.org/jwilger/auto_review"
-rust-version = "1.85"
+repository = "https://git.johnwilger.com/jwilger/auto_review"
+# 1.88 is the floor required by transitive deps (rpassword's
+# let-chains; idna 2.x via url 2.5). Single source of truth lives
+# in rust-toolchain.toml; this field is the one cargo-deny / docs
+# tooling reads.
+rust-version = "1.88"
+# Workspace crates are application code, not crates.io packages.
+# `publish = false` also tells cargo-deny these are private path
+# crates so wildcard internal deps (`ar-* = { path = "..." }`)
+# don't trip the wildcards-deny rule.
+publish = false
 
 [workspace.dependencies]
 tokio = { version = "1", features = ["full"] }

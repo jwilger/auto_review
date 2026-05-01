@@ -30,8 +30,6 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 # Surface but don't block on:
 unmaintained = "workspace"
-unsound = "warn"
-notice = "warn"
 ignore = []
 
 # ---------------------------------------------------------------
@@ -60,6 +58,10 @@ allow = [
     "MPL-2.0",
     "Unicode-3.0",
     "Unicode-DFS-2016",
+    # `webpki-roots` ships under CDLA-Permissive-2.0 (Linux Foundation
+    # data-license). Permissive in practice; transitive via reqwest →
+    # rustls → webpki-roots.
+    "CDLA-Permissive-2.0",
     # Used by `tinyvec` and friends; permissive in practice.
     "BSL-1.0",
     "OpenSSL",
@@ -74,6 +76,10 @@ exceptions = []
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# Internal path-deps (`ar-* = { path = "../ar-*" }`) are
+# necessarily versionless; without this they read as wildcard
+# dependencies and trip the workspace-internal "deny" rule.
+allow-wildcard-paths = true
 highlight = "all"
 allow = []
 deny = []

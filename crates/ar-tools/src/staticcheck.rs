@@ -54,7 +54,7 @@ pub fn parse_staticcheck_output(text: &str) -> Result<Vec<Finding>, RunnerError>
         }
         let r: StaticcheckRecord = serde_json::from_str(line).map_err(|e| RunnerError::Parse {
             tool: TOOL.into(),
-            detail: format!("line {:?}: {e}", line),
+            detail: format!("line {line:?}: {e}"),
         })?;
         let start = r.location.line.max(1);
         let end = if r.end.line >= start {

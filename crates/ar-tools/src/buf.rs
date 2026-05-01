@@ -44,7 +44,7 @@ pub fn parse_buf_output(text: &str) -> Result<Vec<Finding>, RunnerError> {
         }
         let f: BufFinding = serde_json::from_str(line).map_err(|e| RunnerError::Parse {
             tool: TOOL.into(),
-            detail: format!("line {:?}: {e}", line),
+            detail: format!("line {line:?}: {e}"),
         })?;
         let start = f.start_line.max(1);
         let end = if f.end_line >= start {

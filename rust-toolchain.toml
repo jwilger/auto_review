@@ -1,4 +1,18 @@
 [toolchain]
-channel = "stable"
-components = ["rustfmt", "clippy"]
+# Pinned single source of truth for the project's Rust toolchain.
+#
+# 1.88 is the floor required by the current dep tree:
+#   - rpassword 7.5.1 uses `let`-chains in if conditions (1.88)
+#   - idna / icu_* (via url 2.5) need 1.86
+# The previous channel pin (`stable`) drifted across rebuilds
+# and let CI's `rust:1.85-slim-bookworm` image fail to compile
+# while local dev on 1.94 looked fine.
+#
+# The flake reads this file via `rust-overlay`'s
+# `fromRustupToolchainFile`; the dev shell, every `nix flake
+# check`, and CI all use the same toolchain. Bumping here
+# propagates everywhere — no separate Docker-image pin to keep in
+# sync.
+channel = "1.88"
+components = ["rustfmt", "clippy", "rust-src"]
 profile = "minimal"

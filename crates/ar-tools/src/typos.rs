@@ -44,7 +44,7 @@ pub fn parse_typos_output(text: &str) -> Result<Vec<Finding>, RunnerError> {
         }
         let r: TyposRecord = serde_json::from_str(line).map_err(|e| RunnerError::Parse {
             tool: TOOL.into(),
-            detail: format!("line {:?}: {e}", line),
+            detail: format!("line {line:?}: {e}"),
         })?;
         // Filter out the summary record that typos emits at the end
         // of every run; only `type: "typo"` records carry findings.

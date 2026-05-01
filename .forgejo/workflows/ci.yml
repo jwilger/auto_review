@@ -5,32 +5,35 @@ on:
     branches: [main]
   pull_request:
 
-jobs:
-  check:
-    runs-on: docker
-    container:
-      image: rust:1.85-slim-bookworm
-    steps:
-      - uses: actions/checkout@v4
-      - name: install components
-        run: rustup component add rustfmt clippy
-      - name: fmt
-        run: cargo fmt --all -- --check
-      - name: clippy
-        run: cargo clippy --workspace --all-targets -- -D warnings
-      - name: test
-        run: cargo test --workspace --all-targets
+permissions:
+  contents: read
 
-  supply-chain:
+jobs:
+  flake-check:
+    name: Nix flake check
     runs-on: docker
     container:
-      image: rust:1.85-slim-bookworm
+      # Pinned digest of nixos/nix:2.34.6 — ships nix with flakes
+      # disabled-by-default, hence the `--extra-experimental-features`
+      # below. CI must use the exact toolchain pinned in
+      # rust-toolchain.toml; that's the whole point of the flake.
+      image: docker.io/nixos/nix:2.34.6
     steps:
       - uses: actions/checkout@v4
-      # `cargo install` builds from source which is slow but
-      # reliable across architectures. Pinning the version
-      # keeps the supply-chain check itself reproducible.
-      - name: install cargo-deny
-        run: cargo install --locked cargo-deny@0.16.4
-      - name: cargo deny check
-        run: cargo deny check
+
+      - name: Trust the workspace's flake
+        # Forgejo's runner doesn't pre-trust the working tree;
+        # the experimental-features flag tells nix to allow flakes
+        # for this invocation only.
+        run: |
+          mkdir -p /etc/nix
+          cat >> /etc/nix/nix.conf <<EOF
+          experimental-features = nix-command flakes
+          accept-flake-config = true
+          # Larger /nix/store budget so cargo's target dir doesn't
+          # blow up the default 1 GiB tmpfs.
+          max-jobs = auto
+          EOF
+
+      - name: Run all checks (fmt, clippy, nextest, deny)
+        run: nix flake check --print-build-logs
