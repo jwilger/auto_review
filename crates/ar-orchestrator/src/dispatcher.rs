@@ -179,6 +179,7 @@ pub async fn run_review_job(
             None
         }
     };
+    let mut incremental_diff: Option<String> = None;
     if let Some(prev) = &last_reviewed_sha {
         if prev == &job.head_sha {
             tracing::info!(
@@ -194,8 +195,17 @@ pub async fn run_review_job(
             pr = job.pr_number,
             previous = %prev,
             current = %job.head_sha,
-            "incremental review: new commits since last review",
+            "incremental review: fetching compare diff",
         );
+        match forgejo
+            .get_compare_diff(&job.owner, &job.repo, prev, &job.head_sha)
+            .await
+        {
+            Ok(d) => incremental_diff = Some(d),
+            Err(e) => {
+                tracing::warn!(error = %e, "compare_diff failed; falling back to full diff");
+            }
+        }
     }
 
     let _ = forgejo
@@ -302,6 +312,7 @@ pub async fn run_review_job(
         ignored_paths: &ignored_paths,
         guidelines: &guidelines,
         repo_context: &repo_context,
+        diff_override: incremental_diff.as_deref(),
     })
     .await;
 

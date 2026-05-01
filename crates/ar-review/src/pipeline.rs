@@ -35,6 +35,11 @@ pub struct ReviewArgs<'a> {
     /// co-change neighbors). Empty string when the index hasn't
     /// been built or returned no matches.
     pub repo_context: &'a str,
+    /// Pre-fetched diff to use instead of `forgejo.get_pr_diff`.
+    /// `Some` for incremental reviews where the orchestrator already
+    /// fetched a `compare_diff(previous_sha..head_sha)`. `None` for
+    /// normal full reviews.
+    pub diff_override: Option<&'a str>,
 }
 
 /// End-to-end review activity for one PR.
@@ -45,10 +50,14 @@ pub struct ReviewArgs<'a> {
 /// repo and running linters; their findings are passed in via
 /// `linter_findings` and surfaced to the LLM as supplementary context.
 pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, ReviewError> {
-    let raw_diff = args
-        .forgejo
-        .get_pr_diff(args.owner, args.repo, args.pr_number)
-        .await?;
+    let raw_diff = match args.diff_override {
+        Some(d) => d.to_string(),
+        None => {
+            args.forgejo
+                .get_pr_diff(args.owner, args.repo, args.pr_number)
+                .await?
+        }
+    };
     let pruned = filter_diff_paths(&raw_diff, args.ignored_paths);
     let diff = cap_diff(&pruned, DEFAULT_MAX_DIFF_BYTES);
     if diff.len() < raw_diff.len() {
@@ -204,6 +213,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            diff_override: None,
         })
         .await
         .expect("review ok");
@@ -238,6 +248,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            diff_override: None,
         })
         .await
         .expect_err("err");
@@ -289,6 +300,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            diff_override: None,
         })
         .await
         .expect("ok");
@@ -345,6 +357,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            diff_override: None,
         })
         .await
         .expect("ok");
