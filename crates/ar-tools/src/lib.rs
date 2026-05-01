@@ -51,6 +51,7 @@ pub mod tflint;
 pub mod trivy;
 pub mod typos;
 pub mod vale;
+pub mod vint;
 pub mod yamllint;
 
 pub use finding::{Finding, Severity};

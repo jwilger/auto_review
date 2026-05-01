@@ -44,6 +44,7 @@ use ar_tools::tflint::TflintRunner;
 use ar_tools::trivy::TrivyRunner;
 use ar_tools::typos::TyposRunner;
 use ar_tools::vale::ValeRunner;
+use ar_tools::vint::VintRunner;
 use ar_tools::yamllint::YamlLintRunner;
 use ar_tools::Finding;
 use std::path::Path;
@@ -204,6 +205,19 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         runners.push(Box::new(KtlintRunner {
             files: kotlin_files,
         }));
+    }
+
+    let vim_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| {
+            let last = f.filename.rsplit('/').next().unwrap_or(&f.filename);
+            f.filename.ends_with(".vim")
+                || matches!(last, "vimrc" | ".vimrc" | "gvimrc" | ".gvimrc")
+        })
+        .map(|f| f.filename.clone())
+        .collect();
+    if !vim_files.is_empty() {
+        runners.push(Box::new(VintRunner { files: vim_files }));
     }
 
     let js_files: Vec<String> = surviving
@@ -970,6 +984,29 @@ mod tests {
                     "semgrep",
                     "trivy",
                     "typos"
+                ],
+                "name = {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn vim_files_select_vint() {
+        for name in ["plugin/foo.vim", "vimrc", ".vimrc", "gvimrc"] {
+            let files = vec![cf(name, "modified")];
+            let runners = select_runners(&files);
+            let mut got = names(&runners);
+            got.sort();
+            assert_eq!(
+                got,
+                vec![
+                    "ast-grep",
+                    "gitleaks",
+                    "osv-scanner",
+                    "semgrep",
+                    "trivy",
+                    "typos",
+                    "vint"
                 ],
                 "name = {name}"
             );

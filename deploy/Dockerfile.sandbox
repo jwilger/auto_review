@@ -19,7 +19,8 @@
 #   hadolint, helm, htmlhint, ktlint, kubeconform, markdownlint,
 #   mypy, osv-scanner, oxlint, phpstan, pmd, prettier, pylint,
 #   rubocop, ruff, semgrep, shellcheck, shfmt, sqlfluff, staticcheck,
-#   stylelint, swiftlint, taplo, tflint, trivy, typos, vale, yamllint
+#   stylelint, swiftlint, taplo, tflint, trivy, typos, vale, vint,
+#   yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -51,7 +52,8 @@ RUN pip3 install --break-system-packages \
         mypy \
         bandit \
         ansible-lint \
-        pylint
+        pylint \
+        vim-vint
 
 # Ruby linters (gem)
 RUN gem install --no-document rubocop

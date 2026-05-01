@@ -44,7 +44,7 @@ since the start of the project.
   `run_review_job` posts pending → final commit statuses around the
   triage → clone → lint → review → post sequence.
 
-#### Linters (41 of CodeRabbit's ~45 set)
+#### Linters (42 of CodeRabbit's ~45 set)
 
 | Tool | Languages / files | Source-tool name |
 |---|---|---|
@@ -80,6 +80,7 @@ since the start of the project.
 | `hadolint` | Dockerfiles | `hadolint` |
 | `markdownlint` | `*.md` / `*.markdown` | `markdownlint` |
 | `vale` | Prose linter (grammar/voice/spelling) for `.md`/`.markdown` | `vale` |
+| `vint` | Vim script (.vim / vimrc / .vimrc / gvimrc / .gvimrc) | `vint` |
 | `typos` | Source-tree typo finder (identifiers, comments, strings) | `typos` |
 | `sqlfluff` | SQL (.sql / .dml / .ddl, multi-dialect) | `sqlfluff` |
 | `taplo` | TOML (Cargo.toml, pyproject.toml, …) | `taplo` |
@@ -287,8 +288,8 @@ default in-memory store to the SQLite-backed one.
   paths cover correctness; LanceDB is the scale lever).
 - youki-based `Sandbox` impl as a lighter alternative to the
   podman shell-out.
-- Remaining ~4 linters from CodeRabbit's set
-  (languagetool, jsonlint, vint, nilaway).
+- Remaining ~3 linters from CodeRabbit's set
+  (languagetool, jsonlint, nilaway).
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
   wiremock + canned LLM providers.
