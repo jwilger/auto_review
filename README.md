@@ -36,6 +36,9 @@ plan; [ADR-0001](./docs/ADR-0001-architecture.md) captures the
 architecture decision; the [threat model](./docs/THREAT-MODEL.md)
 enumerates attacker profiles, trust boundaries, and per-class
 mitigations (read this before exposing the bot to drive-by PRs).
+[ADR-0002](./docs/ADR-0002-sandbox.md) documents why every linter
+spawn is sandboxed; [ADR-0003](./docs/ADR-0003-observability.md)
+documents the metrics / readiness / runtime-introspection design.
 
 What's still on the roadmap: a LanceDB-backed vector store
 (currently in-memory + SQLite-backed for learnings), the full

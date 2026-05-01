@@ -66,8 +66,11 @@ cargo deny check
 
 ## Architecture overview
 
-See `docs/ADR-0001-architecture.md` for the high-level decision and
-`docs/FEASIBILITY.md` for the longer reasoning. The crate layout:
+See `docs/ADR-0001-architecture.md` for the high-level decision,
+`docs/ADR-0002-sandbox.md` for why every linter spawn is sandboxed,
+`docs/ADR-0003-observability.md` for the metrics / readiness /
+runtime-introspection design, and `docs/FEASIBILITY.md` for the
+longer reasoning. The crate layout:
 
 | Crate | Responsibility |
 |---|---|

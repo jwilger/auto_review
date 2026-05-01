@@ -749,6 +749,27 @@ default in-memory store to the SQLite-backed one.
   operator-controlled configuration). Cross-referenced from
   the README.
 
+#### ADR-0003 observability (M5 docs)
+
+- `docs/ADR-0003-observability.md`: 8KB ADR documenting
+  the design choices behind the runtime-introspection
+  surface — why five distinct HTTP endpoints
+  (`/healthz`/`/readyz`/`/version`/`/info`/`/metrics`)
+  rather than one mega-status route, why
+  `ReviewObserver` is a trait in `ar-orchestrator` (the
+  dependency arrow stays gateway → orchestrator), why
+  hand-rolled `AtomicU64` counters and not a metrics
+  crate (small set + compile-time + minimal deps), why
+  cumulative-bucket histogram bounds are tuned at
+  1/5/15/30/60/120/300/600s for review work, and how the
+  shipped Grafana / Prometheus artefacts stay in sync via
+  CI contract tests. Covers consequences (positive AND
+  negative — the metric set is hand-maintained; no
+  Prometheus labels yet) and alternatives considered
+  (OpenTelemetry, single status route, JSON metrics).
+  Cross-references THREAT-MODEL, OPERATIONS, and the
+  deploy artefacts. README and CONTRIBUTING link it.
+
 #### User guide (M5 docs)
 
 - `docs/USER-GUIDE.md`: documentation for PR authors whose
