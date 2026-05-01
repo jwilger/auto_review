@@ -6,11 +6,25 @@
     "feature-dev@claude-plugins-official": true,
     "security-guidance@claude-plugins-official": true,
     "coderabbit@claude-plugins-official": true,
+    "bushido@han": true,
+    "core@han": true,
+    "ralph-loop@claude-plugins-official": true,
+    "claude-agent-sdk@han": true,
+    "clippy@han": true,
+    "helm@han": true,
+    "rust@han": true,
     "backend-development@han": true,
     "bdd@han": true,
     "tdd@han": true,
-    "bushido@han": true,
-    "core@han": true,
-    "ralph-loop@claude-plugins-official": true
+    "kubernetes@han": true,
+    "blueprints@han": true
+  },
+  "extraKnownMarketplaces": {
+    "han": {
+      "source": {
+        "source": "github",
+        "repo": "thebushidocollective/han"
+      }
+    }
   }
 }
