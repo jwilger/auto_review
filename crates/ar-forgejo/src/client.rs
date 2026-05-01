@@ -147,6 +147,40 @@ impl Client {
         json_get(&self.http, url).await
     }
 
+    /// Fetch the unified diff between two commit SHAs (or branches).
+    /// Used for incremental review: when a PR gets new commits, the
+    /// orchestrator can ask for `previous_head..current_head` instead
+    /// of re-reviewing the whole PR.
+    ///
+    /// Forgejo accepts the standard `base...head` triple-dot syntax
+    /// for range diffs.
+    pub async fn get_compare_diff(
+        &self,
+        owner: &str,
+        repo: &str,
+        base: &str,
+        head: &str,
+    ) -> Result<String, Error> {
+        let url = self.url(&format!(
+            "repos/{owner}/{repo}/compare/{base}...{head}.diff"
+        ))?;
+        let resp = self
+            .http
+            .get(url)
+            .header(ACCEPT, "text/plain")
+            .send()
+            .await?;
+        let status = resp.status();
+        let body = resp.text().await?;
+        if !status.is_success() {
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        Ok(body)
+    }
+
     /// Fetch the Forgejo server's reported version string. Used as a
     /// cheap connectivity probe by readiness checks at gateway startup.
     pub async fn get_server_version(&self) -> Result<String, Error> {
@@ -305,6 +339,39 @@ mod tests {
             .post_commit_status("o", "r", "abc123", &status)
             .await
             .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn get_compare_diff_returns_text() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/compare/abc...def.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/x b/x\n+y\n"))
+            .mount(&server)
+            .await;
+        let diff = client
+            .get_compare_diff("o", "r", "abc", "def")
+            .await
+            .expect("ok");
+        assert!(diff.contains("+y"));
+    }
+
+    #[tokio::test]
+    async fn get_compare_diff_propagates_404() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/compare/abc...def.diff"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+        let err = client
+            .get_compare_diff("o", "r", "abc", "def")
+            .await
+            .expect_err("err");
+        match err {
+            Error::Api { status, .. } => assert_eq!(status, 404),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[tokio::test]
