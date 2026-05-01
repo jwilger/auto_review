@@ -783,10 +783,33 @@ fn build_suggestion_user_prompt(kind: SuggestionKind, diff: &str) -> String {
     out
 }
 
+/// Per-field caps on what we'll inline into a Forgejo review-comment
+/// body. Without these, a misbehaving cheap-tier model could blow
+/// past Forgejo's per-review payload limit (Forgejo doesn't document
+/// it, but a multi-MB review request reliably 422s; a few KB per
+/// comment leaves comfortable headroom for up to AUTOFIX_MAX_PATCHES
+/// comments + the review-body text).
+const SUGGESTION_REASON_MAX: usize = 1_024;
+const SUGGESTION_REPLACEMENT_MAX: usize = 4_096;
+
 fn format_suggestion_body(p: &AutofixPatch) -> String {
-    let mut out = String::with_capacity(p.replacement.len() + p.reason.len() + 64);
-    if !p.reason.trim().is_empty() {
-        out.push_str(p.reason.trim());
+    let reason = if p.reason.len() > SUGGESTION_REASON_MAX {
+        truncate_with_marker(&p.reason, SUGGESTION_REASON_MAX, "[reason truncated]")
+    } else {
+        p.reason.clone()
+    };
+    let replacement = if p.replacement.len() > SUGGESTION_REPLACEMENT_MAX {
+        truncate_with_marker(
+            &p.replacement,
+            SUGGESTION_REPLACEMENT_MAX,
+            "[replacement truncated — apply will not work]",
+        )
+    } else {
+        p.replacement.clone()
+    };
+    let mut out = String::with_capacity(replacement.len() + reason.len() + 64);
+    if !reason.trim().is_empty() {
+        out.push_str(reason.trim());
         out.push_str("\n\n");
     }
     // Pick a fence longer than any backtick run inside the
@@ -795,11 +818,11 @@ fn format_suggestion_body(p: &AutofixPatch) -> String {
     // close the suggestion block. CommonMark requires the opening
     // and closing fences to use the same length, and the closing
     // fence's length must be >= the longest internal run.
-    let fence = pick_fence(&p.replacement);
+    let fence = pick_fence(&replacement);
     out.push_str(&fence);
     out.push_str("suggestion\n");
-    out.push_str(&p.replacement);
-    if !p.replacement.ends_with('\n') {
+    out.push_str(&replacement);
+    if !replacement.ends_with('\n') {
         out.push('\n');
     }
     out.push_str(&fence);
@@ -2018,6 +2041,29 @@ mod tests {
         // Block must always close on its own line.
         assert!(body.ends_with("```"));
         assert!(body.contains("no newline\n```"));
+    }
+
+    #[test]
+    fn format_suggestion_body_caps_oversized_reason_and_replacement() {
+        // Defence: a misbehaving cheap-tier model could emit a
+        // multi-MB rationale or replacement, blowing past Forgejo's
+        // per-review payload limit and 422-ing the entire batch
+        // (losing every legitimate patch alongside).
+        let p = AutofixPatch {
+            path: "x.rs".into(),
+            line: 1,
+            replacement: "x".repeat(10_000),
+            reason: "y".repeat(5_000),
+        };
+        let body = format_suggestion_body(&p);
+        assert!(body.contains("[reason truncated]"));
+        assert!(body.contains("[replacement truncated"));
+        // Total body should be bounded by the two caps + framing.
+        assert!(
+            body.len() < 6_500,
+            "body should be ≤ caps + a little framing, got {} bytes",
+            body.len()
+        );
     }
 
     #[test]
