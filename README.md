@@ -28,7 +28,9 @@ ongoing basis (rotation, upgrades, alerts, repo config),
 see [docs/OPERATIONS.md](./docs/OPERATIONS.md). If you're a
 PR author whose changes are reviewed by an `auto_review`
 deployment and you want to know what the bot does and how to
-talk to it, see [docs/USER-GUIDE.md](./docs/USER-GUIDE.md). For background,
+talk to it, see [docs/USER-GUIDE.md](./docs/USER-GUIDE.md).
+If you've found a security issue, see
+[SECURITY.md](./SECURITY.md) for the disclosure process. For background,
 the [feasibility study](./docs/FEASIBILITY.md) lays out the broader
 plan; [ADR-0001](./docs/ADR-0001-architecture.md) captures the
 architecture decision; the [threat model](./docs/THREAT-MODEL.md)

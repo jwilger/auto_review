@@ -638,6 +638,17 @@ default in-memory store to the SQLite-backed one.
   renaming a counter without updating the rules file fails
   CI.
 
+#### Security policy (M5 docs)
+
+- `SECURITY.md`: vulnerability disclosure policy at the
+  repo root. Documents the reporting channel
+  (`john@johnwilger.com`), pre-1.0 disclosure timeline norms
+  (5-day ack, 14-day triage, 90-day fix-or-coordinate), and
+  scope (in: this repo's crates and deploy artefacts; out:
+  Forgejo / LLM providers / bundled linter upstreams /
+  operator-controlled configuration). Cross-referenced from
+  the README.
+
 #### User guide (M5 docs)
 
 - `docs/USER-GUIDE.md`: documentation for PR authors whose
