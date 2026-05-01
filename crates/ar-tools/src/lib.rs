@@ -16,6 +16,7 @@ pub mod gitleaks;
 pub mod golangci_lint;
 pub mod hadolint;
 pub mod markdownlint;
+pub mod rubocop;
 pub mod ruff;
 pub mod runner;
 pub mod semgrep;

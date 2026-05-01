@@ -8,6 +8,7 @@ use ar_tools::gitleaks::GitleaksRunner;
 use ar_tools::golangci_lint::GolangciLintRunner;
 use ar_tools::hadolint::HadolintRunner;
 use ar_tools::markdownlint::MarkdownLintRunner;
+use ar_tools::rubocop::RubocopRunner;
 use ar_tools::ruff::RuffRunner;
 use ar_tools::runner::{run_all, LinterRunner};
 use ar_tools::semgrep::SemgrepRunner;
@@ -69,6 +70,15 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
 
     if surviving.iter().any(|f| has_go_ext(&f.filename)) {
         runners.push(Box::new(GolangciLintRunner));
+    }
+
+    let ruby_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| has_ruby_ext(&f.filename))
+        .map(|f| f.filename.clone())
+        .collect();
+    if !ruby_files.is_empty() {
+        runners.push(Box::new(RubocopRunner { files: ruby_files }));
     }
 
     let js_files: Vec<String> = surviving
@@ -141,6 +151,16 @@ fn has_python_ext(name: &str) -> bool {
 
 fn has_go_ext(name: &str) -> bool {
     name.ends_with(".go")
+}
+
+fn has_ruby_ext(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".rb")
+        || lower.ends_with(".rake")
+        || lower.ends_with("/gemfile")
+        || lower.ends_with("/rakefile")
+        || lower == "gemfile"
+        || lower == "rakefile"
 }
 
 fn has_js_ext(name: &str) -> bool {
@@ -218,6 +238,23 @@ mod tests {
         let mut got = names(&runners);
         got.sort();
         assert_eq!(got, vec!["gitleaks", "ruff", "semgrep"]);
+    }
+
+    #[test]
+    fn ruby_files_select_rubocop() {
+        for name in [
+            "lib/user.rb",
+            "spec/user_spec.rb",
+            "Rakefile",
+            "Gemfile",
+            "tasks/deploy.rake",
+        ] {
+            let files = vec![cf(name, "modified")];
+            let runners = select_runners(&files);
+            let mut got = names(&runners);
+            got.sort();
+            assert_eq!(got, vec!["gitleaks", "rubocop", "semgrep"], "name = {name}");
+        }
     }
 
     #[test]
