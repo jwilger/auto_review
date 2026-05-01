@@ -1205,6 +1205,29 @@ default in-memory store to the SQLite-backed one.
   configured deploy can run `auto_review doctor` with no
   args.
 
+#### Forgejo client: list_changed_files now paginates
+
+- **Bug**: `Client::list_changed_files` issued a single
+  unparametered GET against `/pulls/{n}/files`. Forgejo
+  paginates this endpoint at 50 files/page by default, so
+  any PR with more than 50 changed files silently returned
+  only the first 50. Downstream the bot's routing and LLM
+  context would see a partial file set and miss the rest;
+  reviews would post comments only on the first 50 files.
+- **Fix**: loop fetching `?page=N&limit=50` until a page
+  returns fewer than `limit` rows. `MAX_PAGES = 100` caps
+  the loop at a 5,000-file PR (an accidental commit
+  would otherwise OOM on serialised JSON).
+- 2 new tests pin the behaviour:
+  - `list_changed_files_paginates_through_full_result_set`
+    builds a 50-row page 1 + 7-row page 2 and asserts the
+    final vec is 57 rows, with each page hit exactly once
+    (`expect(1)` on both mocks).
+  - `list_changed_files_short_first_page_terminates_loop`
+    builds a 3-row page 1, mounts a page-2 mock with
+    `expect(0)`, asserts the loop short-circuits on the
+    short response.
+
 #### list-webhooks + unregister-webhook subcommands (M5)
 
 - `auto_review list-webhooks --owner <O> --repo <R>` audits

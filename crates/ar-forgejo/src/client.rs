@@ -78,15 +78,38 @@ impl Client {
         Ok(body)
     }
 
-    /// List changed files for a pull request, including patch hunks.
+    /// List changed files for a pull request, including patch
+    /// hunks. Forgejo paginates this endpoint at 50 files/page by
+    /// default; large PRs return more than one page. We loop
+    /// fetching `?page=N&limit=50` until a page returns fewer
+    /// than `limit` rows (or empty), so the caller always gets
+    /// the complete set.
     pub async fn list_changed_files(
         &self,
         owner: &str,
         repo: &str,
         n: u64,
     ) -> Result<Vec<ChangedFile>, Error> {
-        let url = self.url(&format!("repos/{owner}/{repo}/pulls/{n}/files"))?;
-        json_get(&self.http, url).await
+        const PAGE_SIZE: u32 = 50;
+        // Defensive cap: a PR with >5000 changed files is almost
+        // certainly a bug or accidental commit. Stop before we
+        // OOM on serialised JSON.
+        const MAX_PAGES: u32 = 100;
+        let mut all = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let path = format!(
+                "repos/{owner}/{repo}/pulls/{n}/files?page={page}&limit={PAGE_SIZE}"
+            );
+            let url = self.url(&path)?;
+            let chunk: Vec<ChangedFile> = json_get(&self.http, url).await?;
+            let chunk_len = chunk.len();
+            all.extend(chunk);
+            if chunk_len < PAGE_SIZE as usize {
+                // Last page (short or empty).
+                break;
+            }
+        }
+        Ok(all)
     }
 
     /// Create a review on a pull request, optionally with inline line comments.
@@ -365,6 +388,99 @@ mod tests {
         assert_eq!(files.len(), 1);
         assert_eq!(files[0].filename, "src/x.rs");
         assert_eq!(files[0].additions, 3);
+    }
+
+    #[tokio::test]
+    async fn list_changed_files_paginates_through_full_result_set() {
+        use wiremock::matchers::query_param;
+        let (server, client) = mock_client().await;
+        // Build a 50-element page (full) followed by a 7-element
+        // page (short → loop terminates).
+        let page1: Vec<serde_json::Value> = (0..50)
+            .map(|i| {
+                serde_json::json!({
+                    "filename": format!("file{i}.rs"),
+                    "status": "modified",
+                    "additions": 1,
+                    "deletions": 0,
+                    "changes": 1,
+                    "patch": null
+                })
+            })
+            .collect();
+        let page2: Vec<serde_json::Value> = (50..57)
+            .map(|i| {
+                serde_json::json!({
+                    "filename": format!("file{i}.rs"),
+                    "status": "modified",
+                    "additions": 1,
+                    "deletions": 0,
+                    "changes": 1,
+                    "patch": null
+                })
+            })
+            .collect();
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .and(query_param("page", "1"))
+            .and(query_param("limit", "50"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&page1))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .and(query_param("page", "2"))
+            .and(query_param("limit", "50"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&page2))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let files = client.list_changed_files("o", "r", 7).await.expect("files");
+        assert_eq!(files.len(), 57);
+        assert_eq!(files[0].filename, "file0.rs");
+        assert_eq!(files[56].filename, "file56.rs");
+    }
+
+    #[tokio::test]
+    async fn list_changed_files_short_first_page_terminates_loop() {
+        use wiremock::matchers::query_param;
+        let (server, client) = mock_client().await;
+        // 3 files, well below the 50-row page size — single page.
+        let body: Vec<serde_json::Value> = (0..3)
+            .map(|i| {
+                serde_json::json!({
+                    "filename": format!("file{i}.rs"),
+                    "status": "modified",
+                    "additions": 0,
+                    "deletions": 0,
+                    "changes": 0,
+                    "patch": null
+                })
+            })
+            .collect();
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&body))
+            .expect(1)
+            .mount(&server)
+            .await;
+        // page=2 must NOT be hit when page=1 returned a short
+        // response. expect(0) proves the loop short-circuited.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(0)
+            .mount(&server)
+            .await;
+
+        let files = client.list_changed_files("o", "r", 7).await.expect("files");
+        assert_eq!(files.len(), 3);
     }
 
     #[tokio::test]
