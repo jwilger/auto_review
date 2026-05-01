@@ -25,6 +25,7 @@ use ar_tools::osv_scanner::OsvScannerRunner;
 use ar_tools::oxlint::OxlintRunner;
 use ar_tools::phpstan::PhpstanRunner;
 use ar_tools::pmd::PmdRunner;
+use ar_tools::pylint::PylintRunner;
 use ar_tools::rubocop::RubocopRunner;
 use ar_tools::ruff::RuffRunner;
 use ar_tools::runner::{run_all, LinterRunner};
@@ -145,6 +146,7 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         runners.push(Box::new(RuffRunner));
         runners.push(Box::new(MypyRunner));
         runners.push(Box::new(BanditRunner));
+        runners.push(Box::new(PylintRunner));
     }
 
     if surviving.iter().any(|f| has_go_ext(&f.filename)) {
@@ -488,7 +490,7 @@ mod tests {
     }
 
     #[test]
-    fn python_files_select_ruff_mypy_and_bandit() {
+    fn python_files_select_ruff_mypy_bandit_and_pylint() {
         let files = vec![cf("src/x.py", "modified")];
         let runners = select_runners(&files);
         let mut got = names(&runners);
@@ -501,6 +503,7 @@ mod tests {
                 "gitleaks",
                 "mypy",
                 "osv-scanner",
+                "pylint",
                 "ruff",
                 "semgrep",
                 "trivy",
@@ -649,6 +652,7 @@ mod tests {
                 "mypy",
                 "osv-scanner",
                 "oxlint",
+                "pylint",
                 "ruff",
                 "semgrep",
                 "shellcheck",
@@ -1094,6 +1098,7 @@ mod tests {
                 "gitleaks",
                 "mypy",
                 "osv-scanner",
+                "pylint",
                 "ruff",
                 "semgrep",
                 "shellcheck",

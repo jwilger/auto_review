@@ -32,6 +32,7 @@ pub mod osv_scanner;
 pub mod oxlint;
 pub mod phpstan;
 pub mod pmd;
+pub mod pylint;
 pub mod rubocop;
 pub mod ruff;
 pub mod runner;

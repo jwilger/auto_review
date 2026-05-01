@@ -17,7 +17,7 @@
 #   actionlint, ansible-lint, ast-grep, bandit, biome, buf, checkov,
 #   cppcheck, dotenv-linter, eslint, gitleaks, golangci-lint, gosec,
 #   hadolint, ktlint, kubeconform, markdownlint, mypy, osv-scanner,
-#   oxlint, phpstan, pmd, rubocop, ruff, semgrep, shellcheck,
+#   oxlint, phpstan, pmd, pylint, rubocop, ruff, semgrep, shellcheck,
 #   sqlfluff, staticcheck, stylelint, swiftlint, taplo, tflint,
 #   trivy, typos, vale, yamllint
 #
@@ -50,7 +50,8 @@ RUN pip3 install --break-system-packages \
         checkov \
         mypy \
         bandit \
-        ansible-lint
+        ansible-lint \
+        pylint
 
 # Ruby linters (gem)
 RUN gem install --no-document rubocop

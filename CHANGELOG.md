@@ -44,7 +44,7 @@ since the start of the project.
   `run_review_job` posts pending → final commit statuses around the
   triage → clone → lint → review → post sequence.
 
-#### Linters (36 of CodeRabbit's ~45 set)
+#### Linters (37 of CodeRabbit's ~45 set)
 
 | Tool | Languages / files | Source-tool name |
 |---|---|---|
@@ -58,6 +58,7 @@ since the start of the project.
 | `ruff` | Python | `ruff` |
 | `mypy` | Python type checker (complements ruff's lint surface) | `mypy` |
 | `bandit` | Python security scanner (dynamic-code, weak crypto, …) | `bandit` |
+| `pylint` | Python lint (design checks, deeper semantics than ruff) | `pylint` |
 | `eslint` | JS / JSX / TS / TSX / CJS / MJS | `eslint` |
 | `biome` | JS / JSX / TS / TSX / CJS / MJS (rule-set distinct from eslint) | `biome` |
 | `oxlint` | JS / JSX / TS / TSX / CJS / MJS (Rust rewrite of eslint) | `oxlint` |
@@ -282,7 +283,7 @@ default in-memory store to the SQLite-backed one.
   paths cover correctness; LanceDB is the scale lever).
 - youki-based `Sandbox` impl as a lighter alternative to the
   podman shell-out.
-- Remaining ~9 linters from CodeRabbit's set
+- Remaining ~8 linters from CodeRabbit's set
   (languagetool, prettier-check, helm-lint, shfmt, jsonlint, …).
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
