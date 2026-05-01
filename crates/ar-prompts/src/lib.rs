@@ -10,7 +10,7 @@ pub mod schema;
 pub mod types;
 pub mod validate;
 
-pub use prompt::{render_review_prompt, ReviewPromptInputs};
+pub use prompt::{render_review_prompt, system_prompt, ReviewPromptInputs};
 pub use schema::review_schema;
 pub use types::{ReviewFinding, ReviewOutput, ReviewSeverity};
 pub use validate::{validate_review_output, ValidationError};

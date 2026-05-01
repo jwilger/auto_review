@@ -10,6 +10,7 @@
     "bdd@han": true,
     "tdd@han": true,
     "bushido@han": true,
-    "core@han": true
+    "core@han": true,
+    "ralph-loop@claude-plugins-official": true
   }
 }
