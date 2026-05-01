@@ -15,7 +15,7 @@
 #
 # Linter set (in alphabetical order):
 #   actionlint, eslint, gitleaks, golangci-lint, hadolint, markdownlint,
-#   rubocop, ruff, semgrep, shellcheck, trivy, yamllint
+#   osv-scanner, rubocop, ruff, semgrep, shellcheck, trivy, yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -61,6 +61,8 @@ RUN set -eux; \
         && mv /tmp/golangci-lint-1.64.5-linux-${TARGETARCH}/golangci-lint /usr/local/bin/; \
     curl -fsSL "https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.59.0_Linux-64bit.tar.gz" \
         | tar -xz -C /usr/local/bin trivy; \
+    curl -fsSL "https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_${TARGETARCH}" \
+        -o /usr/local/bin/osv-scanner; \
     chmod +x /usr/local/bin/*
 
 # Linters never need to write to the rootfs.
