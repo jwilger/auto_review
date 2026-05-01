@@ -1,6 +1,7 @@
 use anyhow::Result;
 use clap::Parser;
 
+mod bench;
 mod cli;
 mod commands;
 
@@ -20,5 +21,6 @@ async fn main() -> Result<()> {
         Command::Init(args) => commands::init(args).await,
         Command::RegisterWebhook(args) => commands::register_webhook(args).await,
         Command::ReviewOnce(args) => commands::review_once(args).await,
+        Command::Bench(args) => bench::run(args).await,
     }
 }

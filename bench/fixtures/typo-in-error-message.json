@@ -1,0 +1,14 @@
+{
+    "name": "typo-in-error-message",
+    "repo_full_name": "example/widgets",
+    "pr_number": 1,
+    "pr_title": "fix: typo in error message",
+    "pr_body": "Saw a typo in the OAuth error message during a deploy review.",
+    "diff": "diff --git a/src/auth.rs b/src/auth.rs\nindex 1111111..2222222 100644\n--- a/src/auth.rs\n+++ b/src/auth.rs\n@@ -42,7 +42,7 @@ pub fn validate_token(token: &str) -> Result<Claims, AuthError> {\n     match decode::<Claims>(token, &decoding_key(), &validation()) {\n         Ok(data) => Ok(data.claims),\n-        Err(_) => Err(AuthError::Invalid(\"Token is invlaid\".into())),\n+        Err(_) => Err(AuthError::Invalid(\"Token is invalid\".into())),\n     }\n }\n",
+    "changed_files": [
+        "src/auth.rs"
+    ],
+    "linter_findings": [],
+    "guidelines": "",
+    "repo_context": ""
+}

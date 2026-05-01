@@ -28,6 +28,13 @@ pub enum Command {
     /// gateway or webhook required — useful for development, demos, and
     /// reproducing reported issues.
     ReviewOnce(ReviewOnceArgs),
+
+    /// Replay one or more PR fixtures through the LLM-review step
+    /// without touching Forgejo. Reports per-fixture latency, finding
+    /// counts, and self-heal attempts; aggregates over the batch.
+    /// Useful for picking models, tuning prompts, and tracking
+    /// regression in review behaviour over time.
+    Bench(BenchArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -86,6 +93,35 @@ pub struct ReviewOnceArgs {
     /// prompt content without burning tokens or touching the PR.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct BenchArgs {
+    /// One or more fixture file paths or directories. Each fixture is
+    /// a JSON file with the shape documented in `bench/README.md`.
+    /// When a directory is given, every `*.json` file in it is loaded.
+    #[arg(required = true)]
+    pub fixtures: Vec<std::path::PathBuf>,
+
+    #[arg(long, env = "LLM_BASE_URL")]
+    pub llm_base_url: String,
+
+    #[arg(long, env = "LLM_API_KEY")]
+    pub llm_api_key: Option<String>,
+
+    #[arg(long, env = "LLM_REASONING_MODEL", default_value = "qwen2.5-coder:32b")]
+    pub llm_model: String,
+
+    /// Optional cheap-tier model. When set, runs the verifier pass
+    /// after the reasoning model and reports findings before/after.
+    #[arg(long, env = "LLM_CHEAP_MODEL")]
+    pub llm_cheap_model: Option<String>,
+
+    /// Print the final aggregate as one line of JSON instead of the
+    /// human-readable table. Lets you pipe runs into a regression
+    /// tracker.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(clap::Args, Debug)]

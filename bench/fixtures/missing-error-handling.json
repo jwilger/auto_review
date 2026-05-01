@@ -1,0 +1,14 @@
+{
+    "name": "missing-error-handling",
+    "repo_full_name": "example/widgets",
+    "pr_number": 2,
+    "pr_title": "feat: add user lookup endpoint",
+    "pr_body": "Adds GET /users/:id. Returns the user record or 404 if missing.",
+    "diff": "diff --git a/src/handlers/users.rs b/src/handlers/users.rs\nindex 1111111..2222222 100644\n--- a/src/handlers/users.rs\n+++ b/src/handlers/users.rs\n@@ -10,6 +10,12 @@ use crate::{db, AppState};\n use axum::{extract::Path, extract::State, Json};\n use crate::models::User;\n+\n+pub async fn get_user(\n+    State(state): State<AppState>,\n+    Path(id): Path<i64>,\n+) -> Json<User> {\n+    let user = db::find_user(&state.pool, id).await.unwrap();\n+    Json(user)\n+}\n",
+    "changed_files": [
+        "src/handlers/users.rs"
+    ],
+    "linter_findings": [],
+    "guidelines": "Never use `.unwrap()` in handler code — return a typed error and let the error layer translate it to an HTTP response.",
+    "repo_context": ""
+}
