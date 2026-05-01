@@ -454,6 +454,7 @@ impl ChatHandler<'_> {
                 return Ok(());
             }
         };
+        let raw_scaffold_count = parsed.scaffolds.len();
         let scaffolds: Vec<TestScaffold> = parsed
             .scaffolds
             .into_iter()
@@ -461,11 +462,21 @@ impl ChatHandler<'_> {
             .take(AUTOFIX_MAX_PATCHES)
             .collect();
         if scaffolds.is_empty() {
-            self.post(
-                ctx,
-                "Test scaffolding found nothing in the diff that needs new coverage.",
-            )
-            .await?;
+            // Distinguish "model proposed nothing" from "model
+            // proposed N scaffolds but they were unusable" (missing
+            // item_name or empty source). Operators seeing the
+            // second variant know the model is producing low-quality
+            // output and can investigate.
+            let msg = if raw_scaffold_count == 0 {
+                "Test scaffolding found nothing in the diff that needs new coverage.".to_string()
+            } else {
+                format!(
+                    "Test scaffolding proposed {raw_scaffold_count} scaffold{} but \
+                     none had both an item name and source code (all dropped as malformed).",
+                    if raw_scaffold_count == 1 { "" } else { "s" }
+                )
+            };
+            self.post(ctx, &msg).await?;
             return Ok(());
         }
         let body = format_test_scaffolds_body(&scaffolds);
@@ -2425,5 +2436,60 @@ mod tests {
         assert_eq!(paths.len(), 2);
         assert!(paths.contains("a.rs"));
         assert!(paths.contains("b.rs"));
+    }
+
+    #[tokio::test]
+    async fn tests_with_all_malformed_scaffolds_reports_diagnosis() {
+        // Distinguishes "model proposed nothing" from "model
+        // proposed N malformed scaffolds (missing item_name or
+        // empty source)" — the latter is operator-actionable
+        // signal that the model is producing low-quality output.
+        let server = MockServer::start().await;
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let learnings = InMemoryLearningsStore::new();
+        let cheap = Arc::new(CannedCheapProvider {
+            // Two scaffolds, both missing the required fields.
+            reply: r#"{"scaffolds":[{"item_name":"","item_path":"","framework":"","source":""},{"item_name":"x","item_path":"","framework":"","source":""}]}"#.into(),
+        });
+        let router = Router::new()
+            .with(ModelTier::Embedding, Arc::new(ConstantEmbedder))
+            .with(ModelTier::Cheap, cheap);
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "ok",
+                "body": "",
+                "draft": false,
+                "head": {"ref": "t", "sha": "abc"},
+                "base": {"ref": "main", "sha": "def"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/x b/x\n+y\n"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(serde_json::json!({
+                "body": "Test scaffolding proposed 2 scaffolds but none had both an item name and source code (all dropped as malformed)."
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &router,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::TestScaffolds)
+            .await
+            .expect("ok");
     }
 }
