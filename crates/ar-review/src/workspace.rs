@@ -30,6 +30,7 @@ impl From<WorkspaceError> for ReviewError {
 }
 
 /// A cloned repository on local disk, alive for as long as the value lives.
+#[derive(Debug)]
 pub struct PreparedWorkspace {
     dir: TempDir,
 }
@@ -75,6 +76,21 @@ pub async fn prepare_workspace(
     repo: &str,
     head_sha: &str,
 ) -> Result<PreparedWorkspace, WorkspaceError> {
+    // Defence in depth: head_sha is interpolated into git argv
+    // (`git fetch origin <sha>`, `git checkout <sha>`) and git
+    // accepts intermingled `--option`-style args after positional
+    // ones. A pathological value like `--upload-pack=...` would be
+    // re-interpreted as a flag, not a refspec. Forgejo always
+    // sends well-formed SHAs and the HMAC-verified webhook is the
+    // only entry point for this value, but rejecting non-hex
+    // input here keeps the clone path robust against any future
+    // intake (replay tooling, manual review-once invocations,
+    // etc.) that might supply less-trusted strings.
+    if !is_valid_git_sha(head_sha) {
+        return Err(WorkspaceError::Git(format!(
+            "refusing to clone: head_sha {head_sha:?} is not a hex commit SHA"
+        )));
+    }
     let url = build_clone_url(base, owner, repo, token)?;
     let dir = TempDir::new()?;
     let path = dir.path().to_owned();
@@ -91,6 +107,15 @@ pub async fn prepare_workspace(
     git_in(&path, &["checkout", head_sha]).await?;
 
     Ok(PreparedWorkspace { dir })
+}
+
+/// Recognise a git SHA: 7–64 hex characters (covers abbreviated
+/// SHAs, full SHA-1 = 40 chars, and SHA-256 = 64 chars). Used by
+/// `prepare_workspace` to reject argv-injection attempts before
+/// the value reaches git.
+fn is_valid_git_sha(s: &str) -> bool {
+    let len = s.len();
+    (7..=64).contains(&len) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 async fn git(args: &[&str]) -> Result<(), WorkspaceError> {
@@ -195,5 +220,62 @@ mod tests {
         let raw = "fatal: not a git repository";
         let redacted = redact_token(raw);
         assert_eq!(redacted, raw);
+    }
+
+    #[test]
+    fn is_valid_git_sha_accepts_real_shas() {
+        assert!(is_valid_git_sha("deadbeef")); // 8 chars
+        assert!(is_valid_git_sha("0000000000000000000000000000000000000000")); // 40 hex (SHA-1)
+        assert!(is_valid_git_sha(
+            "abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789"
+        )); // 64 hex (SHA-256)
+    }
+
+    #[test]
+    fn is_valid_git_sha_rejects_argv_injection_attempts() {
+        // The whole point of the validator: refuse anything that
+        // looks like a git option flag.
+        assert!(!is_valid_git_sha("--upload-pack=evil"));
+        assert!(!is_valid_git_sha("--exec=touch /tmp/owned"));
+        // Includes a slash → not a SHA.
+        assert!(!is_valid_git_sha("../etc/passwd"));
+        // Empty / too short / too long.
+        assert!(!is_valid_git_sha(""));
+        assert!(!is_valid_git_sha("abc"));
+        assert!(!is_valid_git_sha(&"a".repeat(65)));
+        // Non-hex chars.
+        assert!(!is_valid_git_sha("notahexsha"));
+        assert!(!is_valid_git_sha("0xdeadbeef"));
+    }
+
+    #[tokio::test]
+    async fn prepare_workspace_rejects_non_sha_head_before_invoking_git() {
+        // The clone+fetch should never run when the SHA is a
+        // pathological value. We can't easily mock git here, but
+        // any non-hex value will short-circuit before reaching
+        // the Command::new("git") call. The error string surfaces
+        // the offending value back to the caller.
+        let err = prepare_workspace(
+            "https://forgejo.example.com",
+            "tok",
+            "alice",
+            "widgets",
+            "--upload-pack=evil",
+        )
+        .await
+        .expect_err("must reject");
+        match err {
+            WorkspaceError::Git(msg) => {
+                assert!(
+                    msg.contains("not a hex commit SHA"),
+                    "expected validation message, got: {msg}"
+                );
+                assert!(
+                    msg.contains("upload-pack"),
+                    "expected the bad value echoed for diagnosis"
+                );
+            }
+            other => panic!("unexpected error class: {other:?}"),
+        }
     }
 }
