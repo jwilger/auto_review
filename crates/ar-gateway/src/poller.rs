@@ -119,6 +119,18 @@ impl ChatPoller {
                 return Err(PollerError::History(e.to_string()));
             }
         };
+        // Prune cursor entries for PRs that are no longer in
+        // history (e.g. operator ran `auto_review reset-pr` or
+        // `purge-history`). Without this, the cursors map grows
+        // monotonically over the gateway's lifetime as the
+        // history shrinks. Each entry is small but a long-running
+        // deployment with thousands of historical PRs accumulates
+        // dead cursors forever.
+        {
+            let known_set: std::collections::HashSet<&PrKey> = known.iter().collect();
+            let mut cursors = self.cursors.lock().await;
+            cursors.retain(|k, _| known_set.contains(k));
+        }
         for key in known {
             if let Err(e) = self.poll_pr(&key).await {
                 if let Some(m) = &self.metrics {
@@ -626,5 +638,44 @@ mod tests {
         poller.run_once_for_tests().await.expect("ok");
         assert_eq!(poller.cursor_for(&k_good).await, Some(3));
         assert_eq!(poller.cursor_for(&k_bad).await, None);
+    }
+
+    #[tokio::test]
+    async fn cursors_for_purged_prs_are_pruned_at_next_poll() {
+        // Without prune: the cursors map grows monotonically over
+        // the gateway's lifetime as the history shrinks (e.g.
+        // operator running `auto_review reset-pr` or
+        // `purge-history`). Each entry is small but accumulates.
+        let server = MockServer::start().await;
+        let history = Arc::new(InMemoryReviewHistory::new());
+        let k = key("alice", "widgets", 1);
+        history.record(&k, "deadbeef").await.unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/1/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": 5, "body": "noise", "user": {"login": "carol"}}
+            ])))
+            .mount(&server)
+            .await;
+
+        let dispatcher = Arc::new(NoOpDispatcher);
+        let poller = poller_for(&server, history.clone(), dispatcher).await;
+        // First poll seeds the cursor for k.
+        poller.run_once_for_tests().await.expect("ok");
+        assert_eq!(poller.cursor_for(&k).await, Some(5));
+
+        // Operator clears the PR from history (e.g. via
+        // `auto_review reset-pr`).
+        history.clear(&k).await.unwrap();
+
+        // Next poll: history.list_known() returns empty, so the
+        // cursor for k should be pruned.
+        poller.run_once_for_tests().await.expect("ok");
+        assert_eq!(
+            poller.cursor_for(&k).await,
+            None,
+            "cursor for purged PR must be removed from the in-memory map"
+        );
     }
 }
