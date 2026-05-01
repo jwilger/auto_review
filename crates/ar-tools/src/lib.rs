@@ -18,6 +18,7 @@ pub mod markdownlint;
 pub mod ruff;
 pub mod runner;
 pub mod shellcheck;
+pub mod yamllint;
 
 pub use finding::{Finding, Severity};
 pub use runner::{run_all, LinterRunner};

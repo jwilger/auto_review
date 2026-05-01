@@ -10,6 +10,7 @@ use ar_tools::markdownlint::MarkdownLintRunner;
 use ar_tools::ruff::RuffRunner;
 use ar_tools::runner::{run_all, LinterRunner};
 use ar_tools::shellcheck::ShellCheckRunner;
+use ar_tools::yamllint::YamlLintRunner;
 use ar_tools::Finding;
 use std::path::Path;
 
@@ -106,6 +107,18 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         }));
     }
 
+    // yamllint runs on every YAML file, including workflows (it complains
+    // about formatting; actionlint handles semantics — they're
+    // complementary).
+    let yaml_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| has_yaml_ext(&f.filename))
+        .map(|f| f.filename.clone())
+        .collect();
+    if !yaml_files.is_empty() {
+        runners.push(Box::new(YamlLintRunner { files: yaml_files }));
+    }
+
     runners
 }
 
@@ -144,6 +157,10 @@ fn is_workflow_yaml(name: &str) -> bool {
         || name.contains("/.forgejo/workflows/")
         || name.starts_with(".gitea/workflows/")
         || name.contains("/.gitea/workflows/")
+}
+
+fn has_yaml_ext(name: &str) -> bool {
+    name.ends_with(".yml") || name.ends_with(".yaml")
 }
 
 #[cfg(test)]
@@ -241,7 +258,7 @@ mod tests {
     }
 
     #[test]
-    fn workflow_yaml_selects_actionlint() {
+    fn workflow_yaml_selects_actionlint_and_yamllint() {
         for name in [
             ".github/workflows/ci.yml",
             ".forgejo/workflows/release.yaml",
@@ -251,16 +268,22 @@ mod tests {
             let runners = select_runners(&files);
             let mut got = names(&runners);
             got.sort();
-            assert_eq!(got, vec!["actionlint", "gitleaks"], "name = {name}");
+            assert_eq!(
+                got,
+                vec!["actionlint", "gitleaks", "yamllint"],
+                "name = {name}"
+            );
         }
     }
 
     #[test]
-    fn arbitrary_yaml_does_not_select_actionlint() {
+    fn arbitrary_yaml_selects_yamllint_but_not_actionlint() {
         let files = vec![cf("config/app.yml", "modified")];
         let runners = select_runners(&files);
-        let names_v = names(&runners);
-        assert!(!names_v.contains(&"actionlint"));
+        let mut got = names(&runners);
+        got.sort();
+        assert_eq!(got, vec!["gitleaks", "yamllint"]);
+        assert!(!got.contains(&"actionlint"));
     }
 
     #[test]

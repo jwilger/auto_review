@@ -229,6 +229,7 @@ dependencies = [
  "anyhow",
  "async-trait",
  "futures",
+ "regex",
  "serde",
  "serde_json",
  "tempfile",
