@@ -76,8 +76,24 @@ pub async fn build_review_context(
     // and learnings-similarity queries. Previously each helper
     // re-embedded the diff independently — wasted one round-trip
     // per review with both stores configured.
+    //
+    // Cap the embedded text. OpenAI's text-embedding-3-small caps
+    // at 8191 tokens (~32 KiB English). A multi-MB diff would
+    // otherwise burn the embed call on a refused request. Cap
+    // explicitly so the cheap path stays cheap.
+    const EMBED_QUERY_CAP: usize = 32 * 1024;
+    let mut query_text: &str = diff;
+    let owned_capped: String;
+    if diff.len() > EMBED_QUERY_CAP {
+        let mut cut = EMBED_QUERY_CAP;
+        while cut > 0 && !diff.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        owned_capped = diff[..cut].to_string();
+        query_text = &owned_capped;
+    }
     let query_vec = match router
-        .embed(ModelTier::Embedding, &[diff.to_string()])
+        .embed(ModelTier::Embedding, &[query_text.to_string()])
         .await
     {
         Ok(mut vecs) => vecs.pop().unwrap_or_default(),
