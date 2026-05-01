@@ -4,6 +4,15 @@
 //! per-thread conversation state and uses sandboxed tools (grep, cat,
 //! ast-grep, optional test/build) to investigate and respond.
 //!
+//! Currently shipping the command parser and the data types. The
+//! webhook routing and per-command handlers (remember/forget against
+//! the LearningsStore, ReReview against the orchestrator, freeform
+//! against the chat-tier LLM) land in follow-up commits.
+//!
 //! Forgejo gotcha: `pull_request_review_comment` webhooks do not fire
 //! reliably (gitea#26023); the handler also accepts `issue_comment`
 //! events and falls back to polling for missed mentions.
+
+pub mod command;
+
+pub use command::{parse_chat_command, ChatCommand};

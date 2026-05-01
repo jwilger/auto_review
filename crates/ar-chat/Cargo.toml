@@ -11,5 +11,9 @@ description = "Agentic @-mention chat handler with sandboxed tool use"
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
