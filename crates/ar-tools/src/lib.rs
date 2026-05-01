@@ -21,6 +21,7 @@ pub mod ruff;
 pub mod runner;
 pub mod semgrep;
 pub mod shellcheck;
+pub mod trivy;
 pub mod yamllint;
 
 pub use finding::{Finding, Severity};

@@ -13,6 +13,7 @@ use ar_tools::ruff::RuffRunner;
 use ar_tools::runner::{run_all, LinterRunner};
 use ar_tools::semgrep::SemgrepRunner;
 use ar_tools::shellcheck::ShellCheckRunner;
+use ar_tools::trivy::TrivyRunner;
 use ar_tools::yamllint::YamlLintRunner;
 use ar_tools::Finding;
 use std::path::Path;
@@ -62,6 +63,14 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
     // plus any .semgrep.yml the repo provides.
     if !surviving.is_empty() {
         runners.push(Box::new(SemgrepRunner));
+    }
+
+    // Always run trivy: detects CVEs in dependency manifests
+    // (Cargo.lock, package-lock.json, etc.), Dockerfile / k8s /
+    // Terraform misconfigurations, and committed secrets — covers
+    // territory none of the per-language linters reach.
+    if !surviving.is_empty() {
+        runners.push(Box::new(TrivyRunner));
     }
 
     if surviving.iter().any(|f| has_python_ext(&f.filename)) {
@@ -237,7 +246,7 @@ mod tests {
         let runners = select_runners(&files);
         let mut got = names(&runners);
         got.sort();
-        assert_eq!(got, vec!["gitleaks", "ruff", "semgrep"]);
+        assert_eq!(got, vec!["gitleaks", "ruff", "semgrep", "trivy"]);
     }
 
     #[test]
@@ -253,7 +262,11 @@ mod tests {
             let runners = select_runners(&files);
             let mut got = names(&runners);
             got.sort();
-            assert_eq!(got, vec!["gitleaks", "rubocop", "semgrep"], "name = {name}");
+            assert_eq!(
+                got,
+                vec!["gitleaks", "rubocop", "semgrep", "trivy"],
+                "name = {name}"
+            );
         }
     }
 
@@ -263,7 +276,7 @@ mod tests {
         let runners = select_runners(&files);
         let mut got = names(&runners);
         got.sort();
-        assert_eq!(got, vec!["gitleaks", "golangci-lint", "semgrep"]);
+        assert_eq!(got, vec!["gitleaks", "golangci-lint", "semgrep", "trivy"]);
     }
 
     #[test]
@@ -272,7 +285,7 @@ mod tests {
         let runners = select_runners(&files);
         let mut got = names(&runners);
         got.sort();
-        assert_eq!(got, vec!["gitleaks", "semgrep", "shellcheck"]);
+        assert_eq!(got, vec!["gitleaks", "semgrep", "shellcheck", "trivy"]);
     }
 
     #[test]
@@ -284,7 +297,7 @@ mod tests {
             got.sort();
             assert_eq!(
                 got,
-                vec!["gitleaks", "hadolint", "semgrep"],
+                vec!["gitleaks", "hadolint", "semgrep", "trivy"],
                 "name = {name}"
             );
         }
@@ -296,7 +309,7 @@ mod tests {
         let runners = select_runners(&files);
         let mut got = names(&runners);
         got.sort();
-        assert_eq!(got, vec!["gitleaks", "markdownlint", "semgrep"]);
+        assert_eq!(got, vec!["gitleaks", "markdownlint", "semgrep", "trivy"]);
     }
 
     #[test]
@@ -320,7 +333,8 @@ mod tests {
                 "markdownlint",
                 "ruff",
                 "semgrep",
-                "shellcheck"
+                "shellcheck",
+                "trivy"
             ]
         );
     }
@@ -338,7 +352,7 @@ mod tests {
             got.sort();
             assert_eq!(
                 got,
-                vec!["actionlint", "gitleaks", "semgrep", "yamllint"],
+                vec!["actionlint", "gitleaks", "semgrep", "trivy", "yamllint"],
                 "name = {name}"
             );
         }
@@ -350,7 +364,7 @@ mod tests {
         let runners = select_runners(&files);
         let mut got = names(&runners);
         got.sort();
-        assert_eq!(got, vec!["gitleaks", "semgrep", "yamllint"]);
+        assert_eq!(got, vec!["gitleaks", "semgrep", "trivy", "yamllint"]);
         assert!(!got.contains(&"actionlint"));
     }
 
@@ -368,7 +382,11 @@ mod tests {
             let runners = select_runners(&files);
             let mut got = names(&runners);
             got.sort();
-            assert_eq!(got, vec!["eslint", "gitleaks", "semgrep"], "name = {name}");
+            assert_eq!(
+                got,
+                vec!["eslint", "gitleaks", "semgrep", "trivy"],
+                "name = {name}"
+            );
         }
     }
 
@@ -378,7 +396,7 @@ mod tests {
         let runners = select_runners(&files);
         let mut got = names(&runners);
         got.sort();
-        assert_eq!(got, vec!["gitleaks", "semgrep"]);
+        assert_eq!(got, vec!["gitleaks", "semgrep", "trivy"]);
     }
 
     #[test]
@@ -434,6 +452,9 @@ mod tests {
         let _ = sc;
         let mut got: Vec<&str> = runners.iter().map(|r| r.name()).collect();
         got.sort();
-        assert_eq!(got, vec!["gitleaks", "ruff", "semgrep", "shellcheck"]);
+        assert_eq!(
+            got,
+            vec!["gitleaks", "ruff", "semgrep", "shellcheck", "trivy"]
+        );
     }
 }
