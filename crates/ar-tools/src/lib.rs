@@ -10,6 +10,7 @@
 //! the OCI sandbox; runners are unchanged but execution moves into the jail.
 
 pub mod actionlint;
+pub mod ast_grep;
 pub mod eslint;
 pub mod finding;
 pub mod gitleaks;

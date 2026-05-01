@@ -4,6 +4,7 @@
 use ar_forgejo::ChangedFile;
 use ar_sandbox::{DirectSandbox, Sandbox};
 use ar_tools::actionlint::ActionlintRunner;
+use ar_tools::ast_grep::AstGrepRunner;
 use ar_tools::eslint::EslintRunner;
 use ar_tools::gitleaks::GitleaksRunner;
 use ar_tools::golangci_lint::GolangciLintRunner;
@@ -100,6 +101,16 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
     // both surfaces vulns that either DB has indexed.
     if !surviving.is_empty() {
         runners.push(Box::new(OsvScannerRunner));
+    }
+
+    // Always run ast-grep. When the repo has no `sgconfig.yml`
+    // or `.ast-grep/` rules, it exits cleanly with empty output
+    // (no rules → no findings) and the runner returns Vec::new.
+    // The cost is one container spawn per review for repos that
+    // don't use ast-grep — small enough to be worth always
+    // surfacing for those that do.
+    if !surviving.is_empty() {
+        runners.push(Box::new(AstGrepRunner));
     }
 
     if surviving.iter().any(|f| has_python_ext(&f.filename)) {
@@ -291,7 +302,14 @@ mod tests {
         got.sort();
         assert_eq!(
             got,
-            vec!["gitleaks", "osv-scanner", "ruff", "semgrep", "trivy"]
+            vec![
+                "ast-grep",
+                "gitleaks",
+                "osv-scanner",
+                "ruff",
+                "semgrep",
+                "trivy"
+            ]
         );
     }
 
@@ -310,7 +328,14 @@ mod tests {
             got.sort();
             assert_eq!(
                 got,
-                vec!["gitleaks", "osv-scanner", "rubocop", "semgrep", "trivy"],
+                vec![
+                    "ast-grep",
+                    "gitleaks",
+                    "osv-scanner",
+                    "rubocop",
+                    "semgrep",
+                    "trivy"
+                ],
                 "name = {name}"
             );
         }
@@ -325,6 +350,7 @@ mod tests {
         assert_eq!(
             got,
             vec![
+                "ast-grep",
                 "gitleaks",
                 "golangci-lint",
                 "osv-scanner",
@@ -342,7 +368,14 @@ mod tests {
         got.sort();
         assert_eq!(
             got,
-            vec!["gitleaks", "osv-scanner", "semgrep", "shellcheck", "trivy"]
+            vec![
+                "ast-grep",
+                "gitleaks",
+                "osv-scanner",
+                "semgrep",
+                "shellcheck",
+                "trivy"
+            ]
         );
     }
 
@@ -355,7 +388,14 @@ mod tests {
             got.sort();
             assert_eq!(
                 got,
-                vec!["gitleaks", "hadolint", "osv-scanner", "semgrep", "trivy"],
+                vec![
+                    "ast-grep",
+                    "gitleaks",
+                    "hadolint",
+                    "osv-scanner",
+                    "semgrep",
+                    "trivy"
+                ],
                 "name = {name}"
             );
         }
@@ -370,6 +410,7 @@ mod tests {
         assert_eq!(
             got,
             vec![
+                "ast-grep",
                 "gitleaks",
                 "markdownlint",
                 "osv-scanner",
@@ -394,6 +435,7 @@ mod tests {
         assert_eq!(
             got,
             vec![
+                "ast-grep",
                 "eslint",
                 "gitleaks",
                 "hadolint",
@@ -422,6 +464,7 @@ mod tests {
                 got,
                 vec![
                     "actionlint",
+                    "ast-grep",
                     "gitleaks",
                     "osv-scanner",
                     "semgrep",
@@ -441,7 +484,14 @@ mod tests {
         got.sort();
         assert_eq!(
             got,
-            vec!["gitleaks", "osv-scanner", "semgrep", "trivy", "yamllint"]
+            vec![
+                "ast-grep",
+                "gitleaks",
+                "osv-scanner",
+                "semgrep",
+                "trivy",
+                "yamllint"
+            ]
         );
         assert!(!got.contains(&"actionlint"));
     }
@@ -462,7 +512,14 @@ mod tests {
             got.sort();
             assert_eq!(
                 got,
-                vec!["eslint", "gitleaks", "osv-scanner", "semgrep", "trivy"],
+                vec![
+                    "ast-grep",
+                    "eslint",
+                    "gitleaks",
+                    "osv-scanner",
+                    "semgrep",
+                    "trivy"
+                ],
                 "name = {name}"
             );
         }
@@ -474,7 +531,10 @@ mod tests {
         let runners = select_runners(&files);
         let mut got = names(&runners);
         got.sort();
-        assert_eq!(got, vec!["gitleaks", "osv-scanner", "semgrep", "trivy"]);
+        assert_eq!(
+            got,
+            vec!["ast-grep", "gitleaks", "osv-scanner", "semgrep", "trivy"]
+        );
     }
 
     #[test]
@@ -491,7 +551,14 @@ mod tests {
             got.sort();
             assert_eq!(
                 got,
-                vec!["gitleaks", "osv-scanner", "semgrep", "sqlfluff", "trivy"],
+                vec![
+                    "ast-grep",
+                    "gitleaks",
+                    "osv-scanner",
+                    "semgrep",
+                    "sqlfluff",
+                    "trivy"
+                ],
                 "name = {name}"
             );
         }
@@ -553,6 +620,7 @@ mod tests {
         assert_eq!(
             got,
             vec![
+                "ast-grep",
                 "gitleaks",
                 "osv-scanner",
                 "ruff",

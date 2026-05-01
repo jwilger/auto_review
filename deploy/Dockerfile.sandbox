@@ -14,8 +14,9 @@
 # Forgejo token / LLM creds / learnings DB.
 #
 # Linter set (in alphabetical order):
-#   actionlint, eslint, gitleaks, golangci-lint, hadolint, markdownlint,
-#   osv-scanner, rubocop, ruff, semgrep, shellcheck, sqlfluff, trivy, yamllint
+#   actionlint, ast-grep, eslint, gitleaks, golangci-lint, hadolint,
+#   markdownlint, osv-scanner, rubocop, ruff, semgrep, shellcheck,
+#   sqlfluff, trivy, yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -25,7 +26,7 @@ FROM debian:bookworm-slim
 ARG TARGETARCH=amd64
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-        ca-certificates curl git \
+        ca-certificates curl git unzip \
         # debian-packaged linters
         shellcheck \
         yamllint \
@@ -64,6 +65,11 @@ RUN set -eux; \
         | tar -xz -C /usr/local/bin trivy; \
     curl -fsSL "https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_${TARGETARCH}" \
         -o /usr/local/bin/osv-scanner; \
+    curl -fsSL "https://github.com/ast-grep/ast-grep/releases/latest/download/app-x86_64-unknown-linux-gnu.zip" \
+        -o /tmp/ast-grep.zip \
+        && unzip -q /tmp/ast-grep.zip -d /tmp/ast-grep \
+        && mv /tmp/ast-grep/ast-grep /usr/local/bin/ \
+        && rm -rf /tmp/ast-grep /tmp/ast-grep.zip; \
     chmod +x /usr/local/bin/*
 
 # Linters never need to write to the rootfs.
