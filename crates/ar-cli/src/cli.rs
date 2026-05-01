@@ -24,6 +24,18 @@ pub enum Command {
     /// reviewer.
     RegisterWebhook(RegisterWebhookArgs),
 
+    /// List webhooks installed on a repository. Useful for auditing
+    /// which webhooks point at the gateway and for finding the id
+    /// `unregister-webhook` needs.
+    ListWebhooks(ListWebhooksArgs),
+
+    /// Delete a webhook by id. Pair with `list-webhooks` to find
+    /// the id, or use `--match-url` to delete the one whose
+    /// `config.url` matches a substring (typically the gateway's
+    /// public hostname). The `--match-url` form is the safe choice
+    /// for scripts that don't know ids ahead of time.
+    UnregisterWebhook(UnregisterWebhookArgs),
+
     /// Run the full review pipeline once against a specific PR. No
     /// gateway or webhook required — useful for development, demos, and
     /// reproducing reported issues.
@@ -251,6 +263,54 @@ pub struct BenchArgs {
 }
 
 #[derive(clap::Args, Debug)]
+pub struct ListWebhooksArgs {
+    #[arg(long, env = "FORGEJO_BASE_URL")]
+    pub forgejo_url: String,
+
+    #[arg(long, env = "FORGEJO_TOKEN")]
+    pub token: String,
+
+    #[arg(long)]
+    pub owner: String,
+
+    #[arg(long)]
+    pub repo: String,
+
+    /// Emit the result as one JSON object per line for piping into
+    /// `jq`. Otherwise renders a human-readable table.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct UnregisterWebhookArgs {
+    #[arg(long, env = "FORGEJO_BASE_URL")]
+    pub forgejo_url: String,
+
+    #[arg(long, env = "FORGEJO_TOKEN")]
+    pub token: String,
+
+    #[arg(long)]
+    pub owner: String,
+
+    #[arg(long)]
+    pub repo: String,
+
+    /// Webhook id, as printed by `register-webhook` or
+    /// `list-webhooks`. Mutually exclusive with `--match-url`.
+    #[arg(long, conflicts_with = "match_url")]
+    pub id: Option<u64>,
+
+    /// Substring to match against each webhook's `config.url`.
+    /// Deletes every webhook whose URL contains the substring.
+    /// Use the gateway's public hostname (e.g. `reviewer.example.com`)
+    /// to delete only your own bot's hook and leave any others
+    /// alone. Mutually exclusive with `--id`.
+    #[arg(long)]
+    pub match_url: Option<String>,
+}
+
+#[derive(clap::Args, Debug)]
 pub struct RegisterWebhookArgs {
     #[arg(long, env = "FORGEJO_BASE_URL")]
     pub forgejo_url: String,
@@ -393,6 +453,101 @@ mod tests {
             }
             _ => panic!("expected ReviewOnce"),
         }
+    }
+
+    #[test]
+    fn list_webhooks_required_args() {
+        let cli = Cli::try_parse_from([
+            "auto_review",
+            "list-webhooks",
+            "--forgejo-url",
+            "https://x.example",
+            "--token",
+            "tok",
+            "--owner",
+            "alice",
+            "--repo",
+            "widgets",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::ListWebhooks(a) => {
+                assert_eq!(a.owner, "alice");
+                assert_eq!(a.repo, "widgets");
+                assert!(!a.json);
+            }
+            _ => panic!("expected ListWebhooks"),
+        }
+    }
+
+    #[test]
+    fn unregister_webhook_accepts_id_or_match_url_but_not_both() {
+        // --id is allowed
+        let by_id = Cli::try_parse_from([
+            "auto_review",
+            "unregister-webhook",
+            "--forgejo-url",
+            "https://x",
+            "--token",
+            "tok",
+            "--owner",
+            "alice",
+            "--repo",
+            "widgets",
+            "--id",
+            "7",
+        ])
+        .expect("parse with --id");
+        match by_id.command {
+            Command::UnregisterWebhook(a) => {
+                assert_eq!(a.id, Some(7));
+                assert!(a.match_url.is_none());
+            }
+            _ => panic!("expected UnregisterWebhook"),
+        }
+
+        // --match-url is allowed
+        let by_match = Cli::try_parse_from([
+            "auto_review",
+            "unregister-webhook",
+            "--forgejo-url",
+            "https://x",
+            "--token",
+            "tok",
+            "--owner",
+            "alice",
+            "--repo",
+            "widgets",
+            "--match-url",
+            "reviewer.example.com",
+        ])
+        .expect("parse with --match-url");
+        match by_match.command {
+            Command::UnregisterWebhook(a) => {
+                assert!(a.id.is_none());
+                assert_eq!(a.match_url.as_deref(), Some("reviewer.example.com"));
+            }
+            _ => panic!("expected UnregisterWebhook"),
+        }
+
+        // both is rejected
+        let both = Cli::try_parse_from([
+            "auto_review",
+            "unregister-webhook",
+            "--forgejo-url",
+            "https://x",
+            "--token",
+            "tok",
+            "--owner",
+            "alice",
+            "--repo",
+            "widgets",
+            "--id",
+            "7",
+            "--match-url",
+            "reviewer",
+        ]);
+        assert!(both.is_err(), "--id and --match-url must be mutually exclusive");
     }
 
     #[test]

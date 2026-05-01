@@ -103,6 +103,58 @@ pub struct CreatedWebhook {
     pub events: Vec<String>,
 }
 
+/// Summary of an existing webhook returned by
+/// `Client::list_webhooks`. Forgejo's `/repos/{owner}/{repo}/hooks`
+/// endpoint returns the secret as `""` on read (it never emits the
+/// configured secret), which is why this type only carries the URL
+/// from the config map — the secret would always be empty anyway.
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct WebhookSummary {
+    pub id: u64,
+    #[serde(rename = "type")]
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub events: Vec<String>,
+    /// The `config.url` field flattened up. Operators auditing
+    /// installations care about which URL each webhook posts to,
+    /// not the rest of the config map.
+    #[serde(default)]
+    pub url: String,
+}
+
+/// Forgejo's wire shape for the list-webhooks endpoint. Internal
+/// to [`Client::list_webhooks`]; flattened to [`WebhookSummary`]
+/// before returning so callers don't need to reach through nested
+/// `config.url`.
+#[derive(Debug, Clone, Deserialize)]
+pub(crate) struct WebhookListItem {
+    pub id: u64,
+    #[serde(rename = "type")]
+    #[serde(default)]
+    pub kind: String,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub events: Vec<String>,
+    #[serde(default)]
+    pub config: std::collections::HashMap<String, String>,
+}
+
+impl From<WebhookListItem> for WebhookSummary {
+    fn from(item: WebhookListItem) -> Self {
+        Self {
+            id: item.id,
+            kind: item.kind,
+            active: item.active,
+            events: item.events,
+            url: item.config.get("url").cloned().unwrap_or_default(),
+        }
+    }
+}
+
 /// Compact view of a pull request, returned by `Client::get_pull_request`.
 /// Mirrors the subset of Forgejo's PR-detail payload we actually need to
 /// drive `run_review_job` from a CLI invocation (no webhook).

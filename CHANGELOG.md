@@ -782,6 +782,31 @@ default in-memory store to the SQLite-backed one.
   configured deploy can run `auto_review doctor` with no
   args.
 
+#### list-webhooks + unregister-webhook subcommands (M5)
+
+- `auto_review list-webhooks --owner <O> --repo <R>` audits
+  every webhook installed on a repo. Output table shows id,
+  active/inactive, type, events, and `config.url` (the
+  secret is intentionally omitted — Forgejo returns it as
+  `""` on read anyway). `--json` emits NDJSON for piping.
+- `auto_review unregister-webhook --owner <O> --repo <R>` deletes
+  a webhook by either `--id N` (single, exact) or
+  `--match-url <substr>` (every webhook whose URL contains
+  the substring; useful in deploy scripts that don't know
+  ids ahead of time, e.g. `--match-url reviewer.example.com`
+  to delete the bot's hook without touching unrelated ones).
+  The two flags are mutually exclusive at the clap layer.
+- Backed by new `Client::list_webhooks` and
+  `Client::delete_webhook` in `ar-forgejo`. Forgejo's
+  list-webhooks wire shape uses a nested `config` map; a new
+  `WebhookSummary` flattens `config.url` up so callers don't
+  need to reach through. 4 client tests + 2 CLI parse tests +
+  5 end-to-end command tests cover the new surface.
+- OPERATIONS.md §6.3 (rotate webhook secret) now uses
+  `list-webhooks` / `unregister-webhook` / `register-webhook`
+  as the canonical rotation flow instead of "find them
+  yourself with curl".
+
 #### test-webhook subcommand (M5)
 
 - `auto_review test-webhook --gateway-url <URL> --webhook-secret <S>`

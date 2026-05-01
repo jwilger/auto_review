@@ -1,8 +1,8 @@
 //! Implementations of the CLI subcommands.
 
 use crate::cli::{
-    DoctorArgs, InitArgs, ListLintersArgs, RegisterWebhookArgs, ReviewOnceArgs, TestWebhookArgs,
-    ValidateConfigArgs,
+    DoctorArgs, InitArgs, ListLintersArgs, ListWebhooksArgs, RegisterWebhookArgs, ReviewOnceArgs,
+    TestWebhookArgs, UnregisterWebhookArgs, ValidateConfigArgs,
 };
 use anyhow::{Context, Result};
 use ar_forgejo::{
@@ -156,6 +156,89 @@ async fn print_dry_run_prompt(
         repo_context: "",
     });
     println!("{prompt}");
+    Ok(())
+}
+
+/// List every webhook installed on the repo. Operators use this
+/// to audit which webhooks the bot's PAT can see and to find the
+/// id `unregister-webhook` needs.
+pub async fn list_webhooks(args: ListWebhooksArgs) -> Result<()> {
+    let client =
+        Client::new(&args.forgejo_url, &args.token).context("build forgejo client")?;
+    let hooks = client
+        .list_webhooks(&args.owner, &args.repo)
+        .await
+        .context("list webhooks")?;
+    if args.json {
+        for h in &hooks {
+            println!("{}", serde_json::to_string(h)?);
+        }
+        return Ok(());
+    }
+    if hooks.is_empty() {
+        println!("No webhooks installed on {}/{}.", args.owner, args.repo);
+        return Ok(());
+    }
+    println!(
+        "{} webhook{} on {}/{}:",
+        hooks.len(),
+        if hooks.len() == 1 { "" } else { "s" },
+        args.owner,
+        args.repo
+    );
+    println!();
+    for h in &hooks {
+        let active = if h.active { "active" } else { "INACTIVE" };
+        println!(
+            "  id={:<6} {:>8} type={:<8} events=[{}]",
+            h.id,
+            active,
+            h.kind,
+            h.events.join(", ")
+        );
+        println!("           url={}", h.url);
+    }
+    Ok(())
+}
+
+/// Delete one or more webhooks. Either `--id N` (single, exact)
+/// or `--match-url <substr>` (every webhook whose URL contains
+/// the substring). The `--match-url` form is the safe choice for
+/// deploy scripts that don't know ids ahead of time.
+pub async fn unregister_webhook(args: UnregisterWebhookArgs) -> Result<()> {
+    let client =
+        Client::new(&args.forgejo_url, &args.token).context("build forgejo client")?;
+    let to_delete: Vec<u64> = match (args.id, args.match_url.as_deref()) {
+        (Some(id), _) => vec![id],
+        (None, Some(needle)) => {
+            let hooks = client
+                .list_webhooks(&args.owner, &args.repo)
+                .await
+                .context("list webhooks for matching")?;
+            let matched: Vec<u64> = hooks
+                .iter()
+                .filter(|h| h.url.contains(needle))
+                .map(|h| h.id)
+                .collect();
+            if matched.is_empty() {
+                anyhow::bail!(
+                    "no webhook on {}/{} has a URL containing `{}`",
+                    args.owner,
+                    args.repo,
+                    needle
+                );
+            }
+            matched
+        }
+        (None, None) => anyhow::bail!("pass either --id <N> or --match-url <substr>"),
+    };
+    for id in &to_delete {
+        client
+            .delete_webhook(&args.owner, &args.repo, *id)
+            .await
+            .with_context(|| format!("delete webhook {id}"))?;
+        println!("Deleted webhook {id} on {}/{}.", args.owner, args.repo);
+    }
     Ok(())
 }
 
@@ -893,6 +976,136 @@ mod tests {
     /// Wire up an in-process gateway with NoOpDispatcher and verify
     /// `test_webhook` round-trips successfully. Catches real bugs:
     /// signature header name, content-type, body framing.
+    #[tokio::test]
+    async fn list_webhooks_renders_table() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/hooks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 7, "type": "forgejo", "active": true,
+                    "events": ["pull_request"],
+                    "config": {"url": "https://reviewer.example.com/webhooks/forgejo"}
+                }
+            ])))
+            .mount(&server)
+            .await;
+        let args = ListWebhooksArgs {
+            forgejo_url: server.uri(),
+            token: "tok".into(),
+            owner: "o".into(),
+            repo: "r".into(),
+            json: false,
+        };
+        list_webhooks(args).await.expect("ok");
+    }
+
+    #[tokio::test]
+    async fn unregister_webhook_by_id_calls_delete() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/repos/o/r/hooks/7"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let args = UnregisterWebhookArgs {
+            forgejo_url: server.uri(),
+            token: "tok".into(),
+            owner: "o".into(),
+            repo: "r".into(),
+            id: Some(7),
+            match_url: None,
+        };
+        unregister_webhook(args).await.expect("ok");
+    }
+
+    #[tokio::test]
+    async fn unregister_webhook_by_match_url_lists_then_deletes_only_matches() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/hooks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 7, "type": "forgejo", "active": true,
+                    "events": [],
+                    "config": {"url": "https://reviewer.example.com/webhooks/forgejo"}
+                },
+                {
+                    "id": 12, "type": "gitea", "active": true,
+                    "events": [],
+                    "config": {"url": "https://other.example/legacy"}
+                }
+            ])))
+            .mount(&server)
+            .await;
+        // Only id 7 should be deleted; 12 must NOT be.
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/repos/o/r/hooks/7"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/repos/o/r/hooks/12"))
+            .respond_with(ResponseTemplate::new(204))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let args = UnregisterWebhookArgs {
+            forgejo_url: server.uri(),
+            token: "tok".into(),
+            owner: "o".into(),
+            repo: "r".into(),
+            id: None,
+            match_url: Some("reviewer.example.com".into()),
+        };
+        unregister_webhook(args).await.expect("ok");
+    }
+
+    #[tokio::test]
+    async fn unregister_webhook_match_url_with_no_match_errors() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/hooks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        let args = UnregisterWebhookArgs {
+            forgejo_url: server.uri(),
+            token: "tok".into(),
+            owner: "o".into(),
+            repo: "r".into(),
+            id: None,
+            match_url: Some("nope".into()),
+        };
+        let err = unregister_webhook(args).await.expect_err("no match");
+        assert!(err.to_string().contains("nope"));
+    }
+
+    #[tokio::test]
+    async fn unregister_webhook_with_neither_arg_errors() {
+        let args = UnregisterWebhookArgs {
+            forgejo_url: "http://127.0.0.1:1".into(),
+            token: "tok".into(),
+            owner: "o".into(),
+            repo: "r".into(),
+            id: None,
+            match_url: None,
+        };
+        let err = unregister_webhook(args).await.expect_err("neither");
+        assert!(err.to_string().contains("--id"));
+        assert!(err.to_string().contains("--match-url"));
+    }
+
     #[tokio::test]
     async fn end_to_end_test_webhook_succeeds_against_real_gateway() {
         use ar_gateway::{build_router, AppState};

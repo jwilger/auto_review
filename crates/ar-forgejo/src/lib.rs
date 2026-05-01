@@ -17,6 +17,7 @@ pub use types::{
     ChangedFile, CommitStatus, CommitStatusState, CreateAccessTokenRequest, CreateReviewRequest,
     CreateWebhookRequest, CreatedAccessToken, CreatedWebhook, PrReviewComment, PrReviewCommentUser,
     PullRequestRefSummary, PullRequestSummary, ReviewComment, ReviewEvent, WebhookConfig,
+    WebhookSummary,
 };
 pub use webhook::{
     Comment, Issue, IssueCommentAction, IssueCommentEvent, IssuePullRequestRef, PullRequestAction,

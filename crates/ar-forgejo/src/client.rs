@@ -133,6 +133,36 @@ impl Client {
         json_post(&self.http, url, request).await
     }
 
+    /// List webhooks installed on a repository. Operators use this
+    /// to audit which webhook(s) point at the gateway and to find
+    /// the `id` needed for `delete_webhook`.
+    pub async fn list_webhooks(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<crate::types::WebhookSummary>, Error> {
+        let url = self.url(&format!("repos/{owner}/{repo}/hooks"))?;
+        let items: Vec<crate::types::WebhookListItem> = json_get(&self.http, url).await?;
+        Ok(items.into_iter().map(Into::into).collect())
+    }
+
+    /// Delete a webhook by id. The id comes from `list_webhooks` or
+    /// from the operator's records when they ran `register-webhook`
+    /// (it printed the id at creation).
+    pub async fn delete_webhook(&self, owner: &str, repo: &str, id: u64) -> Result<(), Error> {
+        let url = self.url(&format!("repos/{owner}/{repo}/hooks/{id}"))?;
+        let resp = self.http.delete(url).send().await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body,
+            });
+        }
+        Ok(())
+    }
+
     /// Fetch a compact summary of a pull request — used by ad-hoc CLI
     /// invocations (e.g. `auto_review review-once`) to drive the same
     /// pipeline the webhook flow uses, without needing the webhook
@@ -560,6 +590,87 @@ mod tests {
         let created = client.create_webhook("o", "r", &req).await.expect("ok");
         assert_eq!(created.id, 7);
         assert!(created.active);
+    }
+
+    #[tokio::test]
+    async fn list_webhooks_flattens_config_url_into_summary() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/hooks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 7,
+                    "type": "forgejo",
+                    "active": true,
+                    "events": ["pull_request", "issue_comment"],
+                    "config": {
+                        "url": "https://reviewer.example.com/webhooks/forgejo",
+                        "content_type": "json",
+                        "secret": ""
+                    }
+                },
+                {
+                    "id": 12,
+                    "type": "gitea",
+                    "active": false,
+                    "events": ["push"],
+                    "config": {
+                        "url": "https://other.example/legacy",
+                        "content_type": "json",
+                        "secret": ""
+                    }
+                }
+            ])))
+            .mount(&server)
+            .await;
+
+        let hooks = client.list_webhooks("o", "r").await.expect("ok");
+        assert_eq!(hooks.len(), 2);
+        assert_eq!(hooks[0].id, 7);
+        assert_eq!(hooks[0].url, "https://reviewer.example.com/webhooks/forgejo");
+        assert!(hooks[0].active);
+        assert_eq!(hooks[0].events, vec!["pull_request", "issue_comment"]);
+        assert_eq!(hooks[1].id, 12);
+        assert_eq!(hooks[1].url, "https://other.example/legacy");
+        assert!(!hooks[1].active);
+    }
+
+    #[tokio::test]
+    async fn list_webhooks_handles_empty_response() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/hooks"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        let hooks = client.list_webhooks("o", "r").await.expect("ok");
+        assert!(hooks.is_empty());
+    }
+
+    #[tokio::test]
+    async fn delete_webhook_uses_delete_verb_and_id_path() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/repos/o/r/hooks/7"))
+            .respond_with(ResponseTemplate::new(204))
+            .mount(&server)
+            .await;
+        client.delete_webhook("o", "r", 7).await.expect("ok");
+    }
+
+    #[tokio::test]
+    async fn delete_webhook_propagates_404_as_api_error() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("DELETE"))
+            .and(path("/api/v1/repos/o/r/hooks/999"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
+            .mount(&server)
+            .await;
+        let err = client.delete_webhook("o", "r", 999).await.expect_err("404");
+        match err {
+            Error::Api { status, .. } => assert_eq!(status, 404),
+            other => panic!("unexpected: {other:?}"),
+        }
     }
 
     #[tokio::test]

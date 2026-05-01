@@ -20,6 +20,8 @@ async fn main() -> Result<()> {
     match cli.command {
         Command::Init(args) => commands::init(args).await,
         Command::RegisterWebhook(args) => commands::register_webhook(args).await,
+        Command::ListWebhooks(args) => commands::list_webhooks(args).await,
+        Command::UnregisterWebhook(args) => commands::unregister_webhook(args).await,
         Command::ReviewOnce(args) => commands::review_once(args).await,
         Command::Bench(args) => bench::run(args).await,
         Command::ValidateConfig(args) => commands::validate_config(args),

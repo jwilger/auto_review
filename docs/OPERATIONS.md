@@ -303,9 +303,20 @@ gateway, run a smoke-test PR through `auto_review review-once
 
 Generate a new value (`openssl rand -hex 32`). Update both:
 1. The gateway's env. Restart.
-2. Every Forgejo webhook configured against this gateway:
-   `GET /api/v1/repos/{owner}/{repo}/hooks` to find them, then
-   `PATCH .../hooks/{id}` with the new `config.secret`.
+2. Every Forgejo webhook configured against this gateway. Audit
+   them with:
+   ```bash
+   auto_review list-webhooks --owner <O> --repo <R>
+   ```
+   Then either patch each one in Forgejo's webhook UI, or remove
+   the old hook and re-register cleanly:
+   ```bash
+   auto_review unregister-webhook --owner <O> --repo <R> \
+       --match-url reviewer.example.com
+   auto_review register-webhook --owner <O> --repo <R> \
+       --gateway-url https://reviewer.example.com \
+       --webhook-secret "$WEBHOOK_SECRET"
+   ```
 
 There's a brief window where webhooks signed with the old secret
 will get rejected. Plan accordingly — schedule for a low-PR-traffic
