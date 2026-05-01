@@ -438,6 +438,22 @@ impl ChatHandler<'_> {
             return Ok(());
         }
 
+        // Cap the question itself. A 1 MiB pasted log in the
+        // mention body would otherwise inflate the LLM prompt by
+        // that much per call (the diff cap doesn't help here —
+        // it only bounds the diff portion). 4 KiB easily covers
+        // any real question.
+        const QUESTION_MAX_BYTES: usize = 4_096;
+        let question_capped: String = if question.len() > QUESTION_MAX_BYTES {
+            tracing::warn!(
+                bytes = question.len(),
+                "freeform question oversized; truncating before LLM call"
+            );
+            truncate_with_marker(question, QUESTION_MAX_BYTES, "[question truncated]")
+        } else {
+            question.to_string()
+        };
+
         // Best-effort diff fetch — we still answer if it fails.
         let diff = self
             .forgejo
@@ -449,7 +465,7 @@ impl ChatHandler<'_> {
             });
         let truncated = truncate_for_chat(&diff, FREEFORM_DIFF_CAP);
 
-        let user_prompt = build_freeform_user_prompt(question, &truncated);
+        let user_prompt = build_freeform_user_prompt(&question_capped, &truncated);
         let req = CompleteRequest {
             system: Some(FREEFORM_SYSTEM_PROMPT.to_string()),
             messages: vec![Message::user(user_prompt)],
