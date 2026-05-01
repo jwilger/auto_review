@@ -16,7 +16,7 @@
 # Linter set (in alphabetical order):
 #   actionlint, ast-grep, biome, eslint, gitleaks, golangci-lint,
 #   hadolint, markdownlint, osv-scanner, oxlint, phpstan, rubocop,
-#   ruff, semgrep, shellcheck, sqlfluff, trivy, yamllint
+#   ruff, semgrep, shellcheck, sqlfluff, taplo, trivy, yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -77,6 +77,8 @@ RUN set -eux; \
         && unzip -q /tmp/ast-grep.zip -d /tmp/ast-grep \
         && mv /tmp/ast-grep/ast-grep /usr/local/bin/ \
         && rm -rf /tmp/ast-grep /tmp/ast-grep.zip; \
+    curl -fsSL "https://github.com/tamasfe/taplo/releases/latest/download/taplo-full-linux-x86_64.gz" \
+        | gunzip > /usr/local/bin/taplo; \
     chmod +x /usr/local/bin/*
 
 # Linters never need to write to the rootfs.

@@ -27,6 +27,7 @@ pub mod runner;
 pub mod semgrep;
 pub mod shellcheck;
 pub mod sqlfluff;
+pub mod taplo;
 pub mod trivy;
 pub mod yamllint;
 

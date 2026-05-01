@@ -20,6 +20,7 @@ use ar_tools::runner::{run_all, LinterRunner};
 use ar_tools::semgrep::SemgrepRunner;
 use ar_tools::shellcheck::ShellCheckRunner;
 use ar_tools::sqlfluff::SqlfluffRunner;
+use ar_tools::taplo::TaploRunner;
 use ar_tools::trivy::TrivyRunner;
 use ar_tools::yamllint::YamlLintRunner;
 use ar_tools::Finding;
@@ -204,6 +205,15 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         .collect();
     if !sql_files.is_empty() {
         runners.push(Box::new(SqlfluffRunner { files: sql_files }));
+    }
+
+    let toml_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| f.filename.ends_with(".toml"))
+        .map(|f| f.filename.clone())
+        .collect();
+    if !toml_files.is_empty() {
+        runners.push(Box::new(TaploRunner { files: toml_files }));
     }
 
     // yamllint runs on every YAML file, including workflows (it complains
@@ -558,15 +568,46 @@ mod tests {
     }
 
     #[test]
-    fn unknown_extensions_select_only_gitleaks() {
+    fn unknown_extensions_select_only_always_run_set() {
+        // .rs has no dedicated runner today (clippy is left to repo
+        // CI per the plan). Cargo.toml routes through taplo.
         let files = vec![cf("src/main.rs", "modified"), cf("Cargo.toml", "modified")];
         let runners = select_runners(&files);
         let mut got = names(&runners);
         got.sort();
         assert_eq!(
             got,
-            vec!["ast-grep", "gitleaks", "osv-scanner", "semgrep", "trivy"]
+            vec![
+                "ast-grep",
+                "gitleaks",
+                "osv-scanner",
+                "semgrep",
+                "taplo",
+                "trivy"
+            ]
         );
+    }
+
+    #[test]
+    fn toml_files_select_taplo() {
+        for name in ["Cargo.toml", "pyproject.toml", "config/app.toml"] {
+            let files = vec![cf(name, "modified")];
+            let runners = select_runners(&files);
+            let mut got = names(&runners);
+            got.sort();
+            assert_eq!(
+                got,
+                vec![
+                    "ast-grep",
+                    "gitleaks",
+                    "osv-scanner",
+                    "semgrep",
+                    "taplo",
+                    "trivy"
+                ],
+                "name = {name}"
+            );
+        }
     }
 
     #[test]
