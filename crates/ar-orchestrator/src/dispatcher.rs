@@ -5,7 +5,7 @@ use ar_llm::Router as LlmRouter;
 use ar_review::{
     build_glob_set, build_review_context, filter_reviewable, lint_workspace_via, load_repo_config,
     pr_is_skippable, prepare_workspace, review_pull_request, triage_files_with_llm, GlobSet,
-    ReviewArgs, ReviewError, WorkspaceError,
+    PreparedWorkspace, ReviewArgs, ReviewError, VerifyMode, WorkspaceError,
 };
 use ar_sandbox::{DirectSandbox, Sandbox};
 use ar_tools::Finding;
@@ -328,7 +328,7 @@ pub async fn run_review_job(
         &job,
     )
     .await;
-    let (findings, ignored_paths, guidelines, repo_context) = match lint_outcome {
+    let (findings, ignored_paths, guidelines, repo_context, workspace) = match lint_outcome {
         Ok(LintPhaseOutput {
             skipped_by_config: true,
             ..
@@ -358,16 +358,39 @@ pub async fn run_review_job(
             ignored_paths,
             guidelines,
             repo_context,
+            workspace,
             ..
         }) => {
             tracing::debug!(count = findings.len(), "linter findings collected");
-            (findings, ignored_paths, guidelines, repo_context)
+            (findings, ignored_paths, guidelines, repo_context, workspace)
         }
         Err(e) => {
             tracing::warn!(error = %e, "lint phase failed; continuing without findings");
-            (Vec::new(), GlobSet::empty(), String::new(), String::new())
+            (
+                Vec::new(),
+                GlobSet::empty(),
+                String::new(),
+                String::new(),
+                None,
+            )
         }
     };
+
+    // The agentic verifier needs the cloned workspace to inspect.
+    // Operators opt in by setting AR_AGENTIC_VERIFIER=1; without it,
+    // the simple verifier (one-pass diff judgement) keeps running.
+    // Either way we silently downgrade to Simple when no workspace
+    // was prepared (e.g. the lint phase failed).
+    let verify_mode = if std::env::var("AR_AGENTIC_VERIFIER")
+        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+        .unwrap_or(false)
+        && workspace.is_some()
+    {
+        VerifyMode::Agentic
+    } else {
+        VerifyMode::Simple
+    };
+    let workspace_path = workspace.as_ref().map(|w| w.path());
 
     let result = review_pull_request(ReviewArgs {
         forgejo,
@@ -383,6 +406,8 @@ pub async fn run_review_job(
         guidelines: &guidelines,
         repo_context: &repo_context,
         diff_override: incremental_diff.as_deref(),
+        verify_mode,
+        workspace_path,
     })
     .await;
 
@@ -445,6 +470,11 @@ struct LintPhaseOutput {
     ignored_paths: GlobSet,
     guidelines: String,
     repo_context: String,
+    /// Held by the orchestrator until the review pipeline finishes
+    /// so the agentic verifier (when enabled) can inspect the
+    /// cloned working tree. `None` when the lint phase exited
+    /// without cloning (skipped_by_config doesn't reach this).
+    workspace: Option<PreparedWorkspace>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -471,6 +501,7 @@ async fn prepare_and_lint(
             ignored_paths,
             guidelines,
             repo_context: String::new(),
+            workspace: None,
         });
     }
     // Fetch the diff once for both LLM triage and the RAG context
@@ -534,6 +565,7 @@ async fn prepare_and_lint(
         ignored_paths,
         guidelines,
         repo_context,
+        workspace: Some(workspace),
     })
 }
 

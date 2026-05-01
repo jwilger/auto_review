@@ -1,3 +1,4 @@
+use crate::agentic_verify::verify_findings_agentic;
 use crate::diff::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 use crate::error::ReviewError;
 use crate::heal::{generate_with_self_heal, HealConfig};
@@ -9,6 +10,19 @@ use ar_llm::Router as LlmRouter;
 use ar_prompts::{render_review_prompt, system_prompt, ReviewPromptInputs};
 use ar_tools::Finding;
 use globset::GlobSet;
+use std::path::Path;
+
+/// Which verifier the pipeline runs after the reasoning model emits
+/// candidate findings. The `Simple` verifier is one cheap-tier call
+/// against the diff alone; `Agentic` runs a per-finding ReAct loop
+/// with read-only workspace tools (read_file / search) and needs a
+/// cloned workspace to inspect.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum VerifyMode {
+    #[default]
+    Simple,
+    Agentic,
+}
 
 #[derive(Debug, Clone)]
 pub struct ReviewOutcome {
@@ -41,6 +55,13 @@ pub struct ReviewArgs<'a> {
     /// fetched a `compare_diff(previous_sha..head_sha)`. `None` for
     /// normal full reviews.
     pub diff_override: Option<&'a str>,
+    /// Verifier strategy. `Agentic` requires `workspace_path` to be
+    /// `Some`; if it's not, the pipeline silently downgrades to
+    /// `Simple` rather than failing the review.
+    pub verify_mode: VerifyMode,
+    /// Path to the cloned PR workspace. Required for the agentic
+    /// verifier; ignored by the simple one.
+    pub workspace_path: Option<&'a Path>,
 }
 
 /// End-to-end review activity for one PR.
@@ -96,7 +117,15 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
     // each finding against the diff and drop the ones the verifier
     // doesn't corroborate. Fails open — verifier issues never drop
     // real findings.
-    let output = verify_findings(args.llm, output, &diff).await?;
+    let output = match (args.verify_mode, args.workspace_path) {
+        (VerifyMode::Agentic, Some(workspace)) => {
+            verify_findings_agentic(args.llm, output, workspace, &diff).await?
+        }
+        // Agentic was requested but the orchestrator didn't supply a
+        // workspace; downgrade to the simple verifier silently rather
+        // than failing the review.
+        _ => verify_findings(args.llm, output, &diff).await?,
+    };
     let findings_count = output.findings.len();
 
     let req = output_to_review_request(&output, args.head_sha);
@@ -221,6 +250,8 @@ mod tests {
             guidelines: "",
             repo_context: "",
             diff_override: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
         })
         .await
         .expect("review ok");
@@ -256,6 +287,8 @@ mod tests {
             guidelines: "",
             repo_context: "",
             diff_override: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
         })
         .await
         .expect_err("err");
@@ -308,6 +341,8 @@ mod tests {
             guidelines: "",
             repo_context: "",
             diff_override: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
         })
         .await
         .expect("ok");
@@ -365,6 +400,8 @@ mod tests {
             guidelines: "",
             repo_context: "",
             diff_override: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
         })
         .await
         .expect("ok");
