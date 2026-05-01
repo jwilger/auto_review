@@ -538,14 +538,23 @@ pub async fn run_review_job(
     // Operators opt in by setting AR_AGENTIC_VERIFIER=1; without it,
     // the simple verifier (one-pass diff judgement) keeps running.
     // Either way we silently downgrade to Simple when no workspace
-    // was prepared (e.g. the lint phase failed).
-    let verify_mode = if std::env::var("AR_AGENTIC_VERIFIER")
+    // was prepared (e.g. the lint phase failed) — but log the
+    // downgrade so operators who set the flag aren't left wondering
+    // why findings stopped being verified against the workspace.
+    let agentic_requested = std::env::var("AR_AGENTIC_VERIFIER")
         .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false)
-        && workspace.is_some()
-    {
+        .unwrap_or(false);
+    let verify_mode = if agentic_requested && workspace.is_some() {
         VerifyMode::Agentic
     } else {
+        if agentic_requested && workspace.is_none() {
+            tracing::warn!(
+                repo = format!("{}/{}", job.owner, job.repo),
+                pr = job.pr_number,
+                "AR_AGENTIC_VERIFIER=1 set but workspace prep failed; \
+                 downgrading verifier to simple mode for this review"
+            );
+        }
         VerifyMode::Simple
     };
     let workspace_path = workspace.as_ref().map(|w| w.path());
