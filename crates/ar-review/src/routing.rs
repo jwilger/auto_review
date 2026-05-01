@@ -17,6 +17,7 @@ use ar_tools::gitleaks::GitleaksRunner;
 use ar_tools::golangci_lint::GolangciLintRunner;
 use ar_tools::gosec::GosecRunner;
 use ar_tools::hadolint::HadolintRunner;
+use ar_tools::helm::HelmRunner;
 use ar_tools::htmlhint::HtmlhintRunner;
 use ar_tools::ktlint::KtlintRunner;
 use ar_tools::kubeconform::KubeconformRunner;
@@ -351,6 +352,31 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         // (AWS/Azure/GCP) that catch resource-level mistakes
         // checkov doesn't see.
         runners.push(Box::new(TflintRunner));
+    }
+
+    // Helm chart routing: when any Chart.yaml is touched, run
+    // `helm lint` against the parent directory of each Chart.yaml
+    // (helm operates on chart roots, not individual files).
+    let chart_dirs: Vec<String> = surviving
+        .iter()
+        .filter_map(|f| {
+            let last = f.filename.rsplit('/').next().unwrap_or(&f.filename);
+            if last == "Chart.yaml" {
+                let dir = if let Some((parent, _)) = f.filename.rsplit_once('/') {
+                    parent.to_string()
+                } else {
+                    ".".to_string()
+                };
+                Some(dir)
+            } else {
+                None
+            }
+        })
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .collect();
+    if !chart_dirs.is_empty() {
+        runners.push(Box::new(HelmRunner { chart_dirs }));
     }
 
     let env_files: Vec<String> = surviving
@@ -830,6 +856,17 @@ mod tests {
                 "typos"
             ]
         );
+    }
+
+    #[test]
+    fn chart_yaml_selects_helm() {
+        // Chart.yaml is also a YAML file, so yamllint + kubeconform
+        // + ansible-lint also fire. The point of this test is to
+        // confirm helm is in the runner set.
+        let files = vec![cf("charts/web/Chart.yaml", "modified")];
+        let runners = select_runners(&files);
+        let got: Vec<&str> = runners.iter().map(|r| r.name()).collect();
+        assert!(got.contains(&"helm"), "helm missing from {got:?}");
     }
 
     #[test]

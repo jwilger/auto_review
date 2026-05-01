@@ -44,7 +44,7 @@ since the start of the project.
   `run_review_job` posts pending → final commit statuses around the
   triage → clone → lint → review → post sequence.
 
-#### Linters (39 of CodeRabbit's ~45 set)
+#### Linters (40 of CodeRabbit's ~45 set)
 
 | Tool | Languages / files | Source-tool name |
 |---|---|---|
@@ -87,6 +87,7 @@ since the start of the project.
 | `yamllint` | `*.yml` / `*.yaml` (workflow + general) | `yamllint` |
 | `kubeconform` | Kubernetes manifests (validates against k8s JSON schema) | `kubeconform` |
 | `ansible-lint` | Ansible playbook / role / task linting | `ansible-lint` |
+| `helm` | `helm lint` against any chart with a touched Chart.yaml | `helm` |
 
 `ar-tools::run_all` runs them in parallel; missing binaries are silently
 skipped so a missing linter doesn't break the review.
@@ -285,8 +286,8 @@ default in-memory store to the SQLite-backed one.
   paths cover correctness; LanceDB is the scale lever).
 - youki-based `Sandbox` impl as a lighter alternative to the
   podman shell-out.
-- Remaining ~6 linters from CodeRabbit's set
-  (languagetool, helm-lint, shfmt, jsonlint, vint, nilaway).
+- Remaining ~5 linters from CodeRabbit's set
+  (languagetool, shfmt, jsonlint, vint, nilaway).
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
   wiremock + canned LLM providers.

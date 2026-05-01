@@ -16,10 +16,10 @@
 # Linter set (in alphabetical order):
 #   actionlint, ansible-lint, ast-grep, bandit, biome, buf, checkov,
 #   cppcheck, dotenv-linter, eslint, gitleaks, golangci-lint, gosec,
-#   hadolint, htmlhint, ktlint, kubeconform, markdownlint, mypy,
-#   osv-scanner, oxlint, phpstan, pmd, prettier, pylint, rubocop,
-#   ruff, semgrep, shellcheck, sqlfluff, staticcheck, stylelint,
-#   swiftlint, taplo, tflint, trivy, typos, vale, yamllint
+#   hadolint, helm, htmlhint, ktlint, kubeconform, markdownlint,
+#   mypy, osv-scanner, oxlint, phpstan, pmd, prettier, pylint,
+#   rubocop, ruff, semgrep, shellcheck, sqlfluff, staticcheck,
+#   stylelint, swiftlint, taplo, tflint, trivy, typos, vale, yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -125,6 +125,10 @@ RUN set -eux; \
         && rm /tmp/pmd.zip; \
     curl -fsSL "https://github.com/pinterest/ktlint/releases/latest/download/ktlint" \
         -o /usr/local/bin/ktlint; \
+    curl -fsSL "https://get.helm.sh/helm-v3.16.0-linux-amd64.tar.gz" \
+        | tar -xz -C /tmp \
+        && mv /tmp/linux-amd64/helm /usr/local/bin/ \
+        && rm -rf /tmp/linux-amd64; \
     chmod +x /usr/local/bin/*
 
 # Linters never need to write to the rootfs.
