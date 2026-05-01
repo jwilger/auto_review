@@ -738,15 +738,29 @@ fn format_test_scaffolds_body(scaffolds: &[TestScaffold]) -> String {
         } else {
             out.push('\n');
         }
+        // Cap the scaffold source. Same rationale as the autofix
+        // patch caps: a misbehaving cheap-tier model could emit
+        // many KB of test code per scaffold and 5 scaffolds × MB
+        // each would exceed Forgejo's issue-comment payload limit.
+        // 4 KiB easily holds any real scaffolded test.
+        let source = if s.source.len() > SCAFFOLD_SOURCE_MAX {
+            truncate_with_marker(
+                &s.source,
+                SCAFFOLD_SOURCE_MAX,
+                "[scaffold truncated — not directly usable]",
+            )
+        } else {
+            s.source.clone()
+        };
         // Same fence-sizing rationale as format_suggestion_body:
         // a Rust doctest source contains literal ```rust...```
         // markers and would otherwise prematurely close the
         // outer fence here.
-        let fence = pick_fence(&s.source);
+        let fence = pick_fence(&source);
         out.push_str(&fence);
         out.push('\n');
-        out.push_str(&s.source);
-        if !s.source.ends_with('\n') {
+        out.push_str(&source);
+        if !source.ends_with('\n') {
             out.push('\n');
         }
         out.push_str(&fence);
@@ -791,6 +805,11 @@ fn build_suggestion_user_prompt(kind: SuggestionKind, diff: &str) -> String {
 /// comments + the review-body text).
 const SUGGESTION_REASON_MAX: usize = 1_024;
 const SUGGESTION_REPLACEMENT_MAX: usize = 4_096;
+/// Same rationale as SUGGESTION_REPLACEMENT_MAX but for
+/// `format_test_scaffolds_body`. Test scaffolds are bigger than
+/// inline patches in practice (multi-test cases, framework imports,
+/// helper fns), but 4 KiB still covers any reasonable scaffold.
+const SCAFFOLD_SOURCE_MAX: usize = 4_096;
 
 fn format_suggestion_body(p: &AutofixPatch) -> String {
     let reason = if p.reason.len() > SUGGESTION_REASON_MAX {
@@ -1994,6 +2013,27 @@ mod tests {
         assert!(body.contains("### `fn render`"));
         // Source code is fenced.
         assert!(body.contains("```\n#[test]\nfn parses_ok() {}\n```"));
+    }
+
+    #[test]
+    fn format_test_scaffolds_body_caps_oversized_source() {
+        // Defence: a misbehaving cheap-tier model could emit a
+        // multi-MB test scaffold; 5 of them would blow past
+        // Forgejo's issue-comment payload limit and 422 the post.
+        let scaffolds = vec![TestScaffold {
+            item_name: "fn x".into(),
+            item_path: "src/lib.rs".into(),
+            framework: "cargo-test".into(),
+            source: "x".repeat(10_000),
+        }];
+        let body = format_test_scaffolds_body(&scaffolds);
+        assert!(body.contains("[scaffold truncated"));
+        // Body bounded by cap + framing.
+        assert!(
+            body.len() < 5_000,
+            "body should be ≤ cap + framing, got {}",
+            body.len()
+        );
     }
 
     #[test]
