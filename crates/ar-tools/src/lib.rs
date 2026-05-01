@@ -11,6 +11,7 @@
 
 pub mod actionlint;
 pub mod ansible_lint;
+pub mod catalog;
 pub mod ast_grep;
 pub mod bandit;
 pub mod biome;
@@ -56,5 +57,6 @@ pub mod vale;
 pub mod vint;
 pub mod yamllint;
 
+pub use catalog::{linter_catalogue, LinterInfo};
 pub use finding::{Finding, Severity};
 pub use runner::{run_all, run_in_sandbox, LinterRunner};

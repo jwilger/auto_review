@@ -1,6 +1,8 @@
 //! Implementations of the CLI subcommands.
 
-use crate::cli::{InitArgs, RegisterWebhookArgs, ReviewOnceArgs, ValidateConfigArgs};
+use crate::cli::{
+    InitArgs, ListLintersArgs, RegisterWebhookArgs, ReviewOnceArgs, ValidateConfigArgs,
+};
 use anyhow::{Context, Result};
 use ar_forgejo::{
     Client, CreateAccessTokenRequest, CreateWebhookRequest, InitClient, WebhookConfig,
@@ -185,6 +187,60 @@ pub fn build_webhook_url(gateway_url: &str) -> String {
     format!("{trimmed}{WEBHOOK_PATH}")
 }
 
+/// Print the bundled linter catalogue. With `--json`, emits one
+/// JSON object per line (newline-delimited JSON). Otherwise renders
+/// a human-readable table grouped by language.
+pub fn list_linters(args: ListLintersArgs) -> Result<()> {
+    let mut entries: Vec<&ar_tools::LinterInfo> = ar_tools::linter_catalogue().iter().collect();
+    if let Some(lang) = args.language.as_deref() {
+        let lang = lang.to_ascii_lowercase();
+        entries.retain(|e| e.languages.iter().any(|l| l.eq_ignore_ascii_case(&lang)));
+        if entries.is_empty() {
+            anyhow::bail!(
+                "no linters tagged with language `{lang}`. Run `auto_review list-linters` (no filter) to see all tags."
+            );
+        }
+    }
+    if args.json {
+        for entry in &entries {
+            println!("{}", serde_json::to_string(entry)?);
+        }
+        return Ok(());
+    }
+    // Human-readable: column-aligned name + description.
+    let widest = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
+    println!(
+        "{} bundled linter{}{}",
+        entries.len(),
+        if entries.len() == 1 { "" } else { "s" },
+        match args.language.as_deref() {
+            Some(l) => format!(" tagged `{l}`"),
+            None => String::new(),
+        }
+    );
+    println!();
+    for entry in &entries {
+        println!(
+            "  {:width$}  {}",
+            entry.name,
+            entry.description,
+            width = widest
+        );
+        println!(
+            "  {:width$}  languages: {}",
+            "",
+            entry.languages.join(", "),
+            width = widest
+        );
+        println!("  {:width$}  {}", "", entry.homepage, width = widest);
+        println!();
+    }
+    println!(
+        "Use any of these names under `disabled_tools:` in .auto_review.yaml to skip a linter."
+    );
+    Ok(())
+}
+
 /// Validate one or more `.auto_review.yaml` files. Each path can be a
 /// file or a directory; directories are scanned for the standard
 /// config filenames. Returns Ok with the count of validated files;
@@ -263,6 +319,34 @@ fn expand_config_paths(paths: &[std::path::PathBuf]) -> Result<Vec<std::path::Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn list_linters_no_filter_succeeds() {
+        let args = ListLintersArgs {
+            language: None,
+            json: false,
+        };
+        list_linters(args).expect("default catalogue print");
+    }
+
+    #[test]
+    fn list_linters_with_known_language_succeeds() {
+        let args = ListLintersArgs {
+            language: Some("python".into()),
+            json: true,
+        };
+        list_linters(args).expect("python filter");
+    }
+
+    #[test]
+    fn list_linters_with_unknown_language_errors() {
+        let args = ListLintersArgs {
+            language: Some("klingon".into()),
+            json: false,
+        };
+        let err = list_linters(args).expect_err("unknown language should fail");
+        assert!(err.to_string().contains("klingon"));
+    }
 
     #[test]
     fn validate_config_succeeds_on_valid_yaml() {

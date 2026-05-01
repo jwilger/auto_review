@@ -510,6 +510,21 @@ default in-memory store to the SQLite-backed one.
   drive-by PRs. Includes guidance for keeping the document
   in sync as new components are added.
 
+#### list-linters subcommand (M5)
+
+- `auto_review list-linters` prints the bundled linter
+  catalogue with each entry's canonical name (the string
+  to use under `disabled_tools:` in `.auto_review.yaml`),
+  description, language tags, and homepage. `--language=<tag>`
+  filters by language; `--json` emits one JSON object per
+  line for piping into `jq`. Backed by a new
+  `ar_tools::catalog::linter_catalogue()` returning a
+  `&'static [LinterInfo]` slice. A contract test in
+  `ar_review::routing` instantiates every routed runner
+  through a synthetic comprehensive file set and asserts
+  every name appears in the catalogue, so adding a new
+  runner without updating the catalogue fails CI.
+
 #### validate-config subcommand (M5)
 
 - `auto_review validate-config <paths>...` parses one or more

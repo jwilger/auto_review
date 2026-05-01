@@ -270,9 +270,13 @@ disabled_tools:
   - phpstan
 ```
 
-Names match `LinterRunner::name()`. Find the canonical name in
-`auto_review review-once --dry-run` output (linters that ran are
-listed in the Findings section).
+Names match `LinterRunner::name()`. Enumerate them with:
+
+```bash
+auto_review list-linters                  # full table
+auto_review list-linters --language python # filter by language tag
+auto_review list-linters --json | jq      # machine-readable
+```
 
 ---
 

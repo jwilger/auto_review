@@ -593,6 +593,53 @@ mod tests {
         runners.iter().map(|r| r.name()).collect()
     }
 
+    /// Contract test: every runner the routing logic ever produces
+    /// has a corresponding entry in `ar_tools::linter_catalogue()`.
+    /// If you add a new runner, this test fails until you also add a
+    /// catalogue entry — keeping `auto_review list-linters` honest.
+    #[test]
+    fn every_routed_runner_has_a_catalogue_entry() {
+        use ar_tools::linter_catalogue;
+        use std::collections::HashSet;
+        // A file set engineered to trigger every conditional branch
+        // in `select_runners`. Mirrors the cases above; the union of
+        // their files lights up every runner in one routing pass.
+        let files = vec![
+            cf("src/x.py", "modified"),
+            cf("src/y.go", "modified"),
+            cf("src/z.rb", "modified"),
+            cf("src/a.php", "modified"),
+            cf("src/b.cpp", "modified"),
+            cf("src/c.java", "modified"),
+            cf("src/d.kt", "modified"),
+            cf("plugin/x.vim", "modified"),
+            cf("src/e.ts", "modified"),
+            cf("scripts/x.sh", "modified"),
+            cf("Dockerfile", "modified"),
+            cf("docs/x.md", "modified"),
+            cf(".github/workflows/ci.yml", "modified"),
+            cf("migrations/0001.sql", "modified"),
+            cf("ios/X.swift", "modified"),
+            cf("styles/main.css", "modified"),
+            cf("public/x.html", "modified"),
+            cf("config/x.json", "modified"),
+            cf("api/x.proto", "modified"),
+            cf("Cargo.toml", "modified"),
+            cf("infra/main.tf", "modified"),
+            cf("charts/web/Chart.yaml", "modified"),
+            cf(".env", "modified"),
+            cf("config/k8s.yaml", "modified"),
+        ];
+        let runners = select_runners(&files);
+        let routed: HashSet<&str> = runners.iter().map(|r| r.name()).collect();
+        let known: HashSet<&str> = linter_catalogue().iter().map(|l| l.name).collect();
+        let missing: Vec<&&str> = routed.difference(&known).collect();
+        assert!(
+            missing.is_empty(),
+            "routed runners not in catalogue: {missing:?}"
+        );
+    }
+
     #[test]
     fn empty_input_yields_no_runners() {
         assert!(select_runners(&[]).is_empty());

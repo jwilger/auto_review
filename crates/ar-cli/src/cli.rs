@@ -42,6 +42,13 @@ pub enum Command {
     /// validation failure so this fits cleanly in a pre-commit hook
     /// or CI step.
     ValidateConfig(ValidateConfigArgs),
+
+    /// List bundled linters with their canonical names, descriptions,
+    /// and homepages. The `name` column is what operators put under
+    /// `disabled_tools:` in `.auto_review.yaml`. Filter by language
+    /// tag (e.g. `--language python`) to see only what runs on a
+    /// specific stack; pass `--json` for machine-readable output.
+    ListLinters(ListLintersArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -100,6 +107,21 @@ pub struct ReviewOnceArgs {
     /// prompt content without burning tokens or touching the PR.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ListLintersArgs {
+    /// Restrict output to linters tagged with this language
+    /// (e.g. `python`, `shell`, `terraform`, `security`). Tags come
+    /// from `LinterInfo::languages` and are descriptive — the file
+    /// routing in `ar_review::routing` is the authoritative source.
+    #[arg(long)]
+    pub language: Option<String>,
+
+    /// Emit the catalogue as one JSON line per linter for piping
+    /// into `jq` or another tracker.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -281,6 +303,37 @@ mod tests {
                 assert!(a.llm_api_key.is_none());
             }
             _ => panic!("expected ReviewOnce"),
+        }
+    }
+
+    #[test]
+    fn list_linters_default_args() {
+        let cli = Cli::try_parse_from(["auto_review", "list-linters"]).expect("parse");
+        match cli.command {
+            Command::ListLinters(a) => {
+                assert!(a.language.is_none());
+                assert!(!a.json);
+            }
+            _ => panic!("expected ListLinters"),
+        }
+    }
+
+    #[test]
+    fn list_linters_with_filter_and_json() {
+        let cli = Cli::try_parse_from([
+            "auto_review",
+            "list-linters",
+            "--language",
+            "python",
+            "--json",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::ListLinters(a) => {
+                assert_eq!(a.language.as_deref(), Some("python"));
+                assert!(a.json);
+            }
+            _ => panic!("expected ListLinters"),
         }
     }
 
