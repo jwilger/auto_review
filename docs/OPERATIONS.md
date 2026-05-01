@@ -73,6 +73,13 @@ review latency p95, and per-class failure spikes. See
 [`deploy/prometheus/README.md`](../deploy/prometheus/README.md)
 for tuning notes and Alertmanager routing.
 
+If you run Grafana, import
+[`deploy/grafana/auto_review.dashboard.json`](../deploy/grafana/auto_review.dashboard.json)
+for a five-row dashboard covering the funnel, review outcomes,
+skip paths, webhook intake, and chat surface. See
+[`deploy/grafana/README.md`](../deploy/grafana/README.md) for
+import steps.
+
 
 
 **Scrape metrics** at `GET /metrics` from your Prometheus and dashboard:

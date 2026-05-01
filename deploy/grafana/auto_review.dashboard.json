@@ -1,0 +1,285 @@
+{
+  "annotations": {
+    "list": [
+      {
+        "builtIn": 1,
+        "datasource": "-- Grafana --",
+        "enable": true,
+        "hide": true,
+        "iconColor": "rgba(0, 211, 255, 1)",
+        "name": "Annotations & Alerts",
+        "type": "dashboard"
+      }
+    ]
+  },
+  "description": "Operator dashboard for auto_review (Forgejo PR-review bot). Pairs with deploy/prometheus/auto_review.rules.yaml — every panel below maps to a counter or recording rule that ships in this repo.",
+  "editable": true,
+  "graphTooltip": 1,
+  "id": null,
+  "panels": [
+    {
+      "type": "row",
+      "title": "Pipeline funnel",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 0},
+      "panels": []
+    },
+    {
+      "type": "stat",
+      "title": "Review success rate (5m)",
+      "description": "auto_review:review_success_ratio:5m. Drives the AutoReviewSuccessRateBelowSLO alert at < 0.9.",
+      "gridPos": {"h": 5, "w": 6, "x": 0, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {
+          "expr": "auto_review:review_success_ratio:5m",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "red", "value": 0},
+              {"color": "yellow", "value": 0.9},
+              {"color": "green", "value": 0.97}
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {"calcs": ["lastNotNull"]}
+      }
+    },
+    {
+      "type": "stat",
+      "title": "p95 review latency (5m)",
+      "description": "auto_review:review_latency_p95:5m. Drives the AutoReviewReviewLatencyHigh alert at > 120s.",
+      "gridPos": {"h": 5, "w": 6, "x": 6, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {
+          "expr": "auto_review:review_latency_p95:5m",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": 0},
+              {"color": "yellow", "value": 60},
+              {"color": "red", "value": 120}
+            ]
+          }
+        }
+      },
+      "options": {
+        "colorMode": "background",
+        "graphMode": "area",
+        "reduceOptions": {"calcs": ["lastNotNull"]}
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Review throughput (per min)",
+      "description": "rate(auto_review_reviews_completed_count[5m]) * 60.",
+      "gridPos": {"h": 5, "w": 6, "x": 12, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {
+          "expr": "auto_review:reviews_completed:rate5m * 60",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqpm", "decimals": 1}
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {"calcs": ["lastNotNull"]}
+      }
+    },
+    {
+      "type": "stat",
+      "title": "Active findings sum",
+      "description": "Cumulative findings posted across successful reviews. A counter, so use rate() for per-period.",
+      "gridPos": {"h": 5, "w": 6, "x": 18, "y": 1},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {
+          "expr": "auto_review_review_findings_sum",
+          "refId": "A"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "short", "decimals": 0}
+      },
+      "options": {
+        "colorMode": "value",
+        "graphMode": "area",
+        "reduceOptions": {"calcs": ["lastNotNull"]}
+      }
+    },
+    {
+      "type": "row",
+      "title": "Review outcomes",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 6},
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Review outcomes (per second)",
+      "description": "Rate of succeeded vs failed reviews split by failure class. Spikes in a single class point at one subsystem; see OPERATIONS.md §3 for triage.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 7},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "rate(auto_review_reviews_succeeded_total[5m])", "legendFormat": "succeeded", "refId": "A"},
+        {"expr": "rate(auto_review_reviews_failed_forgejo_total[5m])", "legendFormat": "failed: forgejo", "refId": "B"},
+        {"expr": "rate(auto_review_reviews_failed_workspace_total[5m])", "legendFormat": "failed: workspace", "refId": "C"},
+        {"expr": "rate(auto_review_reviews_failed_llm_total[5m])", "legendFormat": "failed: llm", "refId": "D"},
+        {"expr": "rate(auto_review_reviews_failed_unhealable_total[5m])", "legendFormat": "failed: unhealable", "refId": "E"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "reqps",
+          "custom": {"drawStyle": "line", "lineInterpolation": "smooth", "fillOpacity": 30, "stacking": {"mode": "normal"}}
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Review duration percentiles",
+      "description": "p50 / p95 / p99 derived from auto_review_review_duration_seconds_bucket.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 7},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "histogram_quantile(0.5,  sum by (le) (rate(auto_review_review_duration_seconds_bucket[5m])))", "legendFormat": "p50", "refId": "A"},
+        {"expr": "histogram_quantile(0.95, sum by (le) (rate(auto_review_review_duration_seconds_bucket[5m])))", "legendFormat": "p95", "refId": "B"},
+        {"expr": "histogram_quantile(0.99, sum by (le) (rate(auto_review_review_duration_seconds_bucket[5m])))", "legendFormat": "p99", "refId": "C"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "s"}}
+    },
+    {
+      "type": "row",
+      "title": "Skipped reviews",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 15},
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Skipped reviews by reason",
+      "description": "same_sha = incremental dedup; trivial_files = lockfile/vendored/generated only; disabled_by_config = repo opted out via .auto_review.yaml. Operators shouldn't alert on these.",
+      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "rate(auto_review_reviews_skipped_same_sha_total[5m])", "legendFormat": "same_sha", "refId": "A"},
+        {"expr": "rate(auto_review_reviews_skipped_trivial_total[5m])", "legendFormat": "trivial_files", "refId": "B"},
+        {"expr": "rate(auto_review_reviews_skipped_disabled_total[5m])", "legendFormat": "disabled_by_config", "refId": "C"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 30, "stacking": {"mode": "normal"}}}
+      }
+    },
+    {
+      "type": "row",
+      "title": "Webhook intake",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 24},
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Webhook events received",
+      "description": "Per-event-type ingest rate. Drives signature/payload alerts when failures climb.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 25},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "rate(auto_review_webhooks_pull_request_total[5m])", "legendFormat": "pull_request", "refId": "A"},
+        {"expr": "rate(auto_review_webhooks_issue_comment_total[5m])", "legendFormat": "issue_comment", "refId": "B"},
+        {"expr": "rate(auto_review_webhooks_ping_total[5m])", "legendFormat": "ping", "refId": "C"},
+        {"expr": "rate(auto_review_webhooks_other_total[5m])", "legendFormat": "other", "refId": "D"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Webhook rejections",
+      "description": "Signature failures imply secret drift or probing; payload-decode failures usually mean Forgejo schema drift.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 25},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "rate(auto_review_webhook_signature_failures_total[5m])", "legendFormat": "signature failures", "refId": "A"},
+        {"expr": "rate(auto_review_webhook_payload_failures_total[5m])", "legendFormat": "payload decode failures", "refId": "B"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "type": "row",
+      "title": "Chat surface",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 33},
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Chat command intake",
+      "description": "Webhook-path mentions vs poller-discovered (inline-thread) mentions. Disjoint counters — sum gives total intake.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 34},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "rate(auto_review_chat_commands_received_total[5m])", "legendFormat": "webhook path", "refId": "A"},
+        {"expr": "rate(auto_review_poll_mentions_dispatched_total[5m])", "legendFormat": "poller path", "refId": "B"},
+        {"expr": "rate(auto_review_chat_handler_unconfigured_total[5m])", "legendFormat": "dropped (unconfigured)", "refId": "C"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "type": "timeseries",
+      "title": "Background poller cycles",
+      "description": "Should match 1 / AR_POLL_INTERVAL_SECS. Flat line = poller wedged (drives the AutoReviewPollerStalled alert).",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 34},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "rate(auto_review_poll_cycles_total[5m])", "legendFormat": "cycles/sec", "refId": "A"},
+        {"expr": "rate(auto_review_poll_pr_failures_total[5m])", "legendFormat": "pr failures", "refId": "B"},
+        {"expr": "rate(auto_review_poll_history_failures_total[5m])", "legendFormat": "history failures", "refId": "C"},
+        {"expr": "rate(auto_review_poll_chat_failures_total[5m])", "legendFormat": "chat-handler failures", "refId": "D"}
+      ],
+      "fieldConfig": {"defaults": {"unit": "reqps"}}
+    }
+  ],
+  "refresh": "30s",
+  "schemaVersion": 38,
+  "style": "dark",
+  "tags": ["auto_review", "forgejo", "code-review"],
+  "templating": {
+    "list": [
+      {
+        "current": {"selected": false, "text": "Prometheus", "value": "Prometheus"},
+        "hide": 0,
+        "label": "Prometheus data source",
+        "name": "DS_PROMETHEUS",
+        "options": [],
+        "query": "prometheus",
+        "refresh": 1,
+        "regex": "",
+        "skipUrlSync": false,
+        "type": "datasource"
+      }
+    ]
+  },
+  "time": {"from": "now-6h", "to": "now"},
+  "timepicker": {"refresh_intervals": ["10s", "30s", "1m", "5m", "15m", "1h"]},
+  "timezone": "",
+  "title": "auto_review",
+  "uid": "auto-review",
+  "version": 1,
+  "weekStart": ""
+}

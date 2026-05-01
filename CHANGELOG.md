@@ -510,6 +510,30 @@ default in-memory store to the SQLite-backed one.
   which is correct (a user named `auto_review_helper` was
   previously silently ignored).
 
+#### Grafana dashboard (M5 deploy)
+
+- `deploy/grafana/auto_review.dashboard.json`: drop-in
+  Grafana dashboard mapping every shipped counter and
+  recording rule to a panel. Five rows: Pipeline funnel
+  (success rate, p95 latency, throughput, cumulative
+  findings), Review outcomes (stacked rate by class,
+  p50/p95/p99 latency), Skipped reviews (informational),
+  Webhook intake (event types, signature/payload
+  rejections), Chat surface (webhook vs poller intake,
+  poller cycle health). Includes a Prometheus data-source
+  variable so it imports cleanly.
+- `deploy/grafana/README.md`: import steps, layout
+  reference, and a note that pairing it with the Prometheus
+  rules pack is more efficient than letting the dashboard
+  evaluate the same expressions inline.
+- A new contract test
+  (`shipped_grafana_dashboard_only_references_real_metrics`)
+  parses the dashboard JSON, collects every
+  `auto_review_*` / `auto_review:*` token, and asserts each
+  one is either exposed by `/metrics` or defined as a
+  recording rule in the Prometheus rules file. Drift between
+  metric source and dashboard fails CI.
+
 #### Prometheus rules pack (M5 deploy)
 
 - `deploy/prometheus/auto_review.rules.yaml`: drop-in
