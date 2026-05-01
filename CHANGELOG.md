@@ -251,10 +251,32 @@ default in-memory store to the SQLite-backed one.
   paths cover correctness; LanceDB is the scale lever).
 - youki-based `Sandbox` impl as a lighter alternative to the
   podman shell-out.
-- Remaining ~33 linters from CodeRabbit's set
-  (osv-scanner, sqlfluff, biome, oxlint, phpstan, …).
-- Quality benchmark suite (run a fixture corpus, report
-  precision/recall against labelled findings).
+- Remaining ~32 linters from CodeRabbit's set
+  (sqlfluff, biome, oxlint, phpstan, languagetool, …).
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
   wiremock + canned LLM providers.
+- Red-team test suite for the sandbox (malicious linter configs,
+  fork-bombs, egress attempts, prompt-injected PRs) — the
+  structural isolation ships now; adversarial-input verification
+  is a follow-up.
+
+#### osv-scanner runner (13th bundled linter)
+
+- `OsvScannerRunner` adds a second always-run dependency-CVE
+  scanner alongside trivy. Trivy and OSV draw from different
+  vulnerability feeds; running both surfaces CVEs that either
+  DB has indexed first. Findings are surfaced at line 1 of
+  the manifest with the OSV/GHSA/CVE id in the rule_id and
+  presence-of-CVSS-as-severity heuristic.
+
+#### bench subcommand (M5)
+
+- `auto_review bench` replays one or more PR fixtures through
+  the LLM-review path (prompt rendering → reasoning model →
+  self-heal → optional verifier) and reports per-fixture
+  findings counts and latency, plus an aggregate
+  (successes/failures, totals, mean/median/p99 latency).
+  `--json` emits the aggregate as a single line of JSON for
+  piping into a regression dashboard. Two starter fixtures
+  ship under `bench/fixtures/`.
