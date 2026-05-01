@@ -41,12 +41,16 @@ spawn is sandboxed; [ADR-0003](./docs/ADR-0003-observability.md)
 documents the metrics / readiness / runtime-introspection design.
 
 What's still on the roadmap: a LanceDB-backed vector store
-(currently in-memory + SQLite-backed for learnings), the full
-~45-linter set (44 bundled today), a youki-based sandbox in
-addition to the podman path, and a labelled-corpus benchmark
-(the bench harness handles regression tracking; precision/recall
-needs ground-truth fixtures someone has to build). Real-world
-verification on a production Forgejo instance is also pending.
+(currently in-memory cosine over the SQLite-backed learnings,
+which scales to thousands of rows but not millions); the
+remaining linter from the catalogue (`languagetool`, deferred —
+needs a Java HTTP-server companion); a youki-based pure-Rust
+sandbox in addition to the Podman path; a larger labelled-
+corpus benchmark (5 fixtures ship today across SQLi / command
+injection / hardcoded secrets / path traversal / XSS, but a
+production-quality precision-recall sweep needs more).
+Real-world verification on a production Forgejo instance with
+real PR traffic is also pending.
 
 ### Production sandbox
 
@@ -64,13 +68,15 @@ used to reach RCE on CodeRabbit.)
 ## Architecture (one-paragraph)
 
 A Forgejo webhook lands at the **gateway**, which enqueues a job for the
-**orchestrator**. The orchestrator runs a per-PR durable state machine:
-clone → triage → summarize → static-analysis fan-out → context curation
-(tree-sitter + LanceDB embeddings + learnings store) → review generation
-→ verification (drop unfounded findings) → walkthrough → post review.
-All untrusted execution (linters, LLM-issued shell tools) runs in an
-OCI sandbox. LLM calls go through a pluggable provider abstraction
-that supports OpenAI, Anthropic, Ollama, vLLM, and OpenRouter.
+**orchestrator**. The orchestrator runs a per-PR review pipeline:
+clone → triage → static-analysis fan-out → context curation
+(tree-sitter symbols + in-memory cosine-similarity over the
+learnings store) → review generation → verification (drop unfounded
+findings) → severity-floor filter → post review.
+All untrusted execution (linters, LLM-issued workspace tools) runs in
+a Podman sandbox. LLM calls go through a pluggable provider abstraction
+that today ships an OpenAI-compatible client (works against hosted
+OpenAI, Ollama, vLLM, OpenRouter, Together, Groq, etc.).
 
 ## Crates
 
@@ -80,13 +86,13 @@ that supports OpenAI, Anthropic, Ollama, vLLM, and OpenRouter.
 | `ar-orchestrator` | Per-PR state machine; activity dispatch |
 | `ar-forgejo` | Forgejo REST client |
 | `ar-llm` | LLM provider trait + implementations |
-| `ar-index` | Tree-sitter parser + LanceDB embeddings + co-change graph |
-| `ar-tools` | Static-analysis runners + result normalization |
-| `ar-sandbox` | OCI sandbox launcher |
+| `ar-index` | Tree-sitter parsers + embeddings + co-change graph + learnings store |
+| `ar-tools` | Static-analysis runners + result normalization (44 linters) |
+| `ar-sandbox` | Podman-based linter sandbox |
 | `ar-prompts` | Prompt templates and JSON schemas |
 | `ar-review` | Review pipeline activities |
 | `ar-chat` | Agentic `@auto_review` chat handler |
-| `ar-cli` | Operator CLI (`auto_review init`, `replay`, etc.) |
+| `ar-cli` | Operator CLI (16 subcommands; see `crates/ar-cli/README.md`) |
 
 ## License
 

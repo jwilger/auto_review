@@ -1096,6 +1096,34 @@ default in-memory store to the SQLite-backed one.
   forget-learning behavioural (drop existing record,
   unknown-id errors clearly).
 
+#### README freshness sweep
+
+- Multiple stale claims at the repo root README:
+  - **Architecture paragraph** said "tree-sitter +
+    LanceDB embeddings" — LanceDB isn't shipped (the
+    in-memory cosine-similarity over the SQLite
+    learnings store is what actually runs). Updated to
+    describe the real pipeline (clone → triage → lint
+    fan-out → context curation → review → verify →
+    severity floor → post).
+  - **LLM provider list** said "OpenAI, Anthropic, Ollama,
+    vLLM, OpenRouter". Anthropic isn't shipped — only an
+    OpenAI-compatible client. Updated to the accurate set
+    (hosted OpenAI, Ollama, vLLM, OpenRouter, Together,
+    Groq, etc., all OpenAI-compatible endpoints).
+  - **Crate table** referenced a non-existent `replay`
+    subcommand. Replaced with "16 subcommands; see
+    crate README" pointer.
+  - **Crate descriptions** for `ar-index`, `ar-tools`,
+    `ar-sandbox`, `ar-cli` updated to reflect current
+    reality (LanceDB removed, 44-linter count added,
+    OCI→Podman, replay→subcommand-count).
+- **Roadmap section** updated: clarified LanceDB scope
+  (in-memory cosine works to thousands; LanceDB is for
+  millions); named the missing linter (`languagetool`)
+  with the deferral reason; concrete count of labelled
+  corpus fixtures (5) and the categories they cover.
+
 #### Stale numeric stats sweep
 
 - `docs/ADR-0002-sandbox.md` claimed `~13 linter binaries`
