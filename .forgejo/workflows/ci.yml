@@ -21,28 +21,32 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # Install Nix via the upstream installer script rather than
-      # a third-party action (no assumption about which GitHub
-      # Marketplace actions this Forgejo runner can fetch). The
-      # determinate.systems script is the canonical multi-arch
-      # installer; --no-confirm skips the interactive prompt.
-      # `extra-conf` flips on flakes + nix-command for this host.
-      - name: Install Nix
+      # Idempotent Nix install: when the runner host mounts `/nix`
+      # as a persistent volume (see deploy/forgejo-runner/README.md),
+      # subsequent runs find Nix already present and skip the
+      # installer. First run on a fresh volume installs from the
+      # upstream determinate.systems script; the volume retains
+      # the entire /nix/store across jobs so `nix flake check`
+      # hits cache for everything cargo + crane built last time.
+      - name: Install or reuse Nix
         run: |
           set -euo pipefail
-          curl --proto '=https' --tlsv1.2 -sSf -L \
-            https://install.determinate.systems/nix \
-            | sh -s -- install linux \
-              --init none \
-              --no-confirm \
-              --extra-conf "experimental-features = nix-command flakes" \
-              --extra-conf "accept-flake-config = true"
-          # The installer drops binaries under /nix/var/nix/profiles/
-          # default/bin which isn't on PATH for the next step. The
-          # standard /etc/profile.d/nix.sh sets it up; source it.
-          # GITHUB_PATH (also honored by Forgejo Actions) makes the
+          NIX_BIN_DIR="/nix/var/nix/profiles/default/bin"
+          if [ -x "$NIX_BIN_DIR/nix" ]; then
+            echo "Nix already present at $NIX_BIN_DIR (volume cache hit)"
+          else
+            echo "Installing Nix (cold start or fresh volume)"
+            curl --proto '=https' --tlsv1.2 -sSf -L \
+              https://install.determinate.systems/nix \
+              | sh -s -- install linux \
+                --init none \
+                --no-confirm \
+                --extra-conf "experimental-features = nix-command flakes" \
+                --extra-conf "accept-flake-config = true"
+          fi
+          # GITHUB_PATH (honored by Forgejo Actions) makes the PATH
           # change durable across steps.
-          echo "/nix/var/nix/profiles/default/bin" >> "$GITHUB_PATH"
+          echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
 
       - name: Run all checks (fmt, clippy, nextest, deny)
         run: nix flake check --print-build-logs

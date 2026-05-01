@@ -18,6 +18,13 @@ since the start of the project.
   rust-overlay, cargo-deny, cargo-nextest, git, openssl,
   pkg-config) so local dev (`nix develop` or `direnv allow`) and
   CI (`nix flake check`) run identical derivations bit-for-bit.
+- **CI Nix-store persistence** (see
+  `deploy/forgejo-runner/README.md`): a one-time runner-host
+  config change mounts `/var/cache/forgejo-runner-nix:/nix` as
+  a host volume so the cargo + crane dep layer survives across
+  job invocations. First run is cold (~12 min); every subsequent
+  run completes in ~30s. The workflow's Nix-install step is
+  idempotent — when the volume hits, it skips the installer.
 - **`rust-toolchain.toml`** switched to `channel = "nightly"`;
   the actual nightly snapshot is locked by `flake.lock`'s
   rust-overlay revision. Bumping is `nix flake update
