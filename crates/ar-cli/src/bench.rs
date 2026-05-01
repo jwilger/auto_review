@@ -125,6 +125,24 @@ pub async fn run(args: BenchArgs) -> Result<()> {
     if fixture_paths.is_empty() {
         anyhow::bail!("no fixtures matched the supplied paths");
     }
+    // clap's `env = ...` accepts empty assignments, overriding the
+    // default_value silently. Without this check, `LLM_REASONING_MODEL=`
+    // would build an OpenAiProvider with an empty model name and 400
+    // every fixture; operators would chase the cryptic provider error
+    // through dozens of failed runs before noticing the env. Bail
+    // up-front with a fix-pointing message.
+    if args.llm_base_url.trim().is_empty() {
+        anyhow::bail!(
+            "--llm-base-url (LLM_BASE_URL) is empty; set it to the API root \
+             (e.g. https://api.openai.com or http://localhost:11434)"
+        );
+    }
+    if args.llm_model.trim().is_empty() {
+        anyhow::bail!(
+            "--llm-model (LLM_REASONING_MODEL) is empty; set a real model \
+             name or unset to use the default (qwen2.5-coder:32b)"
+        );
+    }
 
     let llm = build_router(&args)?;
     let verifier_enabled = llm.provider(ModelTier::Cheap).is_ok();
@@ -1094,6 +1112,54 @@ mod tests {
     fn expand_fixture_paths_errors_on_nonexistent_path() {
         let result = expand_fixture_paths(&[PathBuf::from("/no/such/path/xyz")]);
         assert!(result.is_err());
+    }
+
+    fn args_with(llm_base_url: &str, llm_model: &str) -> BenchArgs {
+        // Build a minimal BenchArgs we can hand to `run` to test
+        // its validation gates. The fixture path needs to exist so
+        // expand_fixture_paths doesn't bail before our checks fire.
+        let dir = tempfile::tempdir().unwrap();
+        let fixture_path = dir.path().join("fixture.json");
+        std::fs::File::create(&fixture_path)
+            .unwrap()
+            .write_all(b"{}")
+            .unwrap();
+        // Leak the tempdir so the file outlives the test scope.
+        std::mem::forget(dir);
+        BenchArgs {
+            fixtures: vec![fixture_path],
+            llm_base_url: llm_base_url.into(),
+            llm_api_key: None,
+            llm_model: llm_model.into(),
+            llm_cheap_model: None,
+            json: true,
+            baseline: None,
+            fail_on_regression: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn run_bails_on_empty_llm_base_url() {
+        // clap's `env = "LLM_BASE_URL"` accepts `LLM_BASE_URL=`
+        // and overrides any default with an empty string. Without
+        // the explicit empty check in `run`, OpenAiProvider would
+        // be built with empty base URL and 400 every fixture.
+        let args = args_with("", "qwen2.5-coder:32b");
+        let err = run(args).await.expect_err("must reject empty base URL");
+        assert!(
+            err.to_string().contains("--llm-base-url"),
+            "expected llm-base-url message, got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn run_bails_on_empty_llm_model() {
+        let args = args_with("https://api.example", "");
+        let err = run(args).await.expect_err("must reject empty model");
+        assert!(
+            err.to_string().contains("--llm-model"),
+            "expected llm-model message, got: {err}"
+        );
     }
 
     /// The shipped `bench/fixtures/*.json` files double as documentation
