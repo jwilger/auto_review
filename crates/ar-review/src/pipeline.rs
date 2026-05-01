@@ -57,6 +57,39 @@ fn severity_rank(s: ReviewSeverity) -> u8 {
     }
 }
 
+/// Defense-in-depth: drop any finding whose `path` isn't in the
+/// list of paths the PR actually touched. The verifier's LLM is
+/// supposed to catch hallucinated paths, but when it misses,
+/// this deterministic filter prevents the bot from posting an
+/// inline comment on a file the PR never touched (Forgejo would
+/// reject the comment, but losing the whole review post is worse
+/// than dropping one finding).
+///
+/// Empty `changed_paths` is a soft fail-open: returns 0 without
+/// filtering. The orchestrator only feeds an empty slice when the
+/// changed-files API call returned nothing, in which case the LLM
+/// shouldn't have any findings either; we'd rather post the
+/// (likely empty) review than drop everything.
+fn drop_findings_outside_changed_paths(
+    output: &mut ar_prompts::ReviewOutput,
+    changed_paths: &[String],
+) -> usize {
+    if changed_paths.is_empty() {
+        return 0;
+    }
+    let valid: std::collections::HashSet<&str> = changed_paths.iter().map(|s| s.as_str()).collect();
+    let before = output.findings.len();
+    output.findings.retain(|f| valid.contains(f.path.as_str()));
+    let dropped = before - output.findings.len();
+    if dropped > 0 {
+        tracing::warn!(
+            dropped,
+            "dropped findings whose path is not in the PR's changed-files list"
+        );
+    }
+    dropped
+}
+
 /// In-place drop of findings strictly below `min`. Logs the
 /// kept/dropped counts so operators can confirm the floor is
 /// engaging on a per-review basis. Idempotent: a second
@@ -219,6 +252,13 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
     // findings are already at-or-above the floor; this is a no-op.
     apply_severity_floor(&mut output, args.min_severity);
 
+    // Last-mile path guard: the LLM may have emitted a finding
+    // citing a path it inferred from RAG context rather than the
+    // actual diff. The verifier's job is to catch that, but when
+    // it misses, drop the finding here rather than letting Forgejo
+    // 422 the entire review payload.
+    drop_findings_outside_changed_paths(&mut output, &changed_filenames);
+
     let findings_count = output.findings.len();
 
     let mut req = output_to_review_request(&output, args.head_sha);
@@ -333,6 +373,69 @@ mod tests {
     fn severity_rank_is_total_order() {
         assert!(severity_rank(ReviewSeverity::Note) < severity_rank(ReviewSeverity::Warning));
         assert!(severity_rank(ReviewSeverity::Warning) < severity_rank(ReviewSeverity::Error));
+    }
+
+    fn finding(path: &str) -> ar_prompts::ReviewFinding {
+        ar_prompts::ReviewFinding {
+            path: path.into(),
+            line_start: 1,
+            line_end: None,
+            severity: ReviewSeverity::Warning,
+            message: "msg".into(),
+        }
+    }
+
+    fn output_with_paths(paths: &[&str]) -> ar_prompts::ReviewOutput {
+        ar_prompts::ReviewOutput {
+            summary: String::new(),
+            walkthrough: String::new(),
+            mermaid: String::new(),
+            findings: paths.iter().map(|p| finding(p)).collect(),
+        }
+    }
+
+    #[test]
+    fn drop_findings_outside_changed_paths_keeps_matching_paths() {
+        let mut out = output_with_paths(&["src/a.rs", "src/b.rs"]);
+        let changed = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+        let dropped = drop_findings_outside_changed_paths(&mut out, &changed);
+        assert_eq!(dropped, 0);
+        assert_eq!(out.findings.len(), 2);
+    }
+
+    #[test]
+    fn drop_findings_outside_changed_paths_drops_hallucinated_paths() {
+        let mut out = output_with_paths(&["src/a.rs", "src/hallucinated.rs", "src/b.rs"]);
+        let changed = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
+        let dropped = drop_findings_outside_changed_paths(&mut out, &changed);
+        assert_eq!(dropped, 1);
+        let kept: Vec<&str> = out.findings.iter().map(|f| f.path.as_str()).collect();
+        assert_eq!(kept, vec!["src/a.rs", "src/b.rs"]);
+    }
+
+    #[test]
+    fn drop_findings_outside_changed_paths_fails_open_when_changed_list_empty() {
+        // If the changed-files API returned nothing, don't drop
+        // anything — the LLM probably has nothing to flag either,
+        // and we'd rather post the (likely empty) review than nuke
+        // legitimate findings on a transient API misread.
+        let mut out = output_with_paths(&["src/a.rs"]);
+        let dropped = drop_findings_outside_changed_paths(&mut out, &[]);
+        assert_eq!(dropped, 0);
+        assert_eq!(out.findings.len(), 1);
+    }
+
+    #[test]
+    fn drop_findings_outside_changed_paths_is_case_sensitive() {
+        // Forgejo paths are case-sensitive (POSIX-y). Treating
+        // them as such avoids false positives on case-insensitive
+        // filesystems and is consistent with how the LLM sees
+        // them in the prompt.
+        let mut out = output_with_paths(&["src/Foo.rs"]);
+        let changed = vec!["src/foo.rs".to_string()];
+        let dropped = drop_findings_outside_changed_paths(&mut out, &changed);
+        assert_eq!(dropped, 1);
+        assert!(out.findings.is_empty());
     }
 
     #[tokio::test]
