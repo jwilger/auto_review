@@ -16,11 +16,11 @@
 # Linter set (in alphabetical order):
 #   actionlint, ansible-lint, ast-grep, bandit, biome, buf, checkov,
 #   cppcheck, dotenv-linter, eslint, gitleaks, golangci-lint, gosec,
-#   hadolint, helm, htmlhint, ktlint, kubeconform, markdownlint,
-#   mypy, nilaway, osv-scanner, oxlint, phpstan, pmd, prettier,
-#   pylint, rubocop, ruff, semgrep, shellcheck, shfmt, sqlfluff,
-#   staticcheck, stylelint, swiftlint, taplo, tflint, trivy, typos,
-#   vale, vint, yamllint
+#   hadolint, helm, htmlhint, jsonlint, ktlint, kubeconform,
+#   markdownlint, mypy, nilaway, osv-scanner, oxlint, phpstan, pmd,
+#   prettier, pylint, rubocop, ruff, semgrep, shellcheck, shfmt,
+#   sqlfluff, staticcheck, stylelint, swiftlint, taplo, tflint,
+#   trivy, typos, vale, vint, yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -70,7 +70,8 @@ RUN npm install -g \
         oxlint \
         stylelint stylelint-config-standard-scss \
         htmlhint \
-        prettier
+        prettier \
+        jsonlint
 
 # Static-binary linters: pin the latest release downloads.
 RUN set -eux; \

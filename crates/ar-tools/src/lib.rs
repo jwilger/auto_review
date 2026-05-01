@@ -26,6 +26,7 @@ pub mod gosec;
 pub mod hadolint;
 pub mod helm;
 pub mod htmlhint;
+pub mod jsonlint;
 pub mod ktlint;
 pub mod kubeconform;
 pub mod markdownlint;

@@ -19,6 +19,7 @@ use ar_tools::gosec::GosecRunner;
 use ar_tools::hadolint::HadolintRunner;
 use ar_tools::helm::HelmRunner;
 use ar_tools::htmlhint::HtmlhintRunner;
+use ar_tools::jsonlint::JsonlintRunner;
 use ar_tools::ktlint::KtlintRunner;
 use ar_tools::kubeconform::KubeconformRunner;
 use ar_tools::markdownlint::MarkdownLintRunner;
@@ -342,6 +343,15 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         runners.push(Box::new(PrettierRunner {
             files: prettier_files,
         }));
+    }
+
+    let json_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| f.filename.ends_with(".json") || f.filename.ends_with(".jsonc"))
+        .map(|f| f.filename.clone())
+        .collect();
+    if !json_files.is_empty() {
+        runners.push(Box::new(JsonlintRunner { files: json_files }));
     }
 
     // buf reads its module config (`buf.yaml`) from the workspace
@@ -984,6 +994,32 @@ mod tests {
                     "gitleaks",
                     "osv-scanner",
                     "phpstan",
+                    "semgrep",
+                    "trivy",
+                    "typos"
+                ],
+                "name = {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn json_files_select_jsonlint() {
+        // .json and .jsonc are also prettier-supported, so the
+        // prettier runner appears too.
+        for name in ["package.json", "config/app.jsonc"] {
+            let files = vec![cf(name, "modified")];
+            let runners = select_runners(&files);
+            let mut got = names(&runners);
+            got.sort();
+            assert_eq!(
+                got,
+                vec![
+                    "ast-grep",
+                    "gitleaks",
+                    "jsonlint",
+                    "osv-scanner",
+                    "prettier",
                     "semgrep",
                     "trivy",
                     "typos"
