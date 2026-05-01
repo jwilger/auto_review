@@ -10,6 +10,7 @@
 //! the OCI sandbox; runners are unchanged but execution moves into the jail.
 
 pub mod actionlint;
+pub mod ansible_lint;
 pub mod ast_grep;
 pub mod bandit;
 pub mod biome;

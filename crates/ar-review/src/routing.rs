@@ -4,6 +4,7 @@
 use ar_forgejo::ChangedFile;
 use ar_sandbox::{DirectSandbox, Sandbox};
 use ar_tools::actionlint::ActionlintRunner;
+use ar_tools::ansible_lint::AnsibleLintRunner;
 use ar_tools::ast_grep::AstGrepRunner;
 use ar_tools::bandit::BanditRunner;
 use ar_tools::biome::BiomeRunner;
@@ -317,7 +318,14 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         // anything that isn't a Kubernetes manifest, so the cost
         // for a non-k8s repo is one container spawn that returns
         // an empty resources array.
-        runners.push(Box::new(KubeconformRunner { files: yaml_files }));
+        runners.push(Box::new(KubeconformRunner {
+            files: yaml_files.clone(),
+        }));
+        // ansible-lint runs against the same YAML set; it skips
+        // anything that isn't an Ansible playbook/role/task, so
+        // the cost on non-Ansible repos is one container spawn
+        // that returns an empty array.
+        runners.push(Box::new(AnsibleLintRunner { files: yaml_files }));
     }
 
     runners
@@ -629,6 +637,7 @@ mod tests {
                 got,
                 vec![
                     "actionlint",
+                    "ansible-lint",
                     "ast-grep",
                     "gitleaks",
                     "kubeconform",
@@ -652,6 +661,7 @@ mod tests {
         assert_eq!(
             got,
             vec![
+                "ansible-lint",
                 "ast-grep",
                 "gitleaks",
                 "kubeconform",
