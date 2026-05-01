@@ -57,6 +57,13 @@ pub enum Command {
     /// `register-webhook` to confirm the deploy works before waiting
     /// for an actual PR.
     TestWebhook(TestWebhookArgs),
+
+    /// Probe outbound dependencies (Forgejo API, LLM provider) and
+    /// sanity-check the webhook secret. Reports per-check pass /
+    /// fail / skip with diagnostic detail. Exit 0 only when every
+    /// non-skipped check passes — drop into a deploy script before
+    /// `register-webhook`.
+    Doctor(DoctorArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -115,6 +122,37 @@ pub struct ReviewOnceArgs {
     /// prompt content without burning tokens or touching the PR.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct DoctorArgs {
+    /// Forgejo base URL. When set, `doctor` calls
+    /// `/api/v1/version` to confirm reachability + token validity
+    /// (when `--token` is also set). Skipped otherwise.
+    #[arg(long, env = "FORGEJO_BASE_URL")]
+    pub forgejo_url: Option<String>,
+
+    /// Bot PAT. Pair with `--forgejo-url` to validate auth.
+    #[arg(long, env = "FORGEJO_TOKEN")]
+    pub token: Option<String>,
+
+    /// LLM base URL. When set, `doctor` calls `<base>/v1/models`
+    /// to confirm reachability + key validity. Skipped otherwise.
+    #[arg(long, env = "LLM_BASE_URL")]
+    pub llm_base_url: Option<String>,
+
+    /// API key for the LLM provider. Optional for local Ollama.
+    #[arg(long, env = "LLM_API_KEY")]
+    pub llm_api_key: Option<String>,
+
+    /// Webhook secret. When set, `doctor` checks length /
+    /// entropy. Skipped otherwise.
+    #[arg(long, env = "WEBHOOK_SECRET")]
+    pub webhook_secret: Option<String>,
+
+    /// Connect timeout (per check) in seconds.
+    #[arg(long, default_value_t = 10)]
+    pub timeout_secs: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -337,6 +375,48 @@ mod tests {
                 assert!(a.llm_api_key.is_none());
             }
             _ => panic!("expected ReviewOnce"),
+        }
+    }
+
+    #[test]
+    fn doctor_with_no_args_skips_all_checks() {
+        let cli = Cli::try_parse_from(["auto_review", "doctor"]).expect("parse");
+        match cli.command {
+            Command::Doctor(a) => {
+                assert!(a.forgejo_url.is_none());
+                assert!(a.token.is_none());
+                assert!(a.llm_base_url.is_none());
+                assert_eq!(a.timeout_secs, 10);
+            }
+            _ => panic!("expected Doctor"),
+        }
+    }
+
+    #[test]
+    fn doctor_with_full_args() {
+        let cli = Cli::try_parse_from([
+            "auto_review",
+            "doctor",
+            "--forgejo-url",
+            "https://forge.example",
+            "--token",
+            "tok",
+            "--llm-base-url",
+            "http://localhost:11434",
+            "--webhook-secret",
+            "abcdef0123456789abcdef0123456789",
+            "--timeout-secs",
+            "30",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Doctor(a) => {
+                assert_eq!(a.forgejo_url.as_deref(), Some("https://forge.example"));
+                assert_eq!(a.token.as_deref(), Some("tok"));
+                assert_eq!(a.llm_base_url.as_deref(), Some("http://localhost:11434"));
+                assert_eq!(a.timeout_secs, 30);
+            }
+            _ => panic!("expected Doctor"),
         }
     }
 

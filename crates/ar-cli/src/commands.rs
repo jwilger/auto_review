@@ -1,7 +1,7 @@
 //! Implementations of the CLI subcommands.
 
 use crate::cli::{
-    InitArgs, ListLintersArgs, RegisterWebhookArgs, ReviewOnceArgs, TestWebhookArgs,
+    DoctorArgs, InitArgs, ListLintersArgs, RegisterWebhookArgs, ReviewOnceArgs, TestWebhookArgs,
     ValidateConfigArgs,
 };
 use anyhow::{Context, Result};
@@ -188,6 +188,262 @@ pub async fn register_webhook(args: RegisterWebhookArgs) -> Result<()> {
 pub fn build_webhook_url(gateway_url: &str) -> String {
     let trimmed = gateway_url.trim_end_matches('/');
     format!("{trimmed}{WEBHOOK_PATH}")
+}
+
+/// Probe outbound dependencies and sanity-check the webhook
+/// secret. Mirrors deploy-time concerns: bot PAT valid, LLM
+/// reachable, webhook secret long enough.
+pub async fn doctor(args: DoctorArgs) -> Result<()> {
+    let timeout = std::time::Duration::from_secs(args.timeout_secs);
+    let mut report = DoctorReport::new();
+
+    // Forgejo: cheap auth + reachability probe via /api/v1/version
+    // (which 200s for any authenticated PAT, including read-only
+    // ones, so it's the lightest check available).
+    match (args.forgejo_url.as_deref(), args.token.as_deref()) {
+        (Some(url), Some(token)) => match probe_forgejo(url, token, timeout).await {
+            Ok(version) => report.pass("forgejo", format!("connected; server version {version}")),
+            Err(e) => report.fail("forgejo", format!("{e}")),
+        },
+        (Some(url), None) => match probe_forgejo_anonymous(url, timeout).await {
+            Ok(version) => report.warn(
+                "forgejo",
+                format!("reachable (server version {version}); pass --token to validate auth"),
+            ),
+            Err(e) => report.fail("forgejo", format!("{e}")),
+        },
+        _ => report.skip(
+            "forgejo",
+            "set --forgejo-url (and ideally --token) to enable",
+        ),
+    }
+
+    // LLM: GET <base>/v1/models — standard OpenAI-compatible
+    // health probe. Free for cloud providers, instant for Ollama.
+    match args.llm_base_url.as_deref() {
+        Some(url) => {
+            match probe_llm(url, args.llm_api_key.as_deref(), timeout).await {
+                Ok(detail) => report.pass("llm", detail),
+                Err(e) => report.fail("llm", format!("{e}")),
+            }
+        }
+        None => report.skip("llm", "set --llm-base-url to enable"),
+    }
+
+    // Webhook secret: an entropy heuristic. The HMAC algorithm
+    // accepts any non-empty key, but Forgejo's webhook UI doesn't
+    // hand out the secret on read, so a weak secret can never be
+    // recovered for rotation — we want at least 32 chars from a
+    // proper RNG.
+    match args.webhook_secret.as_deref() {
+        Some(s) => match check_webhook_secret(s) {
+            Ok(detail) => report.pass("webhook-secret", detail),
+            Err(e) => report.warn("webhook-secret", e),
+        },
+        None => report.skip("webhook-secret", "set --webhook-secret to enable"),
+    }
+
+    report.print();
+    if report.has_failures() {
+        anyhow::bail!("one or more required checks failed; see report above");
+    }
+    Ok(())
+}
+
+async fn probe_forgejo(
+    base_url: &str,
+    token: &str,
+    timeout: std::time::Duration,
+) -> Result<String> {
+    let client = ar_forgejo::Client::new(base_url, token).context("build forgejo client")?;
+    // get_server_version doesn't exercise auth on its own, so make
+    // a second authenticated call too. /api/v1/user requires a valid
+    // token and is cheap.
+    let version = tokio::time::timeout(timeout, client.get_server_version())
+        .await
+        .context("forgejo /version timeout")?
+        .context("forgejo /version request")?;
+    let user_url = format!("{}/api/v1/user", base_url.trim_end_matches('/'));
+    let http = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .context("build http client")?;
+    let resp = http
+        .get(&user_url)
+        .header("Authorization", format!("token {token}"))
+        .header("Accept", "application/json")
+        .send()
+        .await
+        .context("forgejo /user request")?;
+    if !resp.status().is_success() {
+        anyhow::bail!(
+            "forgejo /user returned {}; token invalid or revoked?",
+            resp.status()
+        );
+    }
+    Ok(version)
+}
+
+async fn probe_forgejo_anonymous(
+    base_url: &str,
+    timeout: std::time::Duration,
+) -> Result<String> {
+    let url = format!("{}/api/v1/version", base_url.trim_end_matches('/'));
+    let http = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .context("build http client")?;
+    let resp = http.get(&url).send().await.context("forgejo /version")?;
+    if !resp.status().is_success() {
+        anyhow::bail!("forgejo /version returned {}", resp.status());
+    }
+    let body: serde_json::Value = resp.json().await.context("decode /version body")?;
+    Ok(body
+        .get("version")
+        .and_then(|v| v.as_str())
+        .unwrap_or("unknown")
+        .to_string())
+}
+
+async fn probe_llm(
+    base_url: &str,
+    api_key: Option<&str>,
+    timeout: std::time::Duration,
+) -> Result<String> {
+    let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
+    let http = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .context("build http client")?;
+    let mut req = http.get(&url).header("Accept", "application/json");
+    if let Some(key) = api_key {
+        req = req.header("Authorization", format!("Bearer {key}"));
+    }
+    let resp = req.send().await.context("llm /v1/models")?;
+    let status = resp.status();
+    if !status.is_success() {
+        let snippet: String = resp
+            .text()
+            .await
+            .ok()
+            .map(|s| s.chars().take(200).collect())
+            .unwrap_or_default();
+        anyhow::bail!("{status}: {snippet}");
+    }
+    let body: serde_json::Value = resp.json().await.context("decode /v1/models body")?;
+    let model_count = body
+        .get("data")
+        .and_then(|d| d.as_array())
+        .map(|a| a.len())
+        .unwrap_or(0);
+    Ok(format!("{status}; {model_count} model(s) listed"))
+}
+
+fn check_webhook_secret(s: &str) -> std::result::Result<String, String> {
+    if s.len() < 16 {
+        return Err(format!(
+            "secret is only {} chars; recommend >= 32 from a proper RNG",
+            s.len()
+        ));
+    }
+    if s.chars().all(|c| c.is_ascii_digit()) {
+        return Err("secret is all digits; entropy is too low for HMAC".into());
+    }
+    let unique: std::collections::HashSet<char> = s.chars().collect();
+    if unique.len() < 8 {
+        return Err(format!(
+            "secret has only {} distinct characters; suspect placeholder",
+            unique.len()
+        ));
+    }
+    Ok(format!("{} chars, OK", s.len()))
+}
+
+#[derive(Debug)]
+struct CheckResult {
+    name: &'static str,
+    status: CheckStatus,
+    detail: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CheckStatus {
+    Pass,
+    Warn,
+    Fail,
+    Skip,
+}
+
+impl CheckStatus {
+    fn label(&self) -> &'static str {
+        match self {
+            CheckStatus::Pass => "PASS",
+            CheckStatus::Warn => "WARN",
+            CheckStatus::Fail => "FAIL",
+            CheckStatus::Skip => "SKIP",
+        }
+    }
+}
+
+#[derive(Debug, Default)]
+struct DoctorReport {
+    results: Vec<CheckResult>,
+}
+
+impl DoctorReport {
+    fn new() -> Self {
+        Self::default()
+    }
+    fn pass(&mut self, name: &'static str, detail: impl Into<String>) {
+        self.results.push(CheckResult {
+            name,
+            status: CheckStatus::Pass,
+            detail: detail.into(),
+        });
+    }
+    fn warn(&mut self, name: &'static str, detail: impl Into<String>) {
+        self.results.push(CheckResult {
+            name,
+            status: CheckStatus::Warn,
+            detail: detail.into(),
+        });
+    }
+    fn fail(&mut self, name: &'static str, detail: impl Into<String>) {
+        self.results.push(CheckResult {
+            name,
+            status: CheckStatus::Fail,
+            detail: detail.into(),
+        });
+    }
+    fn skip(&mut self, name: &'static str, detail: impl Into<String>) {
+        self.results.push(CheckResult {
+            name,
+            status: CheckStatus::Skip,
+            detail: detail.into(),
+        });
+    }
+    fn has_failures(&self) -> bool {
+        self.results
+            .iter()
+            .any(|r| r.status == CheckStatus::Fail)
+    }
+    fn print(&self) {
+        let widest = self
+            .results
+            .iter()
+            .map(|r| r.name.len())
+            .max()
+            .unwrap_or(0);
+        for r in &self.results {
+            println!(
+                "  [{}] {:width$}  {}",
+                r.status.label(),
+                r.name,
+                r.detail,
+                width = widest
+            );
+        }
+    }
 }
 
 /// Send an HMAC-signed `ping` webhook (or, with `--event`, a
@@ -403,6 +659,88 @@ fn expand_config_paths(paths: &[std::path::PathBuf]) -> Result<Vec<std::path::Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn webhook_secret_check_accepts_a_strong_secret() {
+        // A 32-char hex string from a proper RNG.
+        let s = "9f8e7d6c5b4a3210fedcba9876543210";
+        let detail = check_webhook_secret(s).expect("strong secret");
+        assert!(detail.contains("32"));
+    }
+
+    #[test]
+    fn webhook_secret_check_warns_on_short_secret() {
+        let err = check_webhook_secret("short").expect_err("short");
+        assert!(err.contains("5 chars"));
+    }
+
+    #[test]
+    fn webhook_secret_check_warns_on_all_digits() {
+        let err = check_webhook_secret("1234567890123456").expect_err("digits-only");
+        assert!(err.contains("digits"));
+    }
+
+    #[test]
+    fn webhook_secret_check_warns_on_low_uniqueness() {
+        let err = check_webhook_secret("aaaaaaaaaaaaaaaaaaaa").expect_err("low entropy");
+        assert!(err.contains("distinct"));
+    }
+
+    #[tokio::test]
+    async fn doctor_with_no_args_succeeds_with_all_skips() {
+        let args = DoctorArgs {
+            forgejo_url: None,
+            token: None,
+            llm_base_url: None,
+            llm_api_key: None,
+            webhook_secret: None,
+            timeout_secs: 5,
+        };
+        // No checks run → no failures.
+        doctor(args).await.expect("no checks should not fail");
+    }
+
+    #[tokio::test]
+    async fn doctor_fails_when_a_required_dep_is_unreachable() {
+        let args = DoctorArgs {
+            forgejo_url: Some("http://127.0.0.1:1".into()),
+            token: Some("tok".into()),
+            llm_base_url: None,
+            llm_api_key: None,
+            webhook_secret: None,
+            timeout_secs: 1,
+        };
+        let err = doctor(args).await.expect_err("unreachable forgejo");
+        assert!(err.to_string().contains("required checks failed"));
+    }
+
+    #[tokio::test]
+    async fn doctor_passes_when_only_secret_check_runs_and_secret_is_strong() {
+        let args = DoctorArgs {
+            forgejo_url: None,
+            token: None,
+            llm_base_url: None,
+            llm_api_key: None,
+            webhook_secret: Some("9f8e7d6c5b4a3210fedcba9876543210".into()),
+            timeout_secs: 5,
+        };
+        doctor(args).await.expect("strong-secret-only run");
+    }
+
+    #[tokio::test]
+    async fn doctor_with_weak_secret_warns_but_does_not_fail() {
+        // Warns aren't failures — operator gets the diagnostic
+        // but the command still exits 0.
+        let args = DoctorArgs {
+            forgejo_url: None,
+            token: None,
+            llm_base_url: None,
+            llm_api_key: None,
+            webhook_secret: Some("aaaaaaaaaaaaaaaaaaaa".into()),
+            timeout_secs: 5,
+        };
+        doctor(args).await.expect("weak secret should warn, not fail");
+    }
 
     #[test]
     fn sign_body_is_deterministic_and_hex_encoded() {

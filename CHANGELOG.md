@@ -510,6 +510,31 @@ default in-memory store to the SQLite-backed one.
   drive-by PRs. Includes guidance for keeping the document
   in sync as new components are added.
 
+#### doctor subcommand (M5)
+
+- `auto_review doctor` probes outbound dependencies and
+  sanity-checks the webhook secret. Per-check pass / warn /
+  fail / skip output; exit 0 only when every non-skipped
+  check passes. Designed to drop into a deploy script
+  before `register-webhook`.
+- Checks:
+  - **forgejo**: `GET /api/v1/version` for reachability,
+    `GET /api/v1/user` to validate the bot PAT.
+    Skipped without `--forgejo-url`.
+  - **llm**: `GET <base>/v1/models` against any
+    OpenAI-compatible endpoint (Ollama / vLLM / cloud).
+    Reports model count from the response.
+    Skipped without `--llm-base-url`.
+  - **webhook-secret**: heuristic entropy check (length
+    >= 16 + not all-digits + >= 8 distinct chars). Warns
+    on weak secrets without failing — they're functional,
+    just unrotatable since Forgejo doesn't expose the
+    secret on read.
+- Reads env vars (`FORGEJO_BASE_URL`, `FORGEJO_TOKEN`,
+  `LLM_BASE_URL`, `LLM_API_KEY`, `WEBHOOK_SECRET`) so a
+  configured deploy can run `auto_review doctor` with no
+  args.
+
 #### test-webhook subcommand (M5)
 
 - `auto_review test-webhook --gateway-url <URL> --webhook-secret <S>`

@@ -25,6 +25,27 @@ keep it healthy.
 
 ---
 
+## 0. Pre-deploy and post-deploy validation
+
+Before exposing a freshly-deployed gateway to Forgejo:
+
+```bash
+# Confirms PAT validity, LLM reachability, and secret entropy
+# all in one shot. Reads env vars so a configured deploy needs
+# no args.
+auto_review doctor
+
+# Confirms the webhook intake path works end-to-end.
+auto_review test-webhook \
+    --gateway-url https://reviewer.example.com \
+    --webhook-secret "$WEBHOOK_SECRET"
+```
+
+Both commands are fast and idempotent — drop them into your
+deploy script and your "did the upgrade break anything?"
+runbook. `doctor` exits non-zero when any check fails;
+`test-webhook` exits non-zero when the gateway returns non-2xx.
+
 ## 1. Daily / weekly checks
 
 **Scrape metrics** at `GET /metrics` from your Prometheus and dashboard:

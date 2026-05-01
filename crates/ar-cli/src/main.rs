@@ -25,5 +25,6 @@ async fn main() -> Result<()> {
         Command::ValidateConfig(args) => commands::validate_config(args),
         Command::ListLinters(args) => commands::list_linters(args),
         Command::TestWebhook(args) => commands::test_webhook(args).await,
+        Command::Doctor(args) => commands::doctor(args).await,
     }
 }
