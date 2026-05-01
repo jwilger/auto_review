@@ -69,11 +69,15 @@ runbook. `doctor` exits non-zero when any check fails;
   rate as
   `succeeded / (succeeded + failed_forgejo + failed_workspace + failed_llm + failed_unhealable)`.
   A spike in a single class points at one subsystem.
-- `auto_review_review_duration_ms_sum` paired with
-  `auto_review_reviews_completed_count` lets Prometheus compute a
-  rolling average review latency
-  (`rate(...sum[5m]) / rate(...count[5m])`). Not a histogram —
-  for p99 you'd downsample externally.
+- `auto_review_review_duration_seconds` is a proper Prometheus
+  histogram with buckets at 1s, 5s, 15s, 30s, 60s, 120s, 300s,
+  600s, and `+Inf`. Use
+  `histogram_quantile(0.95,
+   sum(rate(auto_review_review_duration_seconds_bucket[5m])) by (le))`
+  for p95. The legacy `auto_review_review_duration_ms_sum` /
+  `auto_review_reviews_completed_count` pair stays exposed for
+  rolling-average dashboards
+  (`rate(...sum[5m]) / rate(...count[5m])`).
 - `auto_review_review_findings_sum` — total findings posted across
   successful reviews. Useful for charting bot output volume.
 - `auto_review_reviews_skipped_<reason>_total` — `same_sha`

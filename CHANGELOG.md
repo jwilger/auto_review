@@ -172,7 +172,11 @@ PR's changed file extensions.
     `trivial_files`, `disabled_by_config`),
     `review_duration_ms_sum` paired with
     `reviews_completed_count` for a rolling-average latency,
-    and `review_findings_sum` for charting bot output volume.
+    `review_findings_sum` for charting bot output volume,
+    and `review_duration_seconds` as a proper Prometheus
+    histogram (8 cumulative buckets: 1s / 5s / 15s / 30s /
+    60s / 120s / 300s / 600s plus `+Inf`) so SREs can compute
+    `histogram_quantile(0.95, ...)` directly.
     Wired through a new `ReviewObserver` trait on
     `SpawningDispatcher`, so the dispatcher remains
     independent of the metrics format and the dependency

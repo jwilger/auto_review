@@ -13,6 +13,13 @@ use ar_orchestrator::{ReviewObservation, ReviewObserver};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
 
+/// Bucket bounds (in seconds) for the review-duration histogram.
+/// Tuned for review work: most fast on cached PRs, long-tail
+/// reaching minutes on big diffs with cloud LLMs. Operators wanting
+/// a different distribution can derive their own from the raw
+/// `review_duration_ms_sum + reviews_completed_count` pair.
+const DURATION_BUCKETS_SECS: &[f64] = &[1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0];
+
 #[derive(Default)]
 pub struct Metrics {
     pub webhooks_pull_request: AtomicU64,
@@ -45,6 +52,14 @@ pub struct Metrics {
     /// Sum of `findings_count` across successful reviews. Lets
     /// operators chart total bot-flagged issues over time.
     pub review_findings_sum: AtomicU64,
+
+    /// Cumulative-bucket counters for the review-duration histogram.
+    /// Each entry counts reviews whose duration was <= the
+    /// corresponding `DURATION_BUCKETS_SECS` bound. Cumulative
+    /// (Prometheus convention), so the last bucket equals
+    /// `reviews_completed_count` and a `+Inf` line is emitted on
+    /// scrape. Indexed by position in `DURATION_BUCKETS_SECS`.
+    duration_buckets: [AtomicU64; 8],
 }
 
 impl Metrics {
@@ -96,6 +111,7 @@ impl Metrics {
             .fetch_add(duration_ms, Ordering::Relaxed);
         self.review_findings_sum
             .fetch_add(findings_count, Ordering::Relaxed);
+        self.bucket_duration(duration_ms);
     }
 
     pub fn record_review_failed(&self, duration_ms: u64, error_class: &str) {
@@ -109,6 +125,19 @@ impl Metrics {
         self.reviews_completed_count.fetch_add(1, Ordering::Relaxed);
         self.review_duration_ms_sum
             .fetch_add(duration_ms, Ordering::Relaxed);
+        self.bucket_duration(duration_ms);
+    }
+
+    /// Increment every histogram bucket whose upper bound is >= the
+    /// observed duration. Cumulative-bucket convention per the
+    /// Prometheus exposition format.
+    fn bucket_duration(&self, duration_ms: u64) {
+        let secs = duration_ms as f64 / 1000.0;
+        for (i, &bound) in DURATION_BUCKETS_SECS.iter().enumerate() {
+            if secs <= bound {
+                self.duration_buckets[i].fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
 
     pub fn record_review_skipped(&self, reason: &str) {
@@ -247,7 +276,52 @@ impl Metrics {
             out.push_str(&counter.load(Ordering::Relaxed).to_string());
             out.push('\n');
         }
+        self.render_duration_histogram(&mut out);
         out
+    }
+
+    /// Emit the Prometheus histogram lines for review duration:
+    /// one `_bucket{le="X"}` line per bound plus a `+Inf` line that
+    /// equals `reviews_completed_count`.
+    fn render_duration_histogram(&self, out: &mut String) {
+        out.push_str(
+            "# HELP auto_review_review_duration_seconds Review-pipeline wall-clock latency from \
+             pipeline start through commit-status post.\n",
+        );
+        out.push_str("# TYPE auto_review_review_duration_seconds histogram\n");
+        for (i, &bound) in DURATION_BUCKETS_SECS.iter().enumerate() {
+            let count = self.duration_buckets[i].load(Ordering::Relaxed);
+            // Use `{:.3}` so 0.5 doesn't render as `0` and integer
+            // bounds don't grow trailing zeros beyond reason.
+            out.push_str(&format!(
+                "auto_review_review_duration_seconds_bucket{{le=\"{}\"}} {}\n",
+                fmt_bucket_bound(bound),
+                count
+            ));
+        }
+        let total = self.reviews_completed_count.load(Ordering::Relaxed);
+        out.push_str(&format!(
+            "auto_review_review_duration_seconds_bucket{{le=\"+Inf\"}} {total}\n"
+        ));
+        let sum_ms = self.review_duration_ms_sum.load(Ordering::Relaxed);
+        let sum_secs = sum_ms as f64 / 1000.0;
+        out.push_str(&format!(
+            "auto_review_review_duration_seconds_sum {sum_secs}\n"
+        ));
+        out.push_str(&format!(
+            "auto_review_review_duration_seconds_count {total}\n"
+        ));
+    }
+}
+
+/// Render a bucket bound the way Prometheus expects: integers as
+/// `60`, fractions as `0.5`. Avoids `60.0` which is technically
+/// permitted but visually noisy.
+fn fmt_bucket_bound(b: f64) -> String {
+    if b == b.trunc() {
+        format!("{}", b as i64)
+    } else {
+        format!("{b}")
     }
 }
 
@@ -315,6 +389,85 @@ mod tests {
         assert!(out.contains("auto_review_webhooks_issue_comment_total 1\n"));
         assert!(out.contains("auto_review_webhooks_ping_total 1\n"));
         assert!(out.contains("auto_review_webhooks_other_total 2\n"));
+    }
+
+    #[test]
+    fn duration_histogram_buckets_cumulatively() {
+        let m = Arc::new(Metrics::new());
+        let obs = MetricsObserver::new(m.clone());
+        // 500ms (in 1s bucket and up), 3s (in 5s+), 45s (in 60s+),
+        // 200s (in 300s+), 700s (only +Inf).
+        for d in [500u64, 3000, 45_000, 200_000, 700_000] {
+            obs.record(ReviewObservation::Succeeded {
+                duration: std::time::Duration::from_millis(d),
+                findings_count: 0,
+            });
+        }
+        let out = m.render();
+        // 1s bucket: only the 500ms review.
+        assert!(
+            out.contains("auto_review_review_duration_seconds_bucket{le=\"1\"} 1\n"),
+            "{out}"
+        );
+        // 5s bucket: 500ms + 3s = 2 reviews.
+        assert!(out.contains("auto_review_review_duration_seconds_bucket{le=\"5\"} 2\n"));
+        // 30s bucket: still only 500ms + 3s — 45s falls outside.
+        assert!(out.contains("auto_review_review_duration_seconds_bucket{le=\"30\"} 2\n"));
+        // 60s bucket: 500ms + 3s + 45s = 3.
+        assert!(out.contains("auto_review_review_duration_seconds_bucket{le=\"60\"} 3\n"));
+        // 300s bucket: 500ms + 3s + 45s + 200s = 4.
+        assert!(out.contains("auto_review_review_duration_seconds_bucket{le=\"300\"} 4\n"));
+        // 600s: still 4 (the 700s review doesn't fit).
+        assert!(out.contains("auto_review_review_duration_seconds_bucket{le=\"600\"} 4\n"));
+        // +Inf includes everything.
+        assert!(out.contains("auto_review_review_duration_seconds_bucket{le=\"+Inf\"} 5\n"));
+        // Sum and count.
+        assert!(out.contains("auto_review_review_duration_seconds_count 5\n"));
+        // sum = 0.5 + 3 + 45 + 200 + 700 = 948.5 seconds
+        assert!(
+            out.contains("auto_review_review_duration_seconds_sum 948.5\n"),
+            "{out}"
+        );
+    }
+
+    #[test]
+    fn duration_histogram_includes_failed_reviews() {
+        let m = Arc::new(Metrics::new());
+        let obs = MetricsObserver::new(m.clone());
+        obs.record(ReviewObservation::Failed {
+            duration: std::time::Duration::from_millis(2500),
+            error_class: "llm",
+        });
+        let out = m.render();
+        // 2.5s falls into the 5s+ buckets.
+        assert!(out.contains("auto_review_review_duration_seconds_bucket{le=\"1\"} 0\n"));
+        assert!(out.contains("auto_review_review_duration_seconds_bucket{le=\"5\"} 1\n"));
+        assert!(out.contains("auto_review_review_duration_seconds_count 1\n"));
+    }
+
+    #[test]
+    fn duration_histogram_skipped_reviews_do_not_register() {
+        let m = Arc::new(Metrics::new());
+        let obs = MetricsObserver::new(m.clone());
+        obs.record(ReviewObservation::Skipped { reason: "same_sha" });
+        let out = m.render();
+        assert!(out.contains("auto_review_review_duration_seconds_bucket{le=\"+Inf\"} 0\n"));
+        assert!(out.contains("auto_review_review_duration_seconds_count 0\n"));
+    }
+
+    #[test]
+    fn duration_histogram_emits_help_and_type_lines() {
+        let m = Metrics::new();
+        let out = m.render();
+        assert!(out.contains("# HELP auto_review_review_duration_seconds"));
+        assert!(out.contains("# TYPE auto_review_review_duration_seconds histogram"));
+    }
+
+    #[test]
+    fn fmt_bucket_bound_renders_integers_without_decimals() {
+        assert_eq!(fmt_bucket_bound(1.0), "1");
+        assert_eq!(fmt_bucket_bound(60.0), "60");
+        assert_eq!(fmt_bucket_bound(0.5), "0.5");
     }
 
     #[test]
