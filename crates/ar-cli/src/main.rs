@@ -28,5 +28,6 @@ async fn main() -> Result<()> {
         Command::ListLinters(args) => commands::list_linters(args),
         Command::TestWebhook(args) => commands::test_webhook(args).await,
         Command::Doctor(args) => commands::doctor(args).await,
+        Command::Status(args) => commands::status(args).await,
     }
 }

@@ -57,6 +57,12 @@ auto_review doctor
 auto_review test-webhook \
     --gateway-url https://reviewer.example.com \
     --webhook-secret "$WEBHOOK_SECRET"
+
+# Live operational snapshot: runtime config + key counters +
+# success rate. Run from anywhere with HTTP access to the
+# gateway; complements `doctor` (deps) and `test-webhook`
+# (intake) with the live-state view.
+auto_review status --gateway-url https://reviewer.example.com
 ```
 
 Both commands are fast and idempotent — drop them into your

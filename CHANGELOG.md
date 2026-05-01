@@ -862,6 +862,31 @@ default in-memory store to the SQLite-backed one.
   drive-by PRs. Includes guidance for keeping the document
   in sync as new components are added.
 
+#### status subcommand (M5)
+
+- `auto_review status --gateway-url <URL>` pulls `/version`,
+  `/info`, and `/metrics` from a running gateway and renders
+  a one-screen operational summary: version, runtime config
+  (sandbox kind / learnings store / poller / readiness),
+  pipeline counters (jobs dispatched, succeeded, failed,
+  skipped, success rate), webhook rejection counters
+  (signature / payload / rate-limited), and poller cycles.
+- `--json` emits the parsed result as a structured object
+  for piping into a regression tracker or trend-line
+  dashboard.
+- The summary marks the `direct` sandbox as
+  "NO ISOLATION — Kudelski-class RCE risk" so an operator
+  glances at the status output and sees the production
+  hardening gap immediately.
+- Lightweight Prometheus-text-format parser
+  (`parse_metric_counters`) handles the labelless counters
+  the gateway emits and skips `# HELP` / `# TYPE` and
+  histogram `{le="..."}` lines.
+- Operations runbook §0 (pre-deploy validation) now lists
+  `status` alongside `doctor` and `test-webhook` —
+  doctor for outbound deps, test-webhook for intake,
+  status for live state.
+
 #### doctor subcommand (M5)
 
 - `auto_review doctor` probes outbound dependencies and

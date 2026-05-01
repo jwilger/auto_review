@@ -76,6 +76,13 @@ pub enum Command {
     /// non-skipped check passes — drop into a deploy script before
     /// `register-webhook`.
     Doctor(DoctorArgs),
+
+    /// Pull `/version`, `/info`, and `/metrics` from a running
+    /// gateway and render a one-screen operational summary —
+    /// runtime config, review-success rate, key counters,
+    /// throttle activity. Complements `doctor` (outbound deps)
+    /// and `test-webhook` (intake) with the live-state view.
+    Status(StatusArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -134,6 +141,24 @@ pub struct ReviewOnceArgs {
     /// prompt content without burning tokens or touching the PR.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct StatusArgs {
+    /// Gateway URL the status request goes to. Same value as
+    /// `register-webhook --gateway-url` minus the
+    /// `/webhooks/forgejo` suffix.
+    #[arg(long)]
+    pub gateway_url: String,
+
+    /// Emit the parsed result as JSON instead of the human-readable
+    /// summary. Pipe into `jq` or another tracker for trend lines.
+    #[arg(long)]
+    pub json: bool,
+
+    /// Connect timeout in seconds.
+    #[arg(long, default_value_t = 10)]
+    pub timeout_secs: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -563,6 +588,25 @@ mod tests {
             "reviewer",
         ]);
         assert!(both.is_err(), "--id and --match-url must be mutually exclusive");
+    }
+
+    #[test]
+    fn status_required_args() {
+        let cli = Cli::try_parse_from([
+            "auto_review",
+            "status",
+            "--gateway-url",
+            "https://reviewer.example.com",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::Status(a) => {
+                assert_eq!(a.gateway_url, "https://reviewer.example.com");
+                assert!(!a.json);
+                assert_eq!(a.timeout_secs, 10);
+            }
+            _ => panic!("expected Status"),
+        }
     }
 
     #[test]

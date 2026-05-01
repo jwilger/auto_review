@@ -2,7 +2,7 @@
 
 use crate::cli::{
     DoctorArgs, InitArgs, ListLintersArgs, ListWebhooksArgs, RegisterWebhookArgs, ReviewOnceArgs,
-    TestWebhookArgs, UnregisterWebhookArgs, ValidateConfigArgs,
+    StatusArgs, TestWebhookArgs, UnregisterWebhookArgs, ValidateConfigArgs,
 };
 use anyhow::{Context, Result};
 use ar_forgejo::{
@@ -271,6 +271,212 @@ pub async fn register_webhook(args: RegisterWebhookArgs) -> Result<()> {
 pub fn build_webhook_url(gateway_url: &str) -> String {
     let trimmed = gateway_url.trim_end_matches('/');
     format!("{trimmed}{WEBHOOK_PATH}")
+}
+
+/// Pull `/version`, `/info`, `/metrics` from a running gateway
+/// and render a one-screen summary. Returns Err on any HTTP
+/// failure so wrappers can surface the diagnostic.
+pub async fn status(args: StatusArgs) -> Result<()> {
+    let timeout = std::time::Duration::from_secs(args.timeout_secs);
+    let http = reqwest::Client::builder()
+        .timeout(timeout)
+        .build()
+        .context("build http client")?;
+    let base = args.gateway_url.trim_end_matches('/').to_string();
+
+    let version: serde_json::Value = http
+        .get(format!("{base}/version"))
+        .send()
+        .await
+        .context("GET /version")?
+        .error_for_status()
+        .context("/version returned non-2xx")?
+        .json()
+        .await
+        .context("decode /version body")?;
+    let info: serde_json::Value = http
+        .get(format!("{base}/info"))
+        .send()
+        .await
+        .context("GET /info")?
+        .error_for_status()
+        .context("/info returned non-2xx")?
+        .json()
+        .await
+        .context("decode /info body")?;
+    let metrics_text = http
+        .get(format!("{base}/metrics"))
+        .send()
+        .await
+        .context("GET /metrics")?
+        .error_for_status()
+        .context("/metrics returned non-2xx")?
+        .text()
+        .await
+        .context("decode /metrics body")?;
+
+    let summary = StatusSummary::compute(&version, &info, &metrics_text);
+    if args.json {
+        println!("{}", serde_json::to_string(&summary)?);
+    } else {
+        summary.print(&base);
+    }
+    Ok(())
+}
+
+/// Distilled view of the gateway state. Fields are documented in
+/// `print` and `json` for the operator-facing meaning. Stored
+/// numerically so JSON consumers can chart them.
+#[derive(Debug, serde::Serialize)]
+pub(crate) struct StatusSummary {
+    pub version: String,
+    pub bot_login: String,
+    pub sandbox: String,
+    pub learnings: String,
+    pub poller_enabled: bool,
+    pub readiness_enabled: bool,
+    pub jobs_dispatched_total: u64,
+    pub reviews_succeeded_total: u64,
+    pub reviews_failed_total: u64,
+    pub reviews_completed_count: u64,
+    pub reviews_skipped_total: u64,
+    pub webhook_signature_failures_total: u64,
+    pub webhook_payload_failures_total: u64,
+    pub webhook_rate_limited_total: u64,
+    pub poll_cycles_total: u64,
+    pub success_rate: Option<f64>,
+}
+
+impl StatusSummary {
+    pub(crate) fn compute(
+        version: &serde_json::Value,
+        info: &serde_json::Value,
+        metrics_text: &str,
+    ) -> Self {
+        let parsed = parse_metric_counters(metrics_text);
+        let succeeded = parsed.get("auto_review_reviews_succeeded_total").copied().unwrap_or(0);
+        let failed_forgejo = parsed.get("auto_review_reviews_failed_forgejo_total").copied().unwrap_or(0);
+        let failed_workspace = parsed.get("auto_review_reviews_failed_workspace_total").copied().unwrap_or(0);
+        let failed_llm = parsed.get("auto_review_reviews_failed_llm_total").copied().unwrap_or(0);
+        let failed_unhealable = parsed.get("auto_review_reviews_failed_unhealable_total").copied().unwrap_or(0);
+        let failed_total = failed_forgejo + failed_workspace + failed_llm + failed_unhealable;
+        let skipped_same = parsed.get("auto_review_reviews_skipped_same_sha_total").copied().unwrap_or(0);
+        let skipped_trivial = parsed.get("auto_review_reviews_skipped_trivial_total").copied().unwrap_or(0);
+        let skipped_disabled = parsed.get("auto_review_reviews_skipped_disabled_total").copied().unwrap_or(0);
+        let skipped_total = skipped_same + skipped_trivial + skipped_disabled;
+        let completed = parsed.get("auto_review_reviews_completed_count").copied().unwrap_or(0);
+        let success_rate = if completed > 0 {
+            Some(succeeded as f64 / completed as f64)
+        } else {
+            None
+        };
+        Self {
+            version: version["version"].as_str().unwrap_or("unknown").to_string(),
+            bot_login: info["bot_login"].as_str().unwrap_or("unknown").to_string(),
+            sandbox: info["sandbox"].as_str().unwrap_or("unknown").to_string(),
+            learnings: info["learnings"].as_str().unwrap_or("unknown").to_string(),
+            poller_enabled: info["poller_enabled"].as_bool().unwrap_or(false),
+            readiness_enabled: info["readiness_enabled"].as_bool().unwrap_or(false),
+            jobs_dispatched_total: parsed.get("auto_review_jobs_dispatched_total").copied().unwrap_or(0),
+            reviews_succeeded_total: succeeded,
+            reviews_failed_total: failed_total,
+            reviews_completed_count: completed,
+            reviews_skipped_total: skipped_total,
+            webhook_signature_failures_total: parsed.get("auto_review_webhook_signature_failures_total").copied().unwrap_or(0),
+            webhook_payload_failures_total: parsed.get("auto_review_webhook_payload_failures_total").copied().unwrap_or(0),
+            webhook_rate_limited_total: parsed.get("auto_review_webhook_rate_limited_total").copied().unwrap_or(0),
+            poll_cycles_total: parsed.get("auto_review_poll_cycles_total").copied().unwrap_or(0),
+            success_rate,
+        }
+    }
+
+    fn print(&self, base: &str) {
+        println!("auto_review status — {base}");
+        println!("  version          {}", self.version);
+        println!("  bot login        {}", self.bot_login);
+        println!(
+            "  sandbox          {}",
+            match self.sandbox.as_str() {
+                "podman" => "podman (hardened)",
+                "direct" => "direct (NO ISOLATION — Kudelski-class RCE risk)",
+                other => other,
+            }
+        );
+        println!("  learnings        {}", self.learnings);
+        println!(
+            "  poller           {}",
+            if self.poller_enabled { "running" } else { "disabled" }
+        );
+        println!(
+            "  readiness probe  {}",
+            if self.readiness_enabled {
+                "enabled"
+            } else {
+                "fallback to /healthz"
+            }
+        );
+        println!();
+        println!("Review pipeline:");
+        println!("  jobs dispatched  {}", self.jobs_dispatched_total);
+        println!("  succeeded        {}", self.reviews_succeeded_total);
+        println!("  failed           {}", self.reviews_failed_total);
+        println!("  skipped          {}", self.reviews_skipped_total);
+        match self.success_rate {
+            Some(r) => println!("  success rate     {:.1}%", r * 100.0),
+            None => println!("  success rate     — (no completions yet)"),
+        }
+        println!();
+        println!("Webhook intake (rejection counters):");
+        println!(
+            "  signature fails  {}",
+            self.webhook_signature_failures_total
+        );
+        println!(
+            "  payload fails    {}",
+            self.webhook_payload_failures_total
+        );
+        println!(
+            "  rate-limited     {}",
+            self.webhook_rate_limited_total
+        );
+        println!();
+        println!("Poller:");
+        println!("  cycles total     {}", self.poll_cycles_total);
+    }
+}
+
+/// Lightweight Prometheus-text-format parser. Extracts every line
+/// of the form `name VALUE` (no labels, integer values) into a
+/// `name → u64` map. Lines starting with `#` are ignored; lines
+/// with `{labels}` are ignored. The gateway's metrics output is
+/// labelless except for the histogram, which we don't surface in
+/// the status summary.
+fn parse_metric_counters(text: &str) -> std::collections::HashMap<String, u64> {
+    let mut out = std::collections::HashMap::new();
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if line.contains('{') {
+            continue;
+        }
+        let mut parts = line.split_whitespace();
+        let name = match parts.next() {
+            Some(n) => n,
+            None => continue,
+        };
+        let value_str = match parts.next() {
+            Some(v) => v,
+            None => continue,
+        };
+        // Skip parts beyond the first two (Prometheus allows a
+        // timestamp suffix; we don't care about it).
+        if let Ok(v) = value_str.parse::<u64>() {
+            out.insert(name.to_string(), v);
+        }
+    }
+    out
 }
 
 /// Probe outbound dependencies and sanity-check the webhook
@@ -1104,6 +1310,98 @@ mod tests {
         let err = unregister_webhook(args).await.expect_err("neither");
         assert!(err.to_string().contains("--id"));
         assert!(err.to_string().contains("--match-url"));
+    }
+
+    #[test]
+    fn parse_metric_counters_skips_help_type_and_label_lines() {
+        let text = "\
+# HELP auto_review_jobs_dispatched_total docs
+# TYPE auto_review_jobs_dispatched_total counter
+auto_review_jobs_dispatched_total 7
+auto_review_review_duration_seconds_bucket{le=\"5\"} 3
+auto_review_reviews_completed_count 2
+";
+        let map = parse_metric_counters(text);
+        assert_eq!(map.get("auto_review_jobs_dispatched_total"), Some(&7));
+        assert_eq!(map.get("auto_review_reviews_completed_count"), Some(&2));
+        // The label-bearing line is skipped (we don't surface
+        // histograms in the summary).
+        assert!(!map.contains_key("auto_review_review_duration_seconds_bucket"));
+    }
+
+    #[test]
+    fn status_summary_compute_handles_empty_metrics() {
+        let version = serde_json::json!({"name": "auto_review", "version": "0.1.0"});
+        let info = serde_json::json!({
+            "bot_login": "auto_review",
+            "sandbox": "podman",
+            "learnings": "sqlite",
+            "poller_enabled": true,
+            "readiness_enabled": true
+        });
+        let summary = StatusSummary::compute(&version, &info, "");
+        assert_eq!(summary.jobs_dispatched_total, 0);
+        assert!(summary.success_rate.is_none());
+    }
+
+    #[test]
+    fn status_summary_compute_calculates_success_rate() {
+        let version = serde_json::json!({"version": "0.1.0"});
+        let info = serde_json::json!({
+            "bot_login": "auto_review", "sandbox": "podman",
+            "learnings": "sqlite", "poller_enabled": true,
+            "readiness_enabled": true
+        });
+        let metrics = "\
+auto_review_reviews_succeeded_total 8
+auto_review_reviews_failed_forgejo_total 1
+auto_review_reviews_failed_workspace_total 0
+auto_review_reviews_failed_llm_total 1
+auto_review_reviews_failed_unhealable_total 0
+auto_review_reviews_completed_count 10
+";
+        let summary = StatusSummary::compute(&version, &info, metrics);
+        assert_eq!(summary.reviews_succeeded_total, 8);
+        assert_eq!(summary.reviews_failed_total, 2);
+        assert_eq!(summary.reviews_completed_count, 10);
+        assert!((summary.success_rate.unwrap() - 0.8).abs() < 1e-9);
+    }
+
+    #[tokio::test]
+    async fn end_to_end_status_against_real_gateway() {
+        use ar_gateway::{build_router, AppState, GatewayInfo};
+        use ar_orchestrator::NoOpDispatcher;
+
+        let info = Arc::new(GatewayInfo {
+            name: "auto_review",
+            version: env!("CARGO_PKG_VERSION"),
+            bot_login: "pr-bot".into(),
+            bot_name: "pr-bot".into(),
+            sandbox: "podman",
+            learnings: "sqlite",
+            llm_tiers: vec!["reasoning"],
+            reasoning_model: "test-model".into(),
+            poller_enabled: true,
+            readiness_enabled: true,
+        });
+        let app = build_router(
+            AppState::new("s", Arc::new(NoOpDispatcher)).with_info(info),
+        );
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let addr = listener.local_addr().unwrap();
+        tokio::spawn(async move {
+            axum::serve(listener, app).await.unwrap();
+        });
+
+        let args = StatusArgs {
+            gateway_url: format!("http://{addr}"),
+            json: true,
+            timeout_secs: 5,
+        };
+        // Exits cleanly; we're not asserting stdout shape, just
+        // that all three GETs succeed and the parser handles a
+        // minimal-counters response.
+        status(args).await.expect("status against real gateway");
     }
 
     #[tokio::test]
