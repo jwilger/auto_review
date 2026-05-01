@@ -89,6 +89,14 @@ impl ChatPoller {
     pub fn spawn(self, interval: Duration) {
         tokio::spawn(async move {
             let mut ticker = tokio::time::interval(interval);
+            // Delay (not the default Burst) so a slow poll_once
+            // doesn't trigger a thundering-herd of catch-up ticks.
+            // For a polling bot where each cycle does N API calls,
+            // burst-catchup amplifies pressure on Forgejo when it's
+            // already slow. Delay realigns the schedule from the
+            // previous tick so cycles stay spaced even after a
+            // long poll.
+            ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
             // Skip the immediate fire — wait one full interval so
             // gateway startup isn't doing webhook + poll work
             // simultaneously.
