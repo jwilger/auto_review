@@ -88,6 +88,25 @@ directly inside your private network).
 This subscribes the bot to `pull_request` and `issue_comment` events,
 secured with `WEBHOOK_SECRET`.
 
+## 5b. (Optional) Smoke-test against a real PR without a webhook
+
+Before flipping the gateway live, you can run the full pipeline against
+one specific PR. No webhook required:
+
+```sh
+./target/release/auto_review review-once \
+    --forgejo-url $FORGEJO_BASE_URL \
+    --token $FORGEJO_TOKEN \
+    --owner alice --repo widgets --pr 42 \
+    --llm-base-url $LLM_BASE_URL \
+    --llm-model $LLM_REASONING_MODEL
+```
+
+This clones the repo at the PR's head SHA, runs the linters, calls the
+LLM, and posts the review — exactly what the webhook flow would do —
+but synchronously, with all logs streaming to your terminal. Useful for
+onboarding and for reproducing reported review issues.
+
 ## 6. Open a PR
 
 The gateway will:
