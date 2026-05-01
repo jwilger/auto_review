@@ -175,6 +175,10 @@ async fn verify_one(
                 name: "AgentAction".to_string(),
                 schema: agent_action_schema(),
             }),
+            // Determinism on the verify path. Repeated runs on the
+            // same finding shouldn't randomly produce different
+            // verdicts — operators read these in order.
+            temperature: Some(0.0),
             ..Default::default()
         };
         let resp = match router.complete(ModelTier::Cheap, req).await {

@@ -38,6 +38,12 @@ pub async fn generate_with_self_heal(
                 name: "Review".to_string(),
                 schema: review_schema().clone(),
             }),
+            // Deterministic output: same prompt → same findings.
+            // Matters for bench fixtures (stable scoring across
+            // runs), incremental reviews (no spurious re-flagging
+            // on the same code), and provider-side prompt caching.
+            // Slight tradeoff in phrasing variety, accepted.
+            temperature: Some(0.0),
             ..Default::default()
         };
         let resp = router.complete(ModelTier::Reasoning, req).await?;

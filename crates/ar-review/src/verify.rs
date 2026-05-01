@@ -38,6 +38,8 @@ pub async fn verify_findings(
             name: "Verification".to_string(),
             schema: verification_schema().clone(),
         }),
+        // Determinism: same finding + diff → same verdict.
+        temperature: Some(0.0),
         ..Default::default()
     };
 

@@ -43,6 +43,9 @@ pub async fn triage_files_with_llm(
             name: "Triage".to_string(),
             schema: triage_schema().clone(),
         }),
+        // Determinism: same files+diff → same trivial/complex
+        // classification across runs.
+        temperature: Some(0.0),
         ..Default::default()
     };
 

@@ -303,6 +303,10 @@ impl ChatHandler<'_> {
                 name: kind.schema_name().into(),
                 schema: autofix_schema(),
             }),
+            // Determinism: identical diffs should yield identical
+            // suggestions across runs (matters when a user runs
+            // `@bot autofix` twice on the same SHA).
+            temperature: Some(0.0),
             ..Default::default()
         };
         let resp = self.llm.complete(ModelTier::Cheap, req).await?;
@@ -439,6 +443,8 @@ impl ChatHandler<'_> {
                 name: "TestScaffolds".into(),
                 schema: tests_schema(),
             }),
+            // Determinism: same diff → same scaffolds across runs.
+            temperature: Some(0.0),
             ..Default::default()
         };
         let resp = self.llm.complete(ModelTier::Cheap, req).await?;
