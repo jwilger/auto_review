@@ -207,6 +207,20 @@ impl ChatHandler<'_> {
             .await?;
             return Ok(());
         }
+        // Skip closed/merged PRs. The user can still see prior
+        // reviews, but running a fresh review against an immutable
+        // PR is wasted work — they can't act on findings without
+        // reopening, and Forgejo's review endpoint may even reject
+        // posts on a closed PR.
+        if pr.state != "open" {
+            self.post(
+                ctx,
+                "Skipping re-review: this PR is closed/merged. Reopen it first \
+                 if you want a fresh review.",
+            )
+            .await?;
+            return Ok(());
+        }
         let job = ReviewJob {
             owner: ctx.owner.to_string(),
             repo: ctx.repo.to_string(),
@@ -1433,6 +1447,53 @@ mod tests {
             .await
             .expect("ok");
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn re_review_on_closed_pr_skips_dispatch() {
+        // Re-reviewing a closed/merged PR is wasted work — the
+        // findings can't be acted on without reopening, and
+        // Forgejo may reject the review post outright.
+        let (server, forgejo, learnings, llm) = setup().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "old work",
+                "body": "",
+                "draft": false,
+                "state": "closed",
+                "head": {"ref": "t", "sha": "abc"},
+                "base": {"ref": "main", "sha": "def"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(serde_json::json!({
+                "body": "Skipping re-review: this PR is closed/merged. Reopen it first if you want a fresh review."
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let seen = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let dispatcher: Arc<dyn JobDispatcher> =
+            Arc::new(RecordingDispatcher { seen: seen.clone() });
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &llm,
+            learnings: &learnings,
+            dispatcher: Some(dispatcher),
+        };
+        handler
+            .handle(ctx(), ChatCommand::ReReview)
+            .await
+            .expect("ok");
+        assert!(
+            seen.lock().unwrap().is_empty(),
+            "closed PR must not dispatch"
+        );
     }
 
     #[tokio::test]

@@ -166,8 +166,20 @@ pub struct PullRequestSummary {
     pub body: String,
     #[serde(default)]
     pub draft: bool,
+    /// Forgejo's pull-request state: "open" or "closed". Populated
+    /// for the chat handler's `re-review` command to skip closed
+    /// PRs (running a review against a closed/merged PR's head SHA
+    /// is wasted work — the user can't act on the findings).
+    /// Defaults to "open" for older Forgejo versions or for
+    /// payload variants that don't carry the field.
+    #[serde(default = "default_pr_state")]
+    pub state: String,
     pub head: PullRequestRefSummary,
     pub base: PullRequestRefSummary,
+}
+
+fn default_pr_state() -> String {
+    "open".to_string()
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
