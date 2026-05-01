@@ -38,6 +38,7 @@ pub mod semgrep;
 pub mod shellcheck;
 pub mod sqlfluff;
 pub mod staticcheck;
+pub mod stylelint;
 pub mod swiftlint;
 pub mod taplo;
 pub mod tflint;

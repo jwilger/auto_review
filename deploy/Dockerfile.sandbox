@@ -18,8 +18,8 @@
 #   cppcheck, dotenv-linter, eslint, gitleaks, golangci-lint, gosec,
 #   hadolint, kubeconform, markdownlint, mypy, osv-scanner, oxlint,
 #   phpstan, pmd, rubocop, ruff, semgrep, shellcheck, sqlfluff,
-#   staticcheck, swiftlint, taplo, tflint, trivy, typos, vale,
-#   yamllint
+#   staticcheck, stylelint, swiftlint, taplo, tflint, trivy, typos,
+#   vale, yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -64,7 +64,8 @@ RUN npm install -g \
         eslint \
         markdownlint-cli \
         @biomejs/biome \
-        oxlint
+        oxlint \
+        stylelint stylelint-config-standard-scss
 
 # Static-binary linters: pin the latest release downloads.
 RUN set -eux; \

@@ -31,6 +31,7 @@ use ar_tools::semgrep::SemgrepRunner;
 use ar_tools::shellcheck::ShellCheckRunner;
 use ar_tools::sqlfluff::SqlfluffRunner;
 use ar_tools::staticcheck::StaticcheckRunner;
+use ar_tools::stylelint::StylelintRunner;
 use ar_tools::swiftlint::SwiftLintRunner;
 use ar_tools::taplo::TaploRunner;
 use ar_tools::tflint::TflintRunner;
@@ -267,6 +268,15 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         runners.push(Box::new(SwiftLintRunner { files: swift_files }));
     }
 
+    let css_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| has_css_ext(&f.filename))
+        .map(|f| f.filename.clone())
+        .collect();
+    if !css_files.is_empty() {
+        runners.push(Box::new(StylelintRunner { files: css_files }));
+    }
+
     // buf reads its module config (`buf.yaml`) from the workspace
     // root and lints every .proto in the module — passing per-file
     // args isn't its idiom. Always run when there's a .proto in
@@ -373,6 +383,13 @@ fn has_c_ext(name: &str) -> bool {
     ]
     .iter()
     .any(|ext| lower.ends_with(ext))
+}
+
+fn has_css_ext(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".css", ".scss", ".sass", ".less"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
 }
 
 fn has_terraform_ext(name: &str) -> bool {
@@ -877,6 +894,34 @@ mod tests {
                     "gitleaks",
                     "osv-scanner",
                     "semgrep",
+                    "trivy",
+                    "typos"
+                ],
+                "name = {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn css_files_select_stylelint() {
+        for name in [
+            "src/styles/main.css",
+            "src/styles/theme.scss",
+            "src/styles/old.sass",
+            "src/styles/legacy.less",
+        ] {
+            let files = vec![cf(name, "modified")];
+            let runners = select_runners(&files);
+            let mut got = names(&runners);
+            got.sort();
+            assert_eq!(
+                got,
+                vec![
+                    "ast-grep",
+                    "gitleaks",
+                    "osv-scanner",
+                    "semgrep",
+                    "stylelint",
                     "trivy",
                     "typos"
                 ],
