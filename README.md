@@ -8,23 +8,42 @@ you control, with optional support for fully local LLMs.
 
 ## Status
 
-**Alpha.** End-to-end review pipeline works: webhook intake → triage
-(skip lockfile-only PRs) → shallow-clone the repo → run language-
-appropriate linters → call the LLM with a strict-JSON-schema prompt
-and self-heal validation → post inline review comments and a
-top-level summary. CLI helpers mint the bot's PAT and register the
-webhook on a repo.
+**Alpha.** End-to-end review pipeline works: webhook intake → LLM
+triage (skip lockfile-only PRs, route trivial files away from the
+reasoning model) → shallow-clone → 12 bundled linters fanned out
+in parallel inside an optional sandbox → tree-sitter + embedding
+RAG context + persistent learnings memory → reasoning-tier LLM
+with strict-JSON-schema output and self-heal validation → cheap-
+tier verifier drops unfounded findings → post inline review
+comments + commit status. The `@auto_review` chat handler accepts
+`help`, `remember <text>`, `forget <id>`, `re-review`, and free-
+form questions answered by the cheap-tier model. CLI helpers
+mint the bot's PAT and register the webhook on a repo.
 
 To deploy: see [QUICKSTART.md](./QUICKSTART.md). For background,
 the [feasibility study](./docs/FEASIBILITY.md) lays out the broader
 plan; [ADR-0001](./docs/ADR-0001-architecture.md) captures the
 architecture decision.
 
-What's still on the roadmap (per the feasibility study's later
-milestones): RAG with tree-sitter + LanceDB, persistent learnings
-memory, OCI sandbox for linter execution, agentic `@auto_review`
-chat, and the full ~45-linter set CodeRabbit ships. Real-world
-verification on a live Forgejo instance is also pending.
+What's still on the roadmap: a LanceDB-backed vector store
+(currently in-memory + SQLite-backed for learnings), the full
+~45-linter set (12 bundled today), a YOUKI-based sandbox in
+addition to the podman path, and a public quality benchmark
+suite. Real-world verification on a production Forgejo instance
+is also pending.
+
+### Production sandbox
+
+For internet-facing deploys, set `AR_SANDBOX_IMAGE` to point at the
+hardened linter image (`deploy/Dockerfile.sandbox`). Linter spawns
+go through `podman run --network=none --read-only --cap-drop=ALL
+--security-opt=no-new-privileges --memory=… --cpus=… --pids-limit=…
+--user 65534:65534 -v <repo>:/work:ro`. Without this set, the
+gateway still works but logs a `sandbox: direct (NO ISOLATION)`
+warning — fine for a local LAN trial, **not** safe for any
+internet-reachable deploy. (Background: an unjailed linter is the
+exact path the [Kudelski writeup](https://research.kudelskisecurity.com/2024/05/01/a-trip-down-coderabbits-rabbit-hole/)
+used to reach RCE on CodeRabbit.)
 
 ## Architecture (one-paragraph)
 
