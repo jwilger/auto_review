@@ -55,6 +55,7 @@ pub struct Metrics {
     /// operators chart total bot-flagged issues over time.
     pub review_findings_sum: AtomicU64,
     pub verifier_findings_dropped: AtomicU64,
+    pub review_queue_waits: AtomicU64,
 
     // Poller counters: track the background ChatPoller's progress
     // so operators can see whether inline-thread mentions are being
@@ -187,6 +188,10 @@ impl Metrics {
 
     pub fn record_poll_chat_failure(&self) {
         self.poll_chat_failures.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_review_queue_wait(&self) {
+        self.review_queue_waits.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_review_skipped(&self, reason: &str) {
@@ -326,6 +331,11 @@ impl Metrics {
                 &self.verifier_findings_dropped,
             ),
             (
+                "auto_review_review_queue_waits_total",
+                "Dispatches that had to wait on the AR_REVIEW_CONCURRENCY semaphore before starting. Sustained ratio relative to reviews_started_total > 10% means the cap is too tight or traffic exceeds capacity.",
+                &self.review_queue_waits,
+            ),
+            (
                 "auto_review_poll_cycles_total",
                 "Background-poller passes that completed successfully. Compare against the configured AR_POLL_INTERVAL_SECS to spot a stalled poller.",
                 &self.poll_cycles,
@@ -448,6 +458,7 @@ impl ReviewObserver for MetricsObserver {
                 .metrics
                 .record_review_failed(duration.as_millis() as u64, error_class),
             ReviewObservation::Skipped { reason } => self.metrics.record_review_skipped(reason),
+            ReviewObservation::QueueWait => self.metrics.record_review_queue_wait(),
         }
     }
 }
@@ -698,6 +709,21 @@ mod tests {
         assert_eq!(fmt_bucket_bound(1.0), "1");
         assert_eq!(fmt_bucket_bound(60.0), "60");
         assert_eq!(fmt_bucket_bound(0.5), "0.5");
+    }
+
+    #[test]
+    fn queue_wait_observation_increments_counter() {
+        let m = Arc::new(Metrics::new());
+        let obs = MetricsObserver::new(m.clone());
+        obs.record(ReviewObservation::QueueWait);
+        obs.record(ReviewObservation::QueueWait);
+        let out = m.render();
+        assert!(
+            out.contains("auto_review_review_queue_waits_total 2\n"),
+            "{out}"
+        );
+        // Other counters unchanged.
+        assert!(out.contains("auto_review_reviews_started_total 0\n"));
     }
 
     #[test]

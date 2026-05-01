@@ -53,6 +53,13 @@ pub enum ReviewObservation {
     Skipped {
         reason: &'static str,
     },
+    /// The dispatch had to wait on the concurrency-cap semaphore
+    /// before the review could begin. Counts how often the cap is
+    /// engaging — sustained increases mean
+    /// `AR_REVIEW_CONCURRENCY` is too tight (or traffic exceeds
+    /// capacity). Fires AT MOST once per dispatch, before any
+    /// other observation; firing implies a `Started` will follow.
+    QueueWait,
 }
 
 /// Optional sink for [`ReviewObservation`]s. The gateway provides
@@ -229,24 +236,38 @@ impl JobDispatcher for SpawningDispatcher {
         let repo_for_status = job.repo.clone();
         let sha_for_status = job.head_sha.clone();
         let forgejo_for_status = forgejo.clone();
+        let observer_for_queue = observer.clone();
         tokio::spawn(async move {
             // Acquire the concurrency permit BEFORE the inner spawn
             // so the wait actually limits in-flight reviews. Held
             // for the lifetime of the inner task — releases when
             // the review finishes (or panics).
             let _permit = match concurrency_limit.as_ref() {
-                Some(sem) => match sem.clone().acquire_owned().await {
-                    Ok(p) => Some(p),
-                    Err(_) => {
-                        // Semaphore was closed, which we never do.
-                        // Defensive: log and continue without
-                        // limiting rather than dropping the review.
-                        tracing::warn!(
-                            "concurrency semaphore closed; running review without limit"
-                        );
-                        None
+                Some(sem) => {
+                    // Best-effort detection of "this acquire had to
+                    // wait": if no permits are available right now,
+                    // this acquire will block. Race-y (permits can
+                    // change between the check and the acquire) but
+                    // approximate is fine for an ops counter.
+                    if sem.available_permits() == 0 {
+                        if let Some(obs) = observer_for_queue.as_deref() {
+                            obs.record(ReviewObservation::QueueWait);
+                        }
                     }
-                },
+                    match sem.clone().acquire_owned().await {
+                        Ok(p) => Some(p),
+                        Err(_) => {
+                            // Semaphore was closed, which we never
+                            // do. Defensive: log and continue
+                            // without limiting rather than dropping
+                            // the review.
+                            tracing::warn!(
+                                "concurrency semaphore closed; running review without limit"
+                            );
+                            None
+                        }
+                    }
+                }
                 None => None,
             };
             let inner = tokio::spawn(async move {

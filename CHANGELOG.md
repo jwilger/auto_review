@@ -1096,6 +1096,25 @@ default in-memory store to the SQLite-backed one.
   forget-learning behavioural (drop existing record,
   unknown-id errors clearly).
 
+#### Concurrency-cap queue-wait counter
+
+- Counterpart to the `AR_REVIEW_CONCURRENCY` cap: new
+  `auto_review_review_queue_waits_total` counter ticks each
+  time a dispatch had to wait on the cap's semaphore before
+  starting. Operators with a cap configured chart this to
+  see whether the cap is engaging — sustained queueing
+  (> 10% of `reviews_started_total`) means raise the cap or
+  scale horizontally.
+- New `ReviewObservation::QueueWait` variant fires at most
+  once per dispatch, before any other observation. Race
+  detection is approximate (`available_permits() == 0` at
+  the moment of check, not synchronised with the actual
+  acquire) — fine for an ops counter, not load-bearing.
+- 1 new test pins the counter behaviour: two `QueueWait`
+  observations → counter reads 2; other counters unaffected.
+- OPERATIONS.md daily-checks documents the alert formula
+  and the action ladder (raise cap, then scale horizontally).
+
 #### Optional review concurrency cap
 
 - New `AR_REVIEW_CONCURRENCY=N` env var puts a global ceiling

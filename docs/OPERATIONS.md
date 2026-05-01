@@ -126,6 +126,13 @@ import steps.
   above ~30% means the reasoning model is hallucinating heavily.
   Action: try a higher-quality reasoning model, or tighten the
   system prompt's anti-hallucination guidance.
+- `auto_review_review_queue_waits_total` — only meaningful when
+  `AR_REVIEW_CONCURRENCY` is set. Counts dispatches that had to
+  wait on the semaphore before starting. If this is climbing
+  faster than ~10% of `reviews_started_total`, the cap is too
+  tight (or your traffic exceeds the deployment's capacity).
+  Action: raise the cap, or scale horizontally with multiple
+  gateway instances against a shared SQLite history.
 - `auto_review_reviews_skipped_<reason>_total` — `same_sha`
   (incremental dedup), `trivial_files` (lockfiles / vendored /
   generated), `disabled_by_config` (`enabled: false`). Operators
