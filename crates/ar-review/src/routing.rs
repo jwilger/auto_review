@@ -27,6 +27,7 @@ use ar_tools::shellcheck::ShellCheckRunner;
 use ar_tools::sqlfluff::SqlfluffRunner;
 use ar_tools::taplo::TaploRunner;
 use ar_tools::trivy::TrivyRunner;
+use ar_tools::vale::ValeRunner;
 use ar_tools::yamllint::YamlLintRunner;
 use ar_tools::Finding;
 use std::path::Path;
@@ -191,7 +192,14 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         .map(|f| f.filename.clone())
         .collect();
     if !md_files.is_empty() {
-        runners.push(Box::new(MarkdownLintRunner { files: md_files }));
+        runners.push(Box::new(MarkdownLintRunner {
+            files: md_files.clone(),
+        }));
+        // vale catches prose issues (grammar, voice, spelling)
+        // markdownlint doesn't see. When the repo has no .vale.ini
+        // configured, vale exits cleanly with `{}` and the runner
+        // emits no findings.
+        runners.push(Box::new(ValeRunner { files: md_files }));
     }
 
     let workflow_files: Vec<String> = surviving
@@ -487,7 +495,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_files_select_markdownlint() {
+    fn markdown_files_select_markdownlint_and_vale() {
         let files = vec![cf("README.md", "modified")];
         let runners = select_runners(&files);
         let mut got = names(&runners);
@@ -500,7 +508,8 @@ mod tests {
                 "markdownlint",
                 "osv-scanner",
                 "semgrep",
-                "trivy"
+                "trivy",
+                "vale"
             ]
         );
     }
@@ -533,7 +542,8 @@ mod tests {
                 "ruff",
                 "semgrep",
                 "shellcheck",
-                "trivy"
+                "trivy",
+                "vale"
             ]
         );
     }

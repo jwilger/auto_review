@@ -34,6 +34,7 @@ pub mod shellcheck;
 pub mod sqlfluff;
 pub mod taplo;
 pub mod trivy;
+pub mod vale;
 pub mod yamllint;
 
 pub use finding::{Finding, Severity};

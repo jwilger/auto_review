@@ -44,7 +44,7 @@ since the start of the project.
   `run_review_job` posts pending → final commit statuses around the
   triage → clone → lint → review → post sequence.
 
-#### Linters (24 of CodeRabbit's ~45 set)
+#### Linters (25 of CodeRabbit's ~45 set)
 
 | Tool | Languages / files | Source-tool name |
 |---|---|---|
@@ -66,6 +66,7 @@ since the start of the project.
 | `shellcheck` | Bash / sh | `shellcheck` |
 | `hadolint` | Dockerfiles | `hadolint` |
 | `markdownlint` | `*.md` / `*.markdown` | `markdownlint` |
+| `vale` | Prose linter (grammar/voice/spelling) for `.md`/`.markdown` | `vale` |
 | `sqlfluff` | SQL (.sql / .dml / .ddl, multi-dialect) | `sqlfluff` |
 | `taplo` | TOML (Cargo.toml, pyproject.toml, …) | `taplo` |
 | `dotenv-linter` | `.env` / `.env.*` files | `dotenv-linter` |
@@ -270,7 +271,7 @@ default in-memory store to the SQLite-backed one.
   paths cover correctness; LanceDB is the scale lever).
 - youki-based `Sandbox` impl as a lighter alternative to the
   podman shell-out.
-- Remaining ~21 linters from CodeRabbit's set
+- Remaining ~20 linters from CodeRabbit's set
   (languagetool, terragrunt, detekt, swiftlint, prettier-check, …).
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
