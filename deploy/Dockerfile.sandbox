@@ -1,0 +1,71 @@
+# syntax=docker/dockerfile:1.7
+#
+# auto_review sandbox image.
+#
+# Bundles the 12 linter binaries the review pipeline currently invokes,
+# so they can be exec'd by `podman run --rm --network=none --read-only ...`
+# from the gateway. Push this somewhere podman on the gateway host can
+# pull (`docker.io/...`, `ghcr.io/...`, or your private registry) and
+# point AR_SANDBOX_IMAGE at it.
+#
+# This image is intentionally NOT the gateway image — keeping the two
+# separate means the rootfs the linters see contains only what they
+# need, and a sandbox-escape doesn't grant access to the gateway's
+# Forgejo token / LLM creds / learnings DB.
+#
+# Linter set (in alphabetical order):
+#   actionlint, eslint, gitleaks, golangci-lint, hadolint, markdownlint,
+#   rubocop, ruff, semgrep, shellcheck, trivy, yamllint
+#
+# All entrypoints stay on PATH so the orchestrator can invoke them by
+# bare name (e.g. `ruff`, `shellcheck`).
+
+FROM debian:bookworm-slim
+
+ARG TARGETARCH=amd64
+
+RUN apt-get update && apt-get install -y --no-install-recommends \
+        ca-certificates curl git \
+        # debian-packaged linters
+        shellcheck \
+        yamllint \
+        # interpreters used by linters that ship as scripts
+        nodejs npm \
+        python3 python3-pip \
+        ruby \
+    && rm -rf /var/lib/apt/lists/*
+
+# Python linters (pip)
+RUN pip3 install --break-system-packages \
+        ruff \
+        semgrep
+
+# Ruby linters (gem)
+RUN gem install --no-document rubocop
+
+# Node linters (npm)
+RUN npm install -g \
+        eslint \
+        markdownlint-cli
+
+# Static-binary linters: pin the latest release downloads.
+RUN set -eux; \
+    curl -fsSL "https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64" \
+        -o /usr/local/bin/hadolint && chmod +x /usr/local/bin/hadolint; \
+    curl -fsSL "https://github.com/rhysd/actionlint/releases/latest/download/actionlint_linux_${TARGETARCH}.tar.gz" \
+        | tar -xz -C /usr/local/bin actionlint; \
+    curl -fsSL "https://github.com/zricethezav/gitleaks/releases/latest/download/gitleaks_8.22.1_linux_x64.tar.gz" \
+        | tar -xz -C /usr/local/bin gitleaks; \
+    curl -fsSL "https://github.com/golangci/golangci-lint/releases/latest/download/golangci-lint-1.64.5-linux-${TARGETARCH}.tar.gz" \
+        | tar -xz -C /tmp \
+        && mv /tmp/golangci-lint-1.64.5-linux-${TARGETARCH}/golangci-lint /usr/local/bin/; \
+    curl -fsSL "https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.59.0_Linux-64bit.tar.gz" \
+        | tar -xz -C /usr/local/bin trivy; \
+    chmod +x /usr/local/bin/*
+
+# Linters never need to write to the rootfs.
+USER 65534:65534
+WORKDIR /work
+
+# No CMD: the gateway invokes the linter binary by name. ENTRYPOINT
+# left empty so the orchestrator's argv passes through unchanged.

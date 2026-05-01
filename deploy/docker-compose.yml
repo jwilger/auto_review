@@ -22,6 +22,12 @@ services:
       - LLM_EMBEDDING_MODEL=${LLM_EMBEDDING_MODEL:-}
       # Optional: enable LLM-driven triage by setting a cheap model.
       - LLM_CHEAP_MODEL=${LLM_CHEAP_MODEL:-}
+      # Optional: persist learnings across restarts.
+      - AR_LEARNINGS_DB=${AR_LEARNINGS_DB:-/data/learnings.sqlite}
+      # Optional: enable hardened sandbox for linter exec. Requires
+      # podman on the gateway host (mount the podman socket below) and
+      # the sandbox image pre-pulled. Leave unset for local-dev only.
+      - AR_SANDBOX_IMAGE=${AR_SANDBOX_IMAGE:-}
     ports:
       - "8080:8080"
     depends_on:

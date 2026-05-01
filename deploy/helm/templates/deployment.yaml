@@ -43,6 +43,14 @@ spec:
             - name: LLM_CHEAP_MODEL
               value: {{ .Values.config.llmCheapModel | quote }}
             {{- end }}
+            {{- if .Values.config.learningsDb }}
+            - name: AR_LEARNINGS_DB
+              value: {{ .Values.config.learningsDb | quote }}
+            {{- end }}
+            {{- if .Values.config.sandboxImage }}
+            - name: AR_SANDBOX_IMAGE
+              value: {{ .Values.config.sandboxImage | quote }}
+            {{- end }}
           envFrom:
             - secretRef:
                 name: {{ include "auto-review.secretName" . }}

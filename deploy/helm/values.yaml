@@ -15,6 +15,14 @@ config:
   llmReasoningModel: "qwen2.5-coder:32b"
   llmEmbeddingModel: ""     # optional; enables RAG
   llmCheapModel: ""         # optional; enables LLM triage + verifier
+  # Path to the SQLite file backing the learnings store. Set to ""
+  # to fall back to volatile in-memory storage.
+  learningsDb: "/data/learnings.sqlite"
+  # OCI image to invoke linters from. When set, linter spawns are
+  # routed through `podman run --network=none --read-only ...` with
+  # dropped caps. Leave empty for local-dev clusters where the
+  # gateway pod itself has the linter binaries baked in.
+  sandboxImage: ""
 
 # Secrets. Either set inline (NOT recommended for production) or set
 # secretRef to the name of an existing Secret carrying the same keys.
