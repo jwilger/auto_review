@@ -13,6 +13,10 @@ pub struct ReviewPromptInputs<'a> {
     /// can corroborate, expand on, or dismiss them. Empty if no linters ran
     /// or none reported anything.
     pub linter_findings: &'a [Finding],
+    /// Free-form repo-author guidelines from `.auto_review.yaml`. Rendered
+    /// as a top-level section so the model treats them as authoritative
+    /// project conventions. Empty when no config is present.
+    pub guidelines: &'a str,
 }
 
 const SYSTEM_PROMPT: &str = "\
@@ -60,6 +64,14 @@ pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
     out.push_str(" — ");
     out.push_str(inputs.pr_title);
     out.push('\n');
+
+    if !inputs.guidelines.is_empty() {
+        out.push_str("\nRepository guidelines (from .auto_review.yaml):\n");
+        out.push_str(inputs.guidelines);
+        if !inputs.guidelines.ends_with('\n') {
+            out.push('\n');
+        }
+    }
 
     if !inputs.pr_body.is_empty() {
         out.push_str("\nPR description:\n");
@@ -116,6 +128,7 @@ mod tests {
             diff,
             changed_files: files,
             linter_findings: findings,
+            guidelines: "",
         }
     }
 
@@ -162,8 +175,32 @@ mod tests {
             diff: "d",
             changed_files: &files,
             linter_findings: &[],
+            guidelines: "",
         });
         assert!(p.contains("t"));
+    }
+
+    #[test]
+    fn includes_repository_guidelines_when_provided() {
+        let files: Vec<String> = vec![];
+        let p = render_review_prompt(&ReviewPromptInputs {
+            repo_full_name: "x/y",
+            pr_number: 1,
+            pr_title: "t",
+            pr_body: "",
+            diff: "d",
+            changed_files: &files,
+            linter_findings: &[],
+            guidelines: "Always prefer total functions over partial.",
+        });
+        assert!(p.contains("Repository guidelines"));
+        assert!(p.contains("total functions"));
+    }
+
+    #[test]
+    fn omits_guidelines_section_when_empty() {
+        let p = render_review_prompt(&sample("d", &[], &[]));
+        assert!(!p.contains("Repository guidelines"));
     }
 
     #[test]

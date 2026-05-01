@@ -162,7 +162,7 @@ pub async fn run_review_job(
     }
 
     let lint_outcome = prepare_and_lint(forgejo, forgejo_base, forgejo_token, &job).await;
-    let (findings, ignored_paths) = match lint_outcome {
+    let (findings, ignored_paths, guidelines) = match lint_outcome {
         Ok(LintPhaseOutput {
             skipped_by_config: true,
             ..
@@ -190,14 +190,15 @@ pub async fn run_review_job(
         Ok(LintPhaseOutput {
             findings,
             ignored_paths,
+            guidelines,
             ..
         }) => {
             tracing::debug!(count = findings.len(), "linter findings collected");
-            (findings, ignored_paths)
+            (findings, ignored_paths, guidelines)
         }
         Err(e) => {
             tracing::warn!(error = %e, "lint phase failed; continuing without findings");
-            (Vec::new(), GlobSet::empty())
+            (Vec::new(), GlobSet::empty(), String::new())
         }
     };
 
@@ -212,6 +213,7 @@ pub async fn run_review_job(
         &job.pr_body,
         &findings,
         &ignored_paths,
+        &guidelines,
     )
     .await;
 
@@ -265,6 +267,7 @@ struct LintPhaseOutput {
     findings: Vec<Finding>,
     skipped_by_config: bool,
     ignored_paths: GlobSet,
+    guidelines: String,
 }
 
 async fn prepare_and_lint(
@@ -279,11 +282,13 @@ async fn prepare_and_lint(
     let workspace = prepare_workspace(base, token, &job.owner, &job.repo, &job.head_sha).await?;
     let config = load_repo_config(workspace.path());
     let ignored_paths = build_glob_set(&config.ignored_paths);
+    let guidelines = config.guidelines.clone();
     if !config.enabled {
         return Ok(LintPhaseOutput {
             findings: Vec::new(),
             skipped_by_config: true,
             ignored_paths,
+            guidelines,
         });
     }
     let findings = lint_workspace_with(workspace.path(), &files, &config.disabled_tools).await;
@@ -291,6 +296,7 @@ async fn prepare_and_lint(
         findings,
         skipped_by_config: false,
         ignored_paths,
+        guidelines,
     })
 }
 

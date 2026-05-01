@@ -34,6 +34,7 @@ pub async fn review_pull_request(
     pr_body: &str,
     linter_findings: &[Finding],
     ignored_paths: &GlobSet,
+    guidelines: &str,
 ) -> Result<ReviewOutcome, ReviewError> {
     let raw_diff = forgejo.get_pr_diff(owner, repo, pr_number).await?;
     let pruned = filter_diff_paths(&raw_diff, ignored_paths);
@@ -58,6 +59,7 @@ pub async fn review_pull_request(
         diff: &diff,
         changed_files: &changed_filenames,
         linter_findings,
+        guidelines,
     });
 
     let output =
@@ -180,6 +182,7 @@ mod tests {
             "body",
             &[],
             &GlobSet::empty(),
+            "",
         )
         .await
         .expect("review ok");
@@ -212,6 +215,7 @@ mod tests {
             "b",
             &[],
             &GlobSet::empty(),
+            "",
         )
         .await
         .expect_err("err");
@@ -261,6 +265,7 @@ mod tests {
             "b",
             &[],
             &GlobSet::empty(),
+            "",
         )
         .await
         .expect("ok");
@@ -315,6 +320,7 @@ mod tests {
             "b",
             &findings,
             &GlobSet::empty(),
+            "",
         )
         .await
         .expect("ok");
