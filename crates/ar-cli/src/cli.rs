@@ -256,6 +256,14 @@ pub struct ValidateConfigArgs {
     /// containing such files).
     #[arg(required = true)]
     pub paths: Vec<std::path::PathBuf>,
+
+    /// Reject unknown top-level keys. Catches typos like
+    /// `enabld:` (missing `e`) that the runtime loader silently
+    /// ignores. Recommended for pre-commit hooks; default off
+    /// because forward-compatible configs (a config written for
+    /// a newer auto_review version) would fail.
+    #[arg(long)]
+    pub strict: bool,
 }
 
 #[derive(clap::Args, Debug)]

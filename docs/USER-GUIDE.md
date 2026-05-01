@@ -156,7 +156,14 @@ auto_review validate-config .auto_review.yaml
 ```
 
 A failing validation exits non-zero, so this fits cleanly in a
-pre-commit hook.
+pre-commit hook. Add `--strict` to also reject unknown top-level
+keys — that catches typos like `enabld:` (missing `e`) that the
+permissive runtime loader silently ignores. Recommended for
+pre-commit hooks where a typo would silently disable a setting:
+
+```bash
+auto_review validate-config --strict .auto_review.yaml
+```
 
 ## What the bot can't do
 

@@ -977,6 +977,34 @@ default in-memory store to the SQLite-backed one.
   every name appears in the catalogue, so adding a new
   runner without updating the catalogue fails CI.
 
+#### validate-config --strict (M5)
+
+- `auto_review validate-config --strict <paths>...` now
+  rejects unknown top-level keys in `.auto_review.yaml`.
+  The runtime loader stays permissive (forward-compat:
+  a config written for a newer auto_review version
+  shouldn't break older deploys), but the validator
+  command is opt-in strict so pre-commit hooks catch
+  silent typos.
+- Concrete win: `enabld: true` (missing `e` in `enabled`)
+  parses as the default value under the runtime loader,
+  silently disabling the setting the operator thought
+  they configured. `--strict` errors out with the typo'd
+  key named and the valid-key list shown:
+  ```
+  ✗ .auto_review.yaml: unknown top-level key(s): enabld;
+    valid keys are: enabled, guidelines, ignored_paths,
+    disabled_tools, mode, pre_merge_checks
+  ```
+- New `parse_repo_config_strict` + `RepoConfigStrictError`
+  in `ar-review`. A contract test
+  (`strict_allowlist_matches_struct_fields`) round-trips a
+  default `RepoConfig` through serde and asserts the
+  serialised key set equals the strict allow-list, so
+  adding a field without updating the allow-list fails CI.
+- USER-GUIDE.md repo-config section recommends `--strict`
+  for pre-commit hooks; CHANGELOG entry under M5.
+
 #### validate-config subcommand (M5)
 
 - `auto_review validate-config <paths>...` parses one or more

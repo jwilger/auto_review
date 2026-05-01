@@ -941,7 +941,27 @@ pub fn validate_config(args: ValidateConfigArgs) -> Result<()> {
                 continue;
             }
         };
-        match ar_review::parse_repo_config(&body) {
+        let parsed = if args.strict {
+            ar_review::parse_repo_config_strict(&body).map_err(|e| match e {
+                ar_review::RepoConfigStrictError::Parse(yaml_err) => {
+                    if let Some(loc) = yaml_err.location() {
+                        format!("line {}, column {}: {yaml_err}", loc.line(), loc.column())
+                    } else {
+                        yaml_err.to_string()
+                    }
+                }
+                other => other.to_string(),
+            })
+        } else {
+            ar_review::parse_repo_config(&body).map_err(|e| {
+                if let Some(loc) = e.location() {
+                    format!("line {}, column {}: {e}", loc.line(), loc.column())
+                } else {
+                    e.to_string()
+                }
+            })
+        };
+        match parsed {
             Ok(cfg) => {
                 println!(
                     "✓ {}: enabled={}, ignored={}, disabled_tools={}",
@@ -951,12 +971,7 @@ pub fn validate_config(args: ValidateConfigArgs) -> Result<()> {
                     cfg.disabled_tools.len()
                 );
             }
-            Err(e) => {
-                let detail = if let Some(loc) = e.location() {
-                    format!("line {}, column {}: {e}", loc.line(), loc.column())
-                } else {
-                    e.to_string()
-                };
+            Err(detail) => {
                 failures.push((file.clone(), detail));
             }
         }
@@ -1525,6 +1540,7 @@ auto_review_reviews_completed_count 10
         .unwrap();
         let args = ValidateConfigArgs {
             paths: vec![dir.path().to_path_buf()],
+            strict: false,
         };
         validate_config(args).expect("valid config");
     }
@@ -1539,8 +1555,34 @@ auto_review_reviews_completed_count 10
         .unwrap();
         let args = ValidateConfigArgs {
             paths: vec![dir.path().to_path_buf()],
+            strict: false,
         };
         let err = validate_config(args).expect_err("malformed should fail");
+        assert!(err.to_string().contains("failed validation"));
+    }
+
+    #[test]
+    fn validate_config_strict_rejects_unknown_top_level_keys() {
+        let dir = tempfile::tempdir().unwrap();
+        // Typo: `enabld` instead of `enabled`.
+        std::fs::write(
+            dir.path().join(".auto_review.yaml"),
+            "enabld: true\n",
+        )
+        .unwrap();
+        // Permissive mode (default): silently parses, returns Ok.
+        let args = ValidateConfigArgs {
+            paths: vec![dir.path().to_path_buf()],
+            strict: false,
+        };
+        validate_config(args).expect("permissive should accept");
+
+        // Strict mode: fails with the typo'd key in the error.
+        let args = ValidateConfigArgs {
+            paths: vec![dir.path().to_path_buf()],
+            strict: true,
+        };
+        let err = validate_config(args).expect_err("strict should reject");
         assert!(err.to_string().contains("failed validation"));
     }
 
@@ -1549,6 +1591,7 @@ auto_review_reviews_completed_count 10
         let dir = tempfile::tempdir().unwrap();
         let args = ValidateConfigArgs {
             paths: vec![dir.path().to_path_buf()],
+            strict: false,
         };
         let err = validate_config(args).expect_err("empty dir should fail");
         assert!(err.to_string().contains("no .auto_review.yaml"));

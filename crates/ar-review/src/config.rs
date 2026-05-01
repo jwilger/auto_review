@@ -98,6 +98,60 @@ pub fn parse_repo_config(yaml: &str) -> Result<RepoConfig, serde_yaml::Error> {
     serde_yaml::from_str::<RepoConfig>(yaml)
 }
 
+/// Allow-list of every top-level key the loader recognizes. Kept
+/// in sync with [`RepoConfig`] manually — the contract test
+/// `strict_allowlist_matches_struct_fields` in `config.rs` pins
+/// the relationship.
+const KNOWN_KEYS: &[&str] = &[
+    "enabled",
+    "guidelines",
+    "ignored_paths",
+    "disabled_tools",
+    "mode",
+    "pre_merge_checks",
+];
+
+/// Strict parser: surfaces unknown top-level keys as errors so a
+/// typo like `enabld: true` (missing `e`) is caught at validation
+/// time instead of silently parsing as default values.
+///
+/// Layered over [`parse_repo_config`] rather than replacing it
+/// because the runtime loader is intentionally permissive — a
+/// repo that's pinned to an older auto_review version shouldn't
+/// break when someone adds a forward-compat field. The strict
+/// check is opt-in via `auto_review validate-config --strict`.
+pub fn parse_repo_config_strict(yaml: &str) -> Result<RepoConfig, RepoConfigStrictError> {
+    // First: parse generically and inspect top-level keys.
+    let raw: serde_yaml::Value =
+        serde_yaml::from_str(yaml).map_err(RepoConfigStrictError::Parse)?;
+    if let Some(map) = raw.as_mapping() {
+        let mut unknown: Vec<String> = Vec::new();
+        for (k, _) in map {
+            if let Some(key_str) = k.as_str() {
+                if !KNOWN_KEYS.contains(&key_str) {
+                    unknown.push(key_str.to_string());
+                }
+            }
+        }
+        if !unknown.is_empty() {
+            unknown.sort();
+            return Err(RepoConfigStrictError::UnknownKeys(unknown));
+        }
+    }
+    // Then: defer to the permissive parser for value-level errors.
+    parse_repo_config(yaml).map_err(RepoConfigStrictError::Parse)
+}
+
+#[derive(Debug, thiserror::Error)]
+pub enum RepoConfigStrictError {
+    #[error("yaml: {0}")]
+    Parse(#[from] serde_yaml::Error),
+    #[error("unknown top-level key(s): {}; valid keys are: {}",
+        .0.join(", "),
+        KNOWN_KEYS.join(", "))]
+    UnknownKeys(Vec<String>),
+}
+
 /// Load the repo-level config from a cloned workspace. Returns
 /// `RepoConfig::default()` if no config file is present or parsing fails;
 /// in the latter case, a warning is logged.
@@ -214,6 +268,65 @@ disabled_tools:
         .unwrap();
         let cfg = load_repo_config(dir.path());
         assert_eq!(cfg, RepoConfig::default());
+    }
+
+    /// Contract test: the `KNOWN_KEYS` allow-list must match the
+    /// fields on `RepoConfig` exactly. Adding a field to the
+    /// struct without updating `KNOWN_KEYS` would make
+    /// `parse_repo_config_strict` reject legitimate configs.
+    #[test]
+    fn strict_allowlist_matches_struct_fields() {
+        // Round-trip a default config through serde_yaml as JSON
+        // (which exposes field names) and confirm every key is in
+        // the allow-list.
+        let cfg = RepoConfig::default();
+        let value = serde_yaml::to_value(&cfg).unwrap();
+        let map = value.as_mapping().unwrap();
+        let serialised: std::collections::BTreeSet<&str> = map
+            .iter()
+            .filter_map(|(k, _)| k.as_str())
+            .collect();
+        let allowed: std::collections::BTreeSet<&str> = KNOWN_KEYS.iter().copied().collect();
+        assert_eq!(
+            serialised, allowed,
+            "RepoConfig fields and KNOWN_KEYS allow-list have drifted"
+        );
+    }
+
+    #[test]
+    fn strict_parses_known_config_cleanly() {
+        let yaml = "enabled: true\nignored_paths:\n  - vendor/**\n";
+        let cfg = parse_repo_config_strict(yaml).expect("ok");
+        assert!(cfg.enabled);
+        assert_eq!(cfg.ignored_paths, vec!["vendor/**"]);
+    }
+
+    #[test]
+    fn strict_rejects_typo_in_top_level_key() {
+        // Missing 'e' in 'enabled'.
+        let yaml = "enabld: true\n";
+        let err = parse_repo_config_strict(yaml).expect_err("should fail");
+        let msg = format!("{err}");
+        assert!(msg.contains("enabld"), "{msg}");
+        assert!(msg.contains("valid keys"), "{msg}");
+    }
+
+    #[test]
+    fn strict_lists_multiple_unknown_keys_alphabetically() {
+        let yaml = "ignord: x\nbogus: 1\n";
+        let err = parse_repo_config_strict(yaml).expect_err("should fail");
+        let msg = format!("{err}");
+        // Sorted alphabetically.
+        let bogus_pos = msg.find("bogus").expect("bogus");
+        let ignord_pos = msg.find("ignord").expect("ignord");
+        assert!(bogus_pos < ignord_pos, "{msg}");
+    }
+
+    #[test]
+    fn strict_propagates_value_level_errors_through_serde() {
+        let yaml = "enabled: not_a_bool\n";
+        let err = parse_repo_config_strict(yaml).expect_err("should fail");
+        assert!(matches!(err, RepoConfigStrictError::Parse(_)));
     }
 
     #[test]
