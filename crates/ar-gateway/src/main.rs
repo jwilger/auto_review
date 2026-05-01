@@ -59,6 +59,36 @@ async fn main() -> Result<()> {
         );
     }
 
+    // Bot identity: read once and validate up-front so the poller
+    // and the chat handler see the same values. AR_BOT_LOGIN gates
+    // self-loop detection (`is_bot_self`); an empty value would
+    // never match any Forgejo sender and the bot would reply to
+    // its own comments — a real loop bomb. AR_BOT_NAME is the
+    // mention parser's `@<name>` token; an empty value would match
+    // every `@` and fire on every PR thread mention, also bad.
+    let bot_login = match env::var("AR_BOT_LOGIN") {
+        Ok(v) if v.trim().is_empty() => {
+            anyhow::bail!(
+                "AR_BOT_LOGIN is set to an empty/whitespace value; \
+                 unset it to take the default (`auto_review`) or set \
+                 the bot's actual Forgejo login"
+            );
+        }
+        Ok(v) => v,
+        Err(_) => "auto_review".to_string(),
+    };
+    let bot_name = match env::var("AR_BOT_NAME") {
+        Ok(v) if v.trim().is_empty() => {
+            anyhow::bail!(
+                "AR_BOT_NAME is set to an empty/whitespace value; \
+                 unset it to inherit AR_BOT_LOGIN or set the @-handle \
+                 users mention"
+            );
+        }
+        Ok(v) => v,
+        Err(_) => bot_login.clone(),
+    };
+
     let forgejo =
         Arc::new(ForgejoClient::new(&forgejo_base, &forgejo_token).context("forgejo client")?);
 
@@ -187,8 +217,6 @@ async fn main() -> Result<()> {
         .and_then(|s| s.parse::<u64>().ok())
         .unwrap_or(DEFAULT_POLL_INTERVAL.as_secs());
     if poll_interval_secs > 0 {
-        let bot_login = env::var("AR_BOT_LOGIN").unwrap_or_else(|_| "auto_review".into());
-        let bot_name = env::var("AR_BOT_NAME").unwrap_or_else(|_| bot_login.clone());
         let dispatcher_dyn: Arc<dyn ar_orchestrator::JobDispatcher> = dispatcher.clone();
         ChatPoller::new(
             forgejo.clone(),
@@ -203,8 +231,8 @@ async fn main() -> Result<()> {
         .spawn(Duration::from_secs(poll_interval_secs));
         tracing::info!(
             interval_secs = poll_interval_secs,
-            bot_login,
-            bot_name,
+            bot_login = %bot_login,
+            bot_name = %bot_name,
             "chat poller running"
         );
     } else {
@@ -216,11 +244,6 @@ async fn main() -> Result<()> {
         llm: llm_router.clone(),
         learnings,
     };
-
-    // Same bot identity used by the poller above. Falls back to
-    // `auto_review` when the operator hasn't customised it.
-    let bot_login = env::var("AR_BOT_LOGIN").unwrap_or_else(|_| "auto_review".into());
-    let bot_name = env::var("AR_BOT_NAME").unwrap_or_else(|_| bot_login.clone());
 
     // Wire the readiness probe to the same Forgejo client the chat
     // handler uses. The TTL (default 10s) is tuneable via env so
