@@ -1,0 +1,17 @@
+apiVersion: v2
+name: auto-review
+description: AI code review for Forgejo pull requests.
+type: application
+version: 0.0.1
+appVersion: "0.0.1"
+keywords:
+  - forgejo
+  - code-review
+  - ai
+  - llm
+home: https://codeberg.org/jwilger/auto_review
+sources:
+  - https://codeberg.org/jwilger/auto_review
+maintainers:
+  - name: John Wilger
+    url: https://codeberg.org/jwilger

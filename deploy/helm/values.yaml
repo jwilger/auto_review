@@ -1,0 +1,78 @@
+# Default values for the auto-review Helm chart.
+
+image:
+  repository: codeberg.org/jwilger/auto_review
+  tag: ""  # defaults to .Chart.AppVersion
+  pullPolicy: IfNotPresent
+
+replicaCount: 1
+
+# Required configuration. Provide as Helm --set values, in a values
+# override file, or via secretRef (recommended for tokens).
+config:
+  forgejoBaseUrl: ""        # e.g. https://forgejo.example.com
+  llmBaseUrl: ""            # e.g. http://ollama:11434 or https://api.openai.com
+  llmReasoningModel: "qwen2.5-coder:32b"
+  llmEmbeddingModel: ""     # optional; enables RAG
+  llmCheapModel: ""         # optional; enables LLM triage + verifier
+
+# Secrets. Either set inline (NOT recommended for production) or set
+# secretRef to the name of an existing Secret carrying the same keys.
+# When secretRef is set, the inline values are ignored.
+secrets:
+  forgejoToken: ""
+  webhookSecret: ""
+  llmApiKey: ""
+  secretRef: ""
+
+service:
+  type: ClusterIP
+  port: 8080
+  # When using an Ingress, point the Forgejo webhook at the Ingress
+  # host. When exposing directly via NodePort/LoadBalancer, point at
+  # the resulting external endpoint.
+
+ingress:
+  enabled: false
+  className: ""
+  annotations: {}
+  hosts:
+    - host: reviewer.example.com
+      paths:
+        - path: /
+          pathType: Prefix
+  tls: []
+
+resources:
+  requests:
+    cpu: 200m
+    memory: 256Mi
+  limits:
+    cpu: 1000m
+    memory: 1Gi
+
+# Pod security: run as non-root, drop capabilities. The image
+# already creates a `auto` user; these settings reinforce.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 10001
+  fsGroup: 10001
+securityContext:
+  allowPrivilegeEscalation: false
+  readOnlyRootFilesystem: true
+  capabilities:
+    drop:
+      - ALL
+
+logging:
+  rustLog: "info,ar_gateway=debug"
+
+# emptyDir for the workspace clones. Persistent storage isn't
+# required — each review uses a fresh tempdir.
+ephemeralStorage:
+  enabled: true
+  sizeLimit: 5Gi
+
+nodeSelector: {}
+tolerations: []
+affinity: {}

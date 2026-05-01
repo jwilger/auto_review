@@ -1,0 +1,95 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ include "auto-review.fullname" . }}
+  labels:
+    {{- include "auto-review.labels" . | nindent 4 }}
+spec:
+  replicas: {{ .Values.replicaCount }}
+  selector:
+    matchLabels:
+      {{- include "auto-review.selectorLabels" . | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "auto-review.selectorLabels" . | nindent 8 }}
+    spec:
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      containers:
+        - name: gateway
+          image: "{{ .Values.image.repository }}:{{ .Values.image.tag | default .Chart.AppVersion }}"
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          ports:
+            - name: http
+              containerPort: 8080
+              protocol: TCP
+          env:
+            - name: AR_GATEWAY_BIND
+              value: "0.0.0.0:8080"
+            - name: RUST_LOG
+              value: {{ .Values.logging.rustLog | quote }}
+            - name: FORGEJO_BASE_URL
+              value: {{ required "config.forgejoBaseUrl is required" .Values.config.forgejoBaseUrl | quote }}
+            - name: LLM_BASE_URL
+              value: {{ required "config.llmBaseUrl is required" .Values.config.llmBaseUrl | quote }}
+            - name: LLM_REASONING_MODEL
+              value: {{ .Values.config.llmReasoningModel | quote }}
+            {{- if .Values.config.llmEmbeddingModel }}
+            - name: LLM_EMBEDDING_MODEL
+              value: {{ .Values.config.llmEmbeddingModel | quote }}
+            {{- end }}
+            {{- if .Values.config.llmCheapModel }}
+            - name: LLM_CHEAP_MODEL
+              value: {{ .Values.config.llmCheapModel | quote }}
+            {{- end }}
+          envFrom:
+            - secretRef:
+                name: {{ include "auto-review.secretName" . }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          readinessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+            initialDelaySeconds: 2
+            periodSeconds: 5
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          volumeMounts:
+            - name: workspace
+              mountPath: /tmp
+            {{- if .Values.securityContext.readOnlyRootFilesystem }}
+            - name: cargo-cache
+              mountPath: /home/auto/.cargo
+            {{- end }}
+      volumes:
+        - name: workspace
+          {{- if .Values.ephemeralStorage.enabled }}
+          emptyDir:
+            sizeLimit: {{ .Values.ephemeralStorage.sizeLimit }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        {{- if .Values.securityContext.readOnlyRootFilesystem }}
+        - name: cargo-cache
+          emptyDir: {}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
