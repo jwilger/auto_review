@@ -9,6 +9,7 @@
 //! coordinator over them.
 
 pub mod config;
+pub mod context_builder;
 pub mod diff;
 pub mod error;
 pub mod heal;
@@ -22,6 +23,7 @@ pub mod triage;
 pub mod workspace;
 
 pub use config::{load_repo_config, RepoConfig};
+pub use context_builder::{build_review_context, ContextBuildError};
 pub use diff::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 pub use error::ReviewError;
 pub use globset::GlobSet;
