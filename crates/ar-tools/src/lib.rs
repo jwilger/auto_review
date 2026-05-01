@@ -36,6 +36,7 @@ pub mod sqlfluff;
 pub mod swiftlint;
 pub mod taplo;
 pub mod trivy;
+pub mod typos;
 pub mod vale;
 pub mod yamllint;
 

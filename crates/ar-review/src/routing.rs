@@ -29,6 +29,7 @@ use ar_tools::sqlfluff::SqlfluffRunner;
 use ar_tools::swiftlint::SwiftLintRunner;
 use ar_tools::taplo::TaploRunner;
 use ar_tools::trivy::TrivyRunner;
+use ar_tools::typos::TyposRunner;
 use ar_tools::vale::ValeRunner;
 use ar_tools::yamllint::YamlLintRunner;
 use ar_tools::Finding;
@@ -123,6 +124,13 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
     // surfacing for those that do.
     if !surviving.is_empty() {
         runners.push(Box::new(AstGrepRunner));
+    }
+
+    // Always run typos: catches misspellings in identifier names,
+    // comments, and string literals across every source file.
+    // Distinct from vale (markdown prose only).
+    if !surviving.is_empty() {
+        runners.push(Box::new(TyposRunner));
     }
 
     if surviving.iter().any(|f| has_python_ext(&f.filename)) {
@@ -420,7 +428,8 @@ mod tests {
                 "osv-scanner",
                 "ruff",
                 "semgrep",
-                "trivy"
+                "trivy",
+                "typos"
             ]
         );
     }
@@ -446,7 +455,8 @@ mod tests {
                     "osv-scanner",
                     "rubocop",
                     "semgrep",
-                    "trivy"
+                    "trivy",
+                    "typos"
                 ],
                 "name = {name}"
             );
@@ -467,7 +477,8 @@ mod tests {
                 "golangci-lint",
                 "osv-scanner",
                 "semgrep",
-                "trivy"
+                "trivy",
+                "typos"
             ]
         );
     }
@@ -486,7 +497,8 @@ mod tests {
                 "osv-scanner",
                 "semgrep",
                 "shellcheck",
-                "trivy"
+                "trivy",
+                "typos"
             ]
         );
     }
@@ -506,7 +518,8 @@ mod tests {
                     "hadolint",
                     "osv-scanner",
                     "semgrep",
-                    "trivy"
+                    "trivy",
+                    "typos"
                 ],
                 "name = {name}"
             );
@@ -528,6 +541,7 @@ mod tests {
                 "osv-scanner",
                 "semgrep",
                 "trivy",
+                "typos",
                 "vale"
             ]
         );
@@ -562,6 +576,7 @@ mod tests {
                 "semgrep",
                 "shellcheck",
                 "trivy",
+                "typos",
                 "vale"
             ]
         );
@@ -588,6 +603,7 @@ mod tests {
                     "osv-scanner",
                     "semgrep",
                     "trivy",
+                    "typos",
                     "yamllint"
                 ],
                 "name = {name}"
@@ -610,6 +626,7 @@ mod tests {
                 "osv-scanner",
                 "semgrep",
                 "trivy",
+                "typos",
                 "yamllint"
             ]
         );
@@ -640,7 +657,8 @@ mod tests {
                     "osv-scanner",
                     "oxlint",
                     "semgrep",
-                    "trivy"
+                    "trivy",
+                    "typos"
                 ],
                 "name = {name}"
             );
@@ -663,7 +681,8 @@ mod tests {
                 "osv-scanner",
                 "semgrep",
                 "taplo",
-                "trivy"
+                "trivy",
+                "typos"
             ]
         );
     }
@@ -688,7 +707,8 @@ mod tests {
                     "gitleaks",
                     "osv-scanner",
                     "semgrep",
-                    "trivy"
+                    "trivy",
+                    "typos"
                 ],
                 "name = {name}"
             );
@@ -710,7 +730,8 @@ mod tests {
                     "gitleaks",
                     "osv-scanner",
                     "semgrep",
-                    "trivy"
+                    "trivy",
+                    "typos"
                 ],
                 "name = {name}"
             );
@@ -732,7 +753,8 @@ mod tests {
                     "osv-scanner",
                     "semgrep",
                     "taplo",
-                    "trivy"
+                    "trivy",
+                    "typos"
                 ],
                 "name = {name}"
             );
@@ -754,7 +776,8 @@ mod tests {
                     "osv-scanner",
                     "phpstan",
                     "semgrep",
-                    "trivy"
+                    "trivy",
+                    "typos"
                 ],
                 "name = {name}"
             );
@@ -775,7 +798,8 @@ mod tests {
                 "gitleaks",
                 "osv-scanner",
                 "semgrep",
-                "trivy"
+                "trivy",
+                "typos"
             ]
         );
     }
@@ -794,7 +818,8 @@ mod tests {
                 "osv-scanner",
                 "semgrep",
                 "swiftlint",
-                "trivy"
+                "trivy",
+                "typos"
             ]
         );
     }
@@ -819,7 +844,8 @@ mod tests {
                     "osv-scanner",
                     "semgrep",
                     "sqlfluff",
-                    "trivy"
+                    "trivy",
+                    "typos"
                 ],
                 "name = {name}"
             );
@@ -890,7 +916,8 @@ mod tests {
                 "ruff",
                 "semgrep",
                 "shellcheck",
-                "trivy"
+                "trivy",
+                "typos"
             ]
         );
     }

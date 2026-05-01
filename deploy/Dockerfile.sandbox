@@ -17,8 +17,8 @@
 #   actionlint, ast-grep, bandit, biome, buf, checkov, dotenv-linter,
 #   eslint, gitleaks, golangci-lint, hadolint, kubeconform,
 #   markdownlint, mypy, osv-scanner, oxlint, phpstan, rubocop, ruff,
-#   semgrep, shellcheck, sqlfluff, swiftlint, taplo, trivy, vale,
-#   yamllint
+#   semgrep, shellcheck, sqlfluff, swiftlint, taplo, trivy, typos,
+#   vale, yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -97,6 +97,8 @@ RUN set -eux; \
         && rm -rf /tmp/swiftlint /tmp/swiftlint.zip; \
     curl -fsSL "https://github.com/bufbuild/buf/releases/latest/download/buf-Linux-x86_64" \
         -o /usr/local/bin/buf; \
+    curl -fsSL "https://github.com/crate-ci/typos/releases/latest/download/typos-v1.27.0-x86_64-unknown-linux-musl.tar.gz" \
+        | tar -xz -C /usr/local/bin ./typos; \
     chmod +x /usr/local/bin/*
 
 # Linters never need to write to the rootfs.
