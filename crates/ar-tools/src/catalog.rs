@@ -318,6 +318,62 @@ mod tests {
         assert_eq!(linter_catalogue().len(), 44);
     }
 
+    /// Cross-file contract test: every catalogue entry (except
+    /// the documented `nilaway` exception, which has no release
+    /// binary) must appear in `deploy/Dockerfile.sandbox`. Adding
+    /// a new linter to the catalogue without bundling it in the
+    /// production sandbox image would mean operators with
+    /// `AR_SANDBOX_IMAGE=` set silently miss the new linter at
+    /// runtime.
+    #[test]
+    fn deploy_dockerfile_sandbox_bundles_every_catalogue_entry() {
+        // Some linters install under a different name than the
+        // catalogue lists (pip / npm package vs binary name).
+        // Keep this map small — the whole point of the test is
+        // to catch drift, not paper over it.
+        const ALIASES: &[(&str, &str)] = &[
+            // `vint` is the binary; `vim-vint` is the pip package.
+            ("vint", "vim-vint"),
+            // `markdownlint` is the binary; `markdownlint-cli`
+            // is the npm package.
+            ("markdownlint", "markdownlint-cli"),
+        ];
+        const KNOWN_EXCEPTIONS: &[&str] = &[
+            // `nilaway` requires `go install` and has no release
+            // binary. Operators wanting it derive a new image
+            // with a Go toolchain. Documented in the Dockerfile.
+            "nilaway",
+        ];
+
+        let dockerfile_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("deploy/Dockerfile.sandbox");
+        let dockerfile = std::fs::read_to_string(&dockerfile_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", dockerfile_path.display()));
+
+        let mut missing = Vec::new();
+        for entry in linter_catalogue() {
+            if KNOWN_EXCEPTIONS.contains(&entry.name) {
+                continue;
+            }
+            let canonical = ALIASES
+                .iter()
+                .find(|(k, _)| *k == entry.name)
+                .map(|(_, v)| *v)
+                .unwrap_or(entry.name);
+            if !dockerfile.contains(canonical) {
+                missing.push(format!("{} (looking for `{}`)", entry.name, canonical));
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "catalogue entries missing from Dockerfile.sandbox: {missing:?}"
+        );
+    }
+
     #[test]
     fn all_entries_carry_descriptions_and_languages() {
         for entry in linter_catalogue() {

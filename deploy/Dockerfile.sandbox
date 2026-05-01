@@ -2,7 +2,9 @@
 #
 # auto_review sandbox image.
 #
-# Bundles the 12 linter binaries the review pipeline currently invokes,
+# Bundles 43 of the 44 linter binaries the review pipeline can invoke
+# (every one in `ar_tools::catalog::linter_catalogue()` except
+# `nilaway`, which has no release binary; see the note on lines 93+),
 # so they can be exec'd by `podman run --rm --network=none --read-only ...`
 # from the gateway. Push this somewhere podman on the gateway host can
 # pull (`docker.io/...`, `ghcr.io/...`, or your private registry) and

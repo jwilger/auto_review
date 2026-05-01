@@ -1096,6 +1096,24 @@ default in-memory store to the SQLite-backed one.
   forget-learning behavioural (drop existing record,
   unknown-id errors clearly).
 
+#### Sandbox image / catalogue contract test
+
+- Stale doc-comment in `deploy/Dockerfile.sandbox` said the
+  image bundled "12 linter binaries" — actually 43 (every
+  catalogue entry except `nilaway`, which has no release
+  binary). Updated to the accurate count + cross-reference
+  to `ar_tools::catalog::linter_catalogue()` so the
+  invariant is discoverable from either side.
+- New contract test
+  (`deploy_dockerfile_sandbox_bundles_every_catalogue_entry`)
+  walks the catalogue and asserts each non-excepted entry
+  appears in `Dockerfile.sandbox`. Two aliases handle
+  package-vs-binary name differences (`vint` →
+  `vim-vint` pip, `markdownlint` → `markdownlint-cli`
+  npm); `nilaway` is the documented exception. Adding a
+  catalogue entry without bundling it in the production
+  sandbox image now fails CI.
+
 #### Grafana dashboard: Quality and capacity row
 
 - New row + two panels covering the recently-shipped quality
