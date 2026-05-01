@@ -6,4 +6,4 @@
 
 pub mod symbols;
 
-pub use symbols::{extract_rust_symbols, ExtractError, Symbol, SymbolKind};
+pub use symbols::{extract_python_symbols, extract_rust_symbols, ExtractError, Symbol, SymbolKind};

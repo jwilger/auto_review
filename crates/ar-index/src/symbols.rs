@@ -69,27 +69,45 @@ fn rust_query() -> Result<&'static Query, ExtractError> {
     entry.as_ref().map_err(|e| ExtractError::Query(e.clone()))
 }
 
-/// Extract top-level symbols from a Rust source file.
-pub fn extract_rust_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
+const PYTHON_QUERY_SOURCE: &str = r#"
+(function_definition  name: (identifier) @name)         @function
+(class_definition     name: (identifier) @name)         @struct
+(decorated_definition (function_definition name: (identifier) @name)) @function
+(decorated_definition (class_definition    name: (identifier) @name)) @struct
+"#;
+
+fn python_query() -> Result<&'static Query, ExtractError> {
+    static QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
+    let entry = QUERY.get_or_init(|| {
+        let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
+        Query::new(&lang, PYTHON_QUERY_SOURCE).map_err(|e| e.to_string())
+    });
+    entry.as_ref().map_err(|e| ExtractError::Query(e.clone()))
+}
+
+/// Extract top-level symbols from a Python source file. `class` defs map
+/// to [`SymbolKind::Struct`] for cross-language uniformity (the
+/// downstream embedder doesn't care about Python-vs-Rust nomenclature).
+pub fn extract_python_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
+    extract_with(source, tree_sitter_python::LANGUAGE.into(), python_query()?)
+}
+
+fn extract_with(
+    source: &str,
+    lang: tree_sitter::Language,
+    query: &Query,
+) -> Result<Vec<Symbol>, ExtractError> {
     let mut parser = Parser::new();
-    let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
     parser
         .set_language(&lang)
         .map_err(|_| ExtractError::Language)?;
     let tree = parser.parse(source, None).ok_or(ExtractError::Parse)?;
     let root = tree.root_node();
-
-    let query = rust_query()?;
     let mut cursor = QueryCursor::new();
     let mut matches = cursor.matches(query, root, source.as_bytes());
-
     let capture_names = query.capture_names();
 
     let mut out = Vec::new();
-    // QueryMatches::next() is an inherent method (streaming-iterator
-    // semantics — items borrow from the cursor); a `for` loop would
-    // require std::iter::Iterator, which it deliberately doesn't
-    // implement. Silence clippy's tempting suggestion accordingly.
     #[allow(clippy::while_let_on_iterator)]
     while let Some(m) = matches.next() {
         let mut kind: Option<SymbolKind> = None;
@@ -118,8 +136,12 @@ pub fn extract_rust_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
             });
         }
     }
-
     Ok(out)
+}
+
+/// Extract top-level symbols from a Rust source file.
+pub fn extract_rust_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
+    extract_with(source, tree_sitter_rust::LANGUAGE.into(), rust_query()?)
 }
 
 fn kind_from_capture(cap_name: &str) -> Option<SymbolKind> {
@@ -243,6 +265,55 @@ pub type UserId = u64;
     #[test]
     fn empty_source_yields_zero_symbols() {
         let s = extract_rust_symbols("").expect("ok");
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn extracts_python_functions_and_classes() {
+        let src = "\
+def add(a, b):
+    return a + b
+
+class User:
+    def __init__(self, name):
+        self.name = name
+
+@dataclass
+class Config:
+    debug: bool = False
+";
+        let s = extract_python_symbols(src).expect("ok");
+        let n = names(&s);
+        assert!(n.contains(&"add"));
+        assert!(n.contains(&"User"));
+        assert!(n.contains(&"Config"));
+        assert!(n.contains(&"__init__"));
+        assert!(kinds(&s, "add").contains(&SymbolKind::Function));
+        assert!(kinds(&s, "User").contains(&SymbolKind::Struct));
+        // Decorated class should also map to Struct kind.
+        assert!(kinds(&s, "Config").contains(&SymbolKind::Struct));
+    }
+
+    #[test]
+    fn python_decorated_functions_count() {
+        let src = "\
+@property
+def value(self):
+    return self._value
+
+@staticmethod
+def helper():
+    pass
+";
+        let s = extract_python_symbols(src).expect("ok");
+        let n = names(&s);
+        assert!(n.contains(&"value"));
+        assert!(n.contains(&"helper"));
+    }
+
+    #[test]
+    fn python_empty_source_yields_zero_symbols() {
+        let s = extract_python_symbols("").expect("ok");
         assert!(s.is_empty());
     }
 
