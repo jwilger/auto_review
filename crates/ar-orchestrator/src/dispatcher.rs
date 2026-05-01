@@ -1,8 +1,9 @@
 use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullRequestEvent};
 use ar_llm::Router as LlmRouter;
 use ar_review::{
-    build_glob_set, build_review_context, lint_workspace_with, load_repo_config, pr_is_skippable,
-    prepare_workspace, review_pull_request, GlobSet, ReviewArgs, ReviewError, WorkspaceError,
+    build_glob_set, build_review_context, filter_reviewable, lint_workspace_with, load_repo_config,
+    pr_is_skippable, prepare_workspace, review_pull_request, triage_files_with_llm, GlobSet,
+    ReviewArgs, ReviewError, WorkspaceError,
 };
 use ar_tools::Finding;
 use async_trait::async_trait;
@@ -336,22 +337,49 @@ async fn prepare_and_lint(
             repo_context: String::new(),
         });
     }
-    let findings = lint_workspace_with(workspace.path(), &files, &config.disabled_tools).await;
-
-    // Build the RAG context (best-effort): walks the workspace,
-    // embeds symbols, queries top-K against the diff. Returns empty
-    // string when no Embedding tier is configured or the workspace
-    // has no extractable symbols.
+    // Fetch the diff once for both LLM triage and the RAG context
+    // build that follow. Failure here just means we skip those
+    // optional steps; the review still proceeds.
     let raw_diff = match forgejo
         .get_pr_diff(&job.owner, &job.repo, job.pr_number)
         .await
     {
         Ok(d) => d,
         Err(e) => {
-            tracing::warn!(error = %e, "diff fetch for context build failed; continuing");
+            tracing::warn!(error = %e, "diff fetch for triage/context failed; continuing");
             String::new()
         }
     };
+
+    // LLM triage (optional, opt-in via Cheap tier configuration):
+    // narrow the file list to those classified as Simple/Complex.
+    let files = if !raw_diff.is_empty() {
+        match triage_files_with_llm(llm, &files, &raw_diff).await {
+            Ok(Some(triage)) => {
+                let kept = filter_reviewable(&files, &triage);
+                tracing::info!(
+                    in_count = files.len(),
+                    out_count = kept.len(),
+                    "LLM triage filtered changed files"
+                );
+                kept
+            }
+            Ok(None) => files,
+            Err(e) => {
+                tracing::warn!(error = %e, "LLM triage failed; falling through to all files");
+                files
+            }
+        }
+    } else {
+        files
+    };
+
+    let findings = lint_workspace_with(workspace.path(), &files, &config.disabled_tools).await;
+
+    // Build the RAG context (best-effort): walks the workspace,
+    // embeds symbols, queries top-K against the diff. Returns empty
+    // string when no Embedding tier is configured or the workspace
+    // has no extractable symbols.
     let repo_context = if raw_diff.is_empty() {
         String::new()
     } else {
