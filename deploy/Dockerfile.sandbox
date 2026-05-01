@@ -17,7 +17,8 @@
 #   actionlint, ast-grep, bandit, biome, checkov, dotenv-linter,
 #   eslint, gitleaks, golangci-lint, hadolint, kubeconform,
 #   markdownlint, mypy, osv-scanner, oxlint, phpstan, rubocop, ruff,
-#   semgrep, shellcheck, sqlfluff, taplo, trivy, vale, yamllint
+#   semgrep, shellcheck, sqlfluff, swiftlint, taplo, trivy, vale,
+#   yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -89,6 +90,11 @@ RUN set -eux; \
         | tar -xz -C /usr/local/bin kubeconform; \
     curl -fsSL "https://github.com/errata-ai/vale/releases/latest/download/vale_3.7.1_Linux_64-bit.tar.gz" \
         | tar -xz -C /usr/local/bin vale; \
+    curl -fsSL "https://github.com/realm/SwiftLint/releases/latest/download/swiftlint_linux.zip" \
+        -o /tmp/swiftlint.zip \
+        && unzip -q /tmp/swiftlint.zip -d /tmp/swiftlint \
+        && mv /tmp/swiftlint/swiftlint /usr/local/bin/ \
+        && rm -rf /tmp/swiftlint /tmp/swiftlint.zip; \
     chmod +x /usr/local/bin/*
 
 # Linters never need to write to the rootfs.

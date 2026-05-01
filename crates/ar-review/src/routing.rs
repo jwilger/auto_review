@@ -25,6 +25,7 @@ use ar_tools::runner::{run_all, LinterRunner};
 use ar_tools::semgrep::SemgrepRunner;
 use ar_tools::shellcheck::ShellCheckRunner;
 use ar_tools::sqlfluff::SqlfluffRunner;
+use ar_tools::swiftlint::SwiftLintRunner;
 use ar_tools::taplo::TaploRunner;
 use ar_tools::trivy::TrivyRunner;
 use ar_tools::vale::ValeRunner;
@@ -220,6 +221,15 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         .collect();
     if !sql_files.is_empty() {
         runners.push(Box::new(SqlfluffRunner { files: sql_files }));
+    }
+
+    let swift_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| f.filename.ends_with(".swift"))
+        .map(|f| f.filename.clone())
+        .collect();
+    if !swift_files.is_empty() {
+        runners.push(Box::new(SwiftLintRunner { files: swift_files }));
     }
 
     let toml_files: Vec<String> = surviving
@@ -740,6 +750,25 @@ mod tests {
                 "name = {name}"
             );
         }
+    }
+
+    #[test]
+    fn swift_files_select_swiftlint() {
+        let files = vec![cf("Sources/Auth.swift", "modified")];
+        let runners = select_runners(&files);
+        let mut got = names(&runners);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "ast-grep",
+                "gitleaks",
+                "osv-scanner",
+                "semgrep",
+                "swiftlint",
+                "trivy"
+            ]
+        );
     }
 
     #[test]
