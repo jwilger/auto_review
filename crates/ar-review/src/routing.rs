@@ -5,6 +5,7 @@ use ar_forgejo::ChangedFile;
 use ar_sandbox::{DirectSandbox, Sandbox};
 use ar_tools::actionlint::ActionlintRunner;
 use ar_tools::ast_grep::AstGrepRunner;
+use ar_tools::bandit::BanditRunner;
 use ar_tools::biome::BiomeRunner;
 use ar_tools::checkov::CheckovRunner;
 use ar_tools::dotenv_linter::DotenvLinterRunner;
@@ -124,6 +125,7 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
     if surviving.iter().any(|f| has_python_ext(&f.filename)) {
         runners.push(Box::new(RuffRunner));
         runners.push(Box::new(MypyRunner));
+        runners.push(Box::new(BanditRunner));
     }
 
     if surviving.iter().any(|f| has_go_ext(&f.filename)) {
@@ -376,7 +378,7 @@ mod tests {
     }
 
     #[test]
-    fn python_files_select_ruff_and_mypy() {
+    fn python_files_select_ruff_mypy_and_bandit() {
         let files = vec![cf("src/x.py", "modified")];
         let runners = select_runners(&files);
         let mut got = names(&runners);
@@ -385,6 +387,7 @@ mod tests {
             got,
             vec![
                 "ast-grep",
+                "bandit",
                 "gitleaks",
                 "mypy",
                 "osv-scanner",
@@ -518,6 +521,7 @@ mod tests {
             got,
             vec![
                 "ast-grep",
+                "bandit",
                 "biome",
                 "eslint",
                 "gitleaks",
@@ -812,6 +816,7 @@ mod tests {
             got,
             vec![
                 "ast-grep",
+                "bandit",
                 "gitleaks",
                 "mypy",
                 "osv-scanner",
