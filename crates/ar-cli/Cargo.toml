@@ -1,0 +1,18 @@
+[package]
+name = "ar-cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Operator CLI: init bot, register webhook, replay PR, run-once, debug"
+
+[[bin]]
+name = "auto_review"
+path = "src/main.rs"
+
+[dependencies]
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+anyhow.workspace = true

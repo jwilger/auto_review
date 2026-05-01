@@ -1,0 +1,13 @@
+[package]
+name = "ar-index"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Repo indexer: tree-sitter parsing, LanceDB embeddings, co-change graph"
+
+[dependencies]
+serde.workspace = true
+anyhow.workspace = true
+tracing.workspace = true

@@ -1,0 +1,14 @@
+[package]
+name = "ar-sandbox"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "OCI sandbox launcher: youki + seccomp + netns + resource limits"
+
+[dependencies]
+anyhow.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
+serde.workspace = true

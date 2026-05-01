@@ -1,0 +1,15 @@
+[package]
+name = "ar-review"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Review pipeline activities: triage, summarize, review, verify, walkthrough"
+
+[dependencies]
+anyhow.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tracing.workspace = true
+async-trait.workspace = true
