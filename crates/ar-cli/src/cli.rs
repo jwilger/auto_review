@@ -83,6 +83,15 @@ pub enum Command {
     /// throttle activity. Complements `doctor` (outbound deps)
     /// and `test-webhook` (intake) with the live-state view.
     Status(StatusArgs),
+
+    /// Clear the persistent review-history record for a single
+    /// PR so the next webhook triggers a fresh full review
+    /// (instead of a `compare` diff against a stale baseline
+    /// SHA). Useful after a guideline / model change, or to
+    /// recover from a botched review. Operates directly on the
+    /// SQLite file the gateway writes to; safe to run while the
+    /// gateway is up — SQLite handles concurrent access.
+    ResetPr(ResetPrArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -141,6 +150,27 @@ pub struct ReviewOnceArgs {
     /// prompt content without burning tokens or touching the PR.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ResetPrArgs {
+    /// Path to the gateway's SQLite review-history database.
+    /// Reads `AR_HISTORY_DB` by default — the same env var the
+    /// gateway uses, so operators can run this with no args
+    /// when both processes share the env.
+    #[arg(long, env = "AR_HISTORY_DB")]
+    pub history_db: std::path::PathBuf,
+
+    #[arg(long)]
+    pub owner: String,
+
+    #[arg(long)]
+    pub repo: String,
+
+    /// Pull-request number whose history record should be
+    /// cleared.
+    #[arg(long)]
+    pub pr: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -596,6 +626,32 @@ mod tests {
             "reviewer",
         ]);
         assert!(both.is_err(), "--id and --match-url must be mutually exclusive");
+    }
+
+    #[test]
+    fn reset_pr_required_args() {
+        let cli = Cli::try_parse_from([
+            "auto_review",
+            "reset-pr",
+            "--history-db",
+            "/var/lib/auto_review/review_history.db",
+            "--owner",
+            "alice",
+            "--repo",
+            "widgets",
+            "--pr",
+            "42",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::ResetPr(a) => {
+                assert_eq!(a.history_db.to_string_lossy(), "/var/lib/auto_review/review_history.db");
+                assert_eq!(a.owner, "alice");
+                assert_eq!(a.repo, "widgets");
+                assert_eq!(a.pr, 42);
+            }
+            _ => panic!("expected ResetPr"),
+        }
     }
 
     #[test]

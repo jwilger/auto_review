@@ -967,6 +967,31 @@ default in-memory store to the SQLite-backed one.
   drive-by PRs. Includes guidance for keeping the document
   in sync as new components are added.
 
+#### reset-pr subcommand (M5)
+
+- `auto_review reset-pr --history-db <PATH> --owner X
+  --repo Y --pr N` clears the persistent review-history
+  record for one PR. The next webhook on that PR triggers a
+  fresh full review instead of a `compare` diff against a
+  stale baseline SHA. Use cases:
+  - After a guideline change in `.auto_review.yaml`
+  - After swapping `LLM_REASONING_MODEL`
+  - To recover from a botched review (operator wants the
+    bot to start over)
+- `--history-db` reads `AR_HISTORY_DB` by default — same env
+  var the gateway uses, so operators sharing the env can run
+  with no flags except the PR coordinates.
+- Safe to run while the gateway is up — SQLite handles
+  concurrent access. The gateway sees the cleared row on
+  its next read; the orchestrator's next dispatch for that
+  PR proceeds as if the SHA was never recorded.
+- Idempotent: clearing an unknown PR succeeds silently
+  (operators can script around it without `|| true`).
+- 4 new tests: 1 CLI parse, 3 behavioural (clears existing
+  record, succeeds on unknown PR, create-if-missing on
+  fresh DB path).
+- Documented in OPERATIONS.md §7.1.5.
+
 #### status subcommand (M5)
 
 - `auto_review status --gateway-url <URL>` pulls `/version`,

@@ -29,5 +29,6 @@ async fn main() -> Result<()> {
         Command::TestWebhook(args) => commands::test_webhook(args).await,
         Command::Doctor(args) => commands::doctor(args).await,
         Command::Status(args) => commands::status(args).await,
+        Command::ResetPr(args) => commands::reset_pr(args).await,
     }
 }

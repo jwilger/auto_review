@@ -359,6 +359,26 @@ section. Validate locally:
 auto_review validate-config .auto_review.yaml
 ```
 
+### 7.1.5 Force a fresh full review on a specific PR
+
+After a guideline / model change, or to recover from a botched
+review, clear the orchestrator's "last reviewed SHA" record so
+the next webhook triggers a full review (not an incremental
+`compare` against a stale baseline):
+
+```bash
+auto_review reset-pr \
+    --history-db /var/lib/auto_review/review_history.db \
+    --owner $OWNER --repo $REPO --pr $PR
+```
+
+`--history-db` reads `AR_HISTORY_DB` by default; if both the
+gateway and the operator's shell share that env var, the flag
+is optional. Safe to run while the gateway is up — SQLite
+handles concurrent access. The next webhook for that PR (a
+push, an `@<bot> re-review`, etc.) will see no recorded SHA and
+do a full review.
+
 ### 7.2.5 Tune signal-to-noise via `AR_SEVERITY_FLOOR`
 
 Set the gateway env var to `warning` to suppress every Note-

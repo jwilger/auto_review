@@ -1,8 +1,8 @@
 //! Implementations of the CLI subcommands.
 
 use crate::cli::{
-    DoctorArgs, InitArgs, ListLintersArgs, ListWebhooksArgs, RegisterWebhookArgs, ReviewOnceArgs,
-    StatusArgs, TestWebhookArgs, UnregisterWebhookArgs, ValidateConfigArgs,
+    DoctorArgs, InitArgs, ListLintersArgs, ListWebhooksArgs, RegisterWebhookArgs, ResetPrArgs,
+    ReviewOnceArgs, StatusArgs, TestWebhookArgs, UnregisterWebhookArgs, ValidateConfigArgs,
 };
 use anyhow::{Context, Result};
 use ar_forgejo::{
@@ -271,6 +271,44 @@ pub async fn register_webhook(args: RegisterWebhookArgs) -> Result<()> {
 pub fn build_webhook_url(gateway_url: &str) -> String {
     let trimmed = gateway_url.trim_end_matches('/');
     format!("{trimmed}{WEBHOOK_PATH}")
+}
+
+/// Clear a single PR's review-history record so the next
+/// webhook triggers a fresh full review.
+pub async fn reset_pr(args: ResetPrArgs) -> Result<()> {
+    use ar_orchestrator::ReviewHistory;
+    let store = ar_orchestrator::SqliteReviewHistory::open(&args.history_db)
+        .await
+        .with_context(|| {
+            format!(
+                "open history db at {}",
+                args.history_db.display()
+            )
+        })?;
+    let key = ar_orchestrator::PrKey {
+        owner: args.owner.clone(),
+        repo: args.repo.clone(),
+        pr_number: args.pr,
+    };
+    let prior = store
+        .last_reviewed(&key)
+        .await
+        .with_context(|| "look up existing record")?;
+    store
+        .clear(&key)
+        .await
+        .with_context(|| format!("clear history for {}/{}#{}", args.owner, args.repo, args.pr))?;
+    match prior {
+        Some(sha) => println!(
+            "Cleared {}/{}#{}: previously reviewed at {}.",
+            args.owner, args.repo, args.pr, sha
+        ),
+        None => println!(
+            "{}/{}#{} had no recorded review; nothing to clear.",
+            args.owner, args.repo, args.pr
+        ),
+    }
+    Ok(())
 }
 
 /// Pull `/version`, `/info`, `/metrics` from a running gateway
@@ -1328,6 +1366,81 @@ mod tests {
         let err = unregister_webhook(args).await.expect_err("neither");
         assert!(err.to_string().contains("--id"));
         assert!(err.to_string().contains("--match-url"));
+    }
+
+    #[tokio::test]
+    async fn reset_pr_clears_existing_record() {
+        use ar_orchestrator::{PrKey, ReviewHistory, SqliteReviewHistory};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review_history.db");
+        // Pre-populate the db so reset_pr has something to clear.
+        {
+            let store = SqliteReviewHistory::open(&path).await.unwrap();
+            store
+                .record(
+                    &PrKey {
+                        owner: "o".into(),
+                        repo: "r".into(),
+                        pr_number: 7,
+                    },
+                    "deadbeef",
+                )
+                .await
+                .unwrap();
+        }
+        let args = ResetPrArgs {
+            history_db: path.clone(),
+            owner: "o".into(),
+            repo: "r".into(),
+            pr: 7,
+        };
+        reset_pr(args).await.expect("clears");
+        // Verify it's gone.
+        let store = SqliteReviewHistory::open(&path).await.unwrap();
+        let after = store
+            .last_reviewed(&PrKey {
+                owner: "o".into(),
+                repo: "r".into(),
+                pr_number: 7,
+            })
+            .await
+            .unwrap();
+        assert!(after.is_none());
+    }
+
+    #[tokio::test]
+    async fn reset_pr_on_unknown_pr_succeeds() {
+        // Should not error — clearing a non-existent record is a
+        // legitimate use case (operator can run idempotently).
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review_history.db");
+        // Open once to create the file with the schema.
+        ar_orchestrator::SqliteReviewHistory::open(&path)
+            .await
+            .unwrap();
+        let args = ResetPrArgs {
+            history_db: path,
+            owner: "o".into(),
+            repo: "r".into(),
+            pr: 999,
+        };
+        reset_pr(args).await.expect("noop on unknown PR");
+    }
+
+    #[tokio::test]
+    async fn reset_pr_on_missing_db_errors_clearly() {
+        let dir = tempfile::tempdir().unwrap();
+        // Don't create the db — but `open` will create-if-missing,
+        // so this actually succeeds (idempotent reset). Verify the
+        // create happens cleanly.
+        let path = dir.path().join("nonexistent.db");
+        let args = ResetPrArgs {
+            history_db: path,
+            owner: "o".into(),
+            repo: "r".into(),
+            pr: 1,
+        };
+        reset_pr(args).await.expect("create-if-missing");
     }
 
     #[test]
