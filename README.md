@@ -25,7 +25,10 @@ the bot's PAT and register the webhook on a repo.
 
 To deploy: see [QUICKSTART.md](./QUICKSTART.md). To run on an
 ongoing basis (rotation, upgrades, alerts, repo config),
-see [docs/OPERATIONS.md](./docs/OPERATIONS.md). For background,
+see [docs/OPERATIONS.md](./docs/OPERATIONS.md). If you're a
+PR author whose changes are reviewed by an `auto_review`
+deployment and you want to know what the bot does and how to
+talk to it, see [docs/USER-GUIDE.md](./docs/USER-GUIDE.md). For background,
 the [feasibility study](./docs/FEASIBILITY.md) lays out the broader
 plan; [ADR-0001](./docs/ADR-0001-architecture.md) captures the
 architecture decision; the [threat model](./docs/THREAT-MODEL.md)

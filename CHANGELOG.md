@@ -619,6 +619,20 @@ default in-memory store to the SQLite-backed one.
   renaming a counter without updating the rules file fails
   CI.
 
+#### User guide (M5 docs)
+
+- `docs/USER-GUIDE.md`: documentation for PR authors whose
+  changes are reviewed by an `auto_review` deployment. The
+  audience the project's other docs didn't cover (README is
+  for everyone, OPERATIONS is for ops, CONTRIBUTING is for
+  contributors). Covers what the bot does on PR open, how
+  to read inline comments and the pre-merge checklist, the
+  full `@<bot>` chat-command surface (help / re-review /
+  remember / forget / autofix / docstring / tests /
+  free-form), how to disagree with a finding, how to skip
+  the bot (draft, ignored_paths, enabled: false), and a
+  worked `.auto_review.yaml` example. Linked from README.
+
 #### Operations runbook (M5 docs)
 
 - `docs/OPERATIONS.md`: day-2 operations runbook for the
