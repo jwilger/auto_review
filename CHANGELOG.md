@@ -224,6 +224,8 @@ Five shapes:
 - `forget <id>` — removes a learning by id.
 - `re-review` — dispatches a fresh `ReviewJob` with `force=true`
   so the per-PR history dedup is bypassed.
+- `autofix` — posts inline `\`\`\`suggestion` patches for safe
+  mechanical fixes (typos, dead code, off-by-ones); capped at 5.
 - Anything else — free-form question answered by the cheap-tier
   model with the PR diff (capped at 40 KiB) as context.
 
@@ -278,6 +280,22 @@ default in-memory store to the SQLite-backed one.
   DB has indexed first. Findings are surfaced at line 1 of
   the manifest with the OSV/GHSA/CVE id in the rule_id and
   presence-of-CVSS-as-severity heuristic.
+
+#### Autofix chat command (M4 finishing-touches)
+
+- `@auto_review autofix` asks the cheap-tier model for at most 5
+  high-confidence inline patches against the PR diff and posts
+  each as a Forgejo review comment with a `\`\`\`suggestion`
+  block (Forgejo renders these as one-click apply buttons).
+- Strict JSON-schema constraint over `{patches: [{path, line,
+  replacement, reason}]}` — malformed output gets a graceful
+  "didn't return well-formed suggestions" reply rather than
+  silently failing.
+- Aliased as `auto-fix` and `fix` for ergonomics.
+- Skips drafts; gives a placeholder reply when no Cheap tier is
+  configured; replies "nothing safe to suggest" when the model
+  returns an empty patch list. 5 wiremock-backed integration
+  tests cover the keep/skip/error branches end-to-end.
 
 #### Agentic verifier with workspace tools (M3/M4)
 

@@ -15,6 +15,11 @@ pub enum ChatCommand {
     /// re-run the full review on the current head SHA, ignoring any
     /// recorded review history.
     ReReview,
+    /// `@auto_review autofix` — ask the cheap-tier model to emit
+    /// inline patch suggestions for the diff. Each patch is posted
+    /// as a Forgejo review comment with a `\`\`\`suggestion` block
+    /// that the author can apply with one click.
+    Autofix,
     /// `@auto_review help` — print the supported commands.
     Help,
     /// `@auto_review <anything else>` — falls through to freeform
@@ -77,6 +82,7 @@ fn classify(rest: &str) -> ChatCommand {
             Err(_) => ChatCommand::Help,
         },
         "re-review" | "rereview" | "review-again" | "review_again" => ChatCommand::ReReview,
+        "autofix" | "auto-fix" | "fix" => ChatCommand::Autofix,
         "help" | "?" | "--help" | "-h" => ChatCommand::Help,
         _ => ChatCommand::Freeform(rest.to_string()),
     }
@@ -120,6 +126,18 @@ mod tests {
     fn forget_with_non_numeric_returns_help() {
         assert_eq!(parse("@auto_review forget banana"), ChatCommand::Help);
         assert_eq!(parse("@auto_review forget"), ChatCommand::Help);
+    }
+
+    #[test]
+    fn autofix_aliases_all_route_to_autofix() {
+        for s in [
+            "@auto_review autofix",
+            "@auto_review auto-fix",
+            "@auto_review fix",
+            "@auto_review FIX",
+        ] {
+            assert_eq!(parse(s), ChatCommand::Autofix, "input = {s}");
+        }
     }
 
     #[test]

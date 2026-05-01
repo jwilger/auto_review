@@ -23,10 +23,12 @@
 //!   called us in this case.
 
 use crate::command::ChatCommand;
-use ar_forgejo::Client as ForgejoClient;
+use ar_forgejo::{Client as ForgejoClient, CreateReviewRequest, ReviewComment, ReviewEvent};
 use ar_index::{LearningSource, LearningsStore};
-use ar_llm::{CompleteRequest, Message, ModelTier, Router as LlmRouter};
+use ar_llm::{CompleteRequest, Message, ModelTier, ResponseFormat, Router as LlmRouter};
 use ar_orchestrator::{JobDispatcher, ReviewJob};
+use serde::Deserialize;
+use serde_json::json;
 use std::sync::Arc;
 
 /// Byte cap on the diff snippet we feed into freeform-chat prompts.
@@ -34,6 +36,25 @@ use std::sync::Arc;
 /// reasoning tier; this cap keeps us comfortably under any of the
 /// usual ~16k–32k limits.
 const FREEFORM_DIFF_CAP: usize = 40_000;
+
+/// Same cap as `FREEFORM_DIFF_CAP` but for the autofix prompt.
+/// Same justification — cheap-tier model, similar context.
+const AUTOFIX_DIFF_CAP: usize = 40_000;
+
+/// Maximum number of patches the autofix command will post in a
+/// single invocation. Bounded to prevent the model from drowning a
+/// PR thread in marginal suggestions.
+const AUTOFIX_MAX_PATCHES: usize = 5;
+
+const AUTOFIX_SYSTEM_PROMPT: &str = "\
+You are an autofix assistant for a Forgejo pull request review bot. \
+Given a unified diff, propose at most a handful of small, high-confidence \
+inline patches: typo fixes, dead-code removal, obvious off-by-one fixes, \
+clarifying renames, and similar mechanical changes. Skip anything that \
+requires judgement or surrounding context you can't see. Each patch must \
+target a line that exists in the new (post-diff) version of the file; you \
+will be checked against the diff. Be conservative — emit zero patches if \
+nothing is clearly safe.";
 
 const FREEFORM_SYSTEM_PROMPT: &str = "\
 You are a code-review chat assistant for Forgejo pull requests. \
@@ -63,6 +84,9 @@ matching learnings into future review prompts.
 (printed on `remember`).
 - `re-review` — re-run a full review on the current head SHA, \
 ignoring my recorded review history.
+- `autofix` — propose inline `\\`\\`\\`suggestion` patches for safe, \
+mechanical fixes (typos, dead code, obvious off-by-ones). Capped at \
+5 patches per command; the cheap-tier model decides what's safe.
 - `help` — print this message.
 
 Anything else after the mention is treated as a freeform question.";
@@ -104,6 +128,9 @@ impl ChatHandler<'_> {
             }
             ChatCommand::ReReview => {
                 self.handle_re_review(ctx).await?;
+            }
+            ChatCommand::Autofix => {
+                self.handle_autofix(ctx).await?;
             }
             ChatCommand::Freeform(text) => {
                 self.handle_freeform(ctx, &text).await?;
@@ -153,6 +180,109 @@ impl ChatHandler<'_> {
             pr.head.sha
         );
         self.post(ctx, &reply).await
+    }
+
+    async fn handle_autofix(&self, ctx: ChatContext<'_>) -> Result<(), ChatError> {
+        // Cheap tier required — same as freeform.
+        if self.llm.provider(ModelTier::Cheap).is_err() {
+            self.post(
+                ctx,
+                "Autofix needs an LLM_CHEAP_MODEL configured. Try \
+                 `@auto_review help` for the structured commands.",
+            )
+            .await?;
+            return Ok(());
+        }
+        // The PR is needed both for the head SHA (commit_id on
+        // create_review) and to confirm the PR isn't a draft.
+        let pr = self
+            .forgejo
+            .get_pull_request(ctx.owner, ctx.repo, ctx.issue_number)
+            .await?;
+        if pr.draft {
+            self.post(ctx, "Skipping autofix: this PR is a draft.")
+                .await?;
+            return Ok(());
+        }
+        // Best-effort diff fetch.
+        let diff = self
+            .forgejo
+            .get_pr_diff(ctx.owner, ctx.repo, ctx.issue_number)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "diff fetch for autofix failed");
+                String::new()
+            });
+        if diff.trim().is_empty() {
+            self.post(
+                ctx,
+                "Autofix can't run without a diff (none returned by Forgejo).",
+            )
+            .await?;
+            return Ok(());
+        }
+        let truncated = truncate_for_chat(&diff, AUTOFIX_DIFF_CAP);
+
+        let user_prompt = build_autofix_user_prompt(&truncated);
+        let req = CompleteRequest {
+            system: Some(AUTOFIX_SYSTEM_PROMPT.to_string()),
+            messages: vec![Message::user(user_prompt)],
+            response_format: Some(ResponseFormat::JsonSchema {
+                name: "Autofix".into(),
+                schema: autofix_schema(),
+            }),
+            ..Default::default()
+        };
+        let resp = self.llm.complete(ModelTier::Cheap, req).await?;
+        let parsed: AutofixOutput = match serde_json::from_str(&resp.content) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "autofix model returned malformed JSON");
+                self.post(
+                    ctx,
+                    "Autofix didn't return well-formed suggestions; nothing posted.",
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        let patches: Vec<AutofixPatch> = parsed
+            .patches
+            .into_iter()
+            .filter(|p| !p.path.is_empty() && p.line >= 1 && !p.replacement.is_empty())
+            .take(AUTOFIX_MAX_PATCHES)
+            .collect();
+        if patches.is_empty() {
+            self.post(ctx, "Autofix found nothing safe to suggest.")
+                .await?;
+            return Ok(());
+        }
+
+        let comments: Vec<ReviewComment> = patches
+            .iter()
+            .map(|p| ReviewComment {
+                path: p.path.clone(),
+                body: format_suggestion_body(p),
+                old_position: None,
+                new_position: Some(p.line),
+            })
+            .collect();
+        let body = format!(
+            "Autofix posted {} suggested patch{}. Each is applicable inline; \
+             review and click 'Apply suggestion' on the ones you want.",
+            comments.len(),
+            if comments.len() == 1 { "" } else { "es" }
+        );
+        let request = CreateReviewRequest {
+            body,
+            commit_id: pr.head.sha,
+            event: ReviewEvent::Comment,
+            comments,
+        };
+        self.forgejo
+            .create_review(ctx.owner, ctx.repo, ctx.issue_number, &request)
+            .await?;
+        Ok(())
     }
 
     async fn handle_freeform(&self, ctx: ChatContext<'_>, question: &str) -> Result<(), ChatError> {
@@ -239,6 +369,87 @@ impl ChatHandler<'_> {
             .await?;
         Ok(())
     }
+}
+
+#[derive(Debug, Deserialize)]
+struct AutofixOutput {
+    #[serde(default)]
+    patches: Vec<AutofixPatch>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct AutofixPatch {
+    /// Repo-relative file path the patch applies to.
+    #[serde(default)]
+    path: String,
+    /// 1-indexed line in the new file the suggestion replaces.
+    #[serde(default)]
+    line: u32,
+    /// New content for the line. Multi-line replacements are
+    /// expressed by including `\n` in the string; the suggestion
+    /// block renders all of them.
+    #[serde(default)]
+    replacement: String,
+    /// Short rationale shown above the suggestion block.
+    #[serde(default)]
+    reason: String,
+}
+
+fn autofix_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "patches": {
+                "type": "array",
+                "maxItems": AUTOFIX_MAX_PATCHES,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "path": {"type": "string"},
+                        "line": {"type": "integer", "minimum": 1},
+                        "replacement": {"type": "string"},
+                        "reason": {"type": "string"}
+                    },
+                    "required": ["path", "line", "replacement", "reason"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["patches"],
+        "additionalProperties": false
+    })
+}
+
+fn build_autofix_user_prompt(diff: &str) -> String {
+    let mut out = String::with_capacity(diff.len() + 256);
+    out.push_str(
+        "Propose at most 5 safe inline patches for the diff below. \
+         Each patch must target a line in the new (post-diff) file. \
+         Replacement text replaces that one line; embed `\\n` for \
+         multi-line replacements.\n\n",
+    );
+    out.push_str("Unified diff:\n```diff\n");
+    out.push_str(diff);
+    if !diff.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("```\n");
+    out
+}
+
+fn format_suggestion_body(p: &AutofixPatch) -> String {
+    let mut out = String::with_capacity(p.replacement.len() + p.reason.len() + 64);
+    if !p.reason.trim().is_empty() {
+        out.push_str(p.reason.trim());
+        out.push_str("\n\n");
+    }
+    out.push_str("```suggestion\n");
+    out.push_str(&p.replacement);
+    if !p.replacement.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("```");
+    out
 }
 
 fn truncate_for_chat(diff: &str, max_bytes: usize) -> String {
@@ -673,5 +884,262 @@ mod tests {
             .await
             .expect("ok");
         assert!(seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn autofix_without_cheap_tier_replies_with_placeholder() {
+        let (server, forgejo, learnings, llm) = setup().await;
+        // Comment post is the only Forgejo call we expect — no
+        // pull-request fetch, no diff fetch, no review post.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(serde_json::json!({})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &llm,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::Autofix)
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn autofix_on_draft_pr_posts_skip_message() {
+        let server = MockServer::start().await;
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let learnings = InMemoryLearningsStore::new();
+        let cheap = Arc::new(CannedCheapProvider {
+            reply: r#"{"patches":[]}"#.into(),
+        });
+        let router = Router::new()
+            .with(ModelTier::Embedding, Arc::new(ConstantEmbedder))
+            .with(ModelTier::Cheap, cheap);
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "wip",
+                "body": "",
+                "draft": true,
+                "head": {"ref": "t", "sha": "abc"},
+                "base": {"ref": "main", "sha": "def"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(
+                serde_json::json!({"body": "Skipping autofix: this PR is a draft."}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &router,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::Autofix)
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn autofix_posts_review_with_suggestion_blocks() {
+        let server = MockServer::start().await;
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let learnings = InMemoryLearningsStore::new();
+        let cheap_reply = serde_json::json!({
+            "patches": [
+                {
+                    "path": "src/auth.rs",
+                    "line": 42,
+                    "replacement": "        Err(_) => Err(AuthError::Invalid(\"Token is invalid\".into())),",
+                    "reason": "Fix typo: 'invlaid' → 'invalid'"
+                }
+            ]
+        })
+        .to_string();
+        let cheap = Arc::new(CannedCheapProvider { reply: cheap_reply });
+        let router = Router::new()
+            .with(ModelTier::Embedding, Arc::new(ConstantEmbedder))
+            .with(ModelTier::Cheap, cheap);
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "fix typo",
+                "body": "",
+                "draft": false,
+                "head": {"ref": "t", "sha": "deadbeef"},
+                "base": {"ref": "main", "sha": "feedbeef"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/src/auth.rs b/src/auth.rs\n+    Err(_) => Err(AuthError::Invalid(\"Token is invlaid\".into())),\n"))
+            .mount(&server)
+            .await;
+        // Expect a review POST with the suggestion block. Match
+        // partially so we don't pin every field.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42/reviews"))
+            .and(body_partial_json(serde_json::json!({
+                "commit_id": "deadbeef",
+                "event": "COMMENT"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 99})))
+            .mount(&server)
+            .await;
+
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &router,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::Autofix)
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn autofix_with_no_patches_replies_nothing_safe() {
+        let server = MockServer::start().await;
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let learnings = InMemoryLearningsStore::new();
+        let cheap = Arc::new(CannedCheapProvider {
+            reply: r#"{"patches":[]}"#.into(),
+        });
+        let router = Router::new()
+            .with(ModelTier::Embedding, Arc::new(ConstantEmbedder))
+            .with(ModelTier::Cheap, cheap);
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "ok",
+                "body": "",
+                "draft": false,
+                "head": {"ref": "t", "sha": "abc"},
+                "base": {"ref": "main", "sha": "def"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/x b/x\n+y\n"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(
+                serde_json::json!({"body": "Autofix found nothing safe to suggest."}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &router,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::Autofix)
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn autofix_with_malformed_json_posts_graceful_fallback() {
+        let server = MockServer::start().await;
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let learnings = InMemoryLearningsStore::new();
+        let cheap = Arc::new(CannedCheapProvider {
+            reply: "this is not json at all".into(),
+        });
+        let router = Router::new()
+            .with(ModelTier::Embedding, Arc::new(ConstantEmbedder))
+            .with(ModelTier::Cheap, cheap);
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "ok",
+                "body": "",
+                "draft": false,
+                "head": {"ref": "t", "sha": "abc"},
+                "base": {"ref": "main", "sha": "def"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/x b/x\n+y\n"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(
+                serde_json::json!({"body": "Autofix didn't return well-formed suggestions; nothing posted."}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &router,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::Autofix)
+            .await
+            .expect("ok");
+    }
+
+    #[test]
+    fn format_suggestion_body_emits_suggestion_block_with_reason() {
+        let p = AutofixPatch {
+            path: "x.rs".into(),
+            line: 5,
+            replacement: "let x = 1;".into(),
+            reason: "Initialize properly.".into(),
+        };
+        let body = format_suggestion_body(&p);
+        assert!(body.starts_with("Initialize properly."));
+        assert!(body.contains("```suggestion"));
+        assert!(body.contains("let x = 1;"));
+    }
+
+    #[test]
+    fn format_suggestion_body_handles_missing_trailing_newline() {
+        let p = AutofixPatch {
+            path: "x.rs".into(),
+            line: 1,
+            replacement: "no newline".into(),
+            reason: "".into(),
+        };
+        let body = format_suggestion_body(&p);
+        // Block must always close on its own line.
+        assert!(body.ends_with("```"));
+        assert!(body.contains("no newline\n```"));
     }
 }
