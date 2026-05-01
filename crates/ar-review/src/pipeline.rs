@@ -4,7 +4,8 @@ use crate::error::ReviewError;
 use crate::heal::{generate_with_self_heal, HealConfig};
 use crate::ignored::{filter_changed_files, filter_diff_paths};
 use crate::mapping::output_to_review_request;
-use crate::pre_merge::{evaluate as evaluate_pre_merge_checks, render_section as render_pre_merge_section};
+use crate::pre_merge::{evaluate as evaluate_pre_merge_checks, render_combined_section};
+use crate::pre_merge_llm::evaluate_custom_checks;
 use crate::verify::verify_findings;
 use ar_forgejo::Client as ForgejoClient;
 use ar_llm::Router as LlmRouter;
@@ -47,6 +48,12 @@ pub struct ReviewArgs<'a> {
     pub linter_findings: &'a [Finding],
     pub ignored_paths: &'a GlobSet,
     pub guidelines: &'a str,
+    /// Repo-author free-form pre-merge checks (from
+    /// `.auto_review.yaml`'s `pre_merge_checks:`). Each entry is
+    /// evaluated against the diff by the cheap LLM tier and added
+    /// to the review body's checklist. Empty slice = no custom
+    /// checks; the built-in deterministic checks still run.
+    pub custom_pre_merge_checks: &'a [String],
     /// RAG-retrieved markdown context (similar code, learnings,
     /// co-change neighbors). Empty string when the index hasn't
     /// been built or returned no matches.
@@ -132,12 +139,18 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
     let mut req = output_to_review_request(&output, args.head_sha);
 
     // Pre-merge checks: deterministic gates (CHANGELOG / tests /
-    // TODOs) appended to the review body as an advisory checklist.
-    // Failing a check does not change the review event; it just
-    // surfaces a nudge to the PR author.
+    // TODOs) plus repo-author-supplied natural-language checks
+    // evaluated by the cheap LLM tier. Both surface as a single
+    // markdown checklist appended to the review body. Failing a
+    // check is advisory and does not change the review event.
     let pre_merge_results =
         evaluate_pre_merge_checks(&diff, &files, args.workspace_path);
-    let section = render_pre_merge_section(&pre_merge_results);
+    let custom_results = if args.custom_pre_merge_checks.is_empty() {
+        Vec::new()
+    } else {
+        evaluate_custom_checks(args.llm, args.custom_pre_merge_checks, &diff).await
+    };
+    let section = render_combined_section(&pre_merge_results, &custom_results);
     if !section.is_empty() {
         if !req.body.is_empty() {
             req.body.push_str("\n\n");
@@ -268,6 +281,7 @@ mod tests {
             pr_body: "body",
             linter_findings: &[],
             ignored_paths: &GlobSet::empty(),
+            custom_pre_merge_checks: &[],
             guidelines: "",
             repo_context: "",
             diff_override: None,
@@ -305,6 +319,7 @@ mod tests {
             pr_body: "b",
             linter_findings: &[],
             ignored_paths: &GlobSet::empty(),
+            custom_pre_merge_checks: &[],
             guidelines: "",
             repo_context: "",
             diff_override: None,
@@ -359,6 +374,7 @@ mod tests {
             pr_body: "b",
             linter_findings: &[],
             ignored_paths: &GlobSet::empty(),
+            custom_pre_merge_checks: &[],
             guidelines: "",
             repo_context: "",
             diff_override: None,
@@ -418,6 +434,7 @@ mod tests {
             pr_body: "b",
             linter_findings: &findings,
             ignored_paths: &GlobSet::empty(),
+            custom_pre_merge_checks: &[],
             guidelines: "",
             repo_context: "",
             diff_override: None,

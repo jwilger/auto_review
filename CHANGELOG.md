@@ -532,9 +532,22 @@ default in-memory store to the SQLite-backed one.
   checks are nudges.
 - `ar_review::pre_merge::evaluate` is the public entry
   point; pipeline wires it after the LLM verifier.
-- Custom natural-language pre-merge checks (the second half
-  of the milestone-4 spec) are deferred to a future
-  iteration; this ships only the deterministic built-ins.
+- Repo-author free-form checks (the second half of the M4
+  spec) are now wired in too: list them under
+  `pre_merge_checks:` in `.auto_review.yaml` and the cheap
+  LLM tier evaluates each against the diff, returning
+  `pass` / `fail` / `skip` with a one-sentence rationale.
+  Schema-validated output (per
+  `crates/ar-prompts/schemas/pre_merge_custom.json`) — any
+  malformed response or length-mismatch degrades to
+  empty-result rather than mis-aligning the rendered
+  checklist. Skipped silently when the cheap tier is
+  unconfigured (custom checks are advisory; the review
+  still posts).
+- Custom checks render under a `**Custom checks
+  (`.auto_review.yaml`)`** sub-heading inside the same
+  Pre-merge checks section so the built-in vs author-defined
+  source is visually distinct.
 - 18 new tests cover each check's pass/fail/skip paths plus
   the markdown renderer.
 

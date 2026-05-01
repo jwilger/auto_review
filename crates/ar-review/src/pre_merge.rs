@@ -239,7 +239,17 @@ fn is_test_file(filename: &str) -> bool {
 /// Skipped checks are included so the PR author sees the full list
 /// and isn't surprised when a check doesn't appear later.
 pub fn render_section(results: &[CheckResult]) -> String {
-    if results.is_empty() {
+    render_combined_section(results, &[])
+}
+
+/// Render the combined built-in + custom-LLM pre-merge checklist.
+/// Custom checks render below the built-ins under a "Custom" sub-bullet
+/// so the two sources are visually distinct.
+pub fn render_combined_section(
+    results: &[CheckResult],
+    custom: &[crate::pre_merge_llm::CustomCheckResult],
+) -> String {
+    if results.is_empty() && custom.is_empty() {
         return String::new();
     }
     let mut out = String::from("## Pre-merge checks\n\n");
@@ -250,6 +260,17 @@ pub fn render_section(results: &[CheckResult]) -> String {
             r.name.label(),
             r.detail
         ));
+    }
+    if !custom.is_empty() {
+        out.push_str("\n**Custom checks (`.auto_review.yaml`):**\n\n");
+        for c in custom {
+            let cb = match c.status {
+                ar_prompts::PreMergeCustomStatus::Pass => "[x]",
+                ar_prompts::PreMergeCustomStatus::Fail => "[ ]",
+                ar_prompts::PreMergeCustomStatus::Skip => "[~]",
+            };
+            out.push_str(&format!("- {} {} — {}\n", cb, c.check, c.rationale));
+        }
     }
     out
 }
@@ -424,5 +445,44 @@ mod tests {
     #[test]
     fn render_section_handles_empty_input() {
         assert!(render_section(&[]).is_empty());
+    }
+
+    #[test]
+    fn render_combined_section_lists_built_ins_then_custom() {
+        use crate::pre_merge_llm::CustomCheckResult;
+        use ar_prompts::PreMergeCustomStatus;
+        let built_in = vec![CheckResult {
+            name: CheckName::Tests,
+            status: CheckStatus::Pass,
+            detail: "ok".into(),
+        }];
+        let custom = vec![CustomCheckResult {
+            check: "All new public APIs have rustdoc".into(),
+            status: PreMergeCustomStatus::Fail,
+            rationale: "added pub fn `foo` at src/x.rs:42 has no /// above it".into(),
+        }];
+        let out = render_combined_section(&built_in, &custom);
+        assert!(out.contains("- [x] Tests touched — ok"));
+        assert!(out.contains("**Custom checks (`.auto_review.yaml`):**"));
+        assert!(out.contains("- [ ] All new public APIs have rustdoc"));
+        assert!(out.contains("rustdoc"));
+        // Built-ins must appear before the Custom heading.
+        let builtin_pos = out.find("Tests touched").unwrap();
+        let custom_pos = out.find("Custom checks").unwrap();
+        assert!(builtin_pos < custom_pos);
+    }
+
+    #[test]
+    fn render_combined_section_with_only_custom_still_emits_section() {
+        use crate::pre_merge_llm::CustomCheckResult;
+        use ar_prompts::PreMergeCustomStatus;
+        let custom = vec![CustomCheckResult {
+            check: "x".into(),
+            status: PreMergeCustomStatus::Skip,
+            rationale: "diff is config-only".into(),
+        }];
+        let out = render_combined_section(&[], &custom);
+        assert!(out.contains("## Pre-merge checks"));
+        assert!(out.contains("[~] x"));
     }
 }

@@ -399,56 +399,66 @@ pub async fn run_review_job(
         &job,
     )
     .await;
-    let (findings, ignored_paths, guidelines, repo_context, workspace) = match lint_outcome {
-        Ok(LintPhaseOutput {
-            skipped_by_config: true,
-            ..
-        }) => {
-            tracing::info!(
-                repo = format!("{}/{}", job.owner, job.repo),
-                pr = job.pr_number,
-                "skipping review: disabled by .auto_review.yaml"
-            );
-            let _ = forgejo
-                .post_commit_status(
-                    &job.owner,
-                    &job.repo,
-                    &job.head_sha,
-                    &CommitStatus {
-                        state: CommitStatusState::Success,
-                        target_url: String::new(),
-                        description: "auto_review: disabled by repo config".into(),
-                        context: STATUS_CONTEXT.into(),
-                    },
+    let (findings, ignored_paths, guidelines, repo_context, pre_merge_checks, workspace) =
+        match lint_outcome {
+            Ok(LintPhaseOutput {
+                skipped_by_config: true,
+                ..
+            }) => {
+                tracing::info!(
+                    repo = format!("{}/{}", job.owner, job.repo),
+                    pr = job.pr_number,
+                    "skipping review: disabled by .auto_review.yaml"
+                );
+                let _ = forgejo
+                    .post_commit_status(
+                        &job.owner,
+                        &job.repo,
+                        &job.head_sha,
+                        &CommitStatus {
+                            state: CommitStatusState::Success,
+                            target_url: String::new(),
+                            description: "auto_review: disabled by repo config".into(),
+                            context: STATUS_CONTEXT.into(),
+                        },
+                    )
+                    .await;
+                observe(ReviewObservation::Skipped {
+                    reason: "disabled_by_config",
+                });
+                return;
+            }
+            Ok(LintPhaseOutput {
+                findings,
+                ignored_paths,
+                guidelines,
+                repo_context,
+                pre_merge_checks,
+                workspace,
+                ..
+            }) => {
+                tracing::debug!(count = findings.len(), "linter findings collected");
+                (
+                    findings,
+                    ignored_paths,
+                    guidelines,
+                    repo_context,
+                    pre_merge_checks,
+                    workspace,
                 )
-                .await;
-            observe(ReviewObservation::Skipped {
-                reason: "disabled_by_config",
-            });
-            return;
-        }
-        Ok(LintPhaseOutput {
-            findings,
-            ignored_paths,
-            guidelines,
-            repo_context,
-            workspace,
-            ..
-        }) => {
-            tracing::debug!(count = findings.len(), "linter findings collected");
-            (findings, ignored_paths, guidelines, repo_context, workspace)
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "lint phase failed; continuing without findings");
-            (
-                Vec::new(),
-                GlobSet::empty(),
-                String::new(),
-                String::new(),
-                None,
-            )
-        }
-    };
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "lint phase failed; continuing without findings");
+                (
+                    Vec::new(),
+                    GlobSet::empty(),
+                    String::new(),
+                    String::new(),
+                    Vec::new(),
+                    None,
+                )
+            }
+        };
 
     // The agentic verifier needs the cloned workspace to inspect.
     // Operators opt in by setting AR_AGENTIC_VERIFIER=1; without it,
@@ -477,6 +487,7 @@ pub async fn run_review_job(
         pr_body: &job.pr_body,
         linter_findings: &findings,
         ignored_paths: &ignored_paths,
+        custom_pre_merge_checks: &pre_merge_checks,
         guidelines: &guidelines,
         repo_context: &repo_context,
         diff_override: incremental_diff.as_deref(),
@@ -552,6 +563,9 @@ struct LintPhaseOutput {
     ignored_paths: GlobSet,
     guidelines: String,
     repo_context: String,
+    /// From `.auto_review.yaml`'s `pre_merge_checks:` — passed through
+    /// to the review pipeline so the LLM can evaluate them.
+    pre_merge_checks: Vec<String>,
     /// Held by the orchestrator until the review pipeline finishes
     /// so the agentic verifier (when enabled) can inspect the
     /// cloned working tree. `None` when the lint phase exited
@@ -583,6 +597,7 @@ async fn prepare_and_lint(
             ignored_paths,
             guidelines,
             repo_context: String::new(),
+            pre_merge_checks: Vec::new(),
             workspace: None,
         });
     }
@@ -647,6 +662,7 @@ async fn prepare_and_lint(
         ignored_paths,
         guidelines,
         repo_context,
+        pre_merge_checks: config.pre_merge_checks.clone(),
         workspace: Some(workspace),
     })
 }

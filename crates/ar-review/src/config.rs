@@ -35,6 +35,18 @@ pub struct RepoConfig {
     /// want duplicate findings.
     #[serde(default)]
     pub disabled_tools: Vec<String>,
+
+    /// Repo-author-supplied natural-language pre-merge checks. Each
+    /// entry is evaluated against the diff by the cheap LLM tier and
+    /// surfaces in the review body's "Pre-merge checks" section
+    /// alongside the built-in deterministic checks.
+    /// Example:
+    ///   pre_merge_checks:
+    ///     - "All new public APIs have rustdoc comments"
+    ///     - "No raw SQL queries; everything goes through QueryBuilder"
+    /// Skipped silently when the cheap tier is unconfigured.
+    #[serde(default)]
+    pub pre_merge_checks: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -48,6 +60,7 @@ impl Default for RepoConfig {
             guidelines: String::new(),
             ignored_paths: Vec::new(),
             disabled_tools: Vec::new(),
+            pre_merge_checks: Vec::new(),
         }
     }
 }
