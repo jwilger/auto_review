@@ -1,0 +1,48 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Review",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "One- to three-sentence overall assessment of the change. State what the PR does and whether it appears safe to merge."
+    },
+    "findings": {
+      "type": "array",
+      "description": "Inline review comments. Empty array if there is nothing to flag.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["path", "line_start", "severity", "message"],
+        "properties": {
+          "path": {
+            "type": "string",
+            "description": "Repository-relative path of the file the finding applies to."
+          },
+          "line_start": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "1-based line number in the new file content."
+          },
+          "line_end": {
+            "type": "integer",
+            "minimum": 1,
+            "description": "1-based inclusive end line; defaults to line_start if omitted."
+          },
+          "severity": {
+            "type": "string",
+            "enum": ["note", "warning", "error"],
+            "description": "How serious the issue is."
+          },
+          "message": {
+            "type": "string",
+            "minLength": 1,
+            "description": "Concrete, actionable comment for the PR author."
+          }
+        }
+      }
+    }
+  }
+}

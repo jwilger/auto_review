@@ -1,4 +1,16 @@
-//! Prompt templates (Jinja-style via minijinja) and JSON output schemas.
+//! Prompt templates and JSON schema for the review pipeline.
 //!
-//! Templates live in `templates/`, schemas in `schema/`. Both are embedded
-//! at build time via `include_str!` so the binary ships self-contained.
+//! Two responsibilities:
+//! 1. Provide the strict JSON Schema the LLM emits its review against, plus a
+//!    typed [`ReviewOutput`] for downstream activities.
+//! 2. Render the user prompt that ships diff + PR context to the LLM.
+
+pub mod prompt;
+pub mod schema;
+pub mod types;
+pub mod validate;
+
+pub use prompt::{render_review_prompt, ReviewPromptInputs};
+pub use schema::review_schema;
+pub use types::{ReviewFinding, ReviewOutput, ReviewSeverity};
+pub use validate::{validate_review_output, ValidationError};

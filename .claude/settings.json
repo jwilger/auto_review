@@ -6,6 +6,10 @@
     "feature-dev@claude-plugins-official": true,
     "security-guidance@claude-plugins-official": true,
     "coderabbit@claude-plugins-official": true,
-    "backend-development@han": true
+    "backend-development@han": true,
+    "bdd@han": true,
+    "tdd@han": true,
+    "bushido@han": true,
+    "core@han": true
   }
 }
