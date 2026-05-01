@@ -25,8 +25,10 @@ operations, debugging, and benchmark.
 | `status` | One-screen live snapshot from `/version` + `/info` + `/metrics`. |
 | `validate-config` | Parses `.auto_review.yaml` files (with `--strict` to reject unknown top-level keys). |
 | `list-linters` | Prints the bundled linter catalogue; `--language <tag>` filter, `--json` for piping. |
+| `explain-routing` | Shows which linters route to a given set of files. Useful for tuning `disabled_tools:`. |
 | `list-learnings` / `forget-learning` | Direct admin of the persistent learnings store (alternative to `@<bot> remember`/`forget` chat commands). |
 | `reset-pr` | Clears the review-history record for one PR so the next webhook triggers a fresh full review. |
+| `purge-history` | Drops review-history rows older than N days (long-running-deploy cleanup; wire into a systemd timer). |
 
 ### Debugging and benchmark
 

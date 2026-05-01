@@ -1096,6 +1096,24 @@ default in-memory store to the SQLite-backed one.
   forget-learning behavioural (drop existing record,
   unknown-id errors clearly).
 
+#### CLI README / clap subcommands contract test
+
+- `ar-cli/README.md` was missing two subcommand rows:
+  `explain-routing` (M5) and `purge-history` (M5).
+  Operators reading the per-crate README would have
+  missed both features. Added.
+- New contract test (`readme_documents_every_subcommand`)
+  uses clap's `CommandFactory` to enumerate every
+  subcommand `Cli` exposes and asserts each appears as
+  a backticked literal in `ar-cli/README.md`. Adding a
+  new subcommand without updating the README now fails
+  CI alongside the other drift tests.
+- Six total cross-file contract tests now pin
+  user-facing artefacts to source-of-truth definitions
+  (Prometheus rules, Grafana dashboard, Dockerfile
+  sandbox image, linter routing→catalogue, example YAML
+  →RepoConfig keys, ar-cli README→clap subcommands).
+
 #### Example config / RepoConfig contract test
 
 - `.auto_review.example.yaml` was missing

@@ -1009,6 +1009,36 @@ mod tests {
         assert!(res.is_err());
     }
 
+    /// Cross-file contract test: every subcommand `Cli` exposes
+    /// must appear in `crates/ar-cli/README.md`. Adding a new
+    /// subcommand without documenting it in the per-crate README
+    /// is the kind of drift that's invisible until an operator
+    /// goes looking for the feature and fails to find it.
+    #[test]
+    fn readme_documents_every_subcommand() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let readme_path = manifest.join("README.md");
+        let body = std::fs::read_to_string(&readme_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", readme_path.display()));
+        let mut missing = Vec::new();
+        for sub in cmd.get_subcommands() {
+            let name = sub.get_name();
+            // The README documents subcommands as `\`name\`` — match
+            // that literal so a stray substring elsewhere doesn't
+            // false-positive.
+            let needle = format!("`{name}`");
+            if !body.contains(&needle) {
+                missing.push(name.to_string());
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "subcommands missing from ar-cli/README.md: {missing:?}"
+        );
+    }
+
     #[test]
     fn missing_required_arg_is_an_error() {
         let res = Cli::try_parse_from([
