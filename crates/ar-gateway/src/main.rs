@@ -46,6 +46,18 @@ async fn main() -> Result<()> {
     let llm_api_key = env::var("LLM_API_KEY").ok();
     let reasoning_model =
         env::var("LLM_REASONING_MODEL").unwrap_or_else(|_| "qwen2.5-coder:32b".into());
+    // An empty string is a more confusing failure mode than a
+    // missing variable, because clap-style "missing required" never
+    // fires (env::var returns Ok("")) and every subsequent review
+    // 400s with whatever cryptic message the upstream provider
+    // returns for `"model": ""`. Surface this at startup instead.
+    if reasoning_model.trim().is_empty() {
+        anyhow::bail!(
+            "LLM_REASONING_MODEL is set to an empty/whitespace value; \
+             unset it to take the default (qwen2.5-coder:32b) or set \
+             a real model name"
+        );
+    }
 
     let forgejo =
         Arc::new(ForgejoClient::new(&forgejo_base, &forgejo_token).context("forgejo client")?);
