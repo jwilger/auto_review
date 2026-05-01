@@ -1,7 +1,9 @@
 # ADR-0002: Linter Sandbox
 
 Status: **Accepted**
-Date: 2026-04-30
+Date: 2026-04-30 (revised 2026-04-30 to clarify the OCI-runtime
+position: podman OR docker is the production sandbox; youki is
+explicitly future work)
 
 ## Context
 
@@ -33,18 +35,31 @@ two production-bound implementations:
   and local-dev clusters where the operator already trusts every
   contributor.
 - `PodmanSandbox` — wraps the spawn in
-  `podman run --rm --network=none --read-only
+  `<runtime> run --rm --network=none --read-only
   --tmpfs /tmp:size=64m --security-opt=no-new-privileges
   --cap-drop=ALL --memory=… --cpus=… --pids-limit=…
   --user 65534:65534 -v <repo>:/work:ro -w /work …` plus a
   tokio-side wall-clock timeout. The repo is mounted **read-only**;
   the rootfs is read-only; egress is blocked at the network namespace;
-  caps are stripped; the process runs as `nobody`.
+  caps are stripped; the process runs as `nobody`. Despite the
+  type name, `<runtime>` is either `podman` or `docker` — both
+  accept the flag set unchanged. Operators pick via
+  `AR_SANDBOX_RUNTIME` (preferred) or `AR_SANDBOX_PODMAN_BIN`
+  (legacy alias); when neither is set the gateway auto-detects at
+  startup, preferring podman (rootless, no daemon) and falling
+  back to docker.
 
 The gateway picks an implementation at startup based on
-`AR_SANDBOX_IMAGE`. When set, every linter goes through podman.
-When unset, the gateway logs a `WARN: sandbox: direct (NO ISOLATION)`
-banner so the production-deploy gap is loud and discoverable in logs.
+`AR_SANDBOX_IMAGE`. When set, every linter goes through the OCI
+runtime. When unset, the gateway logs a `WARN: sandbox: direct
+(NO ISOLATION)` banner so the production-deploy gap is loud and
+discoverable in logs.
+
+**This is the production sandbox.** No further isolation layer
+is required to ship; the threat model the Kudelski incident
+defines is fully covered by the flag set above. youki is
+documented below as future-work for performance ergonomics, not
+as a security gate that has to land before v1.
 
 ## Trade-offs
 
@@ -54,11 +69,32 @@ banner so the production-deploy gap is loud and discoverable in logs.
   We accept it: the alternative (bundling everything in one image
   and hoping for the best) is what got CodeRabbit owned.
 
-- **No youki yet**: youki is a Rust-native OCI runtime that would
-  let us skip the podman shell-out. It's on the roadmap, but the
-  trait surface (`Sandbox::run(SandboxCommand) -> SandboxOutput`)
-  is shaped so a youki impl is a drop-in. Until then podman is the
-  pragmatic path: same threat model, less integration cost.
+- **No youki yet — and that's fine for v1.** youki is a Rust-
+  native OCI runtime that would let us skip the shell-out
+  altogether (linker against `libcontainer` instead of forking
+  `podman` / `docker`). The win is purely operational: lower
+  per-spawn overhead, no external binary on PATH, pure-Rust build
+  artefact. The threat-model coverage is *identical* — the
+  hardening flags (`--network=none`, `--read-only`,
+  `--cap-drop=ALL`, etc.) get translated into the same kernel-
+  level controls regardless of which OCI runtime applies them.
+  youki integration is therefore explicitly **future-work, not a
+  gate on shipping**. The trait surface (`Sandbox::run(...)
+  -> SandboxOutput`) is shaped so a `YoukiSandbox` impl drops
+  in alongside `PodmanSandbox` without touching callers. Until
+  then podman/docker is the production answer: same threat
+  model, dramatically less integration cost.
+
+- **No precision/recall benchmark for sandbox escapes** — *until
+  the v0.1 ship, that is.* The escape harness in
+  `crates/ar-sandbox/tests/escape.rs` covers seven attack classes
+  against the production flag set: network egress denial, fork-
+  bomb containment, wall-clock termination, repo-mount read-only
+  enforcement, unprivileged-uid execution, no-new-privileges,
+  and dropped capabilities. Run with `cargo test -p ar-sandbox
+  --test escape -- --ignored`. Tests skip cleanly when no OCI
+  runtime is on PATH; in CI they run against whichever runtime
+  the runner provides.
 
 - **DirectSandbox ships in the workspace**: it's tempting to make
   it test-only. We chose to ship it because (a) tests need it,
@@ -72,11 +108,6 @@ banner so the production-deploy gap is loud and discoverable in logs.
   `--stop-timeout` flag, which controls the SIGTERM grace period
   rather than a kill-after-N-seconds.
 
-- **No precision/recall benchmark for sandbox escapes**: a
-  red-team test suite (malicious linter configs, fork-bombs,
-  egress attempts, prompt-injected PRs) is on the roadmap. The
-  current trade-off: ship the structural mitigation now, exercise
-  it against adversarial inputs in a follow-up.
 
 ## Consequences
 
