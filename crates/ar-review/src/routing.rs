@@ -2,6 +2,7 @@
 //! that should run against the cloned workspace.
 
 use ar_forgejo::ChangedFile;
+use ar_tools::actionlint::ActionlintRunner;
 use ar_tools::eslint::EslintRunner;
 use ar_tools::gitleaks::GitleaksRunner;
 use ar_tools::hadolint::HadolintRunner;
@@ -94,6 +95,17 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         runners.push(Box::new(MarkdownLintRunner { files: md_files }));
     }
 
+    let workflow_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| is_workflow_yaml(&f.filename))
+        .map(|f| f.filename.clone())
+        .collect();
+    if !workflow_files.is_empty() {
+        runners.push(Box::new(ActionlintRunner {
+            files: workflow_files,
+        }));
+    }
+
     runners
 }
 
@@ -119,6 +131,19 @@ fn is_dockerfile(name: &str) -> bool {
 
 fn has_markdown_ext(name: &str) -> bool {
     name.ends_with(".md") || name.ends_with(".markdown")
+}
+
+fn is_workflow_yaml(name: &str) -> bool {
+    let yaml = name.ends_with(".yml") || name.ends_with(".yaml");
+    if !yaml {
+        return false;
+    }
+    name.starts_with(".github/workflows/")
+        || name.contains("/.github/workflows/")
+        || name.starts_with(".forgejo/workflows/")
+        || name.contains("/.forgejo/workflows/")
+        || name.starts_with(".gitea/workflows/")
+        || name.contains("/.gitea/workflows/")
 }
 
 #[cfg(test)]
@@ -213,6 +238,29 @@ mod tests {
                 "shellcheck"
             ]
         );
+    }
+
+    #[test]
+    fn workflow_yaml_selects_actionlint() {
+        for name in [
+            ".github/workflows/ci.yml",
+            ".forgejo/workflows/release.yaml",
+            ".gitea/workflows/test.yml",
+        ] {
+            let files = vec![cf(name, "modified")];
+            let runners = select_runners(&files);
+            let mut got = names(&runners);
+            got.sort();
+            assert_eq!(got, vec!["actionlint", "gitleaks"], "name = {name}");
+        }
+    }
+
+    #[test]
+    fn arbitrary_yaml_does_not_select_actionlint() {
+        let files = vec![cf("config/app.yml", "modified")];
+        let runners = select_runners(&files);
+        let names_v = names(&runners);
+        assert!(!names_v.contains(&"actionlint"));
     }
 
     #[test]
