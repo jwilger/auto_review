@@ -8,28 +8,31 @@ Thanks for considering a contribution to `auto_review`.
 
 - Rust toolchain. The repo pins the channel via `rust-toolchain.toml`
   to `stable`; rustup will install it on first build.
-- `git`, plus any of the 17 bundled linter binaries you want exercised
-  end-to-end (`actionlint`, `ast-grep`, `biome`, `eslint`, `gitleaks`,
-  `golangci-lint`, `hadolint`, `markdownlint`, `osv-scanner`,
-  `phpstan`, `rubocop`, `ruff`, `semgrep`, `shellcheck`, `sqlfluff`,
-  `trivy`, `yamllint`). Missing linters are silently skipped at
+- `git`, plus any of the 44 bundled linter binaries you want
+  exercised end-to-end. Run `auto_review list-linters` for the
+  current set with install homepages, or browse
+  `crates/ar-tools/src/catalog.rs`. Missing linters are silently
+  skipped at
   runtime, so absence isn't a build blocker.
 
 ### First build
 
 ```sh
 cargo check --workspace
-cargo test --workspace
-cargo clippy --workspace --all-targets -- -D warnings
 cargo fmt --all -- --check
+cargo clippy --workspace --all-targets -- -D warnings
+cargo test --workspace --all-targets
 ```
 
-CI runs the same four checks (see `.forgejo/workflows/ci.yml`). Land
-no commit that fails any of them. CI additionally runs
-`cargo deny check` against the supply-chain config in
-[`deny.toml`](./deny.toml) — license compatibility, RUSTSEC
-advisories, source allowlist. Run it locally before bumping a
-dep:
+The order matches the CI pipeline (see
+`.forgejo/workflows/ci.yml`): cheap checks first so a failing
+fmt or clippy short-circuits before you wait on the test
+suite. Land no commit that fails any of them.
+
+CI additionally runs `cargo deny check` against the
+supply-chain config in [`deny.toml`](./deny.toml) — license
+compatibility, RUSTSEC advisories, source allowlist. Run it
+locally before bumping a dep:
 
 ```sh
 cargo install --locked cargo-deny

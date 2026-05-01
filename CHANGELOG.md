@@ -1096,6 +1096,26 @@ default in-memory store to the SQLite-backed one.
   forget-learning behavioural (drop existing record,
   unknown-id errors clearly).
 
+#### CONTRIBUTING freshness sweep
+
+- "First build" command list reordered to match CI's
+  shortest-feedback-first sequence: fmt → clippy → test
+  (was: check → test → clippy → fmt). The previous
+  ordering ran tests before format checks; a contributor
+  hitting an fmt issue waited for the full test suite
+  first.
+- `cargo test --workspace --all-targets` now matches CI's
+  `--all-targets`. Without it, cargo test skips example
+  and integration-test targets in some configurations;
+  CI uses `--all-targets` so contributors should match.
+- "Prerequisites" linter list said "17 bundled linter
+  binaries" with a hardcoded enumeration (stale since
+  M3's expansion to 44). Replaced with the current count
+  + a pointer to `auto_review list-linters` and
+  `crates/ar-tools/src/catalog.rs` as the canonical
+  source. The hardcoded list would have drifted again on
+  the next linter addition; the pointer doesn't.
+
 #### README freshness sweep
 
 - Multiple stale claims at the repo root README:
