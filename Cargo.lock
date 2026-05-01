@@ -98,6 +98,7 @@ dependencies = [
  "anyhow",
  "ar-forgejo",
  "ar-gateway",
+ "ar-index",
  "ar-llm",
  "ar-orchestrator",
  "ar-prompts",

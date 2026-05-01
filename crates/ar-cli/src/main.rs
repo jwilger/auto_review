@@ -30,5 +30,7 @@ async fn main() -> Result<()> {
         Command::Doctor(args) => commands::doctor(args).await,
         Command::Status(args) => commands::status(args).await,
         Command::ResetPr(args) => commands::reset_pr(args).await,
+        Command::ListLearnings(args) => commands::list_learnings(args).await,
+        Command::ForgetLearning(args) => commands::forget_learning(args).await,
     }
 }

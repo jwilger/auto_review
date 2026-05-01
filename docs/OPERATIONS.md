@@ -428,14 +428,25 @@ sqlite3 /var/lib/auto_review/learnings.db ".backup '/backup/learnings-$(date -I)
 
 **Inspect:**
 ```bash
-sqlite3 /var/lib/auto_review/learnings.db \
-    "SELECT id, repo, source, substr(text, 1, 80) FROM learnings ORDER BY id DESC LIMIT 20;"
+auto_review list-learnings   # uses AR_LEARNINGS_DB by default
+auto_review list-learnings --json | jq    # machine-readable
 ```
+
+(For a custom inspection query, `sqlite3` against the file
+works too — the schema is documented in
+`crates/ar-index/src/sqlite_learnings.rs`.)
+
+**Forget a single learning:**
+```bash
+auto_review forget-learning --id <ID>
+```
+Same effect as `@<bot> forget` from a PR thread but operates
+directly on the SQLite store, so operators can script bulk
+wipes without going through Forgejo.
 
 **Restore:** stop the gateway, replace the file, restart.
 
-**Wipe:** delete the file, restart. The `@<bot> forget` chat command
-removes individual entries without operator intervention.
+**Wipe everything:** delete the file, restart.
 
 ---
 

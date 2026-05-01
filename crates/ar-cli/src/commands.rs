@@ -1,8 +1,9 @@
 //! Implementations of the CLI subcommands.
 
 use crate::cli::{
-    DoctorArgs, InitArgs, ListLintersArgs, ListWebhooksArgs, RegisterWebhookArgs, ResetPrArgs,
-    ReviewOnceArgs, StatusArgs, TestWebhookArgs, UnregisterWebhookArgs, ValidateConfigArgs,
+    DoctorArgs, ForgetLearningArgs, InitArgs, ListLearningsArgs, ListLintersArgs,
+    ListWebhooksArgs, RegisterWebhookArgs, ResetPrArgs, ReviewOnceArgs, StatusArgs,
+    TestWebhookArgs, UnregisterWebhookArgs, ValidateConfigArgs,
 };
 use anyhow::{Context, Result};
 use ar_forgejo::{
@@ -271,6 +272,79 @@ pub async fn register_webhook(args: RegisterWebhookArgs) -> Result<()> {
 pub fn build_webhook_url(gateway_url: &str) -> String {
     let trimmed = gateway_url.trim_end_matches('/');
     format!("{trimmed}{WEBHOOK_PATH}")
+}
+
+/// Print every learning in the SQLite store. Operators use
+/// this to audit what `@<bot> remember` has been writing and
+/// to find the `id` `forget-learning` needs.
+pub async fn list_learnings(args: ListLearningsArgs) -> Result<()> {
+    use ar_index::LearningsStore;
+    let store = ar_index::SqliteLearningsStore::open(&args.learnings_db)
+        .await
+        .with_context(|| {
+            format!("open learnings db at {}", args.learnings_db.display())
+        })?;
+    let learnings = store.list().await.context("list learnings")?;
+    if args.json {
+        for l in &learnings {
+            // The embedding is many floats and rarely useful in a
+            // human-facing dump. Emit a serialisation that omits
+            // it.
+            let row = serde_json::json!({
+                "id": l.id,
+                "text": l.text,
+                "source": l.source,
+                "created_at": l.created_at,
+                "embedding_dim": l.embedding.len(),
+            });
+            println!("{}", serde_json::to_string(&row)?);
+        }
+        return Ok(());
+    }
+    if learnings.is_empty() {
+        println!("No learnings stored.");
+        return Ok(());
+    }
+    println!(
+        "{} learning{} in {}:",
+        learnings.len(),
+        if learnings.len() == 1 { "" } else { "s" },
+        args.learnings_db.display(),
+    );
+    println!();
+    for l in &learnings {
+        let truncated: String = l.text.chars().take(80).collect();
+        let suffix = if l.text.chars().count() > 80 {
+            "…"
+        } else {
+            ""
+        };
+        println!(
+            "  id={:<6} source={:<10} {}{}",
+            l.id,
+            format!("{:?}", l.source).to_lowercase(),
+            truncated,
+            suffix,
+        );
+    }
+    Ok(())
+}
+
+/// Delete one learning by id. Same effect as `@<bot> forget` but
+/// operates directly on the SQLite store.
+pub async fn forget_learning(args: ForgetLearningArgs) -> Result<()> {
+    use ar_index::LearningsStore;
+    let store = ar_index::SqliteLearningsStore::open(&args.learnings_db)
+        .await
+        .with_context(|| {
+            format!("open learnings db at {}", args.learnings_db.display())
+        })?;
+    store
+        .remove(args.id)
+        .await
+        .with_context(|| format!("remove learning {}", args.id))?;
+    println!("Forgot learning {}.", args.id);
+    Ok(())
 }
 
 /// Clear a single PR's review-history record so the next
@@ -1366,6 +1440,107 @@ mod tests {
         let err = unregister_webhook(args).await.expect_err("neither");
         assert!(err.to_string().contains("--id"));
         assert!(err.to_string().contains("--match-url"));
+    }
+
+    #[tokio::test]
+    async fn list_learnings_renders_table_for_populated_store() {
+        use ar_index::{LearningSource, LearningsStore, SqliteLearningsStore};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learnings.db");
+        {
+            let store = SqliteLearningsStore::open(&path).await.unwrap();
+            store
+                .add(
+                    "Forbid unwrap() outside #[cfg(test)]".into(),
+                    LearningSource::Guideline,
+                    vec![0.1; 4],
+                    1700000000,
+                )
+                .await
+                .unwrap();
+        }
+        let args = ListLearningsArgs {
+            learnings_db: path,
+            json: false,
+        };
+        list_learnings(args).await.expect("ok");
+    }
+
+    #[tokio::test]
+    async fn list_learnings_emits_ndjson_when_json_set() {
+        use ar_index::{LearningSource, LearningsStore, SqliteLearningsStore};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learnings.db");
+        {
+            let store = SqliteLearningsStore::open(&path).await.unwrap();
+            store
+                .add(
+                    "x".into(),
+                    LearningSource::Chat,
+                    vec![1.0; 3],
+                    100,
+                )
+                .await
+                .unwrap();
+        }
+        let args = ListLearningsArgs {
+            learnings_db: path,
+            json: true,
+        };
+        list_learnings(args).await.expect("ok");
+    }
+
+    #[tokio::test]
+    async fn list_learnings_handles_empty_store() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learnings.db");
+        // Touch the db so list_learnings can open it.
+        ar_index::SqliteLearningsStore::open(&path).await.unwrap();
+        let args = ListLearningsArgs {
+            learnings_db: path,
+            json: false,
+        };
+        list_learnings(args).await.expect("ok");
+    }
+
+    #[tokio::test]
+    async fn forget_learning_drops_the_matching_record() {
+        use ar_index::{LearningSource, LearningsStore, SqliteLearningsStore};
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learnings.db");
+        let id = {
+            let store = SqliteLearningsStore::open(&path).await.unwrap();
+            store
+                .add(
+                    "to be forgotten".into(),
+                    LearningSource::Chat,
+                    vec![0.5; 3],
+                    100,
+                )
+                .await
+                .unwrap()
+                .id
+        };
+        let args = ForgetLearningArgs {
+            learnings_db: path.clone(),
+            id,
+        };
+        forget_learning(args).await.expect("ok");
+        let store = SqliteLearningsStore::open(&path).await.unwrap();
+        assert!(store.list().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn forget_learning_on_unknown_id_errors() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("learnings.db");
+        ar_index::SqliteLearningsStore::open(&path).await.unwrap();
+        let args = ForgetLearningArgs {
+            learnings_db: path,
+            id: 999,
+        };
+        let err = forget_learning(args).await.expect_err("not found");
+        assert!(err.to_string().contains("999"));
     }
 
     #[tokio::test]

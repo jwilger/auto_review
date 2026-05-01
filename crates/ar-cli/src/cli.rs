@@ -92,6 +92,20 @@ pub enum Command {
     /// SQLite file the gateway writes to; safe to run while the
     /// gateway is up — SQLite handles concurrent access.
     ResetPr(ResetPrArgs),
+
+    /// List every learning stored in the persistent
+    /// `LearningsStore`. Operators currently can only audit
+    /// learnings by inspecting Forgejo PR threads (where
+    /// `@<bot> remember` invocations live); this surfaces the
+    /// full set in one place. `--json` for piping into a
+    /// reviewer tool.
+    ListLearnings(ListLearningsArgs),
+
+    /// Delete a learning by id. Same effect as `@<bot> forget`
+    /// but operates directly on the SQLite store, so operators
+    /// can script bulk wipes without going through Forgejo.
+    /// Use `list-learnings` to find the id.
+    ForgetLearning(ForgetLearningArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -150,6 +164,31 @@ pub struct ReviewOnceArgs {
     /// prompt content without burning tokens or touching the PR.
     #[arg(long)]
     pub dry_run: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ListLearningsArgs {
+    /// Path to the gateway's SQLite learnings database. Reads
+    /// `AR_LEARNINGS_DB` by default.
+    #[arg(long, env = "AR_LEARNINGS_DB")]
+    pub learnings_db: std::path::PathBuf,
+
+    /// Emit the result as one JSON object per line for piping
+    /// into `jq`. Otherwise renders a human-readable table.
+    #[arg(long)]
+    pub json: bool,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ForgetLearningArgs {
+    /// Path to the gateway's SQLite learnings database. Reads
+    /// `AR_LEARNINGS_DB` by default.
+    #[arg(long, env = "AR_LEARNINGS_DB")]
+    pub learnings_db: std::path::PathBuf,
+
+    /// Learning id, as printed by `list-learnings`.
+    #[arg(long)]
+    pub id: u64,
 }
 
 #[derive(clap::Args, Debug)]
@@ -626,6 +665,46 @@ mod tests {
             "reviewer",
         ]);
         assert!(both.is_err(), "--id and --match-url must be mutually exclusive");
+    }
+
+    #[test]
+    fn list_learnings_required_args() {
+        let cli = Cli::try_parse_from([
+            "auto_review",
+            "list-learnings",
+            "--learnings-db",
+            "/var/lib/auto_review/learnings.db",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::ListLearnings(a) => {
+                assert_eq!(
+                    a.learnings_db.to_string_lossy(),
+                    "/var/lib/auto_review/learnings.db"
+                );
+                assert!(!a.json);
+            }
+            _ => panic!("expected ListLearnings"),
+        }
+    }
+
+    #[test]
+    fn forget_learning_required_args() {
+        let cli = Cli::try_parse_from([
+            "auto_review",
+            "forget-learning",
+            "--learnings-db",
+            "/tmp/x.db",
+            "--id",
+            "42",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::ForgetLearning(a) => {
+                assert_eq!(a.id, 42);
+            }
+            _ => panic!("expected ForgetLearning"),
+        }
     }
 
     #[test]

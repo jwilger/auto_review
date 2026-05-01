@@ -967,6 +967,31 @@ default in-memory store to the SQLite-backed one.
   drive-by PRs. Includes guidance for keeping the document
   in sync as new components are added.
 
+#### list-learnings + forget-learning subcommands (M5)
+
+- `auto_review list-learnings --learnings-db <PATH>` (or
+  reads `AR_LEARNINGS_DB`) prints every entry in the
+  persistent learnings store. Output table shows id,
+  source (`chat` / `guideline` / `inferred`), and a
+  truncated text preview. `--json` emits NDJSON for
+  piping into `jq`; the embedding vector is reduced to
+  `embedding_dim` so the output stays human-scrollable.
+- `auto_review forget-learning --id <N>` deletes one
+  learning. Same effect as `@<bot> forget <id>` from a
+  PR thread, but operates directly on the SQLite store
+  so operators can script bulk wipes / migrations
+  without going through Forgejo. Errors clearly when
+  the id doesn't exist (no silent no-op so a typo is
+  obvious).
+- Operations runbook §8 (Learnings store) updated to use
+  these commands as the primary admin surface, with the
+  `sqlite3 …` recipe demoted to a fallback for
+  custom queries.
+- 7 new tests: 2 CLI parses, 3 list-learnings
+  behavioural (table + ndjson + empty), 2
+  forget-learning behavioural (drop existing record,
+  unknown-id errors clearly).
+
 #### reset-pr subcommand (M5)
 
 - `auto_review reset-pr --history-db <PATH> --owner X
