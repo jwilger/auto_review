@@ -125,6 +125,7 @@ dependencies = [
  "anyhow",
  "ar-chat",
  "ar-forgejo",
+ "ar-index",
  "ar-llm",
  "ar-orchestrator",
  "async-trait",

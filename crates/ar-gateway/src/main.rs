@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use ar_forgejo::Client as ForgejoClient;
-use ar_gateway::{build_router, AppState};
+use ar_gateway::{build_router, AppState, ChatDeps};
+use ar_index::InMemoryLearningsStore;
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::SpawningDispatcher;
 use std::env;
@@ -72,12 +73,23 @@ async fn main() -> Result<()> {
 
     let llm_router = Arc::new(router);
     let dispatcher = Arc::new(SpawningDispatcher::new(
-        forgejo,
-        llm_router,
+        forgejo.clone(),
+        llm_router.clone(),
         forgejo_base.clone(),
         forgejo_token.clone(),
     ));
-    let state = AppState::new(secret, dispatcher);
+
+    // Chat handler dependencies. The learnings store is currently
+    // in-memory only — restarts wipe it. A SQLite/LanceDB backing is
+    // pending.
+    let learnings: Arc<dyn ar_index::LearningsStore> = Arc::new(InMemoryLearningsStore::new());
+    let chat_deps = ChatDeps {
+        forgejo: forgejo.clone(),
+        llm: llm_router.clone(),
+        learnings,
+    };
+
+    let state = AppState::new(secret, dispatcher).with_chat(chat_deps);
     let app = build_router(state);
 
     let listener = TcpListener::bind(&bind)

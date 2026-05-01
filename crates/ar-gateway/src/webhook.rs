@@ -1,6 +1,6 @@
 use crate::hmac::{verify, HmacError};
 use crate::AppState;
-use ar_chat::{parse_chat_command, ChatCommand};
+use ar_chat::{parse_chat_command, ChatCommand, ChatContext, ChatHandler};
 use ar_forgejo::{IssueCommentEvent, PullRequestAction, PullRequestEvent};
 use ar_orchestrator::ReviewJob;
 use axum::body::Bytes;
@@ -54,7 +54,7 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
     }
 }
 
-async fn handle_issue_comment(_state: &AppState, body: &[u8]) -> Response {
+async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
     let evt: IssueCommentEvent = match serde_json::from_slice(body) {
         Ok(e) => e,
         Err(e) => return reject(StatusCode::BAD_REQUEST, &format!("payload decode: {e}")),
@@ -63,25 +63,50 @@ async fn handle_issue_comment(_state: &AppState, body: &[u8]) -> Response {
         // Plain issue (not PR) — ignored.
         return (StatusCode::ACCEPTED, "").into_response();
     }
-    // Bot's own comments must be ignored to avoid loops.
     if is_bot_self(&evt.sender.login) {
+        // Bot's own comments must be ignored to avoid loops.
         return (StatusCode::ACCEPTED, "").into_response();
     }
-    // Parse the @-mention. NotMentioned acks silently; the rest get
-    // routed (TODO: hand off to ar-chat dispatcher; for now we log).
     let bot_name = "auto_review";
     let cmd = parse_chat_command(&evt.comment.body, bot_name);
-    match &cmd {
-        ChatCommand::NotMentioned => {}
-        _ => {
-            tracing::info!(
-                repo = %evt.repository.full_name,
-                issue = evt.issue.number,
-                sender = %evt.sender.login,
-                command = ?cmd,
-                "received chat command (handler dispatch is a TODO)"
-            );
-        }
+    if matches!(cmd, ChatCommand::NotMentioned) {
+        return (StatusCode::ACCEPTED, "").into_response();
+    }
+
+    // Hand off to the chat handler if it's wired up. Spawn the work so
+    // the webhook ack stays fast — chat replies typically involve at
+    // least one Forgejo round-trip and may include an LLM embed.
+    if let Some(chat) = state.chat.clone() {
+        let owner = evt.repository.owner.login.clone();
+        let repo = evt.repository.name.clone();
+        let issue_number = evt.issue.number;
+        let cmd_for_log = format!("{cmd:?}");
+        tokio::spawn(async move {
+            let handler = ChatHandler {
+                forgejo: &chat.forgejo,
+                llm: &chat.llm,
+                learnings: chat.learnings.as_ref(),
+            };
+            let ctx = ChatContext {
+                owner: &owner,
+                repo: &repo,
+                issue_number,
+            };
+            if let Err(e) = handler.handle(ctx, cmd).await {
+                tracing::error!(
+                    %owner, %repo, issue = issue_number, error = %e,
+                    command = %cmd_for_log,
+                    "chat handler failed"
+                );
+            }
+        });
+    } else {
+        tracing::warn!(
+            repo = %evt.repository.full_name,
+            issue = evt.issue.number,
+            command = ?cmd,
+            "chat command received but ChatDeps not configured; ignoring"
+        );
     }
     (StatusCode::ACCEPTED, "").into_response()
 }
