@@ -1,0 +1,33 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "Verification",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdicts"],
+  "properties": {
+    "verdicts": {
+      "type": "array",
+      "description": "One verdict per finding in the original review, in the same order.",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["finding_index", "keep"],
+        "properties": {
+          "finding_index": {
+            "type": "integer",
+            "minimum": 0,
+            "description": "Zero-based index into the review's findings array."
+          },
+          "keep": {
+            "type": "boolean",
+            "description": "True if the finding is corroborated by the cited code; false to drop it."
+          },
+          "reasoning": {
+            "type": "string",
+            "description": "Optional one-sentence justification (debug aid; not surfaced to the PR)."
+          }
+        }
+      }
+    }
+  }
+}

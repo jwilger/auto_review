@@ -10,6 +10,7 @@ pub mod schema;
 pub mod triage;
 pub mod types;
 pub mod validate;
+pub mod verification;
 
 pub use prompt::{render_review_prompt, system_prompt, ReviewPromptInputs};
 pub use schema::review_schema;
@@ -19,3 +20,7 @@ pub use triage::{
 };
 pub use types::{ReviewFinding, ReviewOutput, ReviewSeverity};
 pub use validate::{validate_review_output, ValidationError};
+pub use verification::{
+    validate_verification_output, verification_schema, verification_system_prompt,
+    VerificationOutput, VerificationValidationError, VerificationVerdict,
+};

@@ -3,6 +3,7 @@ use crate::error::ReviewError;
 use crate::heal::{generate_with_self_heal, HealConfig};
 use crate::ignored::{filter_changed_files, filter_diff_paths};
 use crate::mapping::output_to_review_request;
+use crate::verify::verify_findings;
 use ar_forgejo::Client as ForgejoClient;
 use ar_llm::Router as LlmRouter;
 use ar_prompts::{render_review_prompt, system_prompt, ReviewPromptInputs};
@@ -90,6 +91,12 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
 
     let output =
         generate_with_self_heal(args.llm, system_prompt(), &prompt, HealConfig::default()).await?;
+
+    // Optional second pass: when a Cheap tier is configured, verify
+    // each finding against the diff and drop the ones the verifier
+    // doesn't corroborate. Fails open — verifier issues never drop
+    // real findings.
+    let output = verify_findings(args.llm, output, &diff).await?;
     let findings_count = output.findings.len();
 
     let req = output_to_review_request(&output, args.head_sha);

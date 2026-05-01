@@ -20,6 +20,7 @@ pub mod pipeline;
 pub mod rag_context;
 pub mod routing;
 pub mod triage;
+pub mod verify;
 pub mod workspace;
 
 pub use config::{load_repo_config, RepoConfig};
@@ -35,4 +36,5 @@ pub use pipeline::{review_pull_request, ReviewArgs, ReviewOutcome};
 pub use rag_context::format_repo_context;
 pub use routing::{lint_workspace, lint_workspace_with, select_runners};
 pub use triage::{classify, pr_is_skippable, FileClass};
+pub use verify::verify_findings;
 pub use workspace::{build_clone_url, prepare_workspace, PreparedWorkspace, WorkspaceError};
