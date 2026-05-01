@@ -45,7 +45,19 @@ pub struct Client {
 
 impl Client {
     pub fn new(base_url: &str, token: &str) -> Result<Self, Error> {
-        let base = Url::parse(base_url).map_err(|_| Error::InvalidBaseUrl(base_url.to_string()))?;
+        // Forgejo can be deployed under a subpath (e.g.
+        // `https://example.com/forgejo`). `Url::join` resolves
+        // relative to the *last path component*, so a base without
+        // a trailing slash silently drops the subpath when joining
+        // `api/v1/`. Append `/` defensively so subpath deploys work
+        // without requiring operators to remember the convention.
+        let normalized = if base_url.ends_with('/') {
+            base_url.to_string()
+        } else {
+            format!("{base_url}/")
+        };
+        let base =
+            Url::parse(&normalized).map_err(|_| Error::InvalidBaseUrl(normalized.clone()))?;
         let mut headers = HeaderMap::new();
         headers.insert(
             AUTHORIZATION,
@@ -380,6 +392,42 @@ mod tests {
         let server = MockServer::start().await;
         let client = Client::new(&server.uri(), "test-token").expect("client");
         (server, client)
+    }
+
+    #[test]
+    fn base_url_without_trailing_slash_keeps_path_when_joined() {
+        // Forgejo deployed under a subpath
+        // (`https://example.com/forgejo`) is a real configuration.
+        // Without normalisation, `Url::join("api/v1/")` would
+        // resolve relative to the last path component and silently
+        // drop `forgejo` from the URL, making every API call hit
+        // the wrong endpoint.
+        let client = Client::new("https://example.com/forgejo", "tok").expect("client");
+        let url = client.url("repos/x/y/pulls/1.diff").expect("url");
+        assert!(
+            url.as_str().contains("/forgejo/api/v1/"),
+            "subpath was dropped: {url}"
+        );
+    }
+
+    #[test]
+    fn base_url_with_trailing_slash_works() {
+        let client = Client::new("https://example.com/forgejo/", "tok").expect("client");
+        let url = client.url("repos/x/y/pulls/1.diff").expect("url");
+        assert!(url.as_str().contains("/forgejo/api/v1/"));
+    }
+
+    #[test]
+    fn base_url_at_root_works_with_or_without_trailing_slash() {
+        for input in ["https://example.com", "https://example.com/"] {
+            let client = Client::new(input, "tok").expect("client");
+            let url = client.url("repos/x/y/pulls/1.diff").expect("url");
+            assert_eq!(
+                url.as_str(),
+                "https://example.com/api/v1/repos/x/y/pulls/1.diff",
+                "input = {input}"
+            );
+        }
     }
 
     #[tokio::test]
