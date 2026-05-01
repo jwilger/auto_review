@@ -4,6 +4,7 @@ use crate::mapping::output_to_review_request;
 use ar_forgejo::Client as ForgejoClient;
 use ar_llm::Router as LlmRouter;
 use ar_prompts::{render_review_prompt, system_prompt, ReviewPromptInputs};
+use ar_tools::Finding;
 
 #[derive(Debug, Clone)]
 pub struct ReviewOutcome {
@@ -15,8 +16,9 @@ pub struct ReviewOutcome {
 ///
 /// Fetches the diff and changed-file list, calls the reasoning LLM with
 /// self-heal validation, maps the structured output to a Forgejo review
-/// request, and posts it. Returns the review id and finding count on
-/// success.
+/// request, and posts it. The orchestrator is responsible for cloning the
+/// repo and running linters; their findings are passed in via
+/// `linter_findings` and surfaced to the LLM as supplementary context.
 #[allow(clippy::too_many_arguments)]
 pub async fn review_pull_request(
     forgejo: &ForgejoClient,
@@ -27,6 +29,7 @@ pub async fn review_pull_request(
     head_sha: &str,
     pr_title: &str,
     pr_body: &str,
+    linter_findings: &[Finding],
 ) -> Result<ReviewOutcome, ReviewError> {
     let diff = forgejo.get_pr_diff(owner, repo, pr_number).await?;
     let files = forgejo.list_changed_files(owner, repo, pr_number).await?;
@@ -39,9 +42,7 @@ pub async fn review_pull_request(
         pr_body,
         diff: &diff,
         changed_files: &changed_filenames,
-        // Linter findings are wired in once the orchestrator clones the
-        // repo and runs `ar-tools::run_all` (see Milestone 1 follow-up).
-        linter_findings: &[],
+        linter_findings,
     });
 
     let output =
@@ -63,18 +64,45 @@ mod tests {
     use ar_llm::{
         CompleteRequest, CompleteResponse, Error as LlmError, LlmProvider, ModelTier, Router,
     };
+    use ar_tools::Severity;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
-    struct CannedProvider(Mutex<Vec<String>>);
+    /// Provider that records each request it receives and returns canned
+    /// content from a stack (popped LIFO so callers list responses
+    /// last-to-first).
+    struct CannedProvider {
+        responses: Mutex<Vec<String>>,
+        seen: Mutex<Vec<CompleteRequest>>,
+    }
+
+    impl CannedProvider {
+        fn new(responses: Vec<&str>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().map(String::from).collect()),
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn last_user_prompt(&self) -> Option<String> {
+            let seen = self.seen.lock().unwrap();
+            seen.first().and_then(|req| {
+                req.messages
+                    .iter()
+                    .find(|m| matches!(m.role, ar_llm::Role::User))
+                    .map(|m| m.content.clone())
+            })
+        }
+    }
 
     #[async_trait]
     impl LlmProvider for CannedProvider {
-        async fn complete(&self, _req: CompleteRequest) -> Result<CompleteResponse, LlmError> {
+        async fn complete(&self, req: CompleteRequest) -> Result<CompleteResponse, LlmError> {
+            self.seen.lock().unwrap().push(req);
             let next = self
-                .0
+                .responses
                 .lock()
                 .unwrap()
                 .pop()
@@ -85,6 +113,10 @@ mod tests {
                 output_tokens: 0,
             })
         }
+    }
+
+    fn router_with(provider: Arc<CannedProvider>) -> Router {
+        Router::new().with(ModelTier::Reasoning, provider)
     }
 
     #[tokio::test]
@@ -117,15 +149,24 @@ mod tests {
             .await;
 
         let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let llm = router_with(provider);
 
-        let provider = Arc::new(CannedProvider(Mutex::new(vec![
-            r#"{"summary":"looks fine","findings":[]}"#.to_string(),
-        ])));
-        let llm = Router::new().with(ModelTier::Reasoning, provider);
-
-        let outcome = review_pull_request(&forgejo, &llm, "o", "r", 7, "deadbeef", "title", "body")
-            .await
-            .expect("review ok");
+        let outcome = review_pull_request(
+            &forgejo,
+            &llm,
+            "o",
+            "r",
+            7,
+            "deadbeef",
+            "title",
+            "body",
+            &[],
+        )
+        .await
+        .expect("review ok");
 
         assert_eq!(outcome.review_id, 1234);
         assert_eq!(outcome.findings_count, 0);
@@ -141,10 +182,10 @@ mod tests {
             .await;
 
         let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
-        let provider = Arc::new(CannedProvider(Mutex::new(vec![])));
-        let llm = Router::new().with(ModelTier::Reasoning, provider);
+        let provider = Arc::new(CannedProvider::new(vec![]));
+        let llm = router_with(provider);
 
-        let err = review_pull_request(&forgejo, &llm, "o", "r", 7, "x", "t", "b")
+        let err = review_pull_request(&forgejo, &llm, "o", "r", 7, "x", "t", "b", &[])
             .await
             .expect_err("err");
         assert!(matches!(err, ReviewError::Forgejo(_)));
@@ -179,12 +220,62 @@ mod tests {
         let bad = r#"{"summary":"break","findings":[
             {"path":"a","line_start":1,"severity":"error","message":"oops"}
         ]}"#;
-        let provider = Arc::new(CannedProvider(Mutex::new(vec![bad.to_string()])));
-        let llm = Router::new().with(ModelTier::Reasoning, provider);
+        let provider = Arc::new(CannedProvider::new(vec![bad]));
+        let llm = router_with(provider);
 
-        let outcome = review_pull_request(&forgejo, &llm, "o", "r", 7, "sha", "t", "b")
+        let outcome = review_pull_request(&forgejo, &llm, "o", "r", 7, "sha", "t", "b", &[])
             .await
             .expect("ok");
         assert_eq!(outcome.findings_count, 1);
+    }
+
+    #[tokio::test]
+    async fn review_pull_request_threads_linter_findings_into_llm_prompt() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("d"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1, "state": "COMMENT"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"x","findings":[]}"#,
+        ]));
+        let llm = router_with(provider.clone());
+
+        let findings = vec![Finding {
+            source_tool: "shellcheck".into(),
+            rule_id: Some("SC2034".into()),
+            path: "build.sh".into(),
+            line_start: 3,
+            line_end: 3,
+            severity: Severity::Warning,
+            message: "var unused".into(),
+        }];
+
+        review_pull_request(&forgejo, &llm, "o", "r", 7, "sha", "t", "b", &findings)
+            .await
+            .expect("ok");
+
+        let prompt = provider
+            .last_user_prompt()
+            .expect("LLM should have been called");
+        assert!(prompt.to_lowercase().contains("static-analysis findings"));
+        assert!(prompt.contains("shellcheck"));
+        assert!(prompt.contains("SC2034"));
+        assert!(prompt.contains("build.sh:3"));
     }
 }

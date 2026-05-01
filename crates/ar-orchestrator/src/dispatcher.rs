@@ -104,6 +104,8 @@ pub async fn run_review_job(forgejo: &ForgejoClient, llm: &LlmRouter, job: Revie
         &job.head_sha,
         &job.pr_title,
         &job.pr_body,
+        // TODO: clone the repo and run ar-tools::run_all here.
+        &[],
     )
     .await;
 
