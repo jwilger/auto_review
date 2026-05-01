@@ -10,4 +10,10 @@ description = "Repo indexer: tree-sitter parsing, LanceDB embeddings, co-change 
 [dependencies]
 serde.workspace = true
 anyhow.workspace = true
+thiserror.workspace = true
 tracing.workspace = true
+tree-sitter = "0.23"
+tree-sitter-rust = "0.23"
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
