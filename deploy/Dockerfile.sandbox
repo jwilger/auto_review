@@ -15,8 +15,8 @@
 #
 # Linter set (in alphabetical order):
 #   actionlint, ast-grep, biome, eslint, gitleaks, golangci-lint,
-#   hadolint, markdownlint, osv-scanner, phpstan, rubocop, ruff,
-#   semgrep, shellcheck, sqlfluff, trivy, yamllint
+#   hadolint, markdownlint, osv-scanner, oxlint, phpstan, rubocop,
+#   ruff, semgrep, shellcheck, sqlfluff, trivy, yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -54,7 +54,8 @@ RUN composer global require --no-interaction --quiet phpstan/phpstan \
 RUN npm install -g \
         eslint \
         markdownlint-cli \
-        @biomejs/biome
+        @biomejs/biome \
+        oxlint
 
 # Static-binary linters: pin the latest release downloads.
 RUN set -eux; \

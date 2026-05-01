@@ -44,7 +44,7 @@ since the start of the project.
   `run_review_job` posts pending → final commit statuses around the
   triage → clone → lint → review → post sequence.
 
-#### Linters (17 of CodeRabbit's ~45 set)
+#### Linters (18 of CodeRabbit's ~45 set)
 
 | Tool | Languages / files | Source-tool name |
 |---|---|---|
@@ -56,6 +56,7 @@ since the start of the project.
 | `ruff` | Python | `ruff` |
 | `eslint` | JS / JSX / TS / TSX / CJS / MJS | `eslint` |
 | `biome` | JS / JSX / TS / TSX / CJS / MJS (rule-set distinct from eslint) | `biome` |
+| `oxlint` | JS / JSX / TS / TSX / CJS / MJS (Rust rewrite of eslint) | `oxlint` |
 | `golangci-lint` | Go (errcheck, govet, staticcheck, …) | `golangci-lint` |
 | `rubocop` | Ruby (.rb / .rake / Gemfile / Rakefile) | `rubocop` |
 | `phpstan` | PHP (.php / .phtml / .php3-7 / .phps) | `phpstan` |
@@ -256,8 +257,8 @@ default in-memory store to the SQLite-backed one.
   paths cover correctness; LanceDB is the scale lever).
 - youki-based `Sandbox` impl as a lighter alternative to the
   podman shell-out.
-- Remaining ~28 linters from CodeRabbit's set
-  (oxlint, languagetool, checkov, eslintcc, …).
+- Remaining ~27 linters from CodeRabbit's set
+  (languagetool, checkov, terragrunt, detekt, swiftlint, …).
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
   wiremock + canned LLM providers.

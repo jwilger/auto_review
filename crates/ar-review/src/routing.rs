@@ -12,6 +12,7 @@ use ar_tools::golangci_lint::GolangciLintRunner;
 use ar_tools::hadolint::HadolintRunner;
 use ar_tools::markdownlint::MarkdownLintRunner;
 use ar_tools::osv_scanner::OsvScannerRunner;
+use ar_tools::oxlint::OxlintRunner;
 use ar_tools::phpstan::PhpstanRunner;
 use ar_tools::rubocop::RubocopRunner;
 use ar_tools::ruff::RuffRunner;
@@ -150,7 +151,10 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         runners.push(Box::new(EslintRunner {
             files: js_files.clone(),
         }));
-        runners.push(Box::new(BiomeRunner { files: js_files }));
+        runners.push(Box::new(BiomeRunner {
+            files: js_files.clone(),
+        }));
+        runners.push(Box::new(OxlintRunner { files: js_files }));
     }
 
     let shell_files: Vec<String> = surviving
@@ -466,6 +470,7 @@ mod tests {
                 "hadolint",
                 "markdownlint",
                 "osv-scanner",
+                "oxlint",
                 "ruff",
                 "semgrep",
                 "shellcheck",
@@ -522,7 +527,7 @@ mod tests {
     }
 
     #[test]
-    fn javascript_typescript_extensions_select_eslint_and_biome() {
+    fn javascript_typescript_extensions_select_eslint_biome_and_oxlint() {
         for name in [
             "src/a.js",
             "src/b.jsx",
@@ -543,6 +548,7 @@ mod tests {
                     "eslint",
                     "gitleaks",
                     "osv-scanner",
+                    "oxlint",
                     "semgrep",
                     "trivy"
                 ],
