@@ -17,6 +17,7 @@ use ar_tools::gitleaks::GitleaksRunner;
 use ar_tools::golangci_lint::GolangciLintRunner;
 use ar_tools::gosec::GosecRunner;
 use ar_tools::hadolint::HadolintRunner;
+use ar_tools::htmlhint::HtmlhintRunner;
 use ar_tools::ktlint::KtlintRunner;
 use ar_tools::kubeconform::KubeconformRunner;
 use ar_tools::markdownlint::MarkdownLintRunner;
@@ -289,6 +290,18 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         .collect();
     if !css_files.is_empty() {
         runners.push(Box::new(StylelintRunner { files: css_files }));
+    }
+
+    let html_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| {
+            let lower = f.filename.to_ascii_lowercase();
+            lower.ends_with(".html") || lower.ends_with(".htm") || lower.ends_with(".xhtml")
+        })
+        .map(|f| f.filename.clone())
+        .collect();
+    if !html_files.is_empty() {
+        runners.push(Box::new(HtmlhintRunner { files: html_files }));
     }
 
     // buf reads its module config (`buf.yaml`) from the workspace
@@ -931,6 +944,29 @@ mod tests {
                     "ast-grep",
                     "cppcheck",
                     "gitleaks",
+                    "osv-scanner",
+                    "semgrep",
+                    "trivy",
+                    "typos"
+                ],
+                "name = {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn html_files_select_htmlhint() {
+        for name in ["public/index.html", "site/about.htm", "doc/page.xhtml"] {
+            let files = vec![cf(name, "modified")];
+            let runners = select_runners(&files);
+            let mut got = names(&runners);
+            got.sort();
+            assert_eq!(
+                got,
+                vec![
+                    "ast-grep",
+                    "gitleaks",
+                    "htmlhint",
                     "osv-scanner",
                     "semgrep",
                     "trivy",
