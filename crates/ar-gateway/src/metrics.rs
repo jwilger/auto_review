@@ -54,6 +54,7 @@ pub struct Metrics {
     /// Sum of `findings_count` across successful reviews. Lets
     /// operators chart total bot-flagged issues over time.
     pub review_findings_sum: AtomicU64,
+    pub verifier_findings_dropped: AtomicU64,
 
     // Poller counters: track the background ChatPoller's progress
     // so operators can see whether inline-thread mentions are being
@@ -124,13 +125,20 @@ impl Metrics {
         self.reviews_started.fetch_add(1, Ordering::Relaxed);
     }
 
-    pub fn record_review_succeeded(&self, duration_ms: u64, findings_count: u64) {
+    pub fn record_review_succeeded(
+        &self,
+        duration_ms: u64,
+        findings_count: u64,
+        verifier_dropped: u64,
+    ) {
         self.reviews_succeeded.fetch_add(1, Ordering::Relaxed);
         self.reviews_completed_count.fetch_add(1, Ordering::Relaxed);
         self.review_duration_ms_sum
             .fetch_add(duration_ms, Ordering::Relaxed);
         self.review_findings_sum
             .fetch_add(findings_count, Ordering::Relaxed);
+        self.verifier_findings_dropped
+            .fetch_add(verifier_dropped, Ordering::Relaxed);
         self.bucket_duration(duration_ms);
     }
 
@@ -313,6 +321,11 @@ impl Metrics {
                 &self.review_findings_sum,
             ),
             (
+                "auto_review_verifier_findings_dropped_total",
+                "Findings the cheap-tier verifier corrected away. Sustained increases relative to review_findings_sum mean the reasoning model is hallucinating; consider switching to a higher-quality model.",
+                &self.verifier_findings_dropped,
+            ),
+            (
                 "auto_review_poll_cycles_total",
                 "Background-poller passes that completed successfully. Compare against the configured AR_POLL_INTERVAL_SECS to spot a stalled poller.",
                 &self.poll_cycles,
@@ -422,9 +435,11 @@ impl ReviewObserver for MetricsObserver {
             ReviewObservation::Succeeded {
                 duration,
                 findings_count,
+                verifier_dropped,
             } => self.metrics.record_review_succeeded(
                 duration.as_millis() as u64,
                 findings_count as u64,
+                verifier_dropped as u64,
             ),
             ReviewObservation::Failed {
                 duration,
@@ -615,6 +630,7 @@ mod tests {
             obs.record(ReviewObservation::Succeeded {
                 duration: std::time::Duration::from_millis(d),
                 findings_count: 0,
+                verifier_dropped: 0,
             });
         }
         let out = m.render();
@@ -685,6 +701,36 @@ mod tests {
     }
 
     #[test]
+    fn verifier_dropped_counter_sums_across_reviews() {
+        let m = Arc::new(Metrics::new());
+        let obs = MetricsObserver::new(m.clone());
+        obs.record(ReviewObservation::Succeeded {
+            duration: std::time::Duration::from_millis(100),
+            findings_count: 5,
+            verifier_dropped: 2,
+        });
+        obs.record(ReviewObservation::Succeeded {
+            duration: std::time::Duration::from_millis(100),
+            findings_count: 3,
+            verifier_dropped: 1,
+        });
+        // Failed observations don't carry verifier_dropped (no
+        // post-verifier output to compare against).
+        obs.record(ReviewObservation::Failed {
+            duration: std::time::Duration::from_millis(50),
+            error_class: "llm",
+        });
+        let out = m.render();
+        assert!(
+            out.contains("auto_review_verifier_findings_dropped_total 3\n"),
+            "expected sum 3 (2+1), got:\n{out}"
+        );
+        // Findings sum still tracks what got POSTED, not what
+        // was dropped.
+        assert!(out.contains("auto_review_review_findings_sum 8\n"));
+    }
+
+    #[test]
     fn review_outcome_counters_route_by_class() {
         let m = Arc::new(Metrics::new());
         let obs = MetricsObserver::new(m.clone());
@@ -695,10 +741,12 @@ mod tests {
         obs.record(ReviewObservation::Succeeded {
             duration: std::time::Duration::from_millis(1500),
             findings_count: 3,
+            verifier_dropped: 0,
         });
         obs.record(ReviewObservation::Succeeded {
             duration: std::time::Duration::from_millis(500),
             findings_count: 1,
+            verifier_dropped: 0,
         });
 
         obs.record(ReviewObservation::Failed {

@@ -28,10 +28,15 @@ pub enum ReviewObservation {
     /// A review finished and posted comments successfully. `duration`
     /// covers the whole pipeline (clone + lint + LLM + verify +
     /// post). `findings_count` is what landed on the PR; zero is the
-    /// happy path, not an error.
+    /// happy path, not an error. `verifier_dropped` is the number
+    /// of findings the verifier corrected away (sums to the
+    /// reasoning model's pre-verify count if there was no
+    /// severity-floor filter); high rates point at the reasoning
+    /// model hallucinating.
     Succeeded {
         duration: Duration,
         findings_count: usize,
+        verifier_dropped: usize,
     },
     /// A review terminated with an error (LLM/Workspace/Forgejo
     /// failure or unhealable JSON). `error_class` is one of:
@@ -520,6 +525,7 @@ pub async fn run_review_job(
             observe(ReviewObservation::Succeeded {
                 duration: started_at.elapsed(),
                 findings_count: outcome.findings_count,
+                verifier_dropped: outcome.verifier_dropped,
             });
             CommitStatus {
                 state: CommitStatusState::Success,
@@ -853,6 +859,7 @@ mod tests {
             errors,
             warnings,
             notes,
+            verifier_dropped: 0,
         }
     }
 

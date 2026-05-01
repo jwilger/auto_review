@@ -120,6 +120,12 @@ import steps.
   (`rate(...sum[5m]) / rate(...count[5m])`).
 - `auto_review_review_findings_sum` — total findings posted across
   successful reviews. Useful for charting bot output volume.
+- `auto_review_verifier_findings_dropped_total` — findings the
+  cheap-tier verifier corrected away. Sustained drop ratio
+  (`rate(...dropped[5m]) / (rate(...sum[5m]) + rate(...dropped[5m]))`)
+  above ~30% means the reasoning model is hallucinating heavily.
+  Action: try a higher-quality reasoning model, or tighten the
+  system prompt's anti-hallucination guidance.
 - `auto_review_reviews_skipped_<reason>_total` — `same_sha`
   (incremental dedup), `trivial_files` (lockfiles / vendored /
   generated), `disabled_by_config` (`enabled: false`). Operators

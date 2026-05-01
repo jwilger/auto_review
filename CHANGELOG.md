@@ -1096,6 +1096,35 @@ default in-memory store to the SQLite-backed one.
   forget-learning behavioural (drop existing record,
   unknown-id errors clearly).
 
+#### Verifier-dropped findings counter
+
+- New `auto_review_verifier_findings_dropped_total` counter
+  exposed at `/metrics`. Tracks how many findings the cheap-
+  tier verifier corrected away per review. Reasoning model
+  emitted N → verifier kept (N - dropped). Sustained high
+  drop ratios indicate the reasoning model is hallucinating;
+  operators chart it as a quality signal and react with
+  higher-quality models or prompt-hardening.
+- `ReviewObservation::Succeeded` gains a `verifier_dropped:
+  usize` field. Pipeline computes it as
+  `pre_verify_count - output.findings.len()` after the
+  verifier runs (which itself runs after the severity-floor,
+  so the count reflects findings the verifier rejected — not
+  findings filtered for being below severity threshold).
+- LinterOnly mode reports `verifier_dropped: 0` since no
+  verifier runs. The existing `verifier_dropped` field on
+  `ReviewOutcome` mirrors the observation field for
+  cross-crate visibility.
+- New test
+  (`verifier_dropped_counter_sums_across_reviews`)
+  exercises two Succeeded observations + one Failed
+  observation and asserts the counter sums correctly across
+  successes (Failed doesn't carry the field).
+- OPERATIONS.md daily-checks section documents the
+  hallucination-rate alert formula:
+  `rate(dropped[5m]) / (rate(sum[5m]) + rate(dropped[5m]))`
+  above ~30% as the action threshold.
+
 #### Severity breakdown in commit-status descriptions
 
 - The bot's commit-status description used to read

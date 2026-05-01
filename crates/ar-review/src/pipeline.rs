@@ -39,6 +39,12 @@ pub struct ReviewOutcome {
     pub errors: usize,
     pub warnings: usize,
     pub notes: usize,
+    /// Findings the verifier corrected away. Reasoning model
+    /// emitted N findings; verifier kept (N - verifier_dropped).
+    /// Surfaces as a counter so operators can chart their
+    /// hallucination rate over time. Always 0 in LinterOnly mode
+    /// (no verifier runs).
+    pub verifier_dropped: usize,
 }
 
 /// Rank for ordered comparison: higher = more severe. Lets the
@@ -168,6 +174,10 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         repo_context: args.repo_context,
     });
 
+    // Track the post-floor / pre-verifier count so we can report
+    // how many findings the verifier dropped. Linter-only mode
+    // doesn't run a verifier, so it stays at 0.
+    let mut pre_verify_count: usize = 0;
     let mut output = match args.review_mode {
         ReviewMode::LinterOnly => {
             // Skip the LLM entirely. The orchestrator already ran the
@@ -191,6 +201,7 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
             // verifier-cost on every Note-level finding the
             // reasoning model emits.
             apply_severity_floor(&mut output, args.min_severity);
+            pre_verify_count = output.findings.len();
             // Optional second pass: when a Cheap tier is configured,
             // verify each finding against the diff and drop the ones
             // the verifier doesn't corroborate. Fails open — verifier
@@ -251,12 +262,14 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
             ReviewSeverity::Note => notes += 1,
         }
     }
+    let verifier_dropped = pre_verify_count.saturating_sub(output.findings.len());
     Ok(ReviewOutcome {
         findings_count,
         review_id: created.id,
         errors,
         warnings,
         notes,
+        verifier_dropped,
     })
 }
 
