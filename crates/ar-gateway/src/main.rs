@@ -281,8 +281,62 @@ async fn main() -> Result<()> {
         .await
         .with_context(|| format!("bind {bind}"))?;
     tracing::info!(%bind, "ar-gateway listening");
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+    tracing::info!("graceful shutdown complete");
     Ok(())
+}
+
+/// Shutdown signal handler. Returns when SIGTERM (Unix) or
+/// SIGINT (Ctrl-C, cross-platform) arrives. Used as the
+/// `with_graceful_shutdown` argument on `axum::serve` so:
+/// - in-flight HTTP responses finish cleanly,
+/// - the listener stops accepting new connections immediately,
+/// - the process exits 0 once the listener drains.
+///
+/// Note: review tasks the dispatcher has already `tokio::spawn`-ed
+/// continue running after the listener drains, since they're not
+/// joined on. The tokio runtime drops them when `main` returns.
+/// This is best-effort by design — adding a join set across the
+/// dispatcher boundary would mean threading a CancellationToken
+/// through every spawned activity, which is more machinery than
+/// the single-tenant deploy needs. Operators wanting zero data
+/// loss should drain via the systemd `ExecStop=` hook with a
+/// short pre-stop sleep before SIGTERM, so in-flight reviews
+/// reach their commit-status post.
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            tracing::warn!(error = %e, "ctrl_c handler failed; shutdown trigger disabled");
+        }
+    };
+
+    #[cfg(unix)]
+    let terminate = async {
+        let mut term = match tokio::signal::unix::signal(
+            tokio::signal::unix::SignalKind::terminate(),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                tracing::warn!(error = %e, "SIGTERM handler init failed");
+                return;
+            }
+        };
+        term.recv().await;
+    };
+
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {
+            tracing::info!("received SIGINT; draining listener");
+        }
+        _ = terminate => {
+            tracing::info!("received SIGTERM; draining listener");
+        }
+    }
 }
 
 /// Choose a sandbox based on env vars. Setting `AR_SANDBOX_IMAGE`

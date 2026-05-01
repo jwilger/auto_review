@@ -147,6 +147,31 @@ PR's changed file extensions.
   `issue_comment` webhook at `<gateway-url>/webhooks/forgejo` with the
   configured `WEBHOOK_SECRET`.
 
+#### Graceful shutdown
+
+- `ar-gateway` now installs a `with_graceful_shutdown`
+  handler that listens for SIGTERM (Unix) and SIGINT
+  (Ctrl-C, cross-platform). On signal: the listener stops
+  accepting new connections, in-flight HTTP responses
+  drain cleanly, the process exits 0.
+- Behaviour matches what `systemctl stop` operators
+  expect — previously SIGTERM hard-killed mid-response.
+- Spawned review tasks (the dispatcher's
+  `tokio::spawn` work) are best-effort: if they're still
+  running at SIGTERM, the runtime drops them when `main`
+  returns. The threading required for cancellation
+  tokens through every spawned activity is more
+  machinery than the single-tenant deploy needs.
+  Documented inline in `shutdown_signal()` so future
+  contributors don't accidentally promise stronger
+  semantics.
+- `deploy/systemd/auto_review.service` gains
+  `KillSignal=SIGTERM` (explicit; default but pinned)
+  and `TimeoutStopSec=30s` so systemd waits for the
+  graceful drain rather than escalating to SIGKILL at
+  its default 90s timeout. `systemd-analyze verify`
+  clean.
+
 #### Operations endpoints
 
 - `GET /healthz` — cheap liveness check (process up).

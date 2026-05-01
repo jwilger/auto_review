@@ -48,6 +48,15 @@ ReadWritePaths=/var/lib/auto_review
 Restart=on-failure
 RestartSec=5s
 
+# Graceful-shutdown semantics. The gateway listens for SIGTERM
+# and drains its HTTP listener before exiting; give it room to
+# finish in-flight requests rather than hard-killing at the
+# default 90s. Reviews already spawned via tokio::spawn are
+# best-effort: if they're still running at the timeout, systemd
+# escalates to SIGKILL.
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
 # Hardening — same spirit as the threat model's T1 mitigation
 # for the bot process itself. Sandbox-related directives are
 # additive to the application-level Podman sandbox; this layer
