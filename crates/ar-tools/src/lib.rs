@@ -39,6 +39,7 @@ pub mod shellcheck;
 pub mod sqlfluff;
 pub mod swiftlint;
 pub mod taplo;
+pub mod tflint;
 pub mod trivy;
 pub mod typos;
 pub mod vale;

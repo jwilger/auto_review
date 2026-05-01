@@ -32,6 +32,7 @@ use ar_tools::shellcheck::ShellCheckRunner;
 use ar_tools::sqlfluff::SqlfluffRunner;
 use ar_tools::swiftlint::SwiftLintRunner;
 use ar_tools::taplo::TaploRunner;
+use ar_tools::tflint::TflintRunner;
 use ar_tools::trivy::TrivyRunner;
 use ar_tools::typos::TyposRunner;
 use ar_tools::vale::ValeRunner;
@@ -291,6 +292,10 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         .collect();
     if !tf_files.is_empty() {
         runners.push(Box::new(CheckovRunner { files: tf_files }));
+        // tflint is Terraform-specific and supports provider plugins
+        // (AWS/Azure/GCP) that catch resource-level mistakes
+        // checkov doesn't see.
+        runners.push(Box::new(TflintRunner));
     }
 
     let env_files: Vec<String> = surviving
@@ -758,7 +763,7 @@ mod tests {
     }
 
     #[test]
-    fn terraform_files_select_checkov() {
+    fn terraform_files_select_checkov_and_tflint() {
         for name in ["infra/main.tf", "vars/prod.tfvars", "module.hcl"] {
             let files = vec![cf(name, "modified")];
             let runners = select_runners(&files);
@@ -772,6 +777,7 @@ mod tests {
                     "gitleaks",
                     "osv-scanner",
                     "semgrep",
+                    "tflint",
                     "trivy",
                     "typos"
                 ],

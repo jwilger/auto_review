@@ -44,7 +44,7 @@ since the start of the project.
   `run_review_job` posts pending → final commit statuses around the
   triage → clone → lint → review → post sequence.
 
-#### Linters (32 of CodeRabbit's ~45 set)
+#### Linters (33 of CodeRabbit's ~45 set)
 
 | Tool | Languages / files | Source-tool name |
 |---|---|---|
@@ -52,6 +52,7 @@ since the start of the project.
 | `semgrep` | Multi-language SAST via `--config=auto` | `semgrep` |
 | `trivy` | Vulnerabilities, misconfigs, secrets | `trivy` |
 | `checkov` | Terraform / HCL infrastructure-as-code misconfigs | `checkov` |
+| `tflint` | Terraform-specific lint + provider-plugin checks | `tflint` |
 | `osv-scanner` | Dependency CVEs against Google's OSV DB | `osv-scanner` |
 | `ast-grep` | Custom AST-pattern rules (any tree-sitter language) | `ast-grep` |
 | `ruff` | Python | `ruff` |
@@ -278,8 +279,8 @@ default in-memory store to the SQLite-backed one.
   paths cover correctness; LanceDB is the scale lever).
 - youki-based `Sandbox` impl as a lighter alternative to the
   podman shell-out.
-- Remaining ~13 linters from CodeRabbit's set
-  (languagetool, terragrunt, detekt, prettier-check, helm-lint, …).
+- Remaining ~12 linters from CodeRabbit's set
+  (languagetool, detekt, prettier-check, helm-lint, shfmt, …).
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
   wiremock + canned LLM providers.
