@@ -162,6 +162,17 @@ PR's changed file extensions.
   to do that. When no probe is wired (single-pod systemd
   deploy), `/readyz` degrades safely to `/healthz` semantics.
 - `GET /version` — JSON `{"name", "version"}` from `CARGO_PKG_VERSION`.
+- `GET /info` — runtime-config snapshot in JSON. Captured
+  once at startup; surfaces which sandbox is active
+  (`direct` vs `podman`), which learnings store is wired
+  (`in-memory` vs `sqlite`), which LLM tiers have a
+  provider configured (`reasoning` always; `cheap` and
+  `embedding` opt-in), the configured reasoning model name,
+  and whether the background poller and `/readyz` probe are
+  enabled. Operators can confirm at runtime what the
+  gateway thinks it's running without parsing logs;
+  attached to issue reports it tells maintainers exactly
+  which deployment shape generated the bug.
 - `GET /metrics` — Prometheus-format counters spanning the
   webhook layer AND the review pipeline.
   - **Webhook layer:** webhooks bucketed by event

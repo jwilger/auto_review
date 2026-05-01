@@ -335,6 +335,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn info_without_wiring_returns_fallback() {
+        let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)));
+        let req = Request::get("/info").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["name"], "auto_review");
+        assert_eq!(json["info"], "not wired");
+    }
+
+    #[tokio::test]
+    async fn info_with_full_wiring_returns_runtime_snapshot() {
+        use crate::GatewayInfo;
+        let info = Arc::new(GatewayInfo {
+            name: "auto_review",
+            version: "0.0.1",
+            bot_login: "pr-bot".into(),
+            bot_name: "pr-bot".into(),
+            sandbox: "podman",
+            learnings: "sqlite",
+            llm_tiers: vec!["reasoning", "cheap", "embedding"],
+            reasoning_model: "qwen2.5-coder:32b".into(),
+            poller_enabled: true,
+            readiness_enabled: true,
+        });
+        let app = build_router(
+            AppState::new("s", Arc::new(NoOpDispatcher)).with_info(info),
+        );
+        let req = Request::get("/info").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(json["bot_login"], "pr-bot");
+        assert_eq!(json["sandbox"], "podman");
+        assert_eq!(json["learnings"], "sqlite");
+        assert_eq!(json["reasoning_model"], "qwen2.5-coder:32b");
+        assert_eq!(json["poller_enabled"], true);
+        assert_eq!(json["readiness_enabled"], true);
+        let tiers: Vec<String> = json["llm_tiers"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|v| v.as_str().unwrap().to_owned())
+            .collect();
+        assert_eq!(tiers, vec!["reasoning", "cheap", "embedding"]);
+    }
+
+    #[tokio::test]
     async fn readyz_without_probe_returns_200() {
         let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)));
         let req = Request::get("/readyz").body(Body::empty()).unwrap();

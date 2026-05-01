@@ -2,7 +2,7 @@ use anyhow::{Context, Result};
 use ar_forgejo::Client as ForgejoClient;
 use ar_gateway::metrics::{Metrics, MetricsObserver};
 use ar_gateway::poller::{ChatPoller, DEFAULT_POLL_INTERVAL};
-use ar_gateway::{build_router, AppState, ChatDeps, ReadinessProbe};
+use ar_gateway::{build_router, AppState, ChatDeps, GatewayInfo, ReadinessProbe};
 use ar_index::{InMemoryLearningsStore, SqliteLearningsStore};
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::review_history::{InMemoryReviewHistory, ReviewHistory};
@@ -180,11 +180,45 @@ async fn main() -> Result<()> {
         Duration::from_secs(readiness_ttl_secs),
     ));
 
+    // Snapshot the runtime config for /info. Read env-var-driven
+    // booleans here once rather than threading them through every
+    // builder call.
+    let info = Arc::new(GatewayInfo {
+        name: "auto_review",
+        version: env!("CARGO_PKG_VERSION"),
+        bot_login: bot_login.clone(),
+        bot_name: bot_name.clone(),
+        sandbox: if env::var("AR_SANDBOX_IMAGE").is_ok() {
+            "podman"
+        } else {
+            "direct"
+        },
+        learnings: if env::var("AR_LEARNINGS_DB").is_ok() {
+            "sqlite"
+        } else {
+            "in-memory"
+        },
+        llm_tiers: {
+            let mut tiers = vec!["reasoning"]; // always present (required)
+            if env::var("LLM_CHEAP_MODEL").is_ok() {
+                tiers.push("cheap");
+            }
+            if env::var("LLM_EMBEDDING_MODEL").is_ok() {
+                tiers.push("embedding");
+            }
+            tiers
+        },
+        reasoning_model: reasoning_model.clone(),
+        poller_enabled: poll_interval_secs > 0,
+        readiness_enabled: true,
+    });
+
     let state = AppState::new(secret, dispatcher)
         .with_chat(chat_deps)
         .with_bot_identity(bot_login, bot_name)
         .with_metrics(metrics)
-        .with_readiness(readiness);
+        .with_readiness(readiness)
+        .with_info(info);
     let app = build_router(state);
 
     let listener = TcpListener::bind(&bind)

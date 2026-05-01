@@ -20,6 +20,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use metrics::Metrics;
+use serde::Serialize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::Mutex;
@@ -46,6 +47,44 @@ pub struct AppState {
     /// a small TTL cache so we don't hammer Forgejo on every k8s
     /// readiness probe.
     pub readiness: Option<Arc<ReadinessProbe>>,
+    /// Snapshot of runtime configuration surfaced at `/info`. None
+    /// for tests that don't bother populating it; production
+    /// `main.rs` always sets this.
+    pub info: Option<Arc<GatewayInfo>>,
+}
+
+/// Runtime-config snapshot returned from `GET /info`. Captured once
+/// at startup; nothing here changes during the gateway's lifetime
+/// (readiness state lives at `/readyz`, counters at `/metrics`).
+///
+/// JSON shape is stable — operators script against this. Adding a
+/// field is fine; renaming or removing one is a breaking change.
+#[derive(Debug, Clone, Serialize)]
+pub struct GatewayInfo {
+    pub name: &'static str,
+    pub version: &'static str,
+    pub bot_login: String,
+    pub bot_name: String,
+    /// Which `Sandbox` impl is active. `"direct"` = no isolation
+    /// (Kudelski-class RCE risk; only safe for trusted-PR sources);
+    /// `"podman"` = the hardened production path.
+    pub sandbox: &'static str,
+    /// Which `LearningsStore` impl is wired up. `"sqlite"` =
+    /// persistent across restart; `"in-memory"` = volatile.
+    pub learnings: &'static str,
+    /// Which LLM tiers have a provider configured. Order is
+    /// stable: `["reasoning", "cheap", "embedding"]`.
+    pub llm_tiers: Vec<&'static str>,
+    /// Reasoning model name from env at startup. Empty when not
+    /// set (which would block reviews entirely; useful debug
+    /// signal).
+    pub reasoning_model: String,
+    /// Whether the background `ChatPoller` is running. Disabled
+    /// when `AR_POLL_INTERVAL_SECS=0`.
+    pub poller_enabled: bool,
+    /// Whether `/readyz` does an actual probe vs degrading to
+    /// `/healthz` semantics.
+    pub readiness_enabled: bool,
 }
 
 /// Async-Mutex-guarded TTL cache wrapping a Forgejo reachability
@@ -119,6 +158,7 @@ impl AppState {
             bot_login: Arc::new("auto_review".into()),
             bot_name: Arc::new("auto_review".into()),
             readiness: None,
+            info: None,
         }
     }
 
@@ -127,6 +167,12 @@ impl AppState {
     /// degrade to liveness, which is safe for single-pod deploys.
     pub fn with_readiness(mut self, probe: Arc<ReadinessProbe>) -> Self {
         self.readiness = Some(probe);
+        self
+    }
+
+    /// Inject the runtime-config snapshot surfaced at `/info`.
+    pub fn with_info(mut self, info: Arc<GatewayInfo>) -> Self {
+        self.info = Some(info);
         self
     }
 
@@ -162,9 +208,29 @@ pub fn build_router(state: AppState) -> Router {
         .route("/healthz", get(|| async { "ok" }))
         .route("/readyz", get(readyz_handler))
         .route("/version", get(version_handler))
+        .route("/info", get(info_handler))
         .route("/metrics", get(metrics_handler))
         .route("/webhooks/forgejo", post(webhook::handle))
         .with_state(state)
+}
+
+async fn info_handler(State(state): State<AppState>) -> impl IntoResponse {
+    match state.info {
+        Some(info) => (StatusCode::OK, axum::Json(serde_json::to_value(&*info).unwrap()))
+            .into_response(),
+        // No info wired (tests, partial setups). Fall back to the
+        // same {name, version} the /version endpoint emits so the
+        // route still answers.
+        None => (
+            StatusCode::OK,
+            axum::Json(serde_json::json!({
+                "name": "auto_review",
+                "version": env!("CARGO_PKG_VERSION"),
+                "info": "not wired",
+            })),
+        )
+            .into_response(),
+    }
 }
 
 async fn readyz_handler(State(state): State<AppState>) -> impl IntoResponse {

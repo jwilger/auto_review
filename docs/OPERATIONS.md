@@ -430,6 +430,8 @@ Roll back, file an issue.
 
 Before filing, capture:
 - `GET /version` JSON
+- `GET /info` JSON (runtime configuration: sandbox kind,
+  learnings store kind, LLM tiers, poller status)
 - `GET /metrics` snapshot
 - `journalctl -u auto-review --since "1h ago" --no-pager > logs.txt`
 - The exact commit-status `description` text from the failing PR
