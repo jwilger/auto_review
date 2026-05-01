@@ -8,9 +8,11 @@ Thanks for considering a contribution to `auto_review`.
 
 - Rust toolchain. The repo pins the channel via `rust-toolchain.toml`
   to `stable`; rustup will install it on first build.
-- `git`, plus any of the linter binaries you want exercised end-to-end
-  (`ruff`, `eslint`, `shellcheck`, `hadolint`, `markdownlint`,
-  `gitleaks`, `actionlint`). Missing linters are silently skipped at
+- `git`, plus any of the 17 bundled linter binaries you want exercised
+  end-to-end (`actionlint`, `ast-grep`, `biome`, `eslint`, `gitleaks`,
+  `golangci-lint`, `hadolint`, `markdownlint`, `osv-scanner`,
+  `phpstan`, `rubocop`, `ruff`, `semgrep`, `shellcheck`, `sqlfluff`,
+  `trivy`, `yamllint`). Missing linters are silently skipped at
   runtime, so absence isn't a build blocker.
 
 ### First build
@@ -60,30 +62,42 @@ See `docs/ADR-0001-architecture.md` for the high-level decision and
 
 | Crate | Responsibility |
 |---|---|
-| `ar-gateway` | HTTP server, HMAC verification, webhook intake |
+| `ar-gateway` | HTTP server, HMAC verification, webhook intake, sandbox selection |
 | `ar-orchestrator` | JobDispatcher trait + production SpawningDispatcher |
 | `ar-forgejo` | REST client + InitClient for HTTP-Basic bootstrap |
 | `ar-llm` | Provider trait + tier-based Router |
 | `ar-prompts` | Prompt templates + JSON schemas + validation |
-| `ar-review` | Pipeline activities (clone, lint, review, self-heal) |
-| `ar-tools` | Static-analysis runners + result parsers |
-| `ar-cli` | Operator CLI (`init`, `register-webhook`, `review-once`) |
-| `ar-sandbox` | OCI sandbox launcher (Milestone 3, currently stub) |
-| `ar-chat` | Agentic `@auto_review` chat handler (Milestone 4, currently stub) |
-| `ar-index` | RAG index (Milestone 2, currently stub) |
+| `ar-review` | Pipeline activities (clone, lint, review, verify, self-heal) |
+| `ar-tools` | Static-analysis runners + result parsers (17 linters) |
+| `ar-cli` | Operator CLI (`init`, `register-webhook`, `review-once`, `bench`) |
+| `ar-sandbox` | Sandbox trait + DirectSandbox + PodmanSandbox (see ADR-0002) |
+| `ar-chat` | Agentic `@auto_review` chat handler (5 commands + freeform) |
+| `ar-index` | Tree-sitter symbols, embeddings, co-change graph, learnings store |
 
 ## Adding a new linter
 
-1. Pick a JSON output format the binary supports (most do).
+1. Pick a JSON output format the binary supports (most do); for
+   text-only tools, wrap a small parser around the line format
+   (`yamllint` does this).
 2. Create `crates/ar-tools/src/<tool>.rs`:
-   - `parse_<tool>_output(json: &str) -> Result<Vec<Finding>, RunnerError>`
-   - `<Tool>Runner` implementing `LinterRunner`
+   - `parse_<tool>_output(...) -> Result<Vec<Finding>, RunnerError>`
+     — pure function, no I/O. Test it directly against captured tool
+     output.
+   - `<Tool>Runner` implementing `LinterRunner`. Build a
+     `SandboxCommand` and dispatch via the `run_in_sandbox` helper —
+     never spawn `tokio::process::Command` directly. The helper
+     swallows "binary not installed" / "sandbox runtime missing" as
+     `Ok(empty)` so a missing optional linter can't fail the batch.
 3. Add the module to `crates/ar-tools/src/lib.rs`.
-4. Wire routing in `crates/ar-review/src/routing.rs::select_runners`.
-5. Add tests covering parser happy-path and at least one error/edge case.
+4. Wire routing in `crates/ar-review/src/routing.rs::select_runners`
+   and update the affected test assertions (the routing tests sort
+   the runner names alphabetically, so insertion order in
+   `select_runners` doesn't matter — the tests do).
+5. Add the binary to `deploy/Dockerfile.sandbox` so production
+   deployments using `AR_SANDBOX_IMAGE` get it.
+6. Update the linter table in `README.md` and `CHANGELOG.md`.
 
-The existing six-and-counting linters in `crates/ar-tools/src/` are the
-template.
+The existing 17 linters in `crates/ar-tools/src/` are the template.
 
 ## Commit messages
 
