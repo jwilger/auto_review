@@ -920,6 +920,24 @@ default in-memory store to the SQLite-backed one.
   is green; tags vulnerability alerts with the
   `security` label.
 
+#### CONTRIBUTING.md cookbook sections (M5 docs)
+
+- Two new "How to add a..." cookbook sections complement
+  the existing "Adding a new linter" recipe:
+  - **Adding a new CLI subcommand** — five-step recipe
+    (args struct → enum variant → handler →
+    main.rs match arm → tests in both files), with the
+    `AR_*` env-var convention spelled out and pointers to
+    `wiremock` / `tempfile` for behavioural-test scaffolds.
+  - **Adding a new chat command** — five-step recipe
+    (enum variant → parser → handler branch → help-text
+    update → parser + handler tests).
+- Crate summary table updated for current truth: linter
+  count is 44, chat-command count is 8, CLI is "init /
+  register-webhook / review-once / bench / doctor / status
+  / 16 more — see crate README" since enumerating every
+  subcommand here would duplicate `ar-cli/README.md`.
+
 #### Per-crate READMEs (M5 docs)
 
 - Every workspace crate now has its own `README.md`
