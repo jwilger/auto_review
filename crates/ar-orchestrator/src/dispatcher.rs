@@ -1,7 +1,8 @@
 use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullRequestEvent};
 use ar_llm::Router as LlmRouter;
 use ar_review::{
-    lint_workspace, prepare_workspace, review_pull_request, ReviewError, WorkspaceError,
+    lint_workspace, pr_is_skippable, prepare_workspace, review_pull_request, ReviewError,
+    WorkspaceError,
 };
 use ar_tools::Finding;
 use async_trait::async_trait;
@@ -125,6 +126,40 @@ pub async fn run_review_job(
         )
         .await
         .inspect_err(|e| tracing::warn!(error = %e, "failed to post pending status"));
+
+    // Triage: if every changed file is trivial (lockfile bumps, vendored,
+    // generated), skip the LLM call entirely and post a success status.
+    match forgejo
+        .list_changed_files(&job.owner, &job.repo, job.pr_number)
+        .await
+    {
+        Ok(files) if pr_is_skippable(&files) => {
+            tracing::info!(
+                repo = format!("{}/{}", job.owner, job.repo),
+                pr = job.pr_number,
+                "skipping review: all changed files are trivial"
+            );
+            let _ = forgejo
+                .post_commit_status(
+                    &job.owner,
+                    &job.repo,
+                    &job.head_sha,
+                    &CommitStatus {
+                        state: CommitStatusState::Success,
+                        target_url: String::new(),
+                        description: "auto_review: skipped (lockfile/vendored/generated only)"
+                            .into(),
+                        context: STATUS_CONTEXT.into(),
+                    },
+                )
+                .await;
+            return;
+        }
+        Ok(_) => {}
+        Err(e) => {
+            tracing::warn!(error = %e, "triage file-list failed; proceeding to lint+review");
+        }
+    }
 
     let findings = match prepare_and_lint(forgejo, forgejo_base, forgejo_token, &job).await {
         Ok(findings) => {

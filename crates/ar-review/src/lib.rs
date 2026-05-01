@@ -13,6 +13,7 @@ pub mod heal;
 pub mod mapping;
 pub mod pipeline;
 pub mod routing;
+pub mod triage;
 pub mod workspace;
 
 pub use error::ReviewError;
@@ -20,4 +21,5 @@ pub use heal::{generate_with_self_heal, HealConfig};
 pub use mapping::output_to_review_request;
 pub use pipeline::{review_pull_request, ReviewOutcome};
 pub use routing::{lint_workspace, select_runners};
+pub use triage::{classify, pr_is_skippable, FileClass};
 pub use workspace::{build_clone_url, prepare_workspace, PreparedWorkspace, WorkspaceError};
