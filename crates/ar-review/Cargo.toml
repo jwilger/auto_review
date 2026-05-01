@@ -11,6 +11,7 @@ description = "Review pipeline activities: triage, summarize, review, verify, wa
 anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
+serde_yaml = "0.9"
 thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
