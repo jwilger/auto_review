@@ -30,6 +30,7 @@ use ar_tools::runner::{run_all, LinterRunner};
 use ar_tools::semgrep::SemgrepRunner;
 use ar_tools::shellcheck::ShellCheckRunner;
 use ar_tools::sqlfluff::SqlfluffRunner;
+use ar_tools::staticcheck::StaticcheckRunner;
 use ar_tools::swiftlint::SwiftLintRunner;
 use ar_tools::taplo::TaploRunner;
 use ar_tools::tflint::TflintRunner;
@@ -147,6 +148,7 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
     if surviving.iter().any(|f| has_go_ext(&f.filename)) {
         runners.push(Box::new(GolangciLintRunner));
         runners.push(Box::new(GosecRunner));
+        runners.push(Box::new(StaticcheckRunner));
     }
 
     let ruby_files: Vec<String> = surviving
@@ -508,7 +510,7 @@ mod tests {
     }
 
     #[test]
-    fn go_files_select_golangci_lint_and_gosec() {
+    fn go_files_select_golangci_lint_gosec_and_staticcheck() {
         let files = vec![cf("cmd/main.go", "modified")];
         let runners = select_runners(&files);
         let mut got = names(&runners);
@@ -522,6 +524,7 @@ mod tests {
                 "gosec",
                 "osv-scanner",
                 "semgrep",
+                "staticcheck",
                 "trivy",
                 "typos"
             ]

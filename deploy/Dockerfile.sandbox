@@ -18,7 +18,8 @@
 #   cppcheck, dotenv-linter, eslint, gitleaks, golangci-lint, gosec,
 #   hadolint, kubeconform, markdownlint, mypy, osv-scanner, oxlint,
 #   phpstan, pmd, rubocop, ruff, semgrep, shellcheck, sqlfluff,
-#   swiftlint, taplo, tflint, trivy, typos, vale, yamllint
+#   staticcheck, swiftlint, taplo, tflint, trivy, typos, vale,
+#   yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -78,6 +79,10 @@ RUN set -eux; \
         && mv /tmp/golangci-lint-1.64.5-linux-${TARGETARCH}/golangci-lint /usr/local/bin/; \
     curl -fsSL "https://github.com/securego/gosec/releases/latest/download/gosec_2.21.4_linux_amd64.tar.gz" \
         | tar -xz -C /usr/local/bin gosec; \
+    curl -fsSL "https://github.com/dominikh/go-tools/releases/latest/download/staticcheck_linux_amd64.tar.gz" \
+        | tar -xz -C /tmp \
+        && mv /tmp/staticcheck/staticcheck /usr/local/bin/ \
+        && rm -rf /tmp/staticcheck; \
     curl -fsSL "https://github.com/terraform-linters/tflint/releases/latest/download/tflint_linux_amd64.zip" \
         -o /tmp/tflint.zip \
         && unzip -q /tmp/tflint.zip -d /tmp/tflint \
