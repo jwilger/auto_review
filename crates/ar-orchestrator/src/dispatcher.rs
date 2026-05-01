@@ -649,11 +649,26 @@ pub async fn run_review_job(
         .await
         .inspect_err(|e| tracing::warn!(error = %e, "failed to post final status"));
 
-    // Record the SHA so the next webhook against this PR can do an
-    // incremental review. Best-effort: a record failure just means
-    // the next review will be a full one.
-    if let Err(e) = history.record(&pr_key, &job.head_sha).await {
-        tracing::warn!(error = %e, "failed to record review history");
+    // Record the SHA only on successful review. Recording a SHA we
+    // never successfully reviewed would mean the NEXT incremental
+    // review diffs against it (treating it as "already reviewed"),
+    // and any findings introduced in this SHA but unchanged in the
+    // next push get silently skipped. The cost: a transient LLM
+    // failure makes the next review a full one instead of
+    // incremental — pay duplicated tokens once to recover real
+    // findings the user would otherwise miss.
+    //
+    // Best-effort: a record failure just means the next review
+    // will be a full one (same effective behaviour).
+    if result.is_ok() {
+        if let Err(e) = history.record(&pr_key, &job.head_sha).await {
+            tracing::warn!(error = %e, "failed to record review history");
+        }
+    } else {
+        tracing::debug!(
+            sha = %job.head_sha,
+            "review failed; not recording SHA so next webhook re-runs a full review"
+        );
     }
 }
 
