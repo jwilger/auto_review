@@ -37,11 +37,12 @@ config:
   # botName is the @<handle> users mention.
   botLogin: ""
   botName: ""
-  # Severity floor for posted findings: "note" (default; post
-  # everything), "warning" (suppress note-only nits), or
-  # "error" (only post Error-severity findings). Cost + signal-
-  # to-noise lever; bot still generates and verifies the dropped
-  # findings, only posting changes.
+  # Severity floor for posted findings: "warning" (default; drop
+  # note-only nits), "note" (post everything including the LLM's
+  # scratchpad observations), or "error" (only post Error-severity
+  # findings). Cost + signal-to-noise lever; bot still generates
+  # and verifies dropped findings, only posting changes. Leave
+  # blank to take the gateway default (warning).
   severityFloor: ""
   # Cap on concurrent in-flight reviews. Without it a burst of N
   # PRs spawns N tmpdirs + N concurrent LLM calls. Tune for

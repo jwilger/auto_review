@@ -874,30 +874,43 @@ fn review_summary(outcome: &ar_review::ReviewOutcome) -> String {
     format!("auto_review: {}", parts.join(", "))
 }
 
-/// Read `AR_SEVERITY_FLOOR` from the environment. Values:
-/// `note` (post everything, default), `warning` (suppress
-/// note-only nits), `error` (only post Error-severity findings).
-/// Unrecognised values silently fall through to Note so a typo
-/// doesn't accidentally suppress real findings — `auto_review
-/// validate-config --strict` is the place to catch typos at
-/// config-load time, not the runtime path.
+/// Read `AR_SEVERITY_FLOOR` from the environment. See
+/// [`parse_severity_floor`] for the value grammar and defaulting
+/// behaviour.
 fn severity_floor_from_env() -> ar_review::ReviewSeverity {
+    parse_severity_floor(std::env::var("AR_SEVERITY_FLOOR").ok().as_deref())
+}
+
+/// Parse a `AR_SEVERITY_FLOOR` value. Recognised values:
+/// `note` (post everything), `warning` (default; drop note-only
+/// nits), `error` (only post Error-severity findings).
+///
+/// Default (None or empty) is `Warning`: notes are pure noise on
+/// the PR page once the verifier has run, and operators on busy
+/// repos almost always raise the floor on day two anyway. Notes
+/// remain useful as LLM scratchpad inside the review pipeline —
+/// they're generated and counted, just not posted. Operators who
+/// want notes on the PR set `AR_SEVERITY_FLOOR=note` explicitly.
+///
+/// Unrecognised values fall through to the default with a warn
+/// log so a typo doesn't accidentally start surfacing notes
+/// (under the old default it didn't suppress findings; under the
+/// new default we lean the same way — towards the operator's
+/// signal-to-noise expectation rather than the typo).
+fn parse_severity_floor(raw: Option<&str>) -> ar_review::ReviewSeverity {
     use ar_review::ReviewSeverity;
-    match std::env::var("AR_SEVERITY_FLOOR")
-        .ok()
-        .as_deref()
-        .map(|s| s.trim().to_ascii_lowercase())
-        .as_deref()
-    {
-        Some("note") | None => ReviewSeverity::Note,
+    let normalised = raw.map(|s| s.trim().to_ascii_lowercase());
+    match normalised.as_deref() {
+        None | Some("") => ReviewSeverity::Warning,
+        Some("note") => ReviewSeverity::Note,
         Some("warning") | Some("warn") => ReviewSeverity::Warning,
         Some("error") | Some("err") => ReviewSeverity::Error,
         Some(other) => {
             tracing::warn!(
                 value = other,
-                "AR_SEVERITY_FLOOR unrecognised; defaulting to Note (post everything)"
+                "AR_SEVERITY_FLOOR unrecognised; defaulting to Warning (drop note-only nits)"
             );
-            ReviewSeverity::Note
+            ReviewSeverity::Warning
         }
     }
 }
@@ -1152,6 +1165,61 @@ mod tests {
         assert!(out.len() <= MAX_STATUS_DESCRIPTION);
         assert!(out.ends_with('…'));
         assert!(out.starts_with("auto_review failed:"));
+    }
+
+    #[test]
+    fn severity_floor_defaults_to_warning_when_unset() {
+        // Issue #6: notes are LLM scratchpad and pure noise on the
+        // PR page. Default has to drop them so a fresh deployment
+        // doesn't drown PRs in LGTM-style notes the moment it runs.
+        use ar_review::ReviewSeverity;
+        assert_eq!(parse_severity_floor(None), ReviewSeverity::Warning);
+    }
+
+    #[test]
+    fn severity_floor_empty_string_defaults_to_warning() {
+        // Helm chart leaves the env var as `""` when unset; treat
+        // it the same as missing rather than as an unrecognised
+        // value (which would log a warning every dispatch).
+        use ar_review::ReviewSeverity;
+        assert_eq!(parse_severity_floor(Some("")), ReviewSeverity::Warning);
+        assert_eq!(parse_severity_floor(Some("   ")), ReviewSeverity::Warning);
+    }
+
+    #[test]
+    fn severity_floor_note_opts_in_to_posting_notes() {
+        // The opt-in path: operators who want the LLM's note-tier
+        // observations on the PR set `note` explicitly.
+        use ar_review::ReviewSeverity;
+        assert_eq!(parse_severity_floor(Some("note")), ReviewSeverity::Note);
+        assert_eq!(parse_severity_floor(Some("NOTE")), ReviewSeverity::Note);
+        assert_eq!(parse_severity_floor(Some("  note  ")), ReviewSeverity::Note);
+    }
+
+    #[test]
+    fn severity_floor_warning_and_error_pass_through() {
+        use ar_review::ReviewSeverity;
+        assert_eq!(
+            parse_severity_floor(Some("warning")),
+            ReviewSeverity::Warning
+        );
+        assert_eq!(parse_severity_floor(Some("warn")), ReviewSeverity::Warning);
+        assert_eq!(parse_severity_floor(Some("error")), ReviewSeverity::Error);
+        assert_eq!(parse_severity_floor(Some("err")), ReviewSeverity::Error);
+    }
+
+    #[test]
+    fn severity_floor_unrecognised_falls_back_to_default() {
+        // Typos must not accidentally invert the operator's
+        // signal-to-noise intent. Falling back to the default
+        // (Warning) keeps real findings visible while still not
+        // surfacing the LLM's note-tier scratchpad.
+        use ar_review::ReviewSeverity;
+        assert_eq!(
+            parse_severity_floor(Some("warningg")),
+            ReviewSeverity::Warning
+        );
+        assert_eq!(parse_severity_floor(Some("info")), ReviewSeverity::Warning);
     }
 
     #[test]

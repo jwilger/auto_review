@@ -550,6 +550,18 @@ default in-memory store to the SQLite-backed one.
 - `deploy/forgejo-action/`   — composite action wrapping
   `auto_review review-once` for in-CI mode.
 
+### Changed
+
+- `AR_SEVERITY_FLOOR` default flipped from `note` to `warning`
+  (issue #6). Notes function as the LLM's reasoning scratchpad
+  during a review pass — keeping them in the schema makes the
+  review more thorough — but they're pure noise once posted to
+  the PR (`💡 Note: switching from find() to match_indices()...`).
+  Operators who want notes on the PR set `AR_SEVERITY_FLOOR=note`
+  explicitly. Unrecognised values now also fall through to
+  `warning` rather than `note`, so a typo doesn't silently
+  invert the operator's signal-to-noise expectation.
+
 ### Fixed
 
 - `pre_merge::contains_todo_marker` now scans every occurrence of

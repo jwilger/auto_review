@@ -239,7 +239,7 @@ Common optional env vars:
 | `AR_HISTORY_DB` | — | path → SQLite-backed review history; unset → in-memory |
 | `AR_POLL_INTERVAL_SECS` | `60` | inline-thread mention poll cadence; `0` disables |
 | `AR_SANDBOX_IMAGE` | — | OCI image for the linter sandbox; unset → unsafe direct mode |
-| `AR_SEVERITY_FLOOR` | `note` | drop findings below this severity (`warning` / `error`) |
+| `AR_SEVERITY_FLOOR` | `warning` | drop findings below this severity (`note` to post everything, `error` to only post Error-severity) |
 | `AR_WEBHOOK_RATE_PER_SEC` | — | enable webhook rate limiting (paired with `AR_WEBHOOK_BURST`) |
 | `AR_DEDUP_CAPACITY` | `256` | LRU size for `X-Forgejo-Delivery` retry dedup; `0` disables |
 | `AR_READINESS_TTL_SECS` | `10` | cache TTL for `/readyz` Forgejo probe |

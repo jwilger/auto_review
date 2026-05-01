@@ -437,23 +437,27 @@ do a full review.
 
 ### 7.2.5 Tune signal-to-noise via `AR_SEVERITY_FLOOR`
 
-Set the gateway env var to `warning` to suppress every Note-
-severity finding before posting; `error` to only post
-high-confidence problems. The bot still generates the dropped
+Default is `warning`: every Note-severity finding is dropped
+before posting. Notes function as the LLM's reasoning
+scratchpad — externalising observations about the diff makes
+the review pass more thorough — but they're pure noise on the
+PR page once the verifier has finished (e.g. "💡 Note:
+switching from `find()` to `match_indices()` ensures all
+occurrences are checked"). The bot still generates the dropped
 findings (so the metric counters and duration histogram aren't
 distorted), but the floor runs **before the verifier**, so
 cheap-tier LLM calls are saved on every dropped finding.
-Operators on busy monorepos use this both to keep PR pages
-from drowning in stylistic nits AND to lower per-review token
-spend.
 
 ```
-AR_SEVERITY_FLOOR=warning   # most common: drop notes, keep warnings + errors
+AR_SEVERITY_FLOOR=note     # opt back in to posting notes
+AR_SEVERITY_FLOOR=warning  # default: drop notes, keep warnings + errors
+AR_SEVERITY_FLOOR=error    # only post Error-severity findings
 ```
 
-The bot validates this at startup; an unrecognised value
-falls through to `note` (post everything) with a warning log,
-so a typo doesn't accidentally suppress real findings.
+The bot validates the value at startup; an unrecognised
+spelling falls through to the default (`warning`) with a warn
+log so a typo doesn't silently invert the operator's signal-
+to-noise expectation.
 
 ### 7.3 Disable a noisy linter
 
