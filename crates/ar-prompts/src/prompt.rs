@@ -70,6 +70,21 @@ const PR_BODY_MAX_BYTES: usize = 8_192;
 /// prompt header stays compact.
 const PR_TITLE_MAX_BYTES: usize = 512;
 
+/// Cap on the rendered guidelines section. Operators write these in
+/// `.auto_review.yaml` so the field is operator-controlled, not
+/// attacker-controlled — but a copy-pasted style guide can easily
+/// hit tens of KB. 8 KiB matches PR body's cap and is generous for
+/// real guidance.
+const GUIDELINES_MAX_BYTES: usize = 8_192;
+
+/// Cap on the rendered RAG context. The retrieval layer already
+/// caps top-K, but each retrieved snippet is the full embedded
+/// symbol body — for a repo with large functions plus many
+/// learnings retrieved, the combined section can grow without
+/// bound. 16 KiB lets us include a meaningful similar-code window
+/// without burning the full reasoning-tier context.
+const REPO_CONTEXT_MAX_BYTES: usize = 16_384;
+
 /// Render the user-facing prompt the LLM will see. The system prompt is
 /// returned separately by [`system_prompt`].
 pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
@@ -85,7 +100,12 @@ pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
 
     if !inputs.guidelines.is_empty() {
         out.push_str("\nRepository guidelines (from .auto_review.yaml):\n");
-        out.push_str(inputs.guidelines);
+        push_capped(
+            &mut out,
+            inputs.guidelines,
+            GUIDELINES_MAX_BYTES,
+            "\n[guidelines truncated]",
+        );
         if !inputs.guidelines.ends_with('\n') {
             out.push('\n');
         }
@@ -113,7 +133,12 @@ pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
 
     if !inputs.repo_context.is_empty() {
         out.push_str("\nRepository context (retrieved from index):\n");
-        out.push_str(inputs.repo_context);
+        push_capped(
+            &mut out,
+            inputs.repo_context,
+            REPO_CONTEXT_MAX_BYTES,
+            "\n[repo context truncated]",
+        );
         if !inputs.repo_context.ends_with('\n') {
             out.push('\n');
         }
@@ -391,6 +416,48 @@ mod tests {
         assert!(p.contains("[truncated]"));
         // The title should not appear in full.
         assert!(!p.contains(&"T".repeat(1_000)));
+    }
+
+    #[test]
+    fn guidelines_are_capped_at_8kib() {
+        let files: Vec<String> = vec![];
+        let findings: Vec<Finding> = vec![];
+        let huge_guidelines = "g".repeat(20_000);
+        let inputs = ReviewPromptInputs {
+            repo_full_name: "o/r",
+            pr_number: 1,
+            pr_title: "t",
+            pr_body: "",
+            diff: "diff",
+            changed_files: &files,
+            linter_findings: &findings,
+            guidelines: &huge_guidelines,
+            repo_context: "",
+        };
+        let p = render_review_prompt(&inputs);
+        assert!(p.contains("[guidelines truncated]"));
+        assert!(p.len() < 12_000);
+    }
+
+    #[test]
+    fn repo_context_is_capped_at_16kib() {
+        let files: Vec<String> = vec![];
+        let findings: Vec<Finding> = vec![];
+        let huge_context = "c".repeat(40_000);
+        let inputs = ReviewPromptInputs {
+            repo_full_name: "o/r",
+            pr_number: 1,
+            pr_title: "t",
+            pr_body: "",
+            diff: "diff",
+            changed_files: &files,
+            linter_findings: &findings,
+            guidelines: "",
+            repo_context: &huge_context,
+        };
+        let p = render_review_prompt(&inputs);
+        assert!(p.contains("[repo context truncated]"));
+        assert!(p.len() < 20_000);
     }
 
     #[test]
