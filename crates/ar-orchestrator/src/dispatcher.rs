@@ -1,6 +1,9 @@
 use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullRequestEvent};
 use ar_llm::Router as LlmRouter;
-use ar_review::{review_pull_request, ReviewError};
+use ar_review::{
+    lint_workspace, prepare_workspace, review_pull_request, ReviewError, WorkspaceError,
+};
+use ar_tools::Finding;
 use async_trait::async_trait;
 use std::sync::Arc;
 
@@ -51,15 +54,30 @@ impl JobDispatcher for NoOpDispatcher {
 
 /// Production dispatcher: posts a "pending" commit status, spawns
 /// [`run_review_job`] in the background, and returns to the caller.
+///
+/// Owns the Forgejo base URL + bot token in addition to the API client
+/// because the lint phase needs them to build a clone URL.
 #[derive(Clone)]
 pub struct SpawningDispatcher {
     forgejo: Arc<ForgejoClient>,
     llm: Arc<LlmRouter>,
+    forgejo_base: Arc<String>,
+    forgejo_token: Arc<String>,
 }
 
 impl SpawningDispatcher {
-    pub fn new(forgejo: Arc<ForgejoClient>, llm: Arc<LlmRouter>) -> Self {
-        Self { forgejo, llm }
+    pub fn new(
+        forgejo: Arc<ForgejoClient>,
+        llm: Arc<LlmRouter>,
+        forgejo_base: impl Into<String>,
+        forgejo_token: impl Into<String>,
+    ) -> Self {
+        Self {
+            forgejo,
+            llm,
+            forgejo_base: Arc::new(forgejo_base.into()),
+            forgejo_token: Arc::new(forgejo_token.into()),
+        }
     }
 }
 
@@ -68,18 +86,31 @@ impl JobDispatcher for SpawningDispatcher {
     async fn dispatch(&self, job: ReviewJob) {
         let forgejo = self.forgejo.clone();
         let llm = self.llm.clone();
+        let base = self.forgejo_base.clone();
+        let token = self.forgejo_token.clone();
         tokio::spawn(async move {
-            run_review_job(&forgejo, &llm, job).await;
+            run_review_job(&forgejo, &llm, &base, &token, job).await;
         });
     }
 }
 
 /// Run one review job to completion.
 ///
-/// Wraps [`review_pull_request`] with commit-status posting (pending → success
-/// or error). Logs and swallows errors — the gateway has already returned 202,
-/// so failures here only affect the resulting PR status badge and logs.
-pub async fn run_review_job(forgejo: &ForgejoClient, llm: &LlmRouter, job: ReviewJob) {
+/// 1. Post a "pending" commit status.
+/// 2. Clone the repo at the head SHA and run language-appropriate linters.
+///    A failure here is logged but doesn't abort the review — the model
+///    can still produce useful output without static-analysis context.
+/// 3. Call [`review_pull_request`] with the linter findings.
+/// 4. Post the final success/error commit status.
+///
+/// Errors are logged and swallowed; the gateway has already returned 202.
+pub async fn run_review_job(
+    forgejo: &ForgejoClient,
+    llm: &LlmRouter,
+    forgejo_base: &str,
+    forgejo_token: &str,
+    job: ReviewJob,
+) {
     let _ = forgejo
         .post_commit_status(
             &job.owner,
@@ -95,6 +126,17 @@ pub async fn run_review_job(forgejo: &ForgejoClient, llm: &LlmRouter, job: Revie
         .await
         .inspect_err(|e| tracing::warn!(error = %e, "failed to post pending status"));
 
+    let findings = match prepare_and_lint(forgejo, forgejo_base, forgejo_token, &job).await {
+        Ok(findings) => {
+            tracing::debug!(count = findings.len(), "linter findings collected");
+            findings
+        }
+        Err(e) => {
+            tracing::warn!(error = %e, "lint phase failed; continuing without findings");
+            Vec::new()
+        }
+    };
+
     let result = review_pull_request(
         forgejo,
         llm,
@@ -104,8 +146,7 @@ pub async fn run_review_job(forgejo: &ForgejoClient, llm: &LlmRouter, job: Revie
         &job.head_sha,
         &job.pr_title,
         &job.pr_body,
-        // TODO: clone the repo and run ar-tools::run_all here.
-        &[],
+        &findings,
     )
     .await;
 
@@ -145,6 +186,27 @@ pub async fn run_review_job(forgejo: &ForgejoClient, llm: &LlmRouter, job: Revie
         .post_commit_status(&job.owner, &job.repo, &job.head_sha, &final_status)
         .await
         .inspect_err(|e| tracing::warn!(error = %e, "failed to post final status"));
+}
+
+#[derive(Debug, thiserror::Error)]
+enum LintPhaseError {
+    #[error("forgejo: {0}")]
+    Forgejo(#[from] ar_forgejo::Error),
+    #[error("workspace: {0}")]
+    Workspace(#[from] WorkspaceError),
+}
+
+async fn prepare_and_lint(
+    forgejo: &ForgejoClient,
+    base: &str,
+    token: &str,
+    job: &ReviewJob,
+) -> Result<Vec<Finding>, LintPhaseError> {
+    let files = forgejo
+        .list_changed_files(&job.owner, &job.repo, job.pr_number)
+        .await?;
+    let workspace = prepare_workspace(base, token, &job.owner, &job.repo, &job.head_sha).await?;
+    Ok(lint_workspace(workspace.path(), &files).await)
 }
 
 fn review_summary(findings_count: usize) -> String {

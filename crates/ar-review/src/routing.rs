@@ -5,8 +5,22 @@ use ar_forgejo::ChangedFile;
 use ar_tools::hadolint::HadolintRunner;
 use ar_tools::markdownlint::MarkdownLintRunner;
 use ar_tools::ruff::RuffRunner;
-use ar_tools::runner::LinterRunner;
+use ar_tools::runner::{run_all, LinterRunner};
 use ar_tools::shellcheck::ShellCheckRunner;
+use ar_tools::Finding;
+use std::path::Path;
+
+/// Run the linters appropriate for `files` against `repo_dir` and return
+/// every finding. Dispatches to `select_runners` for routing and
+/// `ar_tools::run_all` for parallel execution; missing binaries and
+/// individual runner failures are absorbed (they don't fail the review).
+pub async fn lint_workspace(repo_dir: &Path, files: &[ChangedFile]) -> Vec<Finding> {
+    let runners = select_runners(files);
+    if runners.is_empty() {
+        return Vec::new();
+    }
+    run_all(&runners, repo_dir).await
+}
 
 /// Pick the linters to run for a given set of changed files.
 ///
@@ -149,6 +163,20 @@ mod tests {
     fn removed_files_are_ignored() {
         let files = vec![cf("a.py", "removed"), cf("b.sh", "removed")];
         assert!(select_runners(&files).is_empty());
+    }
+
+    #[tokio::test]
+    async fn lint_workspace_with_no_routed_files_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let findings = lint_workspace(dir.path(), &[cf("src/main.rs", "modified")]).await;
+        assert!(findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn lint_workspace_with_empty_file_list_returns_empty() {
+        let dir = tempfile::tempdir().unwrap();
+        let findings = lint_workspace(dir.path(), &[]).await;
+        assert!(findings.is_empty());
     }
 
     #[test]

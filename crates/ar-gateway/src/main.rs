@@ -33,7 +33,12 @@ async fn main() -> Result<()> {
     );
     let llm_router = Arc::new(LlmRouter::new().with(ModelTier::Reasoning, reasoning_provider));
 
-    let dispatcher = Arc::new(SpawningDispatcher::new(forgejo, llm_router));
+    let dispatcher = Arc::new(SpawningDispatcher::new(
+        forgejo,
+        llm_router,
+        forgejo_base.clone(),
+        forgejo_token.clone(),
+    ));
     let state = AppState::new(secret, dispatcher);
     let app = build_router(state);
 

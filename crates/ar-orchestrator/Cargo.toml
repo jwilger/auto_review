@@ -18,6 +18,7 @@ async-trait.workspace = true
 ar-forgejo = { path = "../ar-forgejo" }
 ar-llm = { path = "../ar-llm" }
 ar-review = { path = "../ar-review" }
+ar-tools = { path = "../ar-tools" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

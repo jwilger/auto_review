@@ -112,6 +112,7 @@ dependencies = [
  "ar-forgejo",
  "ar-llm",
  "ar-review",
+ "ar-tools",
  "async-trait",
  "serde",
  "serde_json",
