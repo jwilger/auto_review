@@ -141,6 +141,32 @@ pub fn extract_tsx_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
     )
 }
 
+const GO_QUERY_SOURCE: &str = r#"
+(function_declaration name: (identifier) @name)              @function
+(method_declaration   name: (field_identifier) @name)        @function
+(type_declaration (type_spec name: (type_identifier) @name)) @struct
+(const_declaration (const_spec name: (identifier) @name))    @constant
+(var_declaration   (var_spec   name: (identifier) @name))    @static
+"#;
+
+fn go_query() -> Result<&'static Query, ExtractError> {
+    static QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
+    let entry = QUERY.get_or_init(|| {
+        let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
+        Query::new(&lang, GO_QUERY_SOURCE).map_err(|e| e.to_string())
+    });
+    entry.as_ref().map_err(|e| ExtractError::Query(e.clone()))
+}
+
+/// Extract top-level symbols from a Go source file. Method definitions
+/// map to [`SymbolKind::Function`]; `type` declarations (whether
+/// struct, interface, or alias) all map to [`SymbolKind::Struct`] for
+/// cross-language uniformity. `const` decls are Constants, `var` decls
+/// are Statics.
+pub fn extract_go_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
+    extract_with(source, tree_sitter_go::LANGUAGE.into(), go_query()?)
+}
+
 /// Pick the right extractor for a path's extension and run it.
 /// Returns `Ok(vec![])` for paths in unsupported languages so a
 /// repo-wide walk doesn't fail on the first JSON file it hits.
@@ -150,6 +176,8 @@ pub fn extract_symbols_for_path(path: &str, source: &str) -> Result<Vec<Symbol>,
         extract_rust_symbols(source)
     } else if lower.ends_with(".py") {
         extract_python_symbols(source)
+    } else if lower.ends_with(".go") {
+        extract_go_symbols(source)
     } else if lower.ends_with(".tsx") {
         extract_tsx_symbols(source)
     } else if lower.ends_with(".ts")
@@ -439,6 +467,47 @@ export class App extends React.Component {
         let n = names(&s);
         assert!(n.contains(&"Greeting"));
         assert!(n.contains(&"App"));
+    }
+
+    #[test]
+    fn extracts_go_functions_methods_types() {
+        let src = "\
+package main
+
+func Add(a int, b int) int {
+    return a + b
+}
+
+type User struct {
+    Name string
+}
+
+func (u *User) Greet() string {
+    return \"hi\"
+}
+
+const Pi = 3.14
+
+var DefaultName = \"world\"
+";
+        let s = extract_go_symbols(src).expect("ok");
+        let n = names(&s);
+        assert!(n.contains(&"Add"));
+        assert!(n.contains(&"User"));
+        assert!(n.contains(&"Greet"));
+        assert!(n.contains(&"Pi"));
+        assert!(n.contains(&"DefaultName"));
+        assert!(kinds(&s, "Add").contains(&SymbolKind::Function));
+        assert!(kinds(&s, "User").contains(&SymbolKind::Struct));
+        assert!(kinds(&s, "Greet").contains(&SymbolKind::Function));
+        assert!(kinds(&s, "Pi").contains(&SymbolKind::Constant));
+        assert!(kinds(&s, "DefaultName").contains(&SymbolKind::Static));
+    }
+
+    #[test]
+    fn go_empty_source_yields_zero_symbols() {
+        let s = extract_go_symbols("").expect("ok");
+        assert!(s.is_empty());
     }
 
     #[test]

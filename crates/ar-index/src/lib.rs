@@ -18,8 +18,8 @@ pub use learnings::{
     ScoredLearning,
 };
 pub use symbols::{
-    extract_python_symbols, extract_rust_symbols, extract_symbols_for_path, extract_tsx_symbols,
-    extract_typescript_symbols, ExtractError, Symbol, SymbolKind,
+    extract_go_symbols, extract_python_symbols, extract_rust_symbols, extract_symbols_for_path,
+    extract_tsx_symbols, extract_typescript_symbols, ExtractError, Symbol, SymbolKind,
 };
 pub use vector_store::{InMemoryVectorStore, ScoredSymbol, VectorStore, VectorStoreError};
 pub use walker::{index_workspace, IndexedSymbol, WalkError};
