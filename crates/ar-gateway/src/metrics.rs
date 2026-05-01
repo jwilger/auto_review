@@ -28,6 +28,7 @@ pub struct Metrics {
     pub webhooks_other: AtomicU64,
     pub webhook_signature_failures: AtomicU64,
     pub webhook_payload_failures: AtomicU64,
+    pub webhook_rate_limited: AtomicU64,
     pub jobs_dispatched: AtomicU64,
     pub chat_commands_received: AtomicU64,
     pub chat_handler_unconfigured: AtomicU64,
@@ -95,6 +96,10 @@ impl Metrics {
     pub fn record_payload_failure(&self) {
         self.webhook_payload_failures
             .fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_rate_limited(&self) {
+        self.webhook_rate_limited.fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_job_dispatched(&self) {
@@ -216,6 +221,11 @@ impl Metrics {
                 "auto_review_webhook_payload_failures_total",
                 "Webhook requests rejected for malformed JSON payload. Increases typically imply a Forgejo version mismatch.",
                 &self.webhook_payload_failures,
+            ),
+            (
+                "auto_review_webhook_rate_limited_total",
+                "Webhook requests rejected because the global token-bucket rate limit was empty. Sustained increases mean a probing source or a misconfigured webhook firing in a tight loop.",
+                &self.webhook_rate_limited,
             ),
             (
                 "auto_review_jobs_dispatched_total",

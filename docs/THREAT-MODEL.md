@@ -196,9 +196,18 @@ unbounded behaviour.
 *Mitigation:* Sandbox enforces wall-clock (60s default per linter),
 CPU, and memory limits. Diff is capped (`DEFAULT_MAX_DIFF_BYTES`)
 before reaching the LLM. The orchestrator has a per-PR wall-clock
-budget; on timeout it posts a degraded review.
-*Residual risk:* lots of small PRs in parallel could DoS the
-gateway. Out of scope for v1; rate-limiting is an operator concern.
+budget; on timeout it posts a degraded review. **In addition**, an
+optional global token-bucket rate limiter on the
+`/webhooks/forgejo` route (`AR_WEBHOOK_RATE_PER_SEC` +
+`AR_WEBHOOK_BURST`, off by default) caps the per-second webhook
+intake. The throttle runs **before** HMAC verification so a flood
+of unsigned junk can't burn CPU on signature math. Rejected
+requests get a `429` and increment
+`auto_review_webhook_rate_limited_total`.
+*Residual risk:* operators who don't set the rate-limit env vars
+remain in the previous v1 regime (sandbox-level limits only,
+gateway-level intake unbounded). Documented as opt-in to avoid
+accidentally throttling existing deployments.
 
 ### T8. Token-cost amplification (cloud LLM profile)
 

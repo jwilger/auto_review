@@ -2,6 +2,7 @@ use anyhow::{Context, Result};
 use ar_forgejo::Client as ForgejoClient;
 use ar_gateway::metrics::{Metrics, MetricsObserver};
 use ar_gateway::poller::{ChatPoller, DEFAULT_POLL_INTERVAL};
+use ar_gateway::ratelimit::TokenBucket;
 use ar_gateway::{build_router, AppState, ChatDeps, GatewayInfo, ReadinessProbe};
 use ar_index::{InMemoryLearningsStore, SqliteLearningsStore};
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
@@ -213,12 +214,31 @@ async fn main() -> Result<()> {
         readiness_enabled: true,
     });
 
-    let state = AppState::new(secret, dispatcher)
+    let mut state = AppState::new(secret, dispatcher)
         .with_chat(chat_deps)
         .with_bot_identity(bot_login, bot_name)
         .with_metrics(metrics)
         .with_readiness(readiness)
         .with_info(info);
+
+    // Optional global webhook throttle (T7 mitigation). Off by
+    // default so existing deployments don't suddenly start
+    // shedding traffic; operators opt in by setting both env
+    // vars. The intended values for a self-host fronting a single
+    // Forgejo instance are tens of req/s and a burst around 30 —
+    // legitimate Forgejo traffic is well under that.
+    let rate_per_sec = env::var("AR_WEBHOOK_RATE_PER_SEC")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok());
+    let burst = env::var("AR_WEBHOOK_BURST")
+        .ok()
+        .and_then(|s| s.parse::<u32>().ok());
+    if let (Some(rate), Some(burst)) = (rate_per_sec, burst) {
+        let bucket = Arc::new(TokenBucket::new(burst, rate));
+        state = state.with_webhook_rate_limit(bucket);
+        tracing::info!(rate, burst, "webhook rate limiter enabled");
+    }
+
     let app = build_router(state);
 
     let listener = TcpListener::bind(&bind)

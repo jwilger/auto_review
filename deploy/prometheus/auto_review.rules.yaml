@@ -76,6 +76,30 @@ groups:
             secret. If that passes, check Forgejo's webhook config
             and rotate per OPERATIONS.md §6.3.
 
+      # Sustained throttling means either the configured rate
+      # limit is too tight for legitimate traffic or there's an
+      # active probing source. Either way operators want to know.
+      # Tune the threshold to your baseline; the default fires on
+      # a slow trickle.
+      - alert: AutoReviewWebhookRateLimited
+        expr: rate(auto_review_webhook_rate_limited_total[5m]) > 0.05
+        for: 10m
+        labels:
+          severity: warning
+          service: auto_review
+        annotations:
+          summary: "auto_review: webhook rate limit firing"
+          description: |
+            More than 0.05/s webhook requests are being rejected
+            with 429 over 10m. Either AR_WEBHOOK_RATE_PER_SEC is
+            set too low for your real traffic, or someone (a
+            misconfigured webhook firing in a tight loop, an
+            unauthenticated probing source) is hitting the
+            endpoint hard. Check
+            `auto_review_webhooks_pull_request_total` and
+            `auto_review_webhook_signature_failures_total` to
+            distinguish.
+
       # Forgejo schema drift breaks payload decoding. A burst here
       # usually means Forgejo was upgraded and the JSON shape moved.
       - alert: AutoReviewWebhookPayloadFailures

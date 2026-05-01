@@ -162,6 +162,39 @@ PR's changed file extensions.
   to do that. When no probe is wired (single-pod systemd
   deploy), `/readyz` degrades safely to `/healthz` semantics.
 - `GET /version` — JSON `{"name", "version"}` from `CARGO_PKG_VERSION`.
+#### Webhook rate limiter (T7 mitigation)
+
+- Optional global token-bucket throttle on the
+  `/webhooks/forgejo` route. Off by default so existing
+  deployments don't suddenly start shedding traffic;
+  operators opt in by setting both `AR_WEBHOOK_RATE_PER_SEC`
+  and `AR_WEBHOOK_BURST` env vars.
+- The throttle runs **before** HMAC verification so a flood
+  of unsigned junk can't burn CPU on signature math.
+  Rejected requests get a `429 Too Many Requests` and
+  increment `auto_review_webhook_rate_limited_total`.
+- Pure-Rust token-bucket implementation in
+  `ar_gateway::ratelimit::TokenBucket` (no external rate-
+  limiter crate); test-only `try_take_at(now)` injection
+  point keeps timing deterministic.
+- New Prometheus alert `AutoReviewWebhookRateLimited` fires
+  on `rate > 0.05/s` over 10m — annotation cross-references
+  the signature-failures and pull-request counters so
+  operators can distinguish legitimate-traffic-too-tight
+  from active probing.
+- THREAT-MODEL.md T7 updated: previously noted as "operator
+  concern, out of scope for v1"; now documented as the
+  default mitigation path with the residual risk being
+  operators who choose not to opt in.
+- 7 new tests: 5 in `ratelimit.rs` covering burst capacity,
+  refill rate at 100ms granularity, capacity cap (refill
+  doesn't overflow), zero-arg defensive clamping, and
+  saturating-duration backwards-clock safety; 2 webhook
+  integration tests verifying the 429 path AND that the
+  throttle runs before HMAC verify (the second case fires
+  an unsigned request twice — first goes 401, second goes
+  429 because the token's spent).
+
 - `GET /info` — runtime-config snapshot in JSON. Captured
   once at startup; surfaces which sandbox is active
   (`direct` vs `podman`), which learnings store is wired

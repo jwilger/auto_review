@@ -8,6 +8,7 @@
 pub mod hmac;
 pub mod metrics;
 pub mod poller;
+pub mod ratelimit;
 pub mod webhook;
 
 use ar_forgejo::Client as ForgejoClient;
@@ -51,6 +52,11 @@ pub struct AppState {
     /// for tests that don't bother populating it; production
     /// `main.rs` always sets this.
     pub info: Option<Arc<GatewayInfo>>,
+    /// Optional global token-bucket throttle on the
+    /// `/webhooks/forgejo` route. T7 mitigation per the threat
+    /// model. None = no throttling (current default for tests and
+    /// trust-the-environment deployments).
+    pub webhook_rate_limit: Option<Arc<crate::ratelimit::TokenBucket>>,
 }
 
 /// Runtime-config snapshot returned from `GET /info`. Captured once
@@ -159,7 +165,19 @@ impl AppState {
             bot_name: Arc::new("auto_review".into()),
             readiness: None,
             info: None,
+            webhook_rate_limit: None,
         }
+    }
+
+    /// Wire in a global token-bucket rate limiter for the
+    /// `/webhooks/forgejo` route. Without this, the route accepts
+    /// every well-signed request.
+    pub fn with_webhook_rate_limit(
+        mut self,
+        bucket: Arc<crate::ratelimit::TokenBucket>,
+    ) -> Self {
+        self.webhook_rate_limit = Some(bucket);
+        self
     }
 
     /// Wire in a `/readyz` probe. When unset, `/readyz` returns the

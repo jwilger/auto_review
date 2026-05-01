@@ -20,6 +20,17 @@ const FALLBACK_EVENT_HEADER: &str = "x-gitea-event";
 /// 3. For `pull_request` opened/synchronized/reopened, decodes the payload
 ///    and hands a [`ReviewJob`] to the configured dispatcher.
 pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    // Global throttle (T7 mitigation). Checked before HMAC verify so
+    // a flood of unsigned junk can't burn CPU on signature math.
+    // Operators leave this unconfigured by default; main.rs wires it
+    // when AR_WEBHOOK_RATE_PER_SEC is set.
+    if let Some(bucket) = state.webhook_rate_limit.as_ref() {
+        if !bucket.try_take() {
+            state.metrics.record_rate_limited();
+            return reject(StatusCode::TOO_MANY_REQUESTS, "rate limit");
+        }
+    }
+
     let sig = headers
         .get(SIG_HEADER)
         .or_else(|| headers.get(FALLBACK_SIG_HEADER))
@@ -523,6 +534,75 @@ mod tests {
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("auto_review_webhooks_pull_request_total 1\n"));
         assert!(text.contains("auto_review_jobs_dispatched_total 1\n"));
+    }
+
+    #[tokio::test]
+    async fn webhook_throttle_returns_429_when_bucket_empty() {
+        use crate::ratelimit::TokenBucket;
+        // Burst=2: first two webhooks pass; the third is throttled.
+        let bucket = Arc::new(TokenBucket::new(2, 1));
+        let app = build_router(
+            AppState::new("s", Arc::new(NoOpDispatcher))
+                .with_webhook_rate_limit(bucket),
+        );
+        let body = pr_payload("opened", false);
+        let sig = sign("s", &body);
+        for _ in 0..2 {
+            let req = Request::post("/webhooks/forgejo")
+                .header(EVENT_HEADER, "pull_request")
+                .header(SIG_HEADER, &sig)
+                .body(Body::from(body.clone()))
+                .unwrap();
+            let resp = app.clone().oneshot(req).await.unwrap();
+            assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        }
+        // Third hit: bucket empty.
+        let req = Request::post("/webhooks/forgejo")
+            .header(EVENT_HEADER, "pull_request")
+            .header(SIG_HEADER, &sig)
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
+
+        // The metric ticks for the rejected request only.
+        let req = Request::get("/metrics").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(
+            text.contains("auto_review_webhook_rate_limited_total 1\n"),
+            "{text}"
+        );
+    }
+
+    #[tokio::test]
+    async fn webhook_throttle_runs_before_hmac_so_unsigned_floods_dont_burn_cpu() {
+        use crate::ratelimit::TokenBucket;
+        // Burst=1, no signature on the request → throttle still
+        // takes the token, then HMAC reject would happen, then
+        // throttle on next try.
+        let bucket = Arc::new(TokenBucket::new(1, 1));
+        let app = build_router(
+            AppState::new("s", Arc::new(NoOpDispatcher))
+                .with_webhook_rate_limit(bucket),
+        );
+        // First unsigned request: throttle passes (token spent),
+        // HMAC verify fails → 401.
+        let req = Request::post("/webhooks/forgejo")
+            .header(EVENT_HEADER, "pull_request")
+            .body(Body::from(b"{}".to_vec()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        // Second unsigned request: throttle empty → 429
+        // (NOT reaching HMAC verify, so we save the CPU).
+        let req = Request::post("/webhooks/forgejo")
+            .header(EVENT_HEADER, "pull_request")
+            .body(Body::from(b"{}".to_vec()))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::TOO_MANY_REQUESTS);
     }
 
     #[tokio::test]
