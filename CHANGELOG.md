@@ -1205,6 +1205,32 @@ default in-memory store to the SQLite-backed one.
   configured deploy can run `auto_review doctor` with no
   args.
 
+#### Forgejo client: paginate every list endpoint
+
+- Continuation of the `list_changed_files` pagination fix.
+  Two more list methods had the same single-page bug:
+  - **`list_pr_review_comments`** — used by `ChatPoller` to
+    scan inline review threads for `@<bot>` mentions. The
+    docstring even acknowledged the cap (50 comments,
+    "operators with very chatty PR threads can paginate
+    later") but never paginated. A mention on comment #51
+    of a chatty thread was silently invisible to the
+    poller.
+  - **`list_webhooks`** — used by `auto_review
+    list-webhooks` and `unregister-webhook --match-url`.
+    A repo with 50+ hooks audited only the first page.
+- Both now loop through pages until a short response
+  signals the last page, with a 100-page upper bound.
+- Constants `PAGINATION_PAGE_SIZE` (50) and
+  `PAGINATION_MAX_PAGES` (100) lifted from
+  `list_changed_files` to module scope so all three
+  methods share them.
+- 2 new tests pin the pagination semantics on each newly-
+  paginated method (53-row total via 50+3 pages for
+  webhooks; 51-row total with the @<bot> mention on page
+  2 for review comments — exactly the scenario the
+  poller bug would hit).
+
 #### Forgejo client: list_changed_files now paginates
 
 - **Bug**: `Client::list_changed_files` issued a single

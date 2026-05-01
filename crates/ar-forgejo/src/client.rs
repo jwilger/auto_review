@@ -19,6 +19,19 @@ pub enum Error {
     UrlBuild(#[from] url::ParseError),
 }
 
+/// Default Forgejo page size for paginated list endpoints.
+/// Forgejo's actual default is 50; this matches it explicitly so
+/// behaviour is deterministic regardless of server-side defaults
+/// (which can be tuned per-instance via `app.ini`).
+pub(crate) const PAGINATION_PAGE_SIZE: u32 = 50;
+
+/// Defensive cap on the number of pages a paginated list call
+/// will fetch. 100 pages × 50 rows = 5,000 rows. Hitting this
+/// limit means either an accidental everything-is-renamed PR or
+/// a bug in the loop's termination condition; better to stop
+/// here than OOM on serialised JSON.
+pub(crate) const PAGINATION_MAX_PAGES: u32 = 100;
+
 /// Forgejo REST client.
 ///
 /// Wraps a `reqwest::Client` with auth + base URL + JSON helpers. Constructed
@@ -79,33 +92,24 @@ impl Client {
     }
 
     /// List changed files for a pull request, including patch
-    /// hunks. Forgejo paginates this endpoint at 50 files/page by
-    /// default; large PRs return more than one page. We loop
-    /// fetching `?page=N&limit=50` until a page returns fewer
-    /// than `limit` rows (or empty), so the caller always gets
-    /// the complete set.
+    /// hunks. Paginates internally — see `PAGINATION_PAGE_SIZE`
+    /// and `PAGINATION_MAX_PAGES`. Large PRs return the full
+    /// file set instead of the first page only.
     pub async fn list_changed_files(
         &self,
         owner: &str,
         repo: &str,
         n: u64,
     ) -> Result<Vec<ChangedFile>, Error> {
-        const PAGE_SIZE: u32 = 50;
-        // Defensive cap: a PR with >5000 changed files is almost
-        // certainly a bug or accidental commit. Stop before we
-        // OOM on serialised JSON.
-        const MAX_PAGES: u32 = 100;
         let mut all = Vec::new();
-        for page in 1..=MAX_PAGES {
-            let path = format!(
-                "repos/{owner}/{repo}/pulls/{n}/files?page={page}&limit={PAGE_SIZE}"
-            );
-            let url = self.url(&path)?;
+        for page in 1..=PAGINATION_MAX_PAGES {
+            let url = self.url(&format!(
+                "repos/{owner}/{repo}/pulls/{n}/files?page={page}&limit={PAGINATION_PAGE_SIZE}"
+            ))?;
             let chunk: Vec<ChangedFile> = json_get(&self.http, url).await?;
             let chunk_len = chunk.len();
             all.extend(chunk);
-            if chunk_len < PAGE_SIZE as usize {
-                // Last page (short or empty).
+            if chunk_len < PAGINATION_PAGE_SIZE as usize {
                 break;
             }
         }
@@ -158,15 +162,26 @@ impl Client {
 
     /// List webhooks installed on a repository. Operators use this
     /// to audit which webhook(s) point at the gateway and to find
-    /// the `id` needed for `delete_webhook`.
+    /// the `id` needed for `delete_webhook`. Paginates internally
+    /// (50/page) so a repo with many hooks returns the full set.
     pub async fn list_webhooks(
         &self,
         owner: &str,
         repo: &str,
     ) -> Result<Vec<crate::types::WebhookSummary>, Error> {
-        let url = self.url(&format!("repos/{owner}/{repo}/hooks"))?;
-        let items: Vec<crate::types::WebhookListItem> = json_get(&self.http, url).await?;
-        Ok(items.into_iter().map(Into::into).collect())
+        let mut all = Vec::new();
+        for page in 1..=PAGINATION_MAX_PAGES {
+            let url = self.url(&format!(
+                "repos/{owner}/{repo}/hooks?page={page}&limit={PAGINATION_PAGE_SIZE}"
+            ))?;
+            let chunk: Vec<crate::types::WebhookListItem> = json_get(&self.http, url).await?;
+            let chunk_len = chunk.len();
+            all.extend(chunk.into_iter().map(Into::into));
+            if chunk_len < PAGINATION_PAGE_SIZE as usize {
+                break;
+            }
+        }
+        Ok(all)
     }
 
     /// Delete a webhook by id. The id comes from `list_webhooks` or
@@ -267,17 +282,32 @@ impl Client {
     /// comment on the PR; the caller filters by id cursor to detect
     /// new ones.
     ///
-    /// Caps the response at 50 comments per call (default Forgejo
-    /// page size); operators with very chatty PR threads can paginate
-    /// later if needed.
+    /// List the inline review-thread comments on a PR. Used by
+    /// `ChatPoller` to scan for `@<bot>` mentions inside review
+    /// threads (which Forgejo's `pull_request_review_comment`
+    /// webhook doesn't fire reliably for; gitea#26023).
+    /// Paginates internally — chatty PR threads with > 50
+    /// comments now return the full set instead of the first
+    /// page only.
     pub async fn list_pr_review_comments(
         &self,
         owner: &str,
         repo: &str,
         n: u64,
     ) -> Result<Vec<crate::types::PrReviewComment>, Error> {
-        let url = self.url(&format!("repos/{owner}/{repo}/pulls/{n}/comments"))?;
-        json_get(&self.http, url).await
+        let mut all = Vec::new();
+        for page in 1..=PAGINATION_MAX_PAGES {
+            let url = self.url(&format!(
+                "repos/{owner}/{repo}/pulls/{n}/comments?page={page}&limit={PAGINATION_PAGE_SIZE}"
+            ))?;
+            let chunk: Vec<crate::types::PrReviewComment> = json_get(&self.http, url).await?;
+            let chunk_len = chunk.len();
+            all.extend(chunk);
+            if chunk_len < PAGINATION_PAGE_SIZE as usize {
+                break;
+            }
+        }
+        Ok(all)
     }
 
     /// Fetch the Forgejo server's reported version string. Used as a
@@ -749,6 +779,104 @@ mod tests {
         assert_eq!(hooks[1].id, 12);
         assert_eq!(hooks[1].url, "https://other.example/legacy");
         assert!(!hooks[1].active);
+    }
+
+    #[tokio::test]
+    async fn list_webhooks_paginates_through_full_result_set() {
+        use wiremock::matchers::query_param;
+        let (server, client) = mock_client().await;
+        let page1: Vec<serde_json::Value> = (0..50)
+            .map(|i| {
+                serde_json::json!({
+                    "id": i,
+                    "type": "forgejo",
+                    "active": true,
+                    "events": [],
+                    "config": {"url": format!("https://h{i}.example/x")}
+                })
+            })
+            .collect();
+        let page2: Vec<serde_json::Value> = (50..53)
+            .map(|i| {
+                serde_json::json!({
+                    "id": i,
+                    "type": "forgejo",
+                    "active": true,
+                    "events": [],
+                    "config": {"url": format!("https://h{i}.example/x")}
+                })
+            })
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/hooks"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&page1))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/hooks"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&page2))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let hooks = client.list_webhooks("o", "r").await.expect("ok");
+        assert_eq!(hooks.len(), 53);
+        assert_eq!(hooks[0].id, 0);
+        assert_eq!(hooks[52].id, 52);
+    }
+
+    #[tokio::test]
+    async fn list_pr_review_comments_paginates() {
+        use wiremock::matchers::query_param;
+        let (server, client) = mock_client().await;
+        let page1: Vec<serde_json::Value> = (0..50)
+            .map(|i| {
+                serde_json::json!({
+                    "id": i,
+                    "body": format!("comment {i}"),
+                    "user": {"login": "alice", "id": 1}
+                })
+            })
+            .collect();
+        let page2: Vec<serde_json::Value> = (50..51)
+            .map(|i| {
+                serde_json::json!({
+                    "id": i,
+                    "body": "@auto_review re-review",
+                    "user": {"login": "bob", "id": 2}
+                })
+            })
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/comments"))
+            .and(query_param("page", "1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&page1))
+            .expect(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/comments"))
+            .and(query_param("page", "2"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&page2))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let comments = client
+            .list_pr_review_comments("o", "r", 7)
+            .await
+            .expect("ok");
+        assert_eq!(comments.len(), 51);
+        // The mention on comment id=50 (page 2) is now visible
+        // to ChatPoller — previously it was silently dropped.
+        let mention = comments
+            .iter()
+            .find(|c| c.body.contains("@auto_review"))
+            .expect("mention on page 2 visible");
+        assert_eq!(mention.id, 50);
     }
 
     #[tokio::test]
