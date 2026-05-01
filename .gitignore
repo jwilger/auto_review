@@ -3,6 +3,7 @@
 *.pdb
 .env
 .env.local
+.envrc
 *.log
 /data
 /.idea
