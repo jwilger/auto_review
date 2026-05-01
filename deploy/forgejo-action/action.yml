@@ -1,0 +1,75 @@
+name: auto_review
+description: AI code review for Forgejo pull requests, run as a Forgejo Action.
+author: auto_review contributors
+
+inputs:
+  forgejo-token:
+    description: |
+      Token used to fetch the diff and post the review. The default
+      injected `${{ secrets.GITHUB_TOKEN }}` (Forgejo aliases this) has
+      enough permission for read+write on the repo's PRs.
+    required: true
+  llm-base-url:
+    description: |
+      OpenAI-compatible LLM endpoint root, e.g. https://api.openai.com
+      or http://ollama-host:11434.
+    required: true
+  llm-api-key:
+    description: |
+      API key for the LLM endpoint. Omit for local Ollama / self-hosted
+      vLLM.
+    required: false
+    default: ""
+  llm-reasoning-model:
+    description: Model name passed to the LLM endpoint as the chat model.
+    required: false
+    default: "qwen2.5-coder:32b"
+  llm-embedding-model:
+    description: |
+      Optional embedding model name. When set, RAG context retrieval is
+      enabled and the LLM prompt receives a "Repository context"
+      section. Leave empty to disable RAG.
+    required: false
+    default: ""
+  llm-cheap-model:
+    description: |
+      Optional cheap-tier model name. When set, LLM-driven file triage
+      and the verifier second-pass run before posting. Leave empty to
+      disable.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Build auto_review CLI
+      shell: bash
+      run: |
+        cargo build --release -p ar-cli
+
+    - name: Run review
+      shell: bash
+      env:
+        FORGEJO_BASE_URL: ${{ env.GITHUB_SERVER_URL }}
+        FORGEJO_TOKEN: ${{ inputs.forgejo-token }}
+        LLM_BASE_URL: ${{ inputs.llm-base-url }}
+        LLM_API_KEY: ${{ inputs.llm-api-key }}
+        LLM_REASONING_MODEL: ${{ inputs.llm-reasoning-model }}
+        LLM_EMBEDDING_MODEL: ${{ inputs.llm-embedding-model }}
+        LLM_CHEAP_MODEL: ${{ inputs.llm-cheap-model }}
+      run: |
+        # GITHUB_REPOSITORY is "owner/repo" — split on the slash.
+        OWNER="${GITHUB_REPOSITORY%%/*}"
+        REPO="${GITHUB_REPOSITORY##*/}"
+        # On pull_request events, GITHUB_REF is "refs/pull/<n>/merge".
+        PR_NUMBER=$(echo "$GITHUB_REF" | sed -E 's|refs/pull/([0-9]+)/.*|\1|')
+        ./target/release/auto_review review-once \
+          --forgejo-url "$FORGEJO_BASE_URL" \
+          --token "$FORGEJO_TOKEN" \
+          --owner "$OWNER" --repo "$REPO" --pr "$PR_NUMBER" \
+          --llm-base-url "$LLM_BASE_URL" \
+          --llm-model "$LLM_REASONING_MODEL"
+
+branding:
+  icon: book-open
+  color: gray-dark
