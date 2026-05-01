@@ -574,6 +574,25 @@ default in-memory store to the SQLite-backed one.
 - 18 new tests cover each check's pass/fail/skip paths plus
   the markdown renderer.
 
+#### systemd unit (M5 deploy)
+
+- `deploy/systemd/auto_review.service`: hardened systemd
+  unit for self-hosters who don't run k8s or docker. Pairs
+  with the existing `helm/` and `docker-compose.yml` as a
+  third deploy option. Includes the conservative-defaults
+  hardening profile (`NoNewPrivileges`, `ProtectSystem=strict`,
+  `RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6`,
+  `CapabilityBoundingSet=`, `SystemCallFilter=@system-service`),
+  burst-guard `StartLimit*`, and `RuntimeDirectory` /
+  `StateDirectory` for the workspace tmpfs and learnings DB.
+  `systemd-analyze verify` clean.
+- `deploy/systemd/auto_review.env.example`: documented
+  EnvironmentFile template covering every env var the
+  gateway reads (FORGEJO_*, LLM_*, AR_*, WEBHOOK_SECRET).
+  Mode 0600 on install since it carries credentials.
+- `deploy/systemd/README.md`: install / hardening /
+  drop-in customisation / upgrade / uninstall walkthrough.
+
 #### Grafana dashboard (M5 deploy)
 
 - `deploy/grafana/auto_review.dashboard.json`: drop-in

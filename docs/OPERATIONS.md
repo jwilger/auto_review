@@ -398,11 +398,16 @@ cargo build --release -p ar-gateway -p ar-cli
 auto_review validate-config /etc/auto_review/
 
 # Restart
-systemctl restart auto-review
+sudo systemctl restart auto_review.service
 
 # Smoke-test
 curl -s http://localhost:8080/version | jq
+auto_review doctor
 ```
+
+The systemd unit ships under
+[`deploy/systemd/`](../deploy/systemd/) — if you're on systemd and
+haven't installed it, follow that README first.
 
 If the new version fails to start, the old binary is still on disk
 at `target/release/ar-gateway.bak` (manual; we do not auto-back-up).
