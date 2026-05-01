@@ -5,6 +5,7 @@ use ar_forgejo::ChangedFile;
 use ar_sandbox::{DirectSandbox, Sandbox};
 use ar_tools::actionlint::ActionlintRunner;
 use ar_tools::ast_grep::AstGrepRunner;
+use ar_tools::biome::BiomeRunner;
 use ar_tools::eslint::EslintRunner;
 use ar_tools::gitleaks::GitleaksRunner;
 use ar_tools::golangci_lint::GolangciLintRunner;
@@ -136,7 +137,10 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         .map(|f| f.filename.clone())
         .collect();
     if !js_files.is_empty() {
-        runners.push(Box::new(EslintRunner { files: js_files }));
+        runners.push(Box::new(EslintRunner {
+            files: js_files.clone(),
+        }));
+        runners.push(Box::new(BiomeRunner { files: js_files }));
     }
 
     let shell_files: Vec<String> = surviving
@@ -436,6 +440,7 @@ mod tests {
             got,
             vec![
                 "ast-grep",
+                "biome",
                 "eslint",
                 "gitleaks",
                 "hadolint",
@@ -497,7 +502,7 @@ mod tests {
     }
 
     #[test]
-    fn javascript_typescript_extensions_select_eslint() {
+    fn javascript_typescript_extensions_select_eslint_and_biome() {
         for name in [
             "src/a.js",
             "src/b.jsx",
@@ -514,6 +519,7 @@ mod tests {
                 got,
                 vec![
                     "ast-grep",
+                    "biome",
                     "eslint",
                     "gitleaks",
                     "osv-scanner",

@@ -14,9 +14,9 @@
 # Forgejo token / LLM creds / learnings DB.
 #
 # Linter set (in alphabetical order):
-#   actionlint, ast-grep, eslint, gitleaks, golangci-lint, hadolint,
-#   markdownlint, osv-scanner, rubocop, ruff, semgrep, shellcheck,
-#   sqlfluff, trivy, yamllint
+#   actionlint, ast-grep, biome, eslint, gitleaks, golangci-lint,
+#   hadolint, markdownlint, osv-scanner, rubocop, ruff, semgrep,
+#   shellcheck, sqlfluff, trivy, yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -48,7 +48,8 @@ RUN gem install --no-document rubocop
 # Node linters (npm)
 RUN npm install -g \
         eslint \
-        markdownlint-cli
+        markdownlint-cli \
+        @biomejs/biome
 
 # Static-binary linters: pin the latest release downloads.
 RUN set -eux; \

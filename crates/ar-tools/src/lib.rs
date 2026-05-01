@@ -11,6 +11,7 @@
 
 pub mod actionlint;
 pub mod ast_grep;
+pub mod biome;
 pub mod eslint;
 pub mod finding;
 pub mod gitleaks;

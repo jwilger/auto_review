@@ -44,7 +44,7 @@ since the start of the project.
   `run_review_job` posts pending → final commit statuses around the
   triage → clone → lint → review → post sequence.
 
-#### Linters (14 of CodeRabbit's ~45 set)
+#### Linters (16 of CodeRabbit's ~45 set)
 
 | Tool | Languages / files | Source-tool name |
 |---|---|---|
@@ -52,8 +52,10 @@ since the start of the project.
 | `semgrep` | Multi-language SAST via `--config=auto` | `semgrep` |
 | `trivy` | Vulnerabilities, misconfigs, secrets | `trivy` |
 | `osv-scanner` | Dependency CVEs against Google's OSV DB | `osv-scanner` |
+| `ast-grep` | Custom AST-pattern rules (any tree-sitter language) | `ast-grep` |
 | `ruff` | Python | `ruff` |
 | `eslint` | JS / JSX / TS / TSX / CJS / MJS | `eslint` |
+| `biome` | JS / JSX / TS / TSX / CJS / MJS (rule-set distinct from eslint) | `biome` |
 | `golangci-lint` | Go (errcheck, govet, staticcheck, …) | `golangci-lint` |
 | `rubocop` | Ruby (.rb / .rake / Gemfile / Rakefile) | `rubocop` |
 | `shellcheck` | Bash / sh | `shellcheck` |
@@ -253,8 +255,8 @@ default in-memory store to the SQLite-backed one.
   paths cover correctness; LanceDB is the scale lever).
 - youki-based `Sandbox` impl as a lighter alternative to the
   podman shell-out.
-- Remaining ~31 linters from CodeRabbit's set
-  (biome, oxlint, phpstan, languagetool, ast-grep, …).
+- Remaining ~29 linters from CodeRabbit's set
+  (oxlint, phpstan, languagetool, checkov, eslintcc, …).
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
   wiremock + canned LLM providers.
