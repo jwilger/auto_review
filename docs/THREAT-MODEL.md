@@ -247,6 +247,31 @@ not auto-merge, auto-approve, or auto-close.
   operator's `.env` leaks, the bot is compromised. Use a secret
   manager.
 
+## Test coverage of these threats
+
+Concrete red-team tests pin the mitigations described above, so
+threat-model claims fail CI when a regression slips in:
+
+- `crates/ar-review/tests/red_team_pipeline.rs` — covers T3
+  (prompt-injection ⇒ schema allow-list), T7 (oversized diff
+  cap), T8 (single-file flat-truncation fallback), and T9
+  (confused-deputy via Forgejo API: schema rejects unknown
+  fields, severity is closed-enum, review event is derived from
+  finding severity not LLM input).
+- `crates/ar-review/tests/red_team_workspace_tools.rs` — covers
+  T4 (LLM tool calls escape workspace): symlink escape, chained
+  symlinks, empty paths, pathological regex.
+- `crates/ar-gateway/src/webhook.rs` HMAC unit tests — cover T2
+  (webhook forgery: missing-signature, wrong-secret, malformed
+  hex).
+- `crates/ar-review/src/workspace.rs` token-redactor tests —
+  cover T5 (PAT compromise: tokens never appear in URL logs).
+
+T1 (Kudelski-class sandbox escape) needs a live container
+runtime; coverage there is operational (the
+`crates/ar-sandbox` Podman integration tests when run against a
+real `podman` binary).
+
 ## How to update this document
 
 When adding a new component (linter runner, chat command, LLM tool,

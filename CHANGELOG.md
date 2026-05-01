@@ -780,6 +780,31 @@ default in-memory store to the SQLite-backed one.
   (which covers *what* the bot defends against) by covering
   *how* operators keep it healthy.
 
+#### Red-team integration tests (M3 verification)
+
+- New `crates/ar-review/tests/red_team_pipeline.rs` makes the
+  threat-model mitigations CI-enforced. Each test has a
+  docstring naming the T# it covers, so the file doubles as
+  a security-audit lens:
+  - **T7** (oversized diff): 50 × 200 KiB diff capped at file
+    boundaries, `omitted N` marker present.
+  - **T8** (single-file giant diff): falls back to flat
+    truncation rather than overflowing the LLM context.
+  - **T9** (confused-deputy via Forgejo API): three tests —
+    review JSON with unknown top-level fields rejected;
+    review finding with unknown severity rejected; review
+    event derived from finding severity, not LLM input.
+  - **T3** (prompt injection): two schema-pinning tests — the
+    review-output schema's top-level keys are an exact
+    allow-list (`summary`, `walkthrough`, `mermaid`,
+    `findings`) with `additionalProperties: false`; same for
+    the verifier output (`verdicts` only).
+- THREAT-MODEL.md gains a "Test coverage of these threats"
+  section cross-referencing each T# to the test that pins it
+  (this file plus the existing `red_team_workspace_tools.rs`
+  for T4 and the HMAC unit tests for T2). Closes the §14 #3
+  red-team-suite gap from the feasibility plan.
+
 #### Threat model (M5 docs)
 
 - `docs/THREAT-MODEL.md`: living document enumerating
