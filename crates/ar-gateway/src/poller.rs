@@ -175,7 +175,13 @@ impl ChatPoller {
             if c.id <= cursor {
                 continue; // already processed
             }
-            if c.user.login == *self.bot_login {
+            // Case-insensitive to match the webhook handler's
+            // is_bot_self. Forgejo logins are case-insensitively
+            // unique but the wire format preserves the casing the
+            // user registered with; an exact-match check here
+            // would risk treating "Auto_review" comments from our
+            // own bot as user comments and reply-looping.
+            if c.user.login.eq_ignore_ascii_case(&self.bot_login) {
                 continue; // never reply to ourselves
             }
             // Cheap pre-filter: only dispatch comments that even
