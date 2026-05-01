@@ -286,10 +286,24 @@ impl ChatHandler<'_> {
                 return Ok(());
             }
         };
+        // Defence-in-depth: drop any patch whose `path` isn't in
+        // the PR's diff. The system prompt tells the cheap model
+        // to stick to diff paths but the prompt isn't a guarantee
+        // — a hallucinated path either Forgejo-rejects the whole
+        // review or, worse, posts a comment on a file the PR
+        // didn't touch (looks like the bot is reviewing files at
+        // random). Either failure mode is worse than dropping the
+        // bad patch.
+        let diff_paths = paths_in_diff(&diff);
         let patches: Vec<AutofixPatch> = parsed
             .patches
             .into_iter()
-            .filter(|p| !p.path.is_empty() && p.line >= 1 && !p.replacement.is_empty())
+            .filter(|p| {
+                !p.path.is_empty()
+                    && p.line >= 1
+                    && !p.replacement.is_empty()
+                    && diff_paths.contains(p.path.as_str())
+            })
             .take(AUTOFIX_MAX_PATCHES)
             .collect();
         if patches.is_empty() {
@@ -728,6 +742,39 @@ fn format_suggestion_body(p: &AutofixPatch) -> String {
     }
     out.push_str("```");
     out
+}
+
+/// Extract every changed-file path from a unified diff. Accepts
+/// either the canonical `+++ b/<path>` header or the
+/// `diff --git a/<old> b/<new>` line that's always present even
+/// when downstream tooling strips the `+++` (e.g. some Forgejo
+/// proxies, or test fixtures that simplify the diff format).
+///
+/// Used as a defence-in-depth filter on LLM-emitted suggestion
+/// paths: a patch citing a path NOT in the diff is either a model
+/// hallucination or a rule-bypass attempt. Either way we drop it
+/// rather than post a comment on an unrelated file.
+fn paths_in_diff(diff: &str) -> std::collections::HashSet<String> {
+    let mut paths = std::collections::HashSet::new();
+    for line in diff.lines() {
+        if let Some(rest) = line.strip_prefix("+++ b/") {
+            let path = rest.split_whitespace().next().unwrap_or("");
+            if !path.is_empty() {
+                paths.insert(path.to_string());
+            }
+        } else if let Some(rest) = line.strip_prefix("diff --git ") {
+            // Format: `a/<old-path> b/<new-path>`. Take the new
+            // (`b/`) path since that's what suggestion comments
+            // anchor on.
+            if let Some(b_part) = rest.split(" b/").nth(1) {
+                let path = b_part.split_whitespace().next().unwrap_or("");
+                if !path.is_empty() {
+                    paths.insert(path.to_string());
+                }
+            }
+        }
+    }
+    paths
 }
 
 fn truncate_for_chat(diff: &str, max_bytes: usize) -> String {
@@ -1294,6 +1341,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn autofix_drops_patches_for_paths_outside_the_diff() {
+        // Defence-in-depth: if the cheap-tier model emits a patch
+        // for a file the PR doesn't touch (hallucination or
+        // confusion), we must NOT post a review comment on that
+        // file. The model's claim should be filtered to the diff's
+        // own path set before we trust it.
+        let server = MockServer::start().await;
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let learnings = InMemoryLearningsStore::new();
+        let cheap_reply = serde_json::json!({
+            "patches": [
+                {
+                    "path": "this/is/not/in/the/diff.rs",
+                    "line": 1,
+                    "replacement": "totally fabricated change",
+                    "reason": "made-up patch"
+                }
+            ]
+        })
+        .to_string();
+        let cheap = Arc::new(CannedCheapProvider { reply: cheap_reply });
+        let router = Router::new()
+            .with(ModelTier::Embedding, Arc::new(ConstantEmbedder))
+            .with(ModelTier::Cheap, cheap);
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "ok",
+                "body": "",
+                "draft": false,
+                "head": {"ref": "t", "sha": "abc"},
+                "base": {"ref": "main", "sha": "def"}
+            })))
+            .mount(&server)
+            .await;
+        // Diff only touches src/real.rs.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42.diff"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string(
+                    "diff --git a/src/real.rs b/src/real.rs\n+legitimate change\n",
+                ),
+            )
+            .mount(&server)
+            .await;
+        // CRITICAL: only an issue comment is expected — NO review
+        // POST. If the path-guard fails, the review POST would fire
+        // and this test would fail because there's no mock for it
+        // (or, worse, if a mock did exist, we'd be silently posting
+        // to wrong files in production).
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(
+                serde_json::json!({"body": "Autofix found nothing to suggest."}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &router,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::Autofix)
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
     async fn autofix_with_no_patches_replies_nothing_safe() {
         let server = MockServer::start().await;
         let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
@@ -1771,5 +1892,58 @@ mod tests {
                  expected {cmd:?} family, got {parsed:?}"
             );
         }
+    }
+
+    #[test]
+    fn paths_in_diff_extracts_plus_plus_plus_paths() {
+        let diff = "diff --git a/src/a.rs b/src/a.rs\n\
+                    index abc..def 100644\n\
+                    --- a/src/a.rs\n\
+                    +++ b/src/a.rs\n\
+                    @@ -1 +1 @@\n\
+                    -old\n\
+                    +new\n";
+        let paths = paths_in_diff(diff);
+        assert!(paths.contains("src/a.rs"));
+    }
+
+    #[test]
+    fn paths_in_diff_falls_back_to_diff_git_line() {
+        // Some diffs (test fixtures, proxies that strip --- /+++)
+        // only have the `diff --git` header. Still extract the path.
+        let diff = "diff --git a/src/auth.rs b/src/auth.rs\n+new line\n";
+        let paths = paths_in_diff(diff);
+        assert!(paths.contains("src/auth.rs"));
+    }
+
+    #[test]
+    fn paths_in_diff_returns_empty_for_empty_diff() {
+        assert!(paths_in_diff("").is_empty());
+        assert!(paths_in_diff("no headers here").is_empty());
+    }
+
+    #[test]
+    fn paths_in_diff_handles_renames() {
+        // Rename diff: old path differs from new path; we want the new.
+        let diff = "diff --git a/old/x.rs b/new/x.rs\n\
+                    similarity index 95%\n\
+                    rename from old/x.rs\n\
+                    rename to new/x.rs\n\
+                    --- a/old/x.rs\n\
+                    +++ b/new/x.rs\n";
+        let paths = paths_in_diff(diff);
+        assert!(paths.contains("new/x.rs"));
+    }
+
+    #[test]
+    fn paths_in_diff_handles_multiple_files() {
+        let diff = "diff --git a/a.rs b/a.rs\n\
+                    +++ b/a.rs\n\
+                    diff --git a/b.rs b/b.rs\n\
+                    +++ b/b.rs\n";
+        let paths = paths_in_diff(diff);
+        assert_eq!(paths.len(), 2);
+        assert!(paths.contains("a.rs"));
+        assert!(paths.contains("b.rs"));
     }
 }
