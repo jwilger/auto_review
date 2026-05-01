@@ -19,6 +19,7 @@ async-trait.workspace = true
 url.workspace = true
 tokio = { workspace = true, features = ["process", "macros", "rt"] }
 tempfile = "3"
+regex = "1"
 ar-forgejo = { path = "../ar-forgejo" }
 ar-index = { path = "../ar-index" }
 ar-llm = { path = "../ar-llm" }

@@ -8,6 +8,7 @@
 //! (triage → summarize → review → verify), with the pipeline becoming a thin
 //! coordinator over them.
 
+pub mod agentic_verify;
 pub mod config;
 pub mod context_builder;
 pub mod diff;
@@ -22,7 +23,9 @@ pub mod routing;
 pub mod triage;
 pub mod verify;
 pub mod workspace;
+pub mod workspace_tools;
 
+pub use agentic_verify::verify_findings_agentic;
 pub use config::{load_repo_config, RepoConfig};
 pub use context_builder::{build_review_context, ContextBuildError};
 pub use diff::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
@@ -38,3 +41,4 @@ pub use routing::{lint_workspace, lint_workspace_via, lint_workspace_with, selec
 pub use triage::{classify, pr_is_skippable, FileClass};
 pub use verify::verify_findings;
 pub use workspace::{build_clone_url, prepare_workspace, PreparedWorkspace, WorkspaceError};
+pub use workspace_tools::{read_file, search, ReadResult, SearchHit, WorkspaceToolError};
