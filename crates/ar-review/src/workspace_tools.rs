@@ -63,6 +63,18 @@ pub fn read_file(
     max_bytes: usize,
 ) -> Result<ReadResult, WorkspaceToolError> {
     let resolved = resolve_inside(workspace_root, rel_path)?;
+    // Refuse to pull a 1 GiB file into RAM just to truncate it
+    // afterwards. The same 1 MiB cap as scan_file: matches the
+    // indexer's per-file ceiling and covers any source file the
+    // verifier would meaningfully read.
+    if let Ok(meta) = fs::metadata(&resolved) {
+        if meta.len() > SCAN_FILE_MAX_BYTES {
+            return Err(WorkspaceToolError::NotFound(format!(
+                "{rel_path} (exceeds {} byte read cap)",
+                SCAN_FILE_MAX_BYTES
+            )));
+        }
+    }
     let raw = fs::read_to_string(&resolved).map_err(|e| {
         if e.kind() == std::io::ErrorKind::NotFound {
             WorkspaceToolError::NotFound(rel_path.into())
@@ -198,6 +210,14 @@ fn walk_dir(
     Ok(())
 }
 
+/// Hard cap on the bytes scan_file will pull into memory per
+/// file. Files committed to a PR are attacker-controllable;
+/// without this, a malicious 1+ GiB committed text file would
+/// OOM the gateway during the agentic verifier's search pass.
+/// 1 MiB matches the indexer's per-file limit and easily covers
+/// any source file the verifier would meaningfully grep.
+const SCAN_FILE_MAX_BYTES: u64 = 1024 * 1024;
+
 fn scan_file(
     workspace_root: &Path,
     path: &Path,
@@ -207,6 +227,14 @@ fn scan_file(
 ) -> Result<(), WorkspaceToolError> {
     if hits.len() >= max_hits {
         return Ok(());
+    }
+    // Stat first; refuse to read pathologically large files. A PR
+    // committing a 1 GiB text file would otherwise slurp it into
+    // RAM here.
+    if let Ok(meta) = fs::metadata(path) {
+        if meta.len() > SCAN_FILE_MAX_BYTES {
+            return Ok(());
+        }
     }
     let content = match fs::read_to_string(path) {
         Ok(c) => c,
@@ -428,6 +456,49 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let r = search(dir.path(), "x", Some("../etc"), 100);
         assert!(matches!(r, Err(WorkspaceToolError::PathEscape(_))));
+    }
+
+    #[test]
+    fn scan_file_skips_oversized_files() {
+        // A PR can commit anything; without the size cap, a
+        // committed 100 MiB text file would slurp into RAM. The
+        // cap (1 MiB) skips the file silently — no error, no
+        // hits.
+        let dir = tempfile::tempdir().unwrap();
+        let big_path = dir.path().join("huge.txt");
+        // Write just over 1 MiB of content that matches.
+        let payload: String = "needle\n".repeat(160_000); // ~1.1 MiB
+        std::fs::write(&big_path, &payload).unwrap();
+        // Also write a small file with the same content so we can
+        // verify search is still working.
+        write(dir.path(), "small.txt", "needle\n");
+
+        let hits = search(dir.path(), "needle", None, 100).expect("ok");
+        // Only the small file should be scanned.
+        let small_hits: Vec<&SearchHit> = hits.iter().filter(|h| h.path == "small.txt").collect();
+        let big_hits: Vec<&SearchHit> = hits.iter().filter(|h| h.path == "huge.txt").collect();
+        assert_eq!(small_hits.len(), 1);
+        assert!(
+            big_hits.is_empty(),
+            "oversized file must be skipped, got: {big_hits:?}"
+        );
+    }
+
+    #[test]
+    fn read_file_rejects_oversized_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let big_path = dir.path().join("huge.txt");
+        // Just over 1 MiB.
+        let payload: String = "x".repeat(1024 * 1024 + 100);
+        std::fs::write(&big_path, &payload).unwrap();
+        let err = read_file(dir.path(), "huge.txt", None, None, 4096)
+            .expect_err("must reject oversized file");
+        match err {
+            WorkspaceToolError::NotFound(msg) => {
+                assert!(msg.contains("read cap"), "expected cap message; got {msg}");
+            }
+            other => panic!("unexpected error class: {other:?}"),
+        }
     }
 
     #[cfg(unix)]
