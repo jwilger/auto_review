@@ -357,12 +357,12 @@ async fn json_get<T: for<'de> Deserialize<'de>>(
     if !status.is_success() {
         return Err(Error::Api {
             status: status.as_u16(),
-            body,
+            body: cap_for_error(&body),
         });
     }
     serde_json::from_str(&body).map_err(|e| Error::Api {
         status: 200,
-        body: format!("decode error: {e}: {body}"),
+        body: format!("decode error: {e}: {}", cap_for_error(&body)),
     })
 }
 
@@ -377,13 +377,31 @@ async fn json_post<I: Serialize, T: for<'de> Deserialize<'de>>(
     if !status.is_success() {
         return Err(Error::Api {
             status: status.as_u16(),
-            body,
+            body: cap_for_error(&body),
         });
     }
     serde_json::from_str(&body).map_err(|e| Error::Api {
         status: 200,
-        body: format!("decode error: {e}: {body}"),
+        body: format!("decode error: {e}: {}", cap_for_error(&body)),
     })
+}
+
+/// Cap the response body included in error messages. Forgejo
+/// errors are usually small JSON ({"message": "..."}), but a
+/// misbehaving reverse proxy can return a multi-KB HTML stub.
+/// Including it verbatim in `Error::Api` holds that much in memory
+/// and pollutes operator logs. 1 KiB easily covers any real
+/// Forgejo error response while bounding the worst case.
+fn cap_for_error(s: &str) -> String {
+    const CAP: usize = 1024;
+    if s.len() <= CAP {
+        return s.to_string();
+    }
+    let mut cut = CAP;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}… [+{} bytes]", &s[..cut], s.len() - cut)
 }
 
 #[cfg(test)]
