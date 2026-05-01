@@ -525,6 +525,15 @@ default in-memory store to the SQLite-backed one.
     OpenAI-compatible endpoint (Ollama / vLLM / cloud).
     Reports model count from the response.
     Skipped without `--llm-base-url`.
+  - **llm-reasoning-model / -cheap-model / -embedding-model**:
+    when configured, `doctor` checks that each model name
+    appears in the `/v1/models` response. Catches the
+    common deploy failure where the env var is set to
+    `qwen2.5-coder:32b` but only `qwen2.5-coder:7b` is
+    pulled into Ollama. Reads the same env vars the
+    gateway and `review-once` use
+    (`LLM_REASONING_MODEL`, `LLM_CHEAP_MODEL`,
+    `LLM_EMBEDDING_MODEL`).
   - **webhook-secret**: heuristic entropy check (length
     >= 16 + not all-digits + >= 8 distinct chars). Warns
     on weak secrets without failing — they're functional,

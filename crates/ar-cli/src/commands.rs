@@ -220,14 +220,55 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
 
     // LLM: GET <base>/v1/models — standard OpenAI-compatible
     // health probe. Free for cloud providers, instant for Ollama.
+    let configured_models: Vec<(&'static str, Option<&str>)> = vec![
+        ("llm-reasoning-model", args.llm_reasoning_model.as_deref()),
+        ("llm-cheap-model", args.llm_cheap_model.as_deref()),
+        ("llm-embedding-model", args.llm_embedding_model.as_deref()),
+    ];
     match args.llm_base_url.as_deref() {
-        Some(url) => {
-            match probe_llm(url, args.llm_api_key.as_deref(), timeout).await {
-                Ok(detail) => report.pass("llm", detail),
-                Err(e) => report.fail("llm", format!("{e}")),
+        Some(url) => match probe_llm(url, args.llm_api_key.as_deref(), timeout).await {
+            Ok(LlmProbeResult { detail, model_ids }) => {
+                report.pass("llm", detail);
+                for &(name, configured) in &configured_models {
+                    match configured {
+                        Some(model) => {
+                            if model_ids.iter().any(|m| m == model) {
+                                report.pass(name, format!("{model} is loaded"));
+                            } else {
+                                report.fail(
+                                    name,
+                                    format!(
+                                        "{model} not in /v1/models response; pull it on the \
+                                         inference server or fix the env var"
+                                    ),
+                                );
+                            }
+                        }
+                        None => {
+                            // Required vs optional differs per tier; we
+                            // don't know which is which here, so skip
+                            // silently.
+                            report.skip(name, "not configured");
+                        }
+                    }
+                }
+            }
+            Err(e) => {
+                report.fail("llm", format!("{e}"));
+                // Without the model list, model-presence checks
+                // are indeterminate — surface that explicitly
+                // rather than silently skipping.
+                for &(name, _configured) in &configured_models {
+                    report.skip(name, "skipped: llm probe failed");
+                }
+            }
+        },
+        None => {
+            report.skip("llm", "set --llm-base-url to enable");
+            for &(name, _configured) in &configured_models {
+                report.skip(name, "skipped: llm probe disabled");
             }
         }
-        None => report.skip("llm", "set --llm-base-url to enable"),
     }
 
     // Webhook secret: an entropy heuristic. The HMAC algorithm
@@ -305,11 +346,16 @@ async fn probe_forgejo_anonymous(
         .to_string())
 }
 
+struct LlmProbeResult {
+    detail: String,
+    model_ids: Vec<String>,
+}
+
 async fn probe_llm(
     base_url: &str,
     api_key: Option<&str>,
     timeout: std::time::Duration,
-) -> Result<String> {
+) -> Result<LlmProbeResult> {
     let url = format!("{}/v1/models", base_url.trim_end_matches('/'));
     let http = reqwest::Client::builder()
         .timeout(timeout)
@@ -331,12 +377,19 @@ async fn probe_llm(
         anyhow::bail!("{status}: {snippet}");
     }
     let body: serde_json::Value = resp.json().await.context("decode /v1/models body")?;
-    let model_count = body
+    let model_ids: Vec<String> = body
         .get("data")
         .and_then(|d| d.as_array())
-        .map(|a| a.len())
-        .unwrap_or(0);
-    Ok(format!("{status}; {model_count} model(s) listed"))
+        .map(|a| {
+            a.iter()
+                .filter_map(|m| m.get("id").and_then(|v| v.as_str()).map(str::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    Ok(LlmProbeResult {
+        detail: format!("{status}; {} model(s) listed", model_ids.len()),
+        model_ids,
+    })
 }
 
 fn check_webhook_secret(s: &str) -> std::result::Result<String, String> {
@@ -693,6 +746,9 @@ mod tests {
             token: None,
             llm_base_url: None,
             llm_api_key: None,
+            llm_reasoning_model: None,
+            llm_cheap_model: None,
+            llm_embedding_model: None,
             webhook_secret: None,
             timeout_secs: 5,
         };
@@ -707,6 +763,9 @@ mod tests {
             token: Some("tok".into()),
             llm_base_url: None,
             llm_api_key: None,
+            llm_reasoning_model: None,
+            llm_cheap_model: None,
+            llm_embedding_model: None,
             webhook_secret: None,
             timeout_secs: 1,
         };
@@ -721,10 +780,75 @@ mod tests {
             token: None,
             llm_base_url: None,
             llm_api_key: None,
+            llm_reasoning_model: None,
+            llm_cheap_model: None,
+            llm_embedding_model: None,
             webhook_secret: Some("9f8e7d6c5b4a3210fedcba9876543210".into()),
             timeout_secs: 5,
         };
         doctor(args).await.expect("strong-secret-only run");
+    }
+
+    #[tokio::test]
+    async fn doctor_passes_when_configured_models_are_loaded() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {"id": "qwen2.5-coder:32b"},
+                    {"id": "qwen2.5-coder:7b"},
+                    {"id": "bge-m3:latest"}
+                ]
+            })))
+            .mount(&server)
+            .await;
+
+        let args = DoctorArgs {
+            forgejo_url: None,
+            token: None,
+            llm_base_url: Some(server.uri()),
+            llm_api_key: None,
+            llm_reasoning_model: Some("qwen2.5-coder:32b".into()),
+            llm_cheap_model: Some("qwen2.5-coder:7b".into()),
+            llm_embedding_model: Some("bge-m3:latest".into()),
+            webhook_secret: None,
+            timeout_secs: 5,
+        };
+        doctor(args).await.expect("all configured models present");
+    }
+
+    #[tokio::test]
+    async fn doctor_fails_when_configured_model_is_missing() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/v1/models"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"id": "qwen2.5-coder:7b"}]
+            })))
+            .mount(&server)
+            .await;
+
+        let args = DoctorArgs {
+            forgejo_url: None,
+            token: None,
+            llm_base_url: Some(server.uri()),
+            llm_api_key: None,
+            // Configured model name doesn't match what's loaded.
+            llm_reasoning_model: Some("qwen2.5-coder:32b".into()),
+            llm_cheap_model: None,
+            llm_embedding_model: None,
+            webhook_secret: None,
+            timeout_secs: 5,
+        };
+        let err = doctor(args).await.expect_err("missing model is a fail");
+        assert!(err.to_string().contains("required checks failed"));
     }
 
     #[tokio::test]
@@ -736,6 +860,9 @@ mod tests {
             token: None,
             llm_base_url: None,
             llm_api_key: None,
+            llm_reasoning_model: None,
+            llm_cheap_model: None,
+            llm_embedding_model: None,
             webhook_secret: Some("aaaaaaaaaaaaaaaaaaaa".into()),
             timeout_secs: 5,
         };

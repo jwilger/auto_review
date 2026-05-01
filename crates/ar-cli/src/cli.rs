@@ -145,6 +145,23 @@ pub struct DoctorArgs {
     #[arg(long, env = "LLM_API_KEY")]
     pub llm_api_key: Option<String>,
 
+    /// Reasoning-tier model name (e.g. `qwen2.5-coder:32b`). When
+    /// set alongside `--llm-base-url`, `doctor` confirms the model
+    /// appears in `/v1/models`. Catches the common deploy failure
+    /// where the env var doesn't match what's actually loaded on
+    /// the inference server.
+    #[arg(long, env = "LLM_REASONING_MODEL")]
+    pub llm_reasoning_model: Option<String>,
+
+    /// Cheap-tier model. Same verification as `--llm-reasoning-model`;
+    /// skipped when unset (the cheap tier is optional).
+    #[arg(long, env = "LLM_CHEAP_MODEL")]
+    pub llm_cheap_model: Option<String>,
+
+    /// Embedding-tier model. Same verification; skipped when unset.
+    #[arg(long, env = "LLM_EMBEDDING_MODEL")]
+    pub llm_embedding_model: Option<String>,
+
     /// Webhook secret. When set, `doctor` checks length /
     /// entropy. Skipped otherwise.
     #[arg(long, env = "WEBHOOK_SECRET")]
