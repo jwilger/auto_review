@@ -15,6 +15,7 @@ use ar_tools::ruff::RuffRunner;
 use ar_tools::runner::{run_all, LinterRunner};
 use ar_tools::semgrep::SemgrepRunner;
 use ar_tools::shellcheck::ShellCheckRunner;
+use ar_tools::sqlfluff::SqlfluffRunner;
 use ar_tools::trivy::TrivyRunner;
 use ar_tools::yamllint::YamlLintRunner;
 use ar_tools::Finding;
@@ -167,6 +168,15 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         }));
     }
 
+    let sql_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| has_sql_ext(&f.filename))
+        .map(|f| f.filename.clone())
+        .collect();
+    if !sql_files.is_empty() {
+        runners.push(Box::new(SqlfluffRunner { files: sql_files }));
+    }
+
     // yamllint runs on every YAML file, including workflows (it complains
     // about formatting; actionlint handles semantics — they're
     // complementary).
@@ -235,6 +245,11 @@ fn is_workflow_yaml(name: &str) -> bool {
 
 fn has_yaml_ext(name: &str) -> bool {
     name.ends_with(".yml") || name.ends_with(".yaml")
+}
+
+fn has_sql_ext(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    lower.ends_with(".sql") || lower.ends_with(".dml") || lower.ends_with(".ddl")
 }
 
 #[cfg(test)]
@@ -460,6 +475,26 @@ mod tests {
         let mut got = names(&runners);
         got.sort();
         assert_eq!(got, vec!["gitleaks", "osv-scanner", "semgrep", "trivy"]);
+    }
+
+    #[test]
+    fn sql_files_select_sqlfluff() {
+        for name in [
+            "queries/users.sql",
+            "schema/migrations/001.SQL",
+            "x.dml",
+            "y.ddl",
+        ] {
+            let files = vec![cf(name, "modified")];
+            let runners = select_runners(&files);
+            let mut got = names(&runners);
+            got.sort();
+            assert_eq!(
+                got,
+                vec!["gitleaks", "osv-scanner", "semgrep", "sqlfluff", "trivy"],
+                "name = {name}"
+            );
+        }
     }
 
     #[test]

@@ -15,7 +15,7 @@
 #
 # Linter set (in alphabetical order):
 #   actionlint, eslint, gitleaks, golangci-lint, hadolint, markdownlint,
-#   osv-scanner, rubocop, ruff, semgrep, shellcheck, trivy, yamllint
+#   osv-scanner, rubocop, ruff, semgrep, shellcheck, sqlfluff, trivy, yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -38,7 +38,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 # Python linters (pip)
 RUN pip3 install --break-system-packages \
         ruff \
-        semgrep
+        semgrep \
+        sqlfluff
 
 # Ruby linters (gem)
 RUN gem install --no-document rubocop
