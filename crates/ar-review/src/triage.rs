@@ -34,13 +34,25 @@ pub fn classify(filename: &str) -> FileClass {
 /// True iff every file in `files` is [`FileClass::Trivial`] — meaning the
 /// entire PR can be skipped. An empty list is *not* skippable: that's a
 /// data error, and we'd rather post an empty review than silently drop it.
+///
+/// Pure-removal PRs (every file has status="removed") are *not*
+/// skippable either. Deletions are reviewable — a PR removing
+/// security checks, tests, or load-bearing code deserves the same
+/// scrutiny as a PR adding them. The previous filter+all idiom
+/// would have returned true vacuously here (empty filtered set ⇒
+/// `all` is true), silently skipping every pure-removal PR.
 pub fn pr_is_skippable(files: &[ChangedFile]) -> bool {
     if files.is_empty() {
         return false;
     }
-    files
+    let surviving: Vec<&ChangedFile> = files.iter().filter(|f| f.status != "removed").collect();
+    if surviving.is_empty() {
+        // Pure-removal PR: don't skip. Reviewing the deletion is
+        // the operator's whole point.
+        return false;
+    }
+    surviving
         .iter()
-        .filter(|f| f.status != "removed")
         .all(|f| classify(&f.filename) == FileClass::Trivial)
 }
 
@@ -182,5 +194,24 @@ mod tests {
             cf("src/main.rs", "modified"),
         ];
         assert!(!pr_is_skippable(&files));
+    }
+
+    #[test]
+    fn pure_removal_pr_is_not_skippable() {
+        // A PR that ONLY deletes files — including trivial ones —
+        // is reviewable. Removing tests, security checks, or
+        // load-bearing code deserves the same scrutiny as adding
+        // them. Without this rule, the previous filter+all idiom
+        // returned true vacuously (empty filtered set ⇒ `all`
+        // is true) and silently skipped the review.
+        let files = vec![
+            cf("Cargo.lock", "removed"),
+            cf("yarn.lock", "removed"),
+            cf("vendor/old.go", "removed"),
+        ];
+        assert!(
+            !pr_is_skippable(&files),
+            "pure-removal PR must still trigger review"
+        );
     }
 }
