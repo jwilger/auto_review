@@ -20,7 +20,18 @@ pub struct InitClient {
 
 impl InitClient {
     pub fn new(base_url: &str, username: &str, password: &str) -> Result<Self, Error> {
-        let base = Url::parse(base_url).map_err(|_| Error::InvalidBaseUrl(base_url.to_string()))?;
+        // Same subpath-deploy normalisation as `Client::new`. Forgejo
+        // mounted at `https://example.com/forgejo` would otherwise
+        // silently lose its subpath when joining `api/v1/`, leading
+        // to confusing 404s during `auto_review init` — and init is
+        // operators' first impression of the bot.
+        let normalized = if base_url.ends_with('/') {
+            base_url.to_string()
+        } else {
+            format!("{base_url}/")
+        };
+        let base =
+            Url::parse(&normalized).map_err(|_| Error::InvalidBaseUrl(normalized.clone()))?;
         let mut headers = HeaderMap::new();
         let basic = base64_basic(username, password);
         let mut auth_value = HeaderValue::from_str(&format!("Basic {basic}"))
@@ -111,6 +122,21 @@ mod tests {
         assert_eq!(token.id, 99);
         assert_eq!(token.name, "auto_review");
         assert_eq!(token.sha1, "tok_secret_value");
+    }
+
+    #[test]
+    fn init_client_subpath_base_url_keeps_path_when_joined() {
+        // Same defence-in-depth as the main client. Operators
+        // running `auto_review init` against a subpath-deployed
+        // Forgejo (e.g. https://example.com/forgejo) shouldn't
+        // silently 404 because the base URL lost its subpath when
+        // building the token-mint URL.
+        let client = InitClient::new("https://example.com/forgejo", "alice", "pw").expect("client");
+        let url = client.url("users/alice/tokens").expect("url");
+        assert!(
+            url.as_str().contains("/forgejo/api/v1/users/alice/tokens"),
+            "subpath was dropped: {url}"
+        );
     }
 
     #[tokio::test]
