@@ -21,6 +21,7 @@ pub mod golangci_lint;
 pub mod hadolint;
 pub mod kubeconform;
 pub mod markdownlint;
+pub mod mypy;
 pub mod osv_scanner;
 pub mod oxlint;
 pub mod phpstan;

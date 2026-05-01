@@ -14,6 +14,7 @@ use ar_tools::golangci_lint::GolangciLintRunner;
 use ar_tools::hadolint::HadolintRunner;
 use ar_tools::kubeconform::KubeconformRunner;
 use ar_tools::markdownlint::MarkdownLintRunner;
+use ar_tools::mypy::MypyRunner;
 use ar_tools::osv_scanner::OsvScannerRunner;
 use ar_tools::oxlint::OxlintRunner;
 use ar_tools::phpstan::PhpstanRunner;
@@ -122,6 +123,7 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
 
     if surviving.iter().any(|f| has_python_ext(&f.filename)) {
         runners.push(Box::new(RuffRunner));
+        runners.push(Box::new(MypyRunner));
     }
 
     if surviving.iter().any(|f| has_go_ext(&f.filename)) {
@@ -374,7 +376,7 @@ mod tests {
     }
 
     #[test]
-    fn python_files_select_ruff() {
+    fn python_files_select_ruff_and_mypy() {
         let files = vec![cf("src/x.py", "modified")];
         let runners = select_runners(&files);
         let mut got = names(&runners);
@@ -384,6 +386,7 @@ mod tests {
             vec![
                 "ast-grep",
                 "gitleaks",
+                "mypy",
                 "osv-scanner",
                 "ruff",
                 "semgrep",
@@ -520,6 +523,7 @@ mod tests {
                 "gitleaks",
                 "hadolint",
                 "markdownlint",
+                "mypy",
                 "osv-scanner",
                 "oxlint",
                 "ruff",
@@ -809,6 +813,7 @@ mod tests {
             vec![
                 "ast-grep",
                 "gitleaks",
+                "mypy",
                 "osv-scanner",
                 "ruff",
                 "semgrep",

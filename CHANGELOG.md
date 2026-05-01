@@ -44,7 +44,7 @@ since the start of the project.
   `run_review_job` posts pending → final commit statuses around the
   triage → clone → lint → review → post sequence.
 
-#### Linters (22 of CodeRabbit's ~45 set)
+#### Linters (23 of CodeRabbit's ~45 set)
 
 | Tool | Languages / files | Source-tool name |
 |---|---|---|
@@ -55,6 +55,7 @@ since the start of the project.
 | `osv-scanner` | Dependency CVEs against Google's OSV DB | `osv-scanner` |
 | `ast-grep` | Custom AST-pattern rules (any tree-sitter language) | `ast-grep` |
 | `ruff` | Python | `ruff` |
+| `mypy` | Python type checker (complements ruff's lint surface) | `mypy` |
 | `eslint` | JS / JSX / TS / TSX / CJS / MJS | `eslint` |
 | `biome` | JS / JSX / TS / TSX / CJS / MJS (rule-set distinct from eslint) | `biome` |
 | `oxlint` | JS / JSX / TS / TSX / CJS / MJS (Rust rewrite of eslint) | `oxlint` |
@@ -268,7 +269,7 @@ default in-memory store to the SQLite-backed one.
   paths cover correctness; LanceDB is the scale lever).
 - youki-based `Sandbox` impl as a lighter alternative to the
   podman shell-out.
-- Remaining ~23 linters from CodeRabbit's set
+- Remaining ~22 linters from CodeRabbit's set
   (languagetool, terragrunt, detekt, swiftlint, prettier-check, …).
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with

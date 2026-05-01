@@ -16,8 +16,8 @@
 # Linter set (in alphabetical order):
 #   actionlint, ast-grep, biome, checkov, dotenv-linter, eslint,
 #   gitleaks, golangci-lint, hadolint, kubeconform, markdownlint,
-#   osv-scanner, oxlint, phpstan, rubocop, ruff, semgrep, shellcheck,
-#   sqlfluff, taplo, trivy, yamllint
+#   mypy, osv-scanner, oxlint, phpstan, rubocop, ruff, semgrep,
+#   shellcheck, sqlfluff, taplo, trivy, yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -43,7 +43,8 @@ RUN pip3 install --break-system-packages \
         ruff \
         semgrep \
         sqlfluff \
-        checkov
+        checkov \
+        mypy
 
 # Ruby linters (gem)
 RUN gem install --no-document rubocop
