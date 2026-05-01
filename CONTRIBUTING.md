@@ -72,6 +72,10 @@ See `docs/ADR-0001-architecture.md` for the high-level decision,
 runtime-introspection design, and `docs/FEASIBILITY.md` for the
 longer reasoning. The crate layout:
 
+Each crate has its own `README.md` documenting public surface,
+module breakdown, and key tests — open the crate directory for
+the navigation aid. The summary table:
+
 | Crate | Responsibility |
 |---|---|
 | `ar-gateway` | HTTP server, HMAC verification, webhook intake, sandbox selection |

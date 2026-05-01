@@ -878,6 +878,25 @@ default in-memory store to the SQLite-backed one.
   operator-controlled configuration). Cross-referenced from
   the README.
 
+#### Per-crate READMEs (M5 docs)
+
+- Every workspace crate now has its own `README.md`
+  (`crates/<name>/README.md`) documenting public surface,
+  module breakdown, key tests, and dependencies.
+  Complements ADR-0001's single-table summary with focused
+  per-crate navigation; CONTRIBUTING.md cross-references
+  the per-crate files.
+- 11 READMEs total: `ar-gateway`, `ar-orchestrator`,
+  `ar-review`, `ar-tools`, `ar-llm`, `ar-forgejo`,
+  `ar-prompts`, `ar-sandbox`, `ar-chat`, `ar-index`,
+  `ar-cli`. Each ~50-80 lines covering the same shape:
+  what the crate does, public surface table, where the
+  tests live, dependency notes.
+- Cross-links to the relevant ADRs and threat-model entries
+  when the crate implements a documented mitigation
+  (e.g. `ar-sandbox` → ADR-0002 + T1, `ar-prompts` →
+  T3 schema-allowlist tests, `ar-gateway` → ADR-0003).
+
 #### ADR-0003 observability (M5 docs)
 
 - `docs/ADR-0003-observability.md`: 8KB ADR documenting
