@@ -680,6 +680,25 @@ default in-memory store to the SQLite-backed one.
   which is correct (a user named `auto_review_helper` was
   previously silently ignored).
 
+#### Severity floor: now runs BEFORE the verifier (M3 cost lever)
+
+- The severity-floor filter introduced in an earlier
+  iteration ran AFTER the verifier — meaning operators
+  with `AR_SEVERITY_FLOOR=warning` were burning cheap-tier
+  tokens verifying Note-level findings the post-filter
+  would drop anyway. Reorder fixes that: filter runs after
+  the reasoning model emits findings but before the
+  verifier sees them. New regression test
+  (`severity_floor_runs_before_verifier_to_save_cheap_tier_calls`)
+  inspects the verifier's user-prompt and asserts dropped
+  findings never reach it.
+- Helper extraction: `apply_severity_floor` is a single
+  function called both before the verifier (Full mode)
+  and after the LLM/verifier path (LinterOnly mode, where
+  the floor is the only filter). Idempotent in the Full
+  case — second invocation post-verifier is a no-op since
+  findings are already at-or-above the floor.
+
 #### Severity floor (M3 signal-to-noise lever)
 
 - New `AR_SEVERITY_FLOOR` gateway env var drops findings

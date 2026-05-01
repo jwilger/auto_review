@@ -44,6 +44,26 @@ fn severity_rank(s: ReviewSeverity) -> u8 {
     }
 }
 
+/// In-place drop of findings strictly below `min`. Logs the
+/// kept/dropped counts so operators can confirm the floor is
+/// engaging on a per-review basis. Idempotent: a second
+/// invocation with the same floor is a no-op.
+fn apply_severity_floor(output: &mut ar_prompts::ReviewOutput, min: ReviewSeverity) {
+    let before = output.findings.len();
+    output
+        .findings
+        .retain(|f| severity_rank(f.severity) >= severity_rank(min));
+    let after = output.findings.len();
+    if after != before {
+        tracing::info!(
+            kept = after,
+            dropped = before - after,
+            min_severity = ?min,
+            "severity floor applied"
+        );
+    }
+}
+
 /// All inputs to [`review_pull_request`]. Bundling them into a struct
 /// keeps the call sites readable and makes adding new context (RAG
 /// snippets, learnings, etc.) a one-line change instead of churning
@@ -150,13 +170,20 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
             build_linter_only_output(args.linter_findings)
         }
         ReviewMode::Full => {
-            let output = generate_with_self_heal(
+            let mut output = generate_with_self_heal(
                 args.llm,
                 system_prompt(),
                 &prompt,
                 HealConfig::default(),
             )
             .await?;
+            // Severity-floor filter runs BEFORE the verifier so we
+            // don't burn cheap-tier LLM calls verifying findings
+            // we'll drop anyway. Operators who set
+            // AR_SEVERITY_FLOOR=warning routinely save the
+            // verifier-cost on every Note-level finding the
+            // reasoning model emits.
+            apply_severity_floor(&mut output, args.min_severity);
             // Optional second pass: when a Cheap tier is configured,
             // verify each finding against the diff and drop the ones
             // the verifier doesn't corroborate. Fails open — verifier
@@ -172,20 +199,11 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
             }
         }
     };
-    // Severity-floor filter. Drops findings strictly below
-    // args.min_severity before posting. Order: Note < Warning < Error.
-    let original_count = output.findings.len();
-    output
-        .findings
-        .retain(|f| severity_rank(f.severity) >= severity_rank(args.min_severity));
-    if output.findings.len() != original_count {
-        tracing::info!(
-            kept = output.findings.len(),
-            dropped = original_count - output.findings.len(),
-            min_severity = ?args.min_severity,
-            "severity floor applied"
-        );
-    }
+    // Apply the severity floor again for the LinterOnly path
+    // (which doesn't run a verifier, so the pre-verifier
+    // application above wouldn't run). Idempotent for Full mode:
+    // findings are already at-or-above the floor; this is a no-op.
+    apply_severity_floor(&mut output, args.min_severity);
 
     let findings_count = output.findings.len();
 
@@ -355,6 +373,98 @@ mod tests {
         .expect("review ok");
         // Note dropped; Warning + Error kept.
         assert_eq!(outcome.findings_count, 2);
+    }
+
+    #[tokio::test]
+    async fn severity_floor_runs_before_verifier_to_save_cheap_tier_calls() {
+        // The reasoning model emits 3 findings (Note + Warning +
+        // Error). The cheap-tier verifier should ONLY see the 2
+        // above the Warning floor — that's the cost-saving claim.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/x b/x\n@@ -1,3 +1,3 @@\n-old1\n+new1\n-old2\n+new2\n-old3\n+new3\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "x", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "id": 1, "state": "COMMENT"
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let reasoning = Arc::new(CannedProvider::new(vec![r#"{
+            "summary":"mixed",
+            "findings": [
+                {"path":"x","line_start":1,"severity":"note","message":"style"},
+                {"path":"x","line_start":2,"severity":"warning","message":"bad"},
+                {"path":"x","line_start":3,"severity":"error","message":"unsafe"}
+            ]
+        }"#]));
+        // Cheap-tier verifier records what it's asked to verify.
+        // It returns "keep" for everything (so post-verifier count
+        // = post-floor count). The assertion is that it received
+        // only 2 findings, not 3.
+        let cheap = Arc::new(CannedProvider::new(vec![r#"{
+            "verdicts": [
+                {"finding_index":0,"keep":true,"reasoning":""},
+                {"finding_index":1,"keep":true,"reasoning":""}
+            ]
+        }"#]));
+        let llm = Router::new()
+            .with(ModelTier::Reasoning, reasoning)
+            .with(ModelTier::Cheap, cheap.clone());
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "x",
+            pr_title: "t",
+            pr_body: "b",
+            linter_findings: &[],
+            ignored_paths: &GlobSet::empty(),
+            custom_pre_merge_checks: &[],
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            review_mode: ReviewMode::Full,
+            min_severity: ReviewSeverity::Warning,
+        })
+        .await
+        .expect("review ok");
+        // Floor dropped Note. Verifier kept the 2 remaining.
+        assert_eq!(outcome.findings_count, 2);
+        // The verifier prompt should mention only 2 findings,
+        // never 3. Spot-check by confirming the user prompt
+        // doesn't mention "style" (the Note message).
+        let verifier_prompt = cheap.last_user_prompt().expect("verifier called");
+        assert!(
+            !verifier_prompt.contains("style"),
+            "verifier saw the Note finding 'style' — floor didn't run before verifier. \
+             Prompt was:\n{verifier_prompt}",
+        );
+        assert!(
+            verifier_prompt.contains("bad") && verifier_prompt.contains("unsafe"),
+            "verifier should see the kept Warning + Error findings",
+        );
     }
 
     #[tokio::test]
