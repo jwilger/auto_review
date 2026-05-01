@@ -25,7 +25,19 @@ impl OpenAiProvider {
     /// `base_url` should be the API root, e.g. `https://api.openai.com` or
     /// `http://localhost:11434` for Ollama.
     pub fn new(base_url: &str, api_key: Option<&str>, chat_model: &str) -> Result<Self, Error> {
-        let base = Url::parse(base_url).map_err(|_| Error::InvalidBaseUrl(base_url.into()))?;
+        // Same subpath-deploy normalisation as the Forgejo client.
+        // OpenRouter and self-hosted LLM gateways are sometimes
+        // mounted under a path (e.g. https://example.com/openrouter);
+        // without trailing-slash normalisation Url::join("v1/")
+        // would silently drop the subpath and every LLM call would
+        // hit the wrong endpoint.
+        let normalized = if base_url.ends_with('/') {
+            base_url.to_string()
+        } else {
+            format!("{base_url}/")
+        };
+        let base =
+            Url::parse(&normalized).map_err(|_| Error::InvalidBaseUrl(normalized.clone()))?;
         let mut headers = HeaderMap::new();
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
@@ -236,6 +248,36 @@ mod tests {
     use super::*;
     use wiremock::matchers::{body_partial_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    #[test]
+    fn subpath_base_url_keeps_path_when_joined() {
+        // Same defence as the Forgejo client. LLM gateways are
+        // sometimes mounted under a path
+        // (e.g. https://example.com/openrouter); without
+        // trailing-slash normalisation Url::join("v1/") would
+        // resolve relative to the last path component and silently
+        // drop the subpath.
+        let provider =
+            OpenAiProvider::new("https://example.com/openrouter", None, "model").expect("provider");
+        let url = provider.url("chat/completions").expect("url");
+        assert!(
+            url.as_str().contains("/openrouter/v1/chat/completions"),
+            "subpath was dropped: {url}"
+        );
+    }
+
+    #[test]
+    fn root_base_url_works_with_or_without_trailing_slash() {
+        for input in ["https://api.openai.com", "https://api.openai.com/"] {
+            let provider = OpenAiProvider::new(input, None, "model").expect("provider");
+            let url = provider.url("chat/completions").expect("url");
+            assert_eq!(
+                url.as_str(),
+                "https://api.openai.com/v1/chat/completions",
+                "input = {input}"
+            );
+        }
+    }
 
     #[tokio::test]
     async fn complete_sends_model_messages_and_returns_content() {
