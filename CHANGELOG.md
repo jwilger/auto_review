@@ -226,6 +226,8 @@ Five shapes:
   so the per-PR history dedup is bypassed.
 - `autofix` — posts inline `\`\`\`suggestion` patches for safe
   mechanical fixes (typos, dead code, off-by-ones); capped at 5.
+- `docstring` — generates docstrings for newly-added items in the
+  diff that lack them; same posting flow as `autofix`, capped at 5.
 - Anything else — free-form question answered by the cheap-tier
   model with the PR diff (capped at 40 KiB) as context.
 
@@ -280,6 +282,22 @@ default in-memory store to the SQLite-backed one.
   DB has indexed first. Findings are surfaced at line 1 of
   the manifest with the OSV/GHSA/CVE id in the rule_id and
   presence-of-CVSS-as-severity heuristic.
+
+#### Docstring-generation chat command (M4 finishing-touches)
+
+- `@auto_review docstring` (or `docstrings` / `docs`) finds
+  newly-added or modified functions, methods, classes, structs,
+  and enums in the diff that lack a docstring and proposes them
+  as inline `\`\`\`suggestion` patches via the same posting
+  flow as `autofix`. Aliased to `docstrings` and `docs`.
+- The replacement format prepends the docstring to the original
+  signature line so Forgejo's "Apply suggestion" button inserts
+  the docstring above the item.
+- Refactored `handle_autofix` into a generic `handle_suggest`
+  parameterised by a `SuggestionKind` (Autofix | Docstrings) so
+  the two commands share the prompt-render → LLM → JSON-validate
+  → review-comment-post flow and only differ in the system
+  prompt + banner copy.
 
 #### Autofix chat command (M4 finishing-touches)
 

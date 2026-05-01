@@ -20,6 +20,11 @@ pub enum ChatCommand {
     /// as a Forgejo review comment with a `\`\`\`suggestion` block
     /// that the author can apply with one click.
     Autofix,
+    /// `@auto_review docstring` — find functions, methods, and
+    /// classes in the diff that lack docstrings and propose them
+    /// as inline `\`\`\`suggestion` patches. Same posting flow as
+    /// [`Autofix`]; different system prompt.
+    Docstrings,
     /// `@auto_review help` — print the supported commands.
     Help,
     /// `@auto_review <anything else>` — falls through to freeform
@@ -83,6 +88,7 @@ fn classify(rest: &str) -> ChatCommand {
         },
         "re-review" | "rereview" | "review-again" | "review_again" => ChatCommand::ReReview,
         "autofix" | "auto-fix" | "fix" => ChatCommand::Autofix,
+        "docstring" | "docstrings" | "docs" => ChatCommand::Docstrings,
         "help" | "?" | "--help" | "-h" => ChatCommand::Help,
         _ => ChatCommand::Freeform(rest.to_string()),
     }
@@ -137,6 +143,18 @@ mod tests {
             "@auto_review FIX",
         ] {
             assert_eq!(parse(s), ChatCommand::Autofix, "input = {s}");
+        }
+    }
+
+    #[test]
+    fn docstring_aliases_all_route_to_docstrings() {
+        for s in [
+            "@auto_review docstring",
+            "@auto_review docstrings",
+            "@auto_review docs",
+            "@auto_review DOCS",
+        ] {
+            assert_eq!(parse(s), ChatCommand::Docstrings, "input = {s}");
         }
     }
 

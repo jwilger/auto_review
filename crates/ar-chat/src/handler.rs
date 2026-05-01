@@ -56,6 +56,20 @@ target a line that exists in the new (post-diff) version of the file; you \
 will be checked against the diff. Be conservative — emit zero patches if \
 nothing is clearly safe.";
 
+const DOCSTRINGS_SYSTEM_PROMPT: &str = "\
+You generate docstrings for newly-added or modified public-facing items \
+in a Forgejo pull request diff. Look for functions, methods, classes, \
+structs, and enums in the diff that lack a docstring (or whose docstring \
+is stale relative to the new signature) and propose docstrings for them. \
+\n\nEach patch's `replacement` must replace the item's signature line \
+with a multi-line string that contains: \
+\n  1. The new docstring (using the language's idiomatic comment style: \
+`///` for Rust, `\"\"\"...\"\"\"` for Python, `/** ... */` for JS/TS/Java) \
+\n  2. The original signature line, byte-for-byte. \
+\n\nUse `\\n` to separate lines inside the replacement. Skip items that \
+already have an adequate docstring. Cap at 5 docstrings per command; emit \
+zero if nothing in the diff needs one.";
+
 const FREEFORM_SYSTEM_PROMPT: &str = "\
 You are a code-review chat assistant for Forgejo pull requests. \
 Answer the user's question about the diff concisely and accurately. \
@@ -87,6 +101,8 @@ ignoring my recorded review history.
 - `autofix` — propose inline `\\`\\`\\`suggestion` patches for safe, \
 mechanical fixes (typos, dead code, obvious off-by-ones). Capped at \
 5 patches per command; the cheap-tier model decides what's safe.
+- `docstring` — generate docstrings for newly-added items in the \
+diff that lack them, posted as inline suggestion patches. Same cap.
 - `help` — print this message.
 
 Anything else after the mention is treated as a freeform question.";
@@ -130,7 +146,10 @@ impl ChatHandler<'_> {
                 self.handle_re_review(ctx).await?;
             }
             ChatCommand::Autofix => {
-                self.handle_autofix(ctx).await?;
+                self.handle_suggest(ctx, SuggestionKind::Autofix).await?;
+            }
+            ChatCommand::Docstrings => {
+                self.handle_suggest(ctx, SuggestionKind::Docstrings).await?;
             }
             ChatCommand::Freeform(text) => {
                 self.handle_freeform(ctx, &text).await?;
@@ -182,53 +201,56 @@ impl ChatHandler<'_> {
         self.post(ctx, &reply).await
     }
 
-    async fn handle_autofix(&self, ctx: ChatContext<'_>) -> Result<(), ChatError> {
-        // Cheap tier required — same as freeform.
+    /// Generic LLM-driven inline-suggestion command. Both `autofix`
+    /// and `docstring` route through here; they differ only in the
+    /// system prompt and the user-visible banner message.
+    async fn handle_suggest(
+        &self,
+        ctx: ChatContext<'_>,
+        kind: SuggestionKind,
+    ) -> Result<(), ChatError> {
         if self.llm.provider(ModelTier::Cheap).is_err() {
-            self.post(
-                ctx,
-                "Autofix needs an LLM_CHEAP_MODEL configured. Try \
+            let msg = format!(
+                "{} needs an LLM_CHEAP_MODEL configured. Try \
                  `@auto_review help` for the structured commands.",
-            )
-            .await?;
+                kind.label()
+            );
+            self.post(ctx, &msg).await?;
             return Ok(());
         }
-        // The PR is needed both for the head SHA (commit_id on
-        // create_review) and to confirm the PR isn't a draft.
         let pr = self
             .forgejo
             .get_pull_request(ctx.owner, ctx.repo, ctx.issue_number)
             .await?;
         if pr.draft {
-            self.post(ctx, "Skipping autofix: this PR is a draft.")
-                .await?;
+            let msg = format!("Skipping {}: this PR is a draft.", kind.lowercase_label());
+            self.post(ctx, &msg).await?;
             return Ok(());
         }
-        // Best-effort diff fetch.
         let diff = self
             .forgejo
             .get_pr_diff(ctx.owner, ctx.repo, ctx.issue_number)
             .await
             .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "diff fetch for autofix failed");
+                tracing::warn!(kind = ?kind, error = %e, "diff fetch failed");
                 String::new()
             });
         if diff.trim().is_empty() {
-            self.post(
-                ctx,
-                "Autofix can't run without a diff (none returned by Forgejo).",
-            )
-            .await?;
+            let msg = format!(
+                "{} can't run without a diff (none returned by Forgejo).",
+                kind.label()
+            );
+            self.post(ctx, &msg).await?;
             return Ok(());
         }
         let truncated = truncate_for_chat(&diff, AUTOFIX_DIFF_CAP);
 
-        let user_prompt = build_autofix_user_prompt(&truncated);
+        let user_prompt = build_suggestion_user_prompt(kind, &truncated);
         let req = CompleteRequest {
-            system: Some(AUTOFIX_SYSTEM_PROMPT.to_string()),
+            system: Some(kind.system_prompt().to_string()),
             messages: vec![Message::user(user_prompt)],
             response_format: Some(ResponseFormat::JsonSchema {
-                name: "Autofix".into(),
+                name: kind.schema_name().into(),
                 schema: autofix_schema(),
             }),
             ..Default::default()
@@ -237,12 +259,12 @@ impl ChatHandler<'_> {
         let parsed: AutofixOutput = match serde_json::from_str(&resp.content) {
             Ok(v) => v,
             Err(e) => {
-                tracing::warn!(error = %e, "autofix model returned malformed JSON");
-                self.post(
-                    ctx,
-                    "Autofix didn't return well-formed suggestions; nothing posted.",
-                )
-                .await?;
+                tracing::warn!(kind = ?kind, error = %e, "model returned malformed JSON");
+                let msg = format!(
+                    "{} didn't return well-formed suggestions; nothing posted.",
+                    kind.label()
+                );
+                self.post(ctx, &msg).await?;
                 return Ok(());
             }
         };
@@ -253,8 +275,8 @@ impl ChatHandler<'_> {
             .take(AUTOFIX_MAX_PATCHES)
             .collect();
         if patches.is_empty() {
-            self.post(ctx, "Autofix found nothing safe to suggest.")
-                .await?;
+            let msg = format!("{} found nothing to suggest.", kind.label());
+            self.post(ctx, &msg).await?;
             return Ok(());
         }
 
@@ -268,10 +290,11 @@ impl ChatHandler<'_> {
             })
             .collect();
         let body = format!(
-            "Autofix posted {} suggested patch{}. Each is applicable inline; \
+            "{} posted {} suggested {}. Each is applicable inline; \
              review and click 'Apply suggestion' on the ones you want.",
+            kind.label(),
             comments.len(),
-            if comments.len() == 1 { "" } else { "es" }
+            kind.unit_plural(comments.len()),
         );
         let request = CreateReviewRequest {
             body,
@@ -371,6 +394,54 @@ impl ChatHandler<'_> {
     }
 }
 
+/// Which suggestion-style command is being handled. Picks the
+/// system prompt, banner copy, and JSON-schema name; the posting
+/// flow is shared between them.
+#[derive(Debug, Clone, Copy)]
+enum SuggestionKind {
+    Autofix,
+    Docstrings,
+}
+
+impl SuggestionKind {
+    fn label(self) -> &'static str {
+        match self {
+            SuggestionKind::Autofix => "Autofix",
+            SuggestionKind::Docstrings => "Docstrings",
+        }
+    }
+
+    fn lowercase_label(self) -> &'static str {
+        match self {
+            SuggestionKind::Autofix => "autofix",
+            SuggestionKind::Docstrings => "docstring generation",
+        }
+    }
+
+    fn system_prompt(self) -> &'static str {
+        match self {
+            SuggestionKind::Autofix => AUTOFIX_SYSTEM_PROMPT,
+            SuggestionKind::Docstrings => DOCSTRINGS_SYSTEM_PROMPT,
+        }
+    }
+
+    fn schema_name(self) -> &'static str {
+        match self {
+            SuggestionKind::Autofix => "Autofix",
+            SuggestionKind::Docstrings => "Docstrings",
+        }
+    }
+
+    fn unit_plural(self, n: usize) -> &'static str {
+        match (self, n) {
+            (SuggestionKind::Autofix, 1) => "patch",
+            (SuggestionKind::Autofix, _) => "patches",
+            (SuggestionKind::Docstrings, 1) => "docstring",
+            (SuggestionKind::Docstrings, _) => "docstrings",
+        }
+    }
+}
+
 #[derive(Debug, Deserialize)]
 struct AutofixOutput {
     #[serde(default)]
@@ -420,14 +491,25 @@ fn autofix_schema() -> serde_json::Value {
     })
 }
 
-fn build_autofix_user_prompt(diff: &str) -> String {
+fn build_suggestion_user_prompt(kind: SuggestionKind, diff: &str) -> String {
     let mut out = String::with_capacity(diff.len() + 256);
-    out.push_str(
-        "Propose at most 5 safe inline patches for the diff below. \
-         Each patch must target a line in the new (post-diff) file. \
-         Replacement text replaces that one line; embed `\\n` for \
-         multi-line replacements.\n\n",
-    );
+    let intro = match kind {
+        SuggestionKind::Autofix => {
+            "Propose at most 5 safe inline patches for the diff below. \
+             Each patch must target a line in the new (post-diff) file. \
+             Replacement text replaces that one line; embed `\\n` for \
+             multi-line replacements.\n\n"
+        }
+        SuggestionKind::Docstrings => {
+            "Find at most 5 newly-added or modified items in the diff \
+             below that lack a docstring (functions, methods, classes, \
+             structs, enums). For each, propose a docstring. Each patch's \
+             `replacement` replaces the item's signature line with: \
+             docstring lines first, then the original signature byte-for-\
+             byte. Embed `\\n` for multi-line replacements.\n\n"
+        }
+    };
+    out.push_str(intro);
     out.push_str("Unified diff:\n```diff\n");
     out.push_str(diff);
     if !diff.ends_with('\n') {
@@ -1047,7 +1129,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
             .and(body_partial_json(
-                serde_json::json!({"body": "Autofix found nothing safe to suggest."}),
+                serde_json::json!({"body": "Autofix found nothing to suggest."}),
             ))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
             .mount(&server)
@@ -1111,6 +1193,131 @@ mod tests {
         };
         handler
             .handle(ctx(), ChatCommand::Autofix)
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn docstrings_posts_review_with_suggestion_blocks() {
+        let server = MockServer::start().await;
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let learnings = InMemoryLearningsStore::new();
+        let cheap_reply = serde_json::json!({
+            "patches": [{
+                "path": "src/lib.rs",
+                "line": 7,
+                "replacement": "/// Returns the user's display name.\npub fn display_name(u: &User) -> String {",
+                "reason": "Public fn lacks docstring"
+            }]
+        })
+        .to_string();
+        let cheap = Arc::new(CannedCheapProvider { reply: cheap_reply });
+        let router = Router::new()
+            .with(ModelTier::Embedding, Arc::new(ConstantEmbedder))
+            .with(ModelTier::Cheap, cheap);
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "add display_name",
+                "body": "",
+                "draft": false,
+                "head": {"ref": "t", "sha": "deadbeef"},
+                "base": {"ref": "main", "sha": "feedbeef"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/src/lib.rs b/src/lib.rs\n+pub fn display_name(u: &User) -> String {\n"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42/reviews"))
+            .and(body_partial_json(serde_json::json!({
+                "commit_id": "deadbeef",
+                "event": "COMMENT"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 99})))
+            .mount(&server)
+            .await;
+
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &router,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::Docstrings)
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn docstrings_without_cheap_tier_replies_with_placeholder() {
+        let (server, forgejo, learnings, llm) = setup().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(
+                serde_json::json!({"body": "Docstrings needs an LLM_CHEAP_MODEL configured. Try `@auto_review help` for the structured commands."}),
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &llm,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::Docstrings)
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn docstrings_on_draft_pr_posts_skip_message() {
+        let server = MockServer::start().await;
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let learnings = InMemoryLearningsStore::new();
+        let cheap = Arc::new(CannedCheapProvider {
+            reply: r#"{"patches":[]}"#.into(),
+        });
+        let router = Router::new()
+            .with(ModelTier::Embedding, Arc::new(ConstantEmbedder))
+            .with(ModelTier::Cheap, cheap);
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "wip",
+                "body": "",
+                "draft": true,
+                "head": {"ref": "t", "sha": "abc"},
+                "base": {"ref": "main", "sha": "def"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(serde_json::json!({
+                "body": "Skipping docstring generation: this PR is a draft."
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &router,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::Docstrings)
             .await
             .expect("ok");
     }
