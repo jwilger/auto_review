@@ -7,10 +7,15 @@
 
 pub mod prompt;
 pub mod schema;
+pub mod triage;
 pub mod types;
 pub mod validate;
 
 pub use prompt::{render_review_prompt, system_prompt, ReviewPromptInputs};
 pub use schema::review_schema;
+pub use triage::{
+    triage_schema, triage_system_prompt, validate_triage_output, TriageClass, TriageEntry,
+    TriageOutput, TriageValidationError,
+};
 pub use types::{ReviewFinding, ReviewOutput, ReviewSeverity};
 pub use validate::{validate_review_output, ValidationError};
