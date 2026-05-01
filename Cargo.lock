@@ -125,6 +125,7 @@ name = "ar-prompts"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ar-tools",
  "serde",
  "serde_json",
  "thiserror",

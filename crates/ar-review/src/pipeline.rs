@@ -39,6 +39,9 @@ pub async fn review_pull_request(
         pr_body,
         diff: &diff,
         changed_files: &changed_filenames,
+        // Linter findings are wired in once the orchestrator clones the
+        // repo and runs `ar-tools::run_all` (see Milestone 1 follow-up).
+        linter_findings: &[],
     });
 
     let output =
