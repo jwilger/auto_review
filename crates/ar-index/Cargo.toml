@@ -12,12 +12,14 @@ serde.workspace = true
 anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
+async-trait.workspace = true
 tree-sitter = "0.23"
 tree-sitter-rust = "0.23"
 tree-sitter-python = "0.23"
 tree-sitter-typescript = "0.23"
 
 walkdir = "2"
+ar-llm = { path = "../ar-llm" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -142,6 +142,8 @@ name = "ar-index"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ar-llm",
+ "async-trait",
  "serde",
  "tempfile",
  "thiserror",
