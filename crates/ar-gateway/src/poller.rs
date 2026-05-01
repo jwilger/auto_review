@@ -145,15 +145,35 @@ impl ChatPoller {
             .await
             .map_err(|e| PollerError::Forgejo(e.to_string()))?;
 
-        let cursor = self.cursors.lock().await.get(key).copied().unwrap_or(0);
+        // Distinguish "first sight of this PR" from "cursor==0
+        // already recorded". On first sight, we want to seed the
+        // cursor to max(comment.id) WITHOUT dispatching — otherwise
+        // a bot restart would re-fire every historical @-mention
+        // ("remember X" "re-review" etc.) that happens to live in
+        // the inline comment thread. The doc comment up top has
+        // always promised this behaviour; the previous
+        // `unwrap_or(0)` accidentally dispatched everything.
+        let (cursor, first_sight) = {
+            let map = self.cursors.lock().await;
+            match map.get(key).copied() {
+                Some(c) => (c, false),
+                None => (0, true),
+            }
+        };
         let mut max_seen = cursor;
         let mut to_dispatch: Vec<u64> = Vec::new();
         for c in &comments {
             if c.id > max_seen {
                 max_seen = c.id;
             }
+            // First-sight seeding: track max id, dispatch nothing.
+            // Subsequent polls dispatch only ids strictly above the
+            // recorded cursor.
+            if first_sight {
+                continue;
+            }
             if c.id <= cursor {
-                continue; // already processed (or pre-existed when we started)
+                continue; // already processed
             }
             if c.user.login == *self.bot_login {
                 continue; // never reply to ourselves
@@ -306,24 +326,67 @@ mod tests {
         let k = key("alice", "widgets", 1);
         history.record(&k, "deadbeef").await.unwrap();
 
-        // Two pre-existing comments; one even mentions the bot. On
-        // the first poll we should set the cursor to max(id) = 7
+        // Two pre-existing comments; one is a `re-review` mention.
+        // On the first poll we MUST set the cursor to max(id) = 7
         // and NOT dispatch — first run = "discover what already
-        // exists, mark as seen".
+        // exists, mark as seen". A bug here would make a bot
+        // restart re-fire every historical mention against PRs
+        // already in the review history.
         Mock::given(method("GET"))
             .and(path("/api/v1/repos/alice/widgets/pulls/1/comments"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                 {"id": 3, "body": "looks good", "user": {"login": "carol"}},
-                {"id": 7, "body": "@auto_review remember always Result", "user": {"login": "bob"}}
+                {"id": 7, "body": "@auto_review re-review", "user": {"login": "bob"}}
             ])))
             .mount(&server)
             .await;
+        // Mock the PR fetch + comment-post too: if first-poll
+        // dispatch were broken, the chat handler's handle_re_review
+        // path would otherwise short-circuit on Forgejo 404 before
+        // reaching the dispatcher and the assertion below would
+        // pass for the wrong reason.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 1,
+                "title": "x",
+                "body": "",
+                "draft": false,
+                "head": {"ref": "t", "sha": "newsha"},
+                "base": {"ref": "main", "sha": "ms"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
 
-        let dispatcher = Arc::new(NoOpDispatcher);
-        let poller = poller_for(&server, history, dispatcher).await;
+        // Use a recording dispatcher so we can assert no dispatch
+        // happened. ReReview is the chat command that goes through
+        // the dispatcher, so it's the right canary for "did the
+        // poller fire any historical mentions on first sight".
+        let dispatcher = Arc::new(RecordingDispatcher {
+            seen: StdMutex::new(Vec::new()),
+        });
+        let poller = poller_for(
+            &server,
+            history,
+            dispatcher.clone() as Arc<dyn JobDispatcher>,
+        )
+        .await;
         poller.run_once_for_tests().await.expect("ok");
         // Cursor advanced past every existing comment.
         assert_eq!(poller.cursor_for(&k).await, Some(7));
+        // CRITICAL: nothing dispatched. Re-firing historical
+        // mentions on bot restart is a real footgun (`re-review` x
+        // N would burn LLM tokens; `remember X` x N would store
+        // dupes).
+        assert!(
+            dispatcher.seen.lock().unwrap().is_empty(),
+            "first poll must not dispatch historical mentions"
+        );
     }
 
     #[tokio::test]
