@@ -44,13 +44,17 @@ since the start of the project.
   `run_review_job` posts pending → final commit statuses around the
   triage → clone → lint → review → post sequence.
 
-#### Linters (Milestone 1: 7 of CodeRabbit's ~45 set)
+#### Linters (12 of CodeRabbit's ~45 set)
 
 | Tool | Languages / files | Source-tool name |
 |---|---|---|
 | `gitleaks` | Any (secret detection across the tree) | `gitleaks` |
+| `semgrep` | Multi-language SAST via `--config=auto` | `semgrep` |
+| `trivy` | Vulnerabilities, misconfigs, secrets | `trivy` |
 | `ruff` | Python | `ruff` |
 | `eslint` | JS / JSX / TS / TSX / CJS / MJS | `eslint` |
+| `golangci-lint` | Go (errcheck, govet, staticcheck, …) | `golangci-lint` |
+| `rubocop` | Ruby (.rb / .rake / Gemfile / Rakefile) | `rubocop` |
 | `shellcheck` | Bash / sh | `shellcheck` |
 | `hadolint` | Dockerfiles | `hadolint` |
 | `markdownlint` | `*.md` / `*.markdown` | `markdownlint` |
@@ -166,32 +170,91 @@ PR's changed file extensions.
   unified diff between two SHAs/branches, the substrate the
   orchestrator will use to ask "what changed since the last review?"
 
-These pieces are individually tested but not yet wired into
-`review_pull_request` end-to-end. That integration is the next
-substantial step.
+All RAG pieces are now wired end-to-end through
+`build_review_context` → review prompt: the orchestrator's
+`prepare_and_lint` step calls `build_review_context` against the
+cloned workspace, embeds the diff, and injects top-K retrieved
+symbols + co-changed files + matching learnings as a "Repository
+context" section in the LLM prompt. The Embedding tier is
+optional; absent it, RAG is skipped silently.
+
+#### Verifier (Milestone 3 cost lever)
+
+`ar-review::verify::verify_findings` calls the cheap-tier model
+with the diff + candidate findings and asks for per-finding
+keep/drop verdicts. Drops findings the verifier doesn't
+corroborate. Falls open (returns input unchanged) when the cheap
+tier isn't configured or the response is malformed — verifier
+failures shouldn't silently drop real findings.
+
+#### Sandbox (Milestone 3)
+
+`ar-sandbox` ships a `Sandbox` trait + two implementations:
+
+- `DirectSandbox` — spawns linters on the host. No isolation;
+  used by tests and the local-dev gateway.
+- `PodmanSandbox` — wraps every linter spawn in
+  `podman run --rm --network=none --read-only --tmpfs /tmp:size=64m
+  --security-opt=no-new-privileges --cap-drop=ALL --memory=… --cpus=…
+  --pids-limit=… --user 65534:65534 -v <repo>:/work:ro -w /work …`,
+  plus a tokio-based wall-clock timeout. Production gateways flip
+  to this by setting `AR_SANDBOX_IMAGE` to a pre-pulled linter
+  image (`deploy/Dockerfile.sandbox`).
+
+All 12 linter runners go through the trait — none spawn
+`tokio::process::Command` directly anymore.
+
+#### Agentic chat (Milestone 4)
+
+`ar-chat::ChatHandler` answers `@auto_review` mentions on PRs.
+Five shapes:
+
+- `help` — brief usage reply.
+- `remember <text>` — persists a learning into the shared
+  `LearningsStore` (visible to RAG retrieval on next review).
+- `forget <id>` — removes a learning by id.
+- `re-review` — dispatches a fresh `ReviewJob` with `force=true`
+  so the per-PR history dedup is bypassed.
+- Anything else — free-form question answered by the cheap-tier
+  model with the PR diff (capped at 40 KiB) as context.
+
+`issue_comment` webhook events are HMAC-verified, parsed for the
+`@auto_review` prefix, and dispatched through the chat handler
+on the same axum server as PR webhooks.
+
+#### Persistent learnings (Milestone 5)
+
+`SqliteLearningsStore` provides a drop-in `LearningsStore`
+implementation backed by SQLite (sqlx with `runtime-tokio` +
+`sqlite` features). Embeddings are stored as little-endian f32
+byte slices; cosine similarity runs in-process over a full table
+scan (fine for the 10s-1000s of rows a typical repo accumulates;
+LanceDB ANN backing is queued for higher scale). The gateway
+wires it via `AR_LEARNINGS_DB`; setting it switches from the
+default in-memory store to the SQLite-backed one.
+
+#### Deploy artefacts (Milestone 5)
+
+- `deploy/Dockerfile`        — gateway image.
+- `deploy/Dockerfile.sandbox` — minimal image with the 12 linter
+  binaries baked in, intended target for `AR_SANDBOX_IMAGE`.
+- `deploy/docker-compose.yml` — gateway + Postgres template,
+  surfaces `AR_LEARNINGS_DB` and `AR_SANDBOX_IMAGE`.
+- `deploy/helm/`             — Helm chart with the same env-var
+  knobs (`config.learningsDb`, `config.sandboxImage`).
+- `deploy/forgejo-action/`   — composite action wrapping
+  `auto_review review-once` for in-CI mode.
 
 ### Pending (roadmap, per the feasibility study)
 
-- Wire the RAG building blocks (index + vector store + learnings)
-  into `review_pull_request` so the LLM prompt actually carries
-  retrieved context and remembered guidance.
-- Persistent backings for the in-memory stores: SQLite for review
-  history, LanceDB for vectors and learnings.
-- Incremental review wiring: read review_history before the diff
-  fetch, switch to compare_diff when the previous SHA is known.
-- OCI sandbox via youki for linter + LLM-issued shell execution
-  (Milestone 3).
-- Remaining linters from CodeRabbit's set (Milestone 3) — currently
-  shipping 8: gitleaks, ruff, eslint, shellcheck, hadolint,
-  markdownlint, actionlint, yamllint.
-- Verification agent that double-checks each LLM finding against the
-  cited code (Milestone 3).
-- Agentic `@auto_review` chat handler with sandboxed tool use
-  (Milestone 4).
-- Finishing-touches autofix / docstring generation / unit-test
-  scaffolding (Milestone 4).
-- Forgejo Action packaging, Helm chart, quality benchmark suite, public
-  release (Milestone 5).
-- Real-world end-to-end verification on a live Forgejo + LLM is also
-  pending; everything to date has been unit/integration-tested with
+- LanceDB-backed `VectorStore` impl (the in-memory + SQLite
+  paths cover correctness; LanceDB is the scale lever).
+- youki-based `Sandbox` impl as a lighter alternative to the
+  podman shell-out.
+- Remaining ~33 linters from CodeRabbit's set
+  (osv-scanner, sqlfluff, biome, oxlint, phpstan, …).
+- Quality benchmark suite (run a fixture corpus, report
+  precision/recall against labelled findings).
+- Real-world end-to-end verification on a live Forgejo + LLM;
+  everything to date has been unit/integration-tested with
   wiremock + canned LLM providers.
