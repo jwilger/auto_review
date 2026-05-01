@@ -7,8 +7,10 @@
 //! webhook intake (in `ar-gateway`) to the review pipeline (in `ar-review`).
 
 pub mod dispatcher;
+pub mod review_history;
 pub mod state;
 
 pub use dispatcher::{
     run_review_job, JobDispatcher, NoOpDispatcher, ReviewJob, SpawningDispatcher,
 };
+pub use review_history::{HistoryError, InMemoryReviewHistory, PrKey, ReviewHistory};
