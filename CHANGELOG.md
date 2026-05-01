@@ -434,6 +434,18 @@ default in-memory store to the SQLite-backed one.
   count as spurious), so the precision number penalises
   noise correctly.
 
+#### Threat model (M5 docs)
+
+- `docs/THREAT-MODEL.md`: living document enumerating
+  attacker profiles (drive-by PR, authenticated collaborator,
+  compromised LLM provider, network attacker), trust
+  boundaries, an asset inventory, and a threat catalogue
+  (T1 sandbox-escape through T9 confused-deputy) with
+  per-threat mitigation and residual-risk notes. Linked from
+  the README so operators read it before exposing the bot to
+  drive-by PRs. Includes guidance for keeping the document
+  in sync as new components are added.
+
 #### validate-config subcommand (M5)
 
 - `auto_review validate-config <paths>...` parses one or more

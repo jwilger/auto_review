@@ -26,7 +26,9 @@ the bot's PAT and register the webhook on a repo.
 To deploy: see [QUICKSTART.md](./QUICKSTART.md). For background,
 the [feasibility study](./docs/FEASIBILITY.md) lays out the broader
 plan; [ADR-0001](./docs/ADR-0001-architecture.md) captures the
-architecture decision.
+architecture decision; the [threat model](./docs/THREAT-MODEL.md)
+enumerates attacker profiles, trust boundaries, and per-class
+mitigations (read this before exposing the bot to drive-by PRs).
 
 What's still on the roadmap: a LanceDB-backed vector store
 (currently in-memory + SQLite-backed for learnings), the full
