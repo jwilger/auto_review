@@ -242,6 +242,28 @@ pub async fn unregister_webhook(args: UnregisterWebhookArgs) -> Result<()> {
 }
 
 pub async fn register_webhook(args: RegisterWebhookArgs) -> Result<()> {
+    // Reject obviously-weak secrets at registration time.
+    // Forgejo accepts any string (including empty) as a webhook
+    // secret, but an empty or short secret means anyone who knows
+    // the gateway URL can forge a valid signature: HMAC-SHA256
+    // with a known/short key is brute-forceable. The gateway logs
+    // a similar warning at startup; surfacing it here too means
+    // the operator hits the message before pushing the bad secret
+    // to Forgejo.
+    if args.webhook_secret.trim().is_empty() {
+        anyhow::bail!(
+            "--webhook-secret is empty; refuse to register a webhook with no \
+             HMAC protection. Generate one with `openssl rand -hex 32`."
+        );
+    }
+    if args.webhook_secret.len() < 16 {
+        anyhow::bail!(
+            "--webhook-secret is only {} bytes; refuse to register because the \
+             HMAC is weakly resistant to brute force. Recommend 32+ random \
+             bytes (e.g. `openssl rand -hex 32`).",
+            args.webhook_secret.len()
+        );
+    }
     let webhook_url = build_webhook_url(&args.gateway_url);
     let client = Client::new(&args.forgejo_url, &args.token).context("build forgejo client")?;
     let request = CreateWebhookRequest {
@@ -1462,6 +1484,47 @@ mod tests {
             json: false,
         };
         list_webhooks(args).await.expect("ok");
+    }
+
+    #[tokio::test]
+    async fn register_webhook_rejects_empty_secret_before_calling_forgejo() {
+        // Defence: a webhook with an empty HMAC secret means anyone
+        // who learns the gateway URL can spoof reviews. Reject at
+        // the CLI rather than registering the bad config.
+        use crate::cli::RegisterWebhookArgs;
+        let args = RegisterWebhookArgs {
+            forgejo_url: "http://invalid.example".into(),
+            token: "tok".into(),
+            owner: "o".into(),
+            repo: "r".into(),
+            gateway_url: "http://gw.example".into(),
+            webhook_secret: "".into(),
+        };
+        let err = register_webhook(args).await.expect_err("must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("--webhook-secret is empty"),
+            "expected empty-secret message, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn register_webhook_rejects_short_secret_before_calling_forgejo() {
+        use crate::cli::RegisterWebhookArgs;
+        let args = RegisterWebhookArgs {
+            forgejo_url: "http://invalid.example".into(),
+            token: "tok".into(),
+            owner: "o".into(),
+            repo: "r".into(),
+            gateway_url: "http://gw.example".into(),
+            webhook_secret: "shorty".into(),
+        };
+        let err = register_webhook(args).await.expect_err("must reject");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("only 6 bytes"),
+            "expected length-pointing message, got: {msg}"
+        );
     }
 
     #[tokio::test]
