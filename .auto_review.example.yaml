@@ -1,0 +1,42 @@
+# Example .auto_review.yaml.
+# Copy this to .auto_review.yaml at the root of any repo the bot reviews
+# and tune to taste. Anything you omit falls back to defaults.
+
+# Master switch. Set to false to skip review for this repo entirely while
+# leaving the webhook in place. The bot will post a "skipped" commit
+# status and return without calling the LLM.
+enabled: true
+
+# Free-form text injected into the LLM system prompt as authoritative
+# project conventions. Use sparingly — every byte costs tokens, and the
+# model already follows reasonable defaults. Examples of good content:
+#
+#   - "All public APIs must have rustdoc."
+#   - "Forbid unwrap() and expect() outside #[cfg(test)]."
+#   - "Prefer total functions: validate at boundaries, not on use."
+#
+# Examples of bad content:
+#
+#   - "Be helpful." (too vague to be actionable)
+#   - "Find all bugs." (the model is already trying to)
+guidelines: |
+  Always prefer total functions over partial ones.
+  Forbid `unwrap()` and `expect()` outside `#[cfg(test)]` modules.
+  Reach for `thiserror` for library errors and `anyhow` for binaries.
+
+# Gitignore-style globs. Matching files are stripped from the diff sent
+# to the LLM AND from the changed-files list. Useful for vendored code,
+# generated output, and large data fixtures the bot has nothing useful
+# to say about.
+ignored_paths:
+  - "vendor/**"
+  - "third_party/**"
+  - "src/generated/**"
+  - "*.snap"
+
+# Linter names (matching ar-tools::LinterRunner::name()) to skip. Useful
+# when your CI already runs the same linter and you don't want duplicate
+# findings cluttering the review.
+disabled_tools:
+  # - markdownlint
+  # - eslint
