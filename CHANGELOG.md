@@ -228,6 +228,9 @@ Five shapes:
   mechanical fixes (typos, dead code, off-by-ones); capped at 5.
 - `docstring` — generates docstrings for newly-added items in the
   diff that lack them; same posting flow as `autofix`, capped at 5.
+- `tests` — scaffolds unit tests for newly-added items that lack
+  coverage; posted as a single markdown comment with copy-pasteable
+  test cases (tests live in separate files, so no inline suggestion).
 - Anything else — free-form question answered by the cheap-tier
   model with the PR diff (capped at 40 KiB) as context.
 
@@ -282,6 +285,23 @@ default in-memory store to the SQLite-backed one.
   DB has indexed first. Findings are surfaced at line 1 of
   the manifest with the OSV/GHSA/CVE id in the rule_id and
   presence-of-CVSS-as-severity heuristic.
+
+#### Test-scaffolding chat command (M4 finishing-touches)
+
+- `@auto_review tests` (or `test` / `unit-tests` / `scaffold-tests`)
+  finds newly-added or substantially-modified items in the diff
+  that lack test coverage and proposes one focused test case per
+  item using the language's idiomatic framework (`#[test]` for
+  Rust, `pytest`, `vitest`, `RSpec`, etc.). Capped at 5 scaffolds
+  per command.
+- Output shape diverges from autofix/docstring: tests usually
+  live in a separate file, so we post a single issue comment with
+  one fenced markdown section per scaffold rather than inline
+  review-comment suggestions. The strict JSON-schema constraint is
+  `{scaffolds: [{item_name, item_path, framework, source}]}`.
+- Closes the third (and final) "finishing-touches" item from the
+  plan's M4 surface — autofix, docstring, and unit-test
+  scaffolding are now all wired.
 
 #### Docstring-generation chat command (M4 finishing-touches)
 

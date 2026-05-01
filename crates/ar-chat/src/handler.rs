@@ -56,6 +56,18 @@ target a line that exists in the new (post-diff) version of the file; you \
 will be checked against the diff. Be conservative — emit zero patches if \
 nothing is clearly safe.";
 
+const TESTS_SYSTEM_PROMPT: &str = "\
+You scaffold unit tests for newly-added or substantially-modified \
+items in a Forgejo pull request diff. For each item that lacks test \
+coverage in the diff, propose one focused test case that exercises a \
+representative happy path or edge case. Use the language's idiomatic \
+test framework: `#[test]` + `#[cfg(test)] mod tests` for Rust, \
+`pytest` for Python, `jest`/`vitest` for JS/TS, `testing` for Go, \
+`RSpec` for Ruby. Each scaffold must compile/parse on its own; \
+include any imports the framework needs at the top. Cap at 5 \
+scaffolds per command; emit zero if nothing in the diff plausibly \
+needs new test coverage.";
+
 const DOCSTRINGS_SYSTEM_PROMPT: &str = "\
 You generate docstrings for newly-added or modified public-facing items \
 in a Forgejo pull request diff. Look for functions, methods, classes, \
@@ -103,6 +115,9 @@ mechanical fixes (typos, dead code, obvious off-by-ones). Capped at \
 5 patches per command; the cheap-tier model decides what's safe.
 - `docstring` — generate docstrings for newly-added items in the \
 diff that lack them, posted as inline suggestion patches. Same cap.
+- `tests` — scaffold unit tests for newly-added items in the diff \
+that lack coverage. Posts a single comment with copy-pasteable test \
+cases (tests live in separate files, so no inline suggestion).
 - `help` — print this message.
 
 Anything else after the mention is treated as a freeform question.";
@@ -150,6 +165,9 @@ impl ChatHandler<'_> {
             }
             ChatCommand::Docstrings => {
                 self.handle_suggest(ctx, SuggestionKind::Docstrings).await?;
+            }
+            ChatCommand::TestScaffolds => {
+                self.handle_test_scaffolds(ctx).await?;
             }
             ChatCommand::Freeform(text) => {
                 self.handle_freeform(ctx, &text).await?;
@@ -306,6 +324,84 @@ impl ChatHandler<'_> {
             .create_review(ctx.owner, ctx.repo, ctx.issue_number, &request)
             .await?;
         Ok(())
+    }
+
+    async fn handle_test_scaffolds(&self, ctx: ChatContext<'_>) -> Result<(), ChatError> {
+        if self.llm.provider(ModelTier::Cheap).is_err() {
+            self.post(
+                ctx,
+                "Test scaffolding needs an LLM_CHEAP_MODEL configured. \
+                 Try `@auto_review help` for the structured commands.",
+            )
+            .await?;
+            return Ok(());
+        }
+        let pr = self
+            .forgejo
+            .get_pull_request(ctx.owner, ctx.repo, ctx.issue_number)
+            .await?;
+        if pr.draft {
+            self.post(ctx, "Skipping test scaffolds: this PR is a draft.")
+                .await?;
+            return Ok(());
+        }
+        let diff = self
+            .forgejo
+            .get_pr_diff(ctx.owner, ctx.repo, ctx.issue_number)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "diff fetch for tests failed");
+                String::new()
+            });
+        if diff.trim().is_empty() {
+            self.post(
+                ctx,
+                "Test scaffolding can't run without a diff (none returned by Forgejo).",
+            )
+            .await?;
+            return Ok(());
+        }
+        let truncated = truncate_for_chat(&diff, AUTOFIX_DIFF_CAP);
+
+        let user_prompt = build_tests_user_prompt(&truncated);
+        let req = CompleteRequest {
+            system: Some(TESTS_SYSTEM_PROMPT.to_string()),
+            messages: vec![Message::user(user_prompt)],
+            response_format: Some(ResponseFormat::JsonSchema {
+                name: "TestScaffolds".into(),
+                schema: tests_schema(),
+            }),
+            ..Default::default()
+        };
+        let resp = self.llm.complete(ModelTier::Cheap, req).await?;
+        let parsed: TestsOutput = match serde_json::from_str(&resp.content) {
+            Ok(v) => v,
+            Err(e) => {
+                tracing::warn!(error = %e, "tests model returned malformed JSON");
+                self.post(
+                    ctx,
+                    "Test scaffolding didn't return well-formed output; nothing posted.",
+                )
+                .await?;
+                return Ok(());
+            }
+        };
+        let scaffolds: Vec<TestScaffold> = parsed
+            .scaffolds
+            .into_iter()
+            .filter(|s| !s.item_name.is_empty() && !s.source.is_empty())
+            .take(AUTOFIX_MAX_PATCHES)
+            .collect();
+        if scaffolds.is_empty() {
+            self.post(
+                ctx,
+                "Test scaffolding found nothing in the diff that needs new coverage.",
+            )
+            .await?;
+            return Ok(());
+        }
+        let body = format_test_scaffolds_body(&scaffolds);
+        self.post(ctx, &body).await
     }
 
     async fn handle_freeform(&self, ctx: ChatContext<'_>, question: &str) -> Result<(), ChatError> {
@@ -489,6 +585,106 @@ fn autofix_schema() -> serde_json::Value {
         "required": ["patches"],
         "additionalProperties": false
     })
+}
+
+#[derive(Debug, Deserialize)]
+struct TestsOutput {
+    #[serde(default)]
+    scaffolds: Vec<TestScaffold>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+struct TestScaffold {
+    /// Human label: `fn validate_token`, `class Mailer`,
+    /// `def parse_csv`, etc.
+    #[serde(default)]
+    item_name: String,
+    /// Repo-relative path of the item under test (informational
+    /// only — we don't post inline since tests typically live in
+    /// separate files).
+    #[serde(default)]
+    item_path: String,
+    /// Test framework label the model picked, e.g. `pytest`,
+    /// `cargo-test`, `vitest`. Surfaced in the comment header.
+    #[serde(default)]
+    framework: String,
+    /// Full test source the user can copy into their test file.
+    #[serde(default)]
+    source: String,
+}
+
+fn tests_schema() -> serde_json::Value {
+    json!({
+        "type": "object",
+        "properties": {
+            "scaffolds": {
+                "type": "array",
+                "maxItems": AUTOFIX_MAX_PATCHES,
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "item_name": {"type": "string"},
+                        "item_path": {"type": "string"},
+                        "framework": {"type": "string"},
+                        "source": {"type": "string"}
+                    },
+                    "required": ["item_name", "item_path", "framework", "source"],
+                    "additionalProperties": false
+                }
+            }
+        },
+        "required": ["scaffolds"],
+        "additionalProperties": false
+    })
+}
+
+fn build_tests_user_prompt(diff: &str) -> String {
+    let mut out = String::with_capacity(diff.len() + 256);
+    out.push_str(
+        "Scaffold up to 5 unit tests for newly-added or substantially-\
+         modified items in the diff below that lack test coverage. Each \
+         scaffold must compile/parse on its own; include framework \
+         imports at the top of `source`. Pick the language's idiomatic \
+         test framework based on the file extension.\n\n",
+    );
+    out.push_str("Unified diff:\n```diff\n");
+    out.push_str(diff);
+    if !diff.ends_with('\n') {
+        out.push('\n');
+    }
+    out.push_str("```\n");
+    out
+}
+
+fn format_test_scaffolds_body(scaffolds: &[TestScaffold]) -> String {
+    let mut out = String::with_capacity(2_048);
+    out.push_str("**Test scaffolds**\n\n");
+    out.push_str(
+        "Below are scaffolded tests for items in this PR that look like \
+         they could use coverage. Tests usually live in a separate file, \
+         so these are copy-paste-ready rather than inline suggestions.\n\n",
+    );
+    for s in scaffolds {
+        let header = if s.item_path.is_empty() {
+            format!("### `{}`", s.item_name)
+        } else {
+            format!("### `{}` (in `{}`)", s.item_name, s.item_path)
+        };
+        out.push_str(&header);
+        out.push('\n');
+        if !s.framework.trim().is_empty() {
+            out.push_str(&format!("Framework: `{}`\n\n", s.framework.trim()));
+        } else {
+            out.push('\n');
+        }
+        out.push_str("```\n");
+        out.push_str(&s.source);
+        if !s.source.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str("```\n\n");
+    }
+    out
 }
 
 fn build_suggestion_user_prompt(kind: SuggestionKind, diff: &str) -> String {
@@ -1320,6 +1516,158 @@ mod tests {
             .handle(ctx(), ChatCommand::Docstrings)
             .await
             .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn tests_posts_markdown_comment_with_scaffolds() {
+        let server = MockServer::start().await;
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let learnings = InMemoryLearningsStore::new();
+        let cheap_reply = serde_json::json!({
+            "scaffolds": [{
+                "item_name": "fn validate_token",
+                "item_path": "src/auth.rs",
+                "framework": "cargo-test",
+                "source": "#[test]\nfn validates_a_well_formed_token() {\n    assert!(validate_token(\"abc\").is_ok());\n}"
+            }]
+        })
+        .to_string();
+        let cheap = Arc::new(CannedCheapProvider { reply: cheap_reply });
+        let router = Router::new()
+            .with(ModelTier::Embedding, Arc::new(ConstantEmbedder))
+            .with(ModelTier::Cheap, cheap);
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "auth fixes",
+                "body": "",
+                "draft": false,
+                "head": {"ref": "t", "sha": "abc"},
+                "base": {"ref": "main", "sha": "def"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/src/auth.rs b/src/auth.rs\n+pub fn validate_token(t: &str) -> Result<(), Error> { Ok(()) }\n"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(serde_json::json!({})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &router,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::TestScaffolds)
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn tests_without_cheap_tier_replies_with_placeholder() {
+        let (server, forgejo, learnings, llm) = setup().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(serde_json::json!({})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &llm,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::TestScaffolds)
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn tests_with_empty_scaffold_list_replies_no_coverage_needed() {
+        let server = MockServer::start().await;
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let learnings = InMemoryLearningsStore::new();
+        let cheap = Arc::new(CannedCheapProvider {
+            reply: r#"{"scaffolds":[]}"#.into(),
+        });
+        let router = Router::new()
+            .with(ModelTier::Embedding, Arc::new(ConstantEmbedder))
+            .with(ModelTier::Cheap, cheap);
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "ok",
+                "body": "",
+                "draft": false,
+                "head": {"ref": "t", "sha": "abc"},
+                "base": {"ref": "main", "sha": "def"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/x b/x\n+y\n"))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(serde_json::json!({
+                "body": "Test scaffolding found nothing in the diff that needs new coverage."
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &router,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::TestScaffolds)
+            .await
+            .expect("ok");
+    }
+
+    #[test]
+    fn format_test_scaffolds_body_emits_one_section_per_scaffold() {
+        let scaffolds = vec![
+            TestScaffold {
+                item_name: "fn parse".into(),
+                item_path: "src/lib.rs".into(),
+                framework: "cargo-test".into(),
+                source: "#[test]\nfn parses_ok() {}".into(),
+            },
+            TestScaffold {
+                item_name: "fn render".into(),
+                item_path: String::new(),
+                framework: String::new(),
+                source: "#[test]\nfn renders_ok() {}\n".into(),
+            },
+        ];
+        let body = format_test_scaffolds_body(&scaffolds);
+        assert!(body.contains("**Test scaffolds**"));
+        // First section names both item and path.
+        assert!(body.contains("`fn parse` (in `src/lib.rs`)"));
+        // Second section has no path → just the item.
+        assert!(body.contains("### `fn render`"));
+        // Source code is fenced.
+        assert!(body.contains("```\n#[test]\nfn parses_ok() {}\n```"));
     }
 
     #[test]

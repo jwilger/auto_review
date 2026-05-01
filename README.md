@@ -17,8 +17,8 @@ with strict-JSON-schema output and self-heal validation → cheap-
 tier verifier drops unfounded findings → post inline review
 comments + commit status. The `@auto_review` chat handler accepts
 `help`, `remember <text>`, `forget <id>`, `re-review`,
-`autofix`, `docstring`, and free-form questions answered by the
-cheap-tier model. The `bench`
+`autofix`, `docstring`, `tests`, and free-form questions
+answered by the cheap-tier model. The `bench`
 CLI subcommand replays PR fixtures through the LLM-review path
 for regression tracking and model comparison. CLI helpers mint
 the bot's PAT and register the webhook on a repo.

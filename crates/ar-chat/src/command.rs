@@ -25,6 +25,13 @@ pub enum ChatCommand {
     /// as inline `\`\`\`suggestion` patches. Same posting flow as
     /// [`Autofix`]; different system prompt.
     Docstrings,
+    /// `@auto_review tests` — find newly-added items in the diff
+    /// that lack test coverage and post a markdown comment with
+    /// scaffolded test cases the author can copy into their test
+    /// suite. Unlike [`Autofix`] / [`Docstrings`], tests usually
+    /// live in a separate file, so we post a single issue comment
+    /// rather than inline review-comment suggestions.
+    TestScaffolds,
     /// `@auto_review help` — print the supported commands.
     Help,
     /// `@auto_review <anything else>` — falls through to freeform
@@ -89,6 +96,7 @@ fn classify(rest: &str) -> ChatCommand {
         "re-review" | "rereview" | "review-again" | "review_again" => ChatCommand::ReReview,
         "autofix" | "auto-fix" | "fix" => ChatCommand::Autofix,
         "docstring" | "docstrings" | "docs" => ChatCommand::Docstrings,
+        "tests" | "test" | "unit-tests" | "scaffold-tests" => ChatCommand::TestScaffolds,
         "help" | "?" | "--help" | "-h" => ChatCommand::Help,
         _ => ChatCommand::Freeform(rest.to_string()),
     }
@@ -155,6 +163,19 @@ mod tests {
             "@auto_review DOCS",
         ] {
             assert_eq!(parse(s), ChatCommand::Docstrings, "input = {s}");
+        }
+    }
+
+    #[test]
+    fn tests_aliases_all_route_to_test_scaffolds() {
+        for s in [
+            "@auto_review tests",
+            "@auto_review test",
+            "@auto_review unit-tests",
+            "@auto_review scaffold-tests",
+            "@auto_review TESTS",
+        ] {
+            assert_eq!(parse(s), ChatCommand::TestScaffolds, "input = {s}");
         }
     }
 
