@@ -13,6 +13,7 @@ pub mod actionlint;
 pub mod eslint;
 pub mod finding;
 pub mod gitleaks;
+pub mod golangci_lint;
 pub mod hadolint;
 pub mod markdownlint;
 pub mod ruff;

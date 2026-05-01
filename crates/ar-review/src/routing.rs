@@ -5,6 +5,7 @@ use ar_forgejo::ChangedFile;
 use ar_tools::actionlint::ActionlintRunner;
 use ar_tools::eslint::EslintRunner;
 use ar_tools::gitleaks::GitleaksRunner;
+use ar_tools::golangci_lint::GolangciLintRunner;
 use ar_tools::hadolint::HadolintRunner;
 use ar_tools::markdownlint::MarkdownLintRunner;
 use ar_tools::ruff::RuffRunner;
@@ -64,6 +65,10 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
 
     if surviving.iter().any(|f| has_python_ext(&f.filename)) {
         runners.push(Box::new(RuffRunner));
+    }
+
+    if surviving.iter().any(|f| has_go_ext(&f.filename)) {
+        runners.push(Box::new(GolangciLintRunner));
     }
 
     let js_files: Vec<String> = surviving
@@ -132,6 +137,10 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
 
 fn has_python_ext(name: &str) -> bool {
     name.ends_with(".py")
+}
+
+fn has_go_ext(name: &str) -> bool {
+    name.ends_with(".go")
 }
 
 fn has_js_ext(name: &str) -> bool {
@@ -209,6 +218,15 @@ mod tests {
         let mut got = names(&runners);
         got.sort();
         assert_eq!(got, vec!["gitleaks", "ruff", "semgrep"]);
+    }
+
+    #[test]
+    fn go_files_select_golangci_lint() {
+        let files = vec![cf("cmd/main.go", "modified")];
+        let runners = select_runners(&files);
+        let mut got = names(&runners);
+        got.sort();
+        assert_eq!(got, vec!["gitleaks", "golangci-lint", "semgrep"]);
     }
 
     #[test]
