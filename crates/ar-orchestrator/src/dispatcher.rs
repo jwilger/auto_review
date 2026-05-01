@@ -89,8 +89,24 @@ impl JobDispatcher for SpawningDispatcher {
         let llm = self.llm.clone();
         let base = self.forgejo_base.clone();
         let token = self.forgejo_token.clone();
+        // Outer spawn returns immediately so the webhook handler can ack.
+        // Inner spawn runs the actual review; the outer awaits the inner's
+        // JoinHandle so panics or cancellations get logged instead of
+        // disappearing silently into the runtime.
+        let repo = format!("{}/{}", job.owner, job.repo);
+        let pr = job.pr_number;
         tokio::spawn(async move {
-            run_review_job(&forgejo, &llm, &base, &token, job).await;
+            let inner = tokio::spawn(async move {
+                run_review_job(&forgejo, &llm, &base, &token, job).await;
+            });
+            if let Err(e) = inner.await {
+                tracing::error!(
+                    repo,
+                    pr,
+                    error = %e,
+                    "review task panicked or was cancelled"
+                );
+            }
         });
     }
 }
