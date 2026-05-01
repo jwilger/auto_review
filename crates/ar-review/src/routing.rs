@@ -21,6 +21,7 @@ use ar_tools::mypy::MypyRunner;
 use ar_tools::osv_scanner::OsvScannerRunner;
 use ar_tools::oxlint::OxlintRunner;
 use ar_tools::phpstan::PhpstanRunner;
+use ar_tools::pmd::PmdRunner;
 use ar_tools::rubocop::RubocopRunner;
 use ar_tools::ruff::RuffRunner;
 use ar_tools::runner::{run_all, LinterRunner};
@@ -169,6 +170,15 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         .collect();
     if !c_files.is_empty() {
         runners.push(Box::new(CppcheckRunner { files: c_files }));
+    }
+
+    let java_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| f.filename.ends_with(".java"))
+        .map(|f| f.filename.clone())
+        .collect();
+    if !java_files.is_empty() {
+        runners.push(Box::new(PmdRunner { files: java_files }));
     }
 
     let js_files: Vec<String> = surviving
@@ -801,6 +811,26 @@ mod tests {
                 "name = {name}"
             );
         }
+    }
+
+    #[test]
+    fn java_files_select_pmd() {
+        let files = vec![cf("src/main/java/Foo.java", "modified")];
+        let runners = select_runners(&files);
+        let mut got = names(&runners);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "ast-grep",
+                "gitleaks",
+                "osv-scanner",
+                "pmd",
+                "semgrep",
+                "trivy",
+                "typos"
+            ]
+        );
     }
 
     #[test]

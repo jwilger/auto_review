@@ -17,8 +17,8 @@
 #   actionlint, ast-grep, bandit, biome, buf, checkov, cppcheck,
 #   dotenv-linter, eslint, gitleaks, golangci-lint, hadolint,
 #   kubeconform, markdownlint, mypy, osv-scanner, oxlint, phpstan,
-#   rubocop, ruff, semgrep, shellcheck, sqlfluff, swiftlint, taplo,
-#   trivy, typos, vale, yamllint
+#   pmd, rubocop, ruff, semgrep, shellcheck, sqlfluff, swiftlint,
+#   taplo, trivy, typos, vale, yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -38,6 +38,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         python3 python3-pip \
         ruby \
         php-cli composer \
+        default-jre \
     && rm -rf /var/lib/apt/lists/*
 
 # Python linters (pip)
@@ -100,6 +101,11 @@ RUN set -eux; \
         -o /usr/local/bin/buf; \
     curl -fsSL "https://github.com/crate-ci/typos/releases/latest/download/typos-v1.27.0-x86_64-unknown-linux-musl.tar.gz" \
         | tar -xz -C /usr/local/bin ./typos; \
+    curl -fsSL "https://github.com/pmd/pmd/releases/download/pmd_releases%2F7.0.0/pmd-dist-7.0.0-bin.zip" \
+        -o /tmp/pmd.zip \
+        && unzip -q /tmp/pmd.zip -d /opt \
+        && ln -sf /opt/pmd-bin-7.0.0/bin/pmd /usr/local/bin/pmd \
+        && rm /tmp/pmd.zip; \
     chmod +x /usr/local/bin/*
 
 # Linters never need to write to the rootfs.
