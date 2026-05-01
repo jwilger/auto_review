@@ -34,9 +34,18 @@ pub enum WalkError {
 /// malformed file shouldn't poison the whole index pass.
 pub fn index_workspace(repo_dir: &Path) -> Result<Vec<IndexedSymbol>, WalkError> {
     const MAX_FILE_BYTES: u64 = 1024 * 1024;
+    // Cap recursion depth. A PR can commit deeply-nested directory
+    // trees; without a max_depth, walkdir would happily descend
+    // through them. 64 covers any realistic repo and matches
+    // `ar_review::workspace_tools::WALK_MAX_DEPTH` for cross-tool
+    // consistency.
+    const MAX_DEPTH: usize = 64;
 
     let mut out = Vec::new();
-    let walker = WalkDir::new(repo_dir).follow_links(false).into_iter();
+    let walker = WalkDir::new(repo_dir)
+        .follow_links(false)
+        .max_depth(MAX_DEPTH)
+        .into_iter();
     // depth == 0 is the walk root itself, which we always traverse —
     // tempdirs and dotfile-prefixed install dirs would otherwise be
     // filtered out by the dot-prefix rule below.
