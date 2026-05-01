@@ -274,10 +274,14 @@ default in-memory store to the SQLite-backed one.
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
   wiremock + canned LLM providers.
-- Red-team test suite for the sandbox (malicious linter configs,
-  fork-bombs, egress attempts, prompt-injected PRs) — the
-  structural isolation ships now; adversarial-input verification
-  is a follow-up.
+- Red-team test suite for the sandbox: unit-level coverage now
+  ships (`crates/ar-review/tests/red_team_workspace_tools.rs`,
+  `crates/ar-sandbox/tests/red_team_argv.rs` — symlink escape,
+  chained symlinks, regex-DoS, binary-file walk safety, shell-
+  metachar argv passthrough, hardening-flag invariants).
+  Live-podman container-escape harness with adversarial linter
+  binaries is still pending; ADR-0002 calls it out as
+  out-of-scope-for-unit-tests.
 
 #### osv-scanner runner (13th bundled linter)
 
