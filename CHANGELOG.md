@@ -1096,6 +1096,38 @@ default in-memory store to the SQLite-backed one.
   forget-learning behavioural (drop existing record,
   unknown-id errors clearly).
 
+#### Helm chart env-var wirings
+
+- Helm chart was missing wirings for many env vars added
+  over recent iterations. Operators using Helm couldn't
+  enable them without overriding the deployment template:
+  - `AR_HISTORY_DB` — companion to `AR_LEARNINGS_DB`
+    (incremental-review dedup persistence)
+  - `AR_BOT_LOGIN` / `AR_BOT_NAME` — operators frequently
+    rename the bot user
+  - `AR_SEVERITY_FLOOR` — cost / signal-to-noise lever
+  - `AR_REVIEW_CONCURRENCY` — capacity guardrail
+  - `AR_WEBHOOK_RATE_PER_SEC` + `AR_WEBHOOK_BURST` — T7
+    rate limit
+  - `AR_POLL_INTERVAL_SECS` — chat poller cadence
+  - `AR_READINESS_TTL_SECS` — k8s probe tuning
+- Each is wired conditionally in `deployment.yaml` (only
+  emits the env var when the corresponding `values.yaml`
+  field is set), so the existing `--set
+  config.forgejoBaseUrl=…` minimal-args install is
+  unchanged.
+- `learningsDb` and `historyDb` defaults changed from
+  `/data/...` to `""`. The previous defaults pointed at a
+  path the chart never mounted — operators inheriting the
+  default would have got "open db at /data/...: no such
+  directory" on first boot. The volatile-in-memory path is
+  now the default; operators wanting persistence must
+  explicitly set both the path and overlay a PVC mount.
+  The values.yaml comment spells out the requirement.
+- Verified by a values-vs-deployment sync check: every
+  `.Values.config.X` field in values.yaml has a
+  corresponding wiring in deployment.yaml, and vice-versa.
+
 #### CONTRIBUTING freshness sweep
 
 - "First build" command list reordered to match CI's

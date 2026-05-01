@@ -47,9 +47,45 @@ spec:
             - name: AR_LEARNINGS_DB
               value: {{ .Values.config.learningsDb | quote }}
             {{- end }}
+            {{- if .Values.config.historyDb }}
+            - name: AR_HISTORY_DB
+              value: {{ .Values.config.historyDb | quote }}
+            {{- end }}
             {{- if .Values.config.sandboxImage }}
             - name: AR_SANDBOX_IMAGE
               value: {{ .Values.config.sandboxImage | quote }}
+            {{- end }}
+            {{- if .Values.config.botLogin }}
+            - name: AR_BOT_LOGIN
+              value: {{ .Values.config.botLogin | quote }}
+            {{- end }}
+            {{- if .Values.config.botName }}
+            - name: AR_BOT_NAME
+              value: {{ .Values.config.botName | quote }}
+            {{- end }}
+            {{- if .Values.config.severityFloor }}
+            - name: AR_SEVERITY_FLOOR
+              value: {{ .Values.config.severityFloor | quote }}
+            {{- end }}
+            {{- if .Values.config.reviewConcurrency }}
+            - name: AR_REVIEW_CONCURRENCY
+              value: {{ .Values.config.reviewConcurrency | quote }}
+            {{- end }}
+            {{- if .Values.config.webhookRatePerSec }}
+            - name: AR_WEBHOOK_RATE_PER_SEC
+              value: {{ .Values.config.webhookRatePerSec | quote }}
+            {{- end }}
+            {{- if .Values.config.webhookBurst }}
+            - name: AR_WEBHOOK_BURST
+              value: {{ .Values.config.webhookBurst | quote }}
+            {{- end }}
+            {{- if .Values.config.pollIntervalSecs }}
+            - name: AR_POLL_INTERVAL_SECS
+              value: {{ .Values.config.pollIntervalSecs | quote }}
+            {{- end }}
+            {{- if .Values.config.readinessTtlSecs }}
+            - name: AR_READINESS_TTL_SECS
+              value: {{ .Values.config.readinessTtlSecs | quote }}
             {{- end }}
           envFrom:
             - secretRef:
