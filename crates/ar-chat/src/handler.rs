@@ -1697,4 +1697,52 @@ mod tests {
         assert!(body.ends_with("```"));
         assert!(body.contains("no newline\n```"));
     }
+
+    /// Contract: every user-facing ChatCommand variant must appear as a
+    /// backticked literal in HELP_TEXT. The exhaustive match in
+    /// `keyword_for` means adding a new variant fails to compile until
+    /// you decide whether it's user-facing and, if so, what string the
+    /// help block should advertise.
+    #[test]
+    fn help_text_documents_every_user_facing_command() {
+        fn keyword_for(cmd: &ChatCommand) -> Option<&'static str> {
+            match cmd {
+                ChatCommand::Help => Some("help"),
+                ChatCommand::Remember(_) => Some("remember"),
+                ChatCommand::Forget(_) => Some("forget"),
+                ChatCommand::ReReview => Some("re-review"),
+                ChatCommand::Autofix => Some("autofix"),
+                ChatCommand::Docstrings => Some("docstring"),
+                ChatCommand::TestScaffolds => Some("tests"),
+                ChatCommand::Freeform(_) | ChatCommand::NotMentioned => None,
+            }
+        }
+
+        let all = [
+            ChatCommand::Help,
+            ChatCommand::Remember(String::new()),
+            ChatCommand::Forget(0),
+            ChatCommand::ReReview,
+            ChatCommand::Autofix,
+            ChatCommand::Docstrings,
+            ChatCommand::TestScaffolds,
+            ChatCommand::Freeform(String::new()),
+            ChatCommand::NotMentioned,
+        ];
+        for cmd in &all {
+            let Some(kw) = keyword_for(cmd) else {
+                continue;
+            };
+            // Each command surfaces in HELP_TEXT either as `keyword`
+            // (no args, e.g. "`autofix`") or as `keyword <arg>` (e.g.
+            // "`forget <id>`"). Accept either shape.
+            let standalone = format!("`{kw}`");
+            let with_arg = format!("`{kw} ");
+            assert!(
+                HELP_TEXT.contains(&standalone) || HELP_TEXT.contains(&with_arg),
+                "HELP_TEXT must mention `{kw}` for variant {cmd:?}; \
+                 update HELP_TEXT or `keyword_for` so they agree"
+            );
+        }
+    }
 }
