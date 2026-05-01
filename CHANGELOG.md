@@ -265,12 +265,6 @@ default in-memory store to the SQLite-backed one.
   fork-bombs, egress attempts, prompt-injected PRs) — the
   structural isolation ships now; adversarial-input verification
   is a follow-up.
-- Wire `verify_findings_agentic` into the default pipeline behind
-  an `AR_AGENTIC_VERIFIER` env flag — the function ships standalone
-  with full tests, but the orchestrator still routes to the simpler
-  `verify_findings`. Wiring requires extending the workspace
-  lifetime past `review_pull_request` (currently dropped after the
-  lint phase).
 
 #### osv-scanner runner (13th bundled linter)
 
@@ -297,9 +291,12 @@ default in-memory store to the SQLite-backed one.
   or the turn budget (5) is exhausted.
 - Fail-open at every error path: LLM failure, malformed JSON,
   unknown tool, turn-budget exhausted, tool execution error all
-  keep the finding rather than dropping it. The simple
-  `verify_findings` is still the default; operators wire the
-  agentic version when they want context-extending verification.
+  keep the finding rather than dropping it. The orchestrator
+  routes to the agentic verifier when `AR_AGENTIC_VERIFIER=1` is
+  set in the gateway env; otherwise the single-pass
+  `verify_findings` continues to run. The dispatcher keeps the
+  cloned `PreparedWorkspace` alive past `review_pull_request` so
+  the agentic loop can `read_file` and `search` against it.
 
 #### bench subcommand (M5)
 
