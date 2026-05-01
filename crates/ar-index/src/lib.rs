@@ -7,6 +7,7 @@
 pub mod co_change;
 pub mod embed;
 pub mod learnings;
+pub mod sqlite_learnings;
 pub mod symbols;
 pub mod vector_store;
 pub mod walker;
@@ -17,6 +18,7 @@ pub use learnings::{
     InMemoryLearningsStore, LearningRecord, LearningSource, LearningsError, LearningsStore,
     ScoredLearning,
 };
+pub use sqlite_learnings::SqliteLearningsStore;
 pub use symbols::{
     extract_go_symbols, extract_python_symbols, extract_rust_symbols, extract_symbols_for_path,
     extract_tsx_symbols, extract_typescript_symbols, ExtractError, Symbol, SymbolKind,

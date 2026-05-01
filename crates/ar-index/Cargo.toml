@@ -21,6 +21,7 @@ tree-sitter-typescript = "0.23"
 tree-sitter-go = "0.23"
 
 walkdir = "2"
+sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
 ar-llm = { path = "../ar-llm" }
 
 [dev-dependencies]
