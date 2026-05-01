@@ -14,17 +14,33 @@
 //!   ReviewJob (bypasses the per-PR history dedup). Drafts are
 //!   skipped with an explanation. Without a dispatcher, replies
 //!   noting the feature isn't wired up.
-//! - `Freeform(text)`: posts a placeholder reply that we received
-//!   the message; the chat-tier LLM call is a follow-up.
+//! - `Freeform(text)`: when the Cheap tier is configured, fetches
+//!   the PR diff (best-effort), truncates it to fit the cheap
+//!   model's context, calls the LLM with the user's question, and
+//!   posts the model's reply. Without a Cheap tier, replies noting
+//!   the feature isn't enabled.
 //! - `NotMentioned`: silently returns; the gateway shouldn't have
 //!   called us in this case.
 
 use crate::command::ChatCommand;
 use ar_forgejo::Client as ForgejoClient;
 use ar_index::{LearningSource, LearningsStore};
-use ar_llm::{ModelTier, Router as LlmRouter};
+use ar_llm::{CompleteRequest, Message, ModelTier, Router as LlmRouter};
 use ar_orchestrator::{JobDispatcher, ReviewJob};
 use std::sync::Arc;
+
+/// Byte cap on the diff snippet we feed into freeform-chat prompts.
+/// Cheap-tier models tend to have smaller context windows than the
+/// reasoning tier; this cap keeps us comfortably under any of the
+/// usual ~16k–32k limits.
+const FREEFORM_DIFF_CAP: usize = 40_000;
+
+const FREEFORM_SYSTEM_PROMPT: &str = "\
+You are a code-review chat assistant for Forgejo pull requests. \
+Answer the user's question about the diff concisely and accurately. \
+Cite specific line numbers from the diff when useful. If you don't \
+know the answer, say so — don't hallucinate. Markdown is fine; \
+keep replies brief.";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChatError {
@@ -89,14 +105,8 @@ impl ChatHandler<'_> {
             ChatCommand::ReReview => {
                 self.handle_re_review(ctx).await?;
             }
-            ChatCommand::Freeform(_text) => {
-                self.post(
-                    ctx,
-                    "I see your question. Conversational replies are a follow-up — \
-                     for now I only act on the structured commands. Try \
-                     `@auto_review help`.",
-                )
-                .await?;
+            ChatCommand::Freeform(text) => {
+                self.handle_freeform(ctx, &text).await?;
             }
             ChatCommand::NotMentioned => {}
         }
@@ -145,6 +155,45 @@ impl ChatHandler<'_> {
         self.post(ctx, &reply).await
     }
 
+    async fn handle_freeform(&self, ctx: ChatContext<'_>, question: &str) -> Result<(), ChatError> {
+        // No Cheap tier ⇒ no chat replies. Fall through to the
+        // placeholder so the user knows their message was seen.
+        if self.llm.provider(ModelTier::Cheap).is_err() {
+            self.post(
+                ctx,
+                "Conversational replies need an LLM_CHEAP_MODEL configured. \
+                 Try `@auto_review help` for the structured commands.",
+            )
+            .await?;
+            return Ok(());
+        }
+
+        // Best-effort diff fetch — we still answer if it fails.
+        let diff = self
+            .forgejo
+            .get_pr_diff(ctx.owner, ctx.repo, ctx.issue_number)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "diff fetch for freeform reply failed");
+                String::new()
+            });
+        let truncated = truncate_for_chat(&diff, FREEFORM_DIFF_CAP);
+
+        let user_prompt = build_freeform_user_prompt(question, &truncated);
+        let req = CompleteRequest {
+            system: Some(FREEFORM_SYSTEM_PROMPT.to_string()),
+            messages: vec![Message::user(user_prompt)],
+            ..Default::default()
+        };
+        let resp = self.llm.complete(ModelTier::Cheap, req).await?;
+        let reply = if resp.content.trim().is_empty() {
+            "(no response from the chat model)".to_string()
+        } else {
+            resp.content
+        };
+        self.post(ctx, &reply).await
+    }
+
     async fn handle_remember(&self, ctx: ChatContext<'_>, text: &str) -> Result<(), ChatError> {
         let embedding = self.embed(text).await?;
         let now = current_unix_seconds()?;
@@ -190,6 +239,37 @@ impl ChatHandler<'_> {
             .await?;
         Ok(())
     }
+}
+
+fn truncate_for_chat(diff: &str, max_bytes: usize) -> String {
+    if diff.len() <= max_bytes {
+        return diff.to_string();
+    }
+    // Don't split a UTF-8 codepoint.
+    let mut end = max_bytes;
+    while end > 0 && !diff.is_char_boundary(end) {
+        end -= 1;
+    }
+    let mut out = diff[..end].to_string();
+    out.push_str("\n\n[diff truncated]\n");
+    out
+}
+
+fn build_freeform_user_prompt(question: &str, diff: &str) -> String {
+    let mut out = String::with_capacity(diff.len() + question.len() + 256);
+    out.push_str("Question:\n");
+    out.push_str(question);
+    out.push_str("\n\nUnified diff for the pull request:\n```diff\n");
+    if diff.is_empty() {
+        out.push_str("(diff unavailable)\n");
+    } else {
+        out.push_str(diff);
+        if !diff.ends_with('\n') {
+            out.push('\n');
+        }
+    }
+    out.push_str("```\n");
+    out
 }
 
 fn current_unix_seconds() -> Result<i64, ChatError> {
@@ -449,6 +529,113 @@ mod tests {
             .handle(ctx(), ChatCommand::ReReview)
             .await
             .expect("ok");
+    }
+
+    /// Cheap-tier provider that returns a fixed response regardless
+    /// of input. Lets freeform tests verify the wiring without
+    /// pinning a specific prompt shape.
+    struct CannedCheapProvider {
+        reply: String,
+    }
+
+    #[async_trait]
+    impl LlmProvider for CannedCheapProvider {
+        async fn complete(&self, _: CompleteRequest) -> Result<CompleteResponse, LlmError> {
+            Ok(CompleteResponse {
+                content: self.reply.clone(),
+                input_tokens: 0,
+                output_tokens: 0,
+            })
+        }
+        async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, LlmError> {
+            unimplemented!()
+        }
+    }
+
+    #[tokio::test]
+    async fn freeform_with_cheap_tier_posts_llm_response() {
+        let server = MockServer::start().await;
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let learnings = InMemoryLearningsStore::new();
+        let cheap = Arc::new(CannedCheapProvider {
+            reply: "It changes the call site to use Result.".into(),
+        });
+        let router = Router::new()
+            .with(ModelTier::Embedding, Arc::new(ConstantEmbedder))
+            .with(ModelTier::Cheap, cheap);
+        // Diff fetch succeeds.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/x b/x\n+y\n"))
+            .mount(&server)
+            .await;
+        // Comment post returns OK; we expect the body to contain the
+        // model's reply.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(serde_json::json!({
+                "body": "It changes the call site to use Result."
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &router,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::Freeform("what does this do?".into()))
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn freeform_without_cheap_tier_replies_with_placeholder() {
+        let server = MockServer::start().await;
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let learnings = InMemoryLearningsStore::new();
+        let router = Router::new(); // no Cheap tier
+                                    // No diff fetch should happen — we short-circuit before that.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(serde_json::json!({})))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &router,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::Freeform("anything".into()))
+            .await
+            .expect("ok");
+    }
+
+    #[test]
+    fn truncate_for_chat_preserves_short_input() {
+        assert_eq!(truncate_for_chat("hello", 100), "hello");
+    }
+
+    #[test]
+    fn truncate_for_chat_caps_long_input_with_marker() {
+        let big = "x".repeat(1000);
+        let out = truncate_for_chat(&big, 100);
+        assert!(out.len() < 200);
+        assert!(out.contains("[diff truncated]"));
+    }
+
+    #[test]
+    fn truncate_for_chat_respects_utf8_boundaries() {
+        let s = format!("héllo {}", "x".repeat(1000));
+        let out = truncate_for_chat(&s, 7);
+        // Result must be valid UTF-8 (no panic, parses back).
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
 
     #[tokio::test]
