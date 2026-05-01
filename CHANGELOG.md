@@ -55,6 +55,7 @@ since the start of the project.
 | `hadolint` | Dockerfiles | `hadolint` |
 | `markdownlint` | `*.md` / `*.markdown` | `markdownlint` |
 | `actionlint` | `.github/workflows/`, `.forgejo/workflows/`, `.gitea/workflows/` | `actionlint` |
+| `yamllint` | `*.yml` / `*.yaml` (workflow + general) | `yamllint` |
 
 `ar-tools::run_all` runs them in parallel; missing binaries are silently
 skipped so a missing linter doesn't break the review.
@@ -127,17 +128,62 @@ PR's changed file extensions.
   reverse-engineering and Forgejo API capability mapping.
 - `docs/ADR-0001-architecture.md`: architecture decision record.
 
+#### Milestone 2 RAG groundwork
+
+- **Tree-sitter symbol extraction** for Rust, Python, TypeScript, and
+  TSX (with .js/.jsx/.cjs/.mjs routing to the TypeScript grammar
+  since TS is a JS superset). `extract_symbols_for_path` dispatches
+  by file extension and returns `Vec<Symbol>` records carrying kind,
+  name, and 1-based inclusive line range.
+- **Workspace walker** (`index_workspace`): walks a cloned repo,
+  filters out `.git`, `target`, `node_modules`, `vendor`,
+  `third_party`, `__pycache__`, `.venv`, `dist`, `build`, `.next`,
+  `.cache`, files >1 MiB, and non-UTF-8 files; emits one
+  `IndexedSymbol { path, symbol }` per definition.
+- **Embedding pass** (`embed_symbols`): slices each symbol's source
+  range, batches all snippets into a single `router.embed(...)` call,
+  emits `EmbeddedSymbol` records ready for a vector store.
+- **Vector store**: `VectorStore` trait + `InMemoryVectorStore`
+  (cosine-similarity search, upsert-on-key). LanceDB swap-in is a
+  follow-up.
+- **Co-change graph** (`compute_co_change`): parses
+  `git log --name-only` to build a `Map<path, Map<path, count>>` of
+  files that change together. `co_changed_with(path, top_n)` returns
+  the most-correlated files.
+- **Learnings store**: `LearningsStore` trait +
+  `InMemoryLearningsStore`. Records carry text, source (Chat /
+  Guideline / Inferred), and an embedding; `query_nearest` does
+  similarity search.
+- **LLM triage**: `triage_files_with_llm` calls the cheap-tier model
+  with a strict-JSON-schema prompt, returns per-file Trivial /
+  Formatting / Doc / Simple / Complex classifications.
+  `filter_reviewable` keeps only Simple/Complex (fail-open on
+  unclassified).
+- **Per-PR review history** (`ReviewHistory` trait +
+  `InMemoryReviewHistory`): tracks the last SHA at which each PR
+  was reviewed, enabling incremental review on subsequent commits.
+- **Compare-diff API** (`Client::get_compare_diff`): fetches the
+  unified diff between two SHAs/branches, the substrate the
+  orchestrator will use to ask "what changed since the last review?"
+
+These pieces are individually tested but not yet wired into
+`review_pull_request` end-to-end. That integration is the next
+substantial step.
+
 ### Pending (roadmap, per the feasibility study)
 
-- LLM-driven triage (cheap-tier classifier on top of the heuristic).
-- Tree-sitter symbol extraction + LanceDB embeddings + co-change graph
-  (Milestone 2 RAG).
-- Persistent learnings store with `@auto_review remember/forget` chat
-  commands (Milestone 2).
-- Incremental commit handling with summary cache (Milestone 2).
+- Wire the RAG building blocks (index + vector store + learnings)
+  into `review_pull_request` so the LLM prompt actually carries
+  retrieved context and remembered guidance.
+- Persistent backings for the in-memory stores: SQLite for review
+  history, LanceDB for vectors and learnings.
+- Incremental review wiring: read review_history before the diff
+  fetch, switch to compare_diff when the previous SHA is known.
 - OCI sandbox via youki for linter + LLM-issued shell execution
   (Milestone 3).
-- Remaining ~40 linters from CodeRabbit's set (Milestone 3).
+- Remaining linters from CodeRabbit's set (Milestone 3) — currently
+  shipping 8: gitleaks, ruff, eslint, shellcheck, hadolint,
+  markdownlint, actionlint, yamllint.
 - Verification agent that double-checks each LLM finding against the
   cited code (Milestone 3).
 - Agentic `@auto_review` chat handler with sandboxed tool use
