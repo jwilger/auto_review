@@ -14,7 +14,8 @@ anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
-tokio = { workspace = true, features = ["process", "macros", "rt"] }
+tokio = { workspace = true, features = ["process", "macros", "rt", "fs"] }
+reqwest.workspace = true
 futures = "0.3"
 regex = "1"
 ar-sandbox = { path = "../ar-sandbox" }
@@ -22,3 +23,4 @@ ar-sandbox = { path = "../ar-sandbox" }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
+wiremock.workspace = true

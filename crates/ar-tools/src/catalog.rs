@@ -139,6 +139,12 @@ const CATALOGUE: &[LinterInfo] = &[
         homepage: "https://github.com/yannh/kubeconform",
     },
     LinterInfo {
+        name: "languagetool",
+        description: "Prose / grammar / style linter via LanguageTool HTTP API. Opt-in: requires LANGUAGETOOL_URL env var pointing at a self-hosted server or the public API.",
+        languages: &["markdown", "prose"],
+        homepage: "https://languagetool.org/",
+    },
+    LinterInfo {
         name: "markdownlint",
         description: "Style-rule linter for Markdown.",
         languages: &["markdown"],
@@ -313,9 +319,9 @@ mod tests {
 
     #[test]
     fn catalogue_size_matches_bundled_count() {
-        // Sanity guard: 44 linters are bundled. If you add or remove
+        // Sanity guard: 45 linters are bundled. If you add or remove
         // one, update this number AND the catalogue itself.
-        assert_eq!(linter_catalogue().len(), 44);
+        assert_eq!(linter_catalogue().len(), 45);
     }
 
     /// Cross-file contract test: every catalogue entry (except
@@ -343,6 +349,10 @@ mod tests {
             // binary. Operators wanting it derive a new image
             // with a Go toolchain. Documented in the Dockerfile.
             "nilaway",
+            // `languagetool` is an HTTP service, not a CLI
+            // binary. It runs against `LANGUAGETOOL_URL` so
+            // there's nothing to install in the sandbox image.
+            "languagetool",
         ];
 
         let dockerfile_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))

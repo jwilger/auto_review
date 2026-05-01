@@ -277,7 +277,18 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         // markdownlint doesn't see. When the repo has no .vale.ini
         // configured, vale exits cleanly with `{}` and the runner
         // emits no findings.
-        runners.push(Box::new(ValeRunner { files: md_files }));
+        runners.push(Box::new(ValeRunner {
+            files: md_files.clone(),
+        }));
+        // languagetool: only fires when the operator has set
+        // LANGUAGETOOL_URL pointing at a self-hosted server (or
+        // the public API). Without that, from_env returns None
+        // and we don't add the runner — preserving the same
+        // "missing tool is fine" semantics every other runner
+        // gets via the run_in_sandbox NotFound path.
+        if let Some(lt) = ar_tools::languagetool::LanguageToolRunner::from_env(md_files) {
+            runners.push(Box::new(lt));
+        }
     }
 
     let workflow_files: Vec<String> = surviving

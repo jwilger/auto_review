@@ -30,6 +30,7 @@ pub mod htmlhint;
 pub mod jsonlint;
 pub mod ktlint;
 pub mod kubeconform;
+pub mod languagetool;
 pub mod markdownlint;
 pub mod mypy;
 pub mod nilaway;

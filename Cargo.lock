@@ -282,12 +282,14 @@ dependencies = [
  "async-trait",
  "futures",
  "regex",
+ "reqwest",
  "serde",
  "serde_json",
  "tempfile",
  "thiserror",
  "tokio",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]
