@@ -36,7 +36,7 @@ pub async fn build_review_context(
     workspace_path: &Path,
     router: &Router,
     diff: &str,
-    learnings: Option<&(dyn LearningsStore + Sync)>,
+    learnings: Option<&dyn LearningsStore>,
     top_k: usize,
 ) -> Result<String, ContextBuildError> {
     // No Embedding tier ⇒ no RAG, return empty.

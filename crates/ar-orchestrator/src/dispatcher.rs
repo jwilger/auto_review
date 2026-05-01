@@ -1,5 +1,6 @@
 use crate::review_history::{InMemoryReviewHistory, PrKey, ReviewHistory};
 use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullRequestEvent};
+use ar_index::LearningsStore;
 use ar_llm::Router as LlmRouter;
 use ar_review::{
     build_glob_set, build_review_context, filter_reviewable, lint_workspace_with, load_repo_config,
@@ -69,6 +70,7 @@ pub struct SpawningDispatcher {
     forgejo_base: Arc<String>,
     forgejo_token: Arc<String>,
     history: Arc<dyn ReviewHistory>,
+    learnings: Option<Arc<dyn LearningsStore>>,
 }
 
 impl SpawningDispatcher {
@@ -84,6 +86,7 @@ impl SpawningDispatcher {
             forgejo_base: Arc::new(forgejo_base.into()),
             forgejo_token: Arc::new(forgejo_token.into()),
             history: Arc::new(InMemoryReviewHistory::new()),
+            learnings: None,
         }
     }
 
@@ -91,6 +94,14 @@ impl SpawningDispatcher {
     /// (e.g. SQLite-backed for persistence across restarts).
     pub fn with_history(mut self, history: Arc<dyn ReviewHistory>) -> Self {
         self.history = history;
+        self
+    }
+
+    /// Wire in a learnings store so remembered guidance gets pulled
+    /// into the RAG context for future reviews. When unset,
+    /// build_review_context skips the learnings-retrieval step.
+    pub fn with_learnings(mut self, learnings: Arc<dyn LearningsStore>) -> Self {
+        self.learnings = Some(learnings);
         self
     }
 }
@@ -103,6 +114,7 @@ impl JobDispatcher for SpawningDispatcher {
         let base = self.forgejo_base.clone();
         let token = self.forgejo_token.clone();
         let history = self.history.clone();
+        let learnings = self.learnings.clone();
         // Outer spawn returns immediately so the webhook handler can ack.
         // Inner spawn runs the actual review; the outer awaits the inner's
         // JoinHandle so panics or cancellations get logged AND surface to
@@ -116,7 +128,16 @@ impl JobDispatcher for SpawningDispatcher {
         let forgejo_for_status = forgejo.clone();
         tokio::spawn(async move {
             let inner = tokio::spawn(async move {
-                run_review_job(&forgejo, &llm, &base, &token, history.as_ref(), job).await;
+                run_review_job(
+                    &forgejo,
+                    &llm,
+                    &base,
+                    &token,
+                    history.as_ref(),
+                    learnings.as_deref(),
+                    job,
+                )
+                .await;
             });
             if let Err(e) = inner.await {
                 tracing::error!(
@@ -159,12 +180,14 @@ impl JobDispatcher for SpawningDispatcher {
 /// 4. Post the final success/error commit status.
 ///
 /// Errors are logged and swallowed; the gateway has already returned 202.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_review_job(
     forgejo: &ForgejoClient,
     llm: &LlmRouter,
     forgejo_base: &str,
     forgejo_token: &str,
     history: &dyn ReviewHistory,
+    learnings: Option<&dyn LearningsStore>,
     job: ReviewJob,
 ) {
     let pr_key = PrKey {
@@ -257,7 +280,8 @@ pub async fn run_review_job(
         }
     }
 
-    let lint_outcome = prepare_and_lint(forgejo, llm, forgejo_base, forgejo_token, &job).await;
+    let lint_outcome =
+        prepare_and_lint(forgejo, llm, forgejo_base, forgejo_token, learnings, &job).await;
     let (findings, ignored_paths, guidelines, repo_context) = match lint_outcome {
         Ok(LintPhaseOutput {
             skipped_by_config: true,
@@ -382,6 +406,7 @@ async fn prepare_and_lint(
     llm: &LlmRouter,
     base: &str,
     token: &str,
+    learnings: Option<&dyn LearningsStore>,
     job: &ReviewJob,
 ) -> Result<LintPhaseOutput, LintPhaseError> {
     let files = forgejo
@@ -446,7 +471,7 @@ async fn prepare_and_lint(
     let repo_context = if raw_diff.is_empty() {
         String::new()
     } else {
-        build_review_context(workspace.path(), llm, &raw_diff, None, 5)
+        build_review_context(workspace.path(), llm, &raw_diff, learnings, 5)
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "RAG context build failed; continuing");

@@ -72,17 +72,23 @@ async fn main() -> Result<()> {
     }
 
     let llm_router = Arc::new(router);
-    let dispatcher = Arc::new(SpawningDispatcher::new(
-        forgejo.clone(),
-        llm_router.clone(),
-        forgejo_base.clone(),
-        forgejo_token.clone(),
-    ));
 
-    // Chat handler dependencies. The learnings store is currently
-    // in-memory only — restarts wipe it. A SQLite/LanceDB backing is
-    // pending.
+    // Single shared learnings store: writes from the chat handler
+    // (remember/forget) become visible to RAG retrieval in subsequent
+    // reviews. Currently in-memory only — restarts wipe it. A
+    // SQLite/LanceDB backing is pending.
     let learnings: Arc<dyn ar_index::LearningsStore> = Arc::new(InMemoryLearningsStore::new());
+
+    let dispatcher = Arc::new(
+        SpawningDispatcher::new(
+            forgejo.clone(),
+            llm_router.clone(),
+            forgejo_base.clone(),
+            forgejo_token.clone(),
+        )
+        .with_learnings(learnings.clone()),
+    );
+
     let chat_deps = ChatDeps {
         forgejo: forgejo.clone(),
         llm: llm_router.clone(),

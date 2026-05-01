@@ -101,6 +101,9 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
         &args.forgejo_url,
         &args.token,
         &history,
+        // review-once is a one-shot debug command — no learnings
+        // store wired in. Future: take a path to a SQLite file.
+        None,
         job,
     )
     .await;
