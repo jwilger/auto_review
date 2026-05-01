@@ -1096,6 +1096,22 @@ default in-memory store to the SQLite-backed one.
   forget-learning behavioural (drop existing record,
   unknown-id errors clearly).
 
+#### Example config / RepoConfig contract test
+
+- `.auto_review.example.yaml` was missing
+  `pre_merge_checks:`. The field was added to `RepoConfig`
+  several iterations ago (custom natural-language
+  pre-merge checks, M4) but the example never got the
+  matching entry. Operators reading the example as the
+  primary doc would have missed the feature entirely.
+- Added the missing `pre_merge_checks:` section
+  (commented-out, with three concrete example rules).
+- New contract test
+  (`example_yaml_documents_every_known_key`) walks
+  `KNOWN_KEYS` and asserts each appears in the example
+  file. Adding a config field without updating the
+  example now fails CI.
+
 #### Sandbox image / catalogue contract test
 
 - Stale doc-comment in `deploy/Dockerfile.sandbox` said the

@@ -49,3 +49,15 @@ disabled_tools:
 # without the cost of LLM review, or as a stepping stone before opting
 # into the full review.
 # mode: linter_only
+
+# Repo-author-supplied natural-language pre-merge checks. Each entry is
+# evaluated against the diff by the cheap LLM tier (LLM_CHEAP_MODEL on
+# the gateway) and surfaces in the review body's "Pre-merge checks"
+# section alongside the built-in deterministic checks (CHANGELOG /
+# tests / no new TODOs). Failing a custom check is advisory — it
+# doesn't block merging. Skipped silently when the cheap tier is
+# unconfigured.
+# pre_merge_checks:
+#   - "All new public APIs have rustdoc comments"
+#   - "No raw SQL queries; everything goes through QueryBuilder"
+#   - "Every new feature flag has a corresponding cleanup TODO date"

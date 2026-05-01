@@ -270,6 +270,39 @@ disabled_tools:
         assert_eq!(cfg, RepoConfig::default());
     }
 
+    /// Cross-file contract test: every key in `KNOWN_KEYS` must
+    /// appear in `.auto_review.example.yaml` (commented or
+    /// uncommented). Adding a config field without documenting
+    /// it in the example means downstream operators discover it
+    /// only by reading source. The test catches that drift at
+    /// CI time.
+    #[test]
+    fn example_yaml_documents_every_known_key() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap();
+        let example_path = manifest.join(".auto_review.example.yaml");
+        let body = std::fs::read_to_string(&example_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", example_path.display()));
+        let mut missing = Vec::new();
+        for key in KNOWN_KEYS {
+            // Match either `key:` (uncommented) or `# key:` (commented
+            // example) — at line start, optionally with leading
+            // whitespace. We just check substring membership; the
+            // YAML parser already validates structure.
+            let needle = format!("{key}:");
+            if !body.contains(&needle) {
+                missing.push(*key);
+            }
+        }
+        assert!(
+            missing.is_empty(),
+            "config keys missing from .auto_review.example.yaml: {missing:?}"
+        );
+    }
+
     /// Contract test: the `KNOWN_KEYS` allow-list must match the
     /// fields on `RepoConfig` exactly. Adding a field to the
     /// struct without updating `KNOWN_KEYS` would make
