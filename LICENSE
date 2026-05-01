@@ -1,0 +1,33 @@
+SPDX-License-Identifier: AGPL-3.0-or-later
+
+auto_review — A self-hosted AI pull-request reviewer for Forgejo.
+Copyright (C) 2026 John Wilger and contributors
+
+This program is free software: you can redistribute it and/or modify
+it under the terms of the GNU Affero General Public License as
+published by the Free Software Foundation, either version 3 of the
+License, or (at your option) any later version.
+
+This program is distributed in the hope that it will be useful,
+but WITHOUT ANY WARRANTY; without even the implied warranty of
+MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+GNU Affero General Public License for more details.
+
+You should have received a copy of the GNU Affero General Public
+License along with this program.  If not, see
+<https://www.gnu.org/licenses/agpl-3.0.html>.
+
+The full text of the AGPL-3.0 license is also available at
+<https://www.gnu.org/licenses/agpl-3.0.txt>.
+
+================================================================
+Why AGPL-3.0-or-later?
+================================================================
+
+The intent is to keep this codebase open. Anyone can self-host,
+modify, or fork. But anyone running a hosted service derived from
+this code must publish their modifications. That is the
+core difference from a permissive license like Apache-2.0 or MIT,
+and it's deliberate: hosted SaaS reviewers (CodeRabbit, Greptile,
+etc.) demonstrated that a permissive license would let a fork-and-
+close-source story repeat itself for Forgejo.
