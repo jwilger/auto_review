@@ -85,6 +85,14 @@ const GUIDELINES_MAX_BYTES: usize = 8_192;
 /// without burning the full reasoning-tier context.
 const REPO_CONTEXT_MAX_BYTES: usize = 16_384;
 
+/// Cap on the number of static-analysis findings rendered into the
+/// prompt. A noisy linter config (e.g. a freshly-enabled rule
+/// flagging the entire file tree) can produce thousands of findings
+/// — most of which the LLM can't usefully cross-reference against
+/// the diff anyway. 100 covers any reasonable PR; the rest are
+/// summarised with a count.
+const LINTER_FINDINGS_MAX: usize = 100;
+
 /// Render the user-facing prompt the LLM will see. The system prompt is
 /// returned separately by [`system_prompt`].
 pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
@@ -146,11 +154,18 @@ pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
 
     if !inputs.linter_findings.is_empty() {
         out.push_str("\nStatic-analysis findings:\n");
-        for f in inputs.linter_findings {
+        let total = inputs.linter_findings.len();
+        for f in inputs.linter_findings.iter().take(LINTER_FINDINGS_MAX) {
             let rule = f.rule_id.as_deref().unwrap_or("-");
             out.push_str(&format!(
                 "- [{}/{}] {}:{} ({:?}) {}\n",
                 f.source_tool, rule, f.path, f.line_start, f.severity, f.message
+            ));
+        }
+        if total > LINTER_FINDINGS_MAX {
+            out.push_str(&format!(
+                "- [{} additional findings omitted to fit prompt budget]\n",
+                total - LINTER_FINDINGS_MAX
             ));
         }
     }
@@ -458,6 +473,52 @@ mod tests {
         let p = render_review_prompt(&inputs);
         assert!(p.contains("[repo context truncated]"));
         assert!(p.len() < 20_000);
+    }
+
+    #[test]
+    fn linter_findings_capped_at_100_with_summary_for_overflow() {
+        // A noisy linter config could emit thousands of findings.
+        // Cap rendering at 100 and summarise the rest, so the
+        // LLM doesn't drown in mechanical noise.
+        let files: Vec<String> = vec![];
+        let findings: Vec<Finding> = (0..250)
+            .map(|i| Finding {
+                source_tool: "ruff".into(),
+                rule_id: Some(format!("E{i:03}")),
+                path: format!("file{i}.py"),
+                line_start: 1,
+                line_end: 1,
+                severity: Severity::Note,
+                message: format!("issue {i}"),
+            })
+            .collect();
+        let p = render_review_prompt(&sample("d", &files, &findings));
+        // First and last of the 100 rendered should appear.
+        assert!(p.contains("E000"));
+        assert!(p.contains("E099"));
+        // Anything past 100 should not.
+        assert!(!p.contains("E100"));
+        assert!(!p.contains("E249"));
+        // Summary line for the omitted ones.
+        assert!(p.contains("150 additional findings omitted"));
+    }
+
+    #[test]
+    fn linter_findings_under_cap_render_without_summary() {
+        let files: Vec<String> = vec![];
+        let findings: Vec<Finding> = (0..5)
+            .map(|i| Finding {
+                source_tool: "ruff".into(),
+                rule_id: None,
+                path: format!("f{i}.py"),
+                line_start: 1,
+                line_end: 1,
+                severity: Severity::Note,
+                message: "m".into(),
+            })
+            .collect();
+        let p = render_review_prompt(&sample("d", &files, &findings));
+        assert!(!p.contains("additional findings omitted"));
     }
 
     #[test]
