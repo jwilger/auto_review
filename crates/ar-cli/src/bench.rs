@@ -464,6 +464,64 @@ mod tests {
     use super::*;
     use std::io::Write;
 
+    /// Contract test: every shipped `bench/fixtures/labelled-*.json`
+    /// parses cleanly into a `Fixture` AND has a non-empty `expected`
+    /// array (otherwise it's not a labelled fixture and the
+    /// filename is misleading). Catches schema drift when someone
+    /// renames a field on `Fixture` without updating the fixtures.
+    #[test]
+    fn shipped_labelled_fixtures_parse_with_expected_findings() {
+        let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("bench/fixtures");
+        let entries: Vec<_> = std::fs::read_dir(&dir)
+            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with("labelled-") && n.ends_with(".json"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            entries.len() >= 5,
+            "expected ≥5 labelled fixtures, found {}",
+            entries.len()
+        );
+        for e in entries {
+            let path = e.path();
+            let body = std::fs::read_to_string(&path)
+                .unwrap_or_else(|err| panic!("read {}: {err}", path.display()));
+            let fix: Fixture = serde_json::from_str(&body)
+                .unwrap_or_else(|err| panic!("parse {}: {err}", path.display()));
+            assert!(
+                !fix.expected.is_empty(),
+                "{}: labelled fixture has empty `expected` array",
+                path.display()
+            );
+            assert!(
+                !fix.diff.is_empty(),
+                "{}: empty diff",
+                path.display()
+            );
+            // Every expected entry must reference a path that's in
+            // the changed_files list (otherwise the model can never
+            // possibly hit it through normal review).
+            for exp in &fix.expected {
+                assert!(
+                    fix.changed_files.iter().any(|f| f == &exp.path),
+                    "{}: expected path {} not in changed_files",
+                    path.display(),
+                    exp.path
+                );
+            }
+        }
+    }
+
     #[test]
     fn percentile_handles_empty_input() {
         assert_eq!(percentile(&[], 50.0), 0);

@@ -1,0 +1,21 @@
+{
+    "name": "labelled-command-injection",
+    "repo_full_name": "example/devops-tools",
+    "pr_number": 12,
+    "pr_title": "feat: ping helper",
+    "pr_body": "Wraps ping(1) so the operator UI can probe a host without leaving the app.",
+    "diff": "diff --git a/src/probe.py b/src/probe.py\nindex 1111111..2222222 100644\n--- a/src/probe.py\n+++ b/src/probe.py\n@@ -1,5 +1,11 @@\n import subprocess\n \n \n def reachable(host: str) -> bool:\n-    return False\n+    cmd = \"ping -c 1 \" + host\n+    result = subprocess.run(cmd, shell=True, capture_output=True)\n+    return result.returncode == 0\n",
+    "changed_files": [
+        "src/probe.py"
+    ],
+    "linter_findings": [],
+    "guidelines": "Never invoke subprocess.run with shell=True on attacker-controlled input. Pass argv as a list and avoid shell metacharacter interpolation.",
+    "repo_context": "",
+    "expected": [
+        {
+            "path": "src/probe.py",
+            "line": 6,
+            "note": "Command injection — `host` is concatenated into a shell command and run with shell=True. A host string of `8.8.8.8; rm -rf /` would execute arbitrary code."
+        }
+    ]
+}

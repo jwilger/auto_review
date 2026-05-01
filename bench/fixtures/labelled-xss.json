@@ -1,0 +1,21 @@
+{
+    "name": "labelled-xss",
+    "repo_full_name": "example/forum-spa",
+    "pr_number": 91,
+    "pr_title": "feat: render thread title from URL",
+    "pr_body": "Pulls the thread title from the URL fragment so the page header reflects the deep link before the API call resolves.",
+    "diff": "diff --git a/src/header.js b/src/header.js\nindex 1111111..2222222 100644\n--- a/src/header.js\n+++ b/src/header.js\n@@ -1,4 +1,9 @@\n export function mountHeader() {\n   const el = document.querySelector('#thread-title');\n   if (!el) return;\n+\n+  const params = new URLSearchParams(window.location.search);\n+  const title = params.get('title') ?? '';\n+  el['inner' + 'HTML'] = title;\n }\n",
+    "changed_files": [
+        "src/header.js"
+    ],
+    "linter_findings": [],
+    "guidelines": "Never assign attacker-controlled values to the dynamic-HTML sink on a DOM element. Use textContent (or a vetted sanitiser) to insert untrusted strings.",
+    "repo_context": "",
+    "expected": [
+        {
+            "path": "src/header.js",
+            "line": 8,
+            "note": "Reflected client-side script injection — query-string `title` is assigned directly to the dynamic-HTML sink, so `?title=<img src=x onerror=fetch(...)>` executes attacker-controlled JavaScript. Use textContent (or render via a templating engine that escapes by default)."
+        }
+    ]
+}

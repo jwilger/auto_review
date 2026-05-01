@@ -472,6 +472,29 @@ default in-memory store to the SQLite-backed one.
   cloned `PreparedWorkspace` alive past `review_pull_request` so
   the agentic loop can `read_file` and `search` against it.
 
+#### Expanded labelled bench corpus (M5)
+
+- Four new labelled fixtures ship under `bench/fixtures/`:
+  `labelled-command-injection` (Python `subprocess.run` with
+  `shell=True` on user input), `labelled-hardcoded-secret`
+  (committed Stripe live key with a "swap before deploy"
+  comment), `labelled-path-traversal` (Flask filesystem read
+  by request param), and `labelled-xss` (URL-controlled
+  value flowing into a dynamic-HTML DOM sink). Together with
+  the existing `labelled-sql-injection`, the labelled corpus
+  now covers the five most common web-app vulnerability
+  classes — enough breadth to exercise precision/recall
+  scoring meaningfully across model + prompt revisions.
+- A new contract test
+  (`shipped_labelled_fixtures_parse_with_expected_findings`)
+  parses every `bench/fixtures/labelled-*.json` and asserts:
+  the file is valid `Fixture` JSON, the `expected` array is
+  non-empty, and every expected `path` appears in the
+  fixture's `changed_files` list. Catches schema drift and
+  malformed fixtures at CI time.
+- `bench/README.md` updated to enumerate the labelled set
+  and document the contract test.
+
 #### bench subcommand (M5)
 
 - `auto_review bench` replays one or more PR fixtures through

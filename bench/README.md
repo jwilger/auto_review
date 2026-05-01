@@ -12,9 +12,15 @@ move.
 
 Fixtures that include an `expected` array (see *Labelled fixtures*
 below) additionally produce precision/recall scores against the
-labelled ground truth. The minimum-viable labelled corpus that
-ships in this repo is enough to demonstrate the format; growing
-it requires manual curation per PR.
+labelled ground truth. Five labelled fixtures ship today, covering
+the most common web-app vulnerability classes: `labelled-sql-injection`,
+`labelled-command-injection`, `labelled-hardcoded-secret`,
+`labelled-path-traversal`, `labelled-xss`. A contract test in
+`ar-cli` (`shipped_labelled_fixtures_parse_with_expected_findings`)
+asserts each parses cleanly, has a non-empty `expected` array, and
+that every expected `path` is actually in the fixture's
+`changed_files` list. Adding a new labelled fixture is a matter of
+dropping in another `labelled-<class>.json` next to these.
 
 ## Running
 

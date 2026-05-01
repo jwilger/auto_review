@@ -1,0 +1,21 @@
+{
+    "name": "labelled-path-traversal",
+    "repo_full_name": "example/docs-portal",
+    "pr_number": 18,
+    "pr_title": "feat: serve repo docs from the file system",
+    "pr_body": "New endpoint that streams a docs file by name so the SPA can fetch markdown without a backend rewrite.",
+    "diff": "diff --git a/src/docs.py b/src/docs.py\nindex 1111111..2222222 100644\n--- a/src/docs.py\n+++ b/src/docs.py\n@@ -1,4 +1,12 @@\n from flask import Flask, request\n \n app = Flask(__name__)\n+\n+\n+@app.get(\"/docs\")\n+def serve_doc():\n+    name = request.args.get(\"name\", \"\")\n+    path = \"/var/app/docs/\" + name\n+    with open(path, \"rb\") as f:\n+        return f.read()\n",
+    "changed_files": [
+        "src/docs.py"
+    ],
+    "linter_findings": [],
+    "guidelines": "Never construct filesystem paths from request parameters by concatenation. Always normalise via pathlib.Path and verify the resolved path is still under the intended root.",
+    "repo_context": "",
+    "expected": [
+        {
+            "path": "src/docs.py",
+            "line": 10,
+            "note": "Path traversal — `name` from the query string is concatenated into a filesystem path with no normalisation. A request for `?name=../../etc/passwd` reads any file the process has access to."
+        }
+    ]
+}
