@@ -499,6 +499,7 @@ pub async fn run_review_job(
         ignored_paths: &ignored_paths,
         custom_pre_merge_checks: &pre_merge_checks,
         review_mode,
+        min_severity: severity_floor_from_env(),
         guidelines: &guidelines,
         repo_context: &repo_context,
         diff_override: incremental_diff.as_deref(),
@@ -688,6 +689,34 @@ fn review_summary(findings_count: usize) -> String {
         0 => "auto_review: no findings".into(),
         1 => "auto_review: 1 finding".into(),
         n => format!("auto_review: {n} findings"),
+    }
+}
+
+/// Read `AR_SEVERITY_FLOOR` from the environment. Values:
+/// `note` (post everything, default), `warning` (suppress
+/// note-only nits), `error` (only post Error-severity findings).
+/// Unrecognised values silently fall through to Note so a typo
+/// doesn't accidentally suppress real findings — `auto_review
+/// validate-config --strict` is the place to catch typos at
+/// config-load time, not the runtime path.
+fn severity_floor_from_env() -> ar_review::ReviewSeverity {
+    use ar_review::ReviewSeverity;
+    match std::env::var("AR_SEVERITY_FLOOR")
+        .ok()
+        .as_deref()
+        .map(|s| s.trim().to_ascii_lowercase())
+        .as_deref()
+    {
+        Some("note") | None => ReviewSeverity::Note,
+        Some("warning") | Some("warn") => ReviewSeverity::Warning,
+        Some("error") | Some("err") => ReviewSeverity::Error,
+        Some(other) => {
+            tracing::warn!(
+                value = other,
+                "AR_SEVERITY_FLOOR unrecognised; defaulting to Note (post everything)"
+            );
+            ReviewSeverity::Note
+        }
     }
 }
 

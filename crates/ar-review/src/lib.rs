@@ -29,6 +29,7 @@ pub mod workspace;
 pub mod workspace_tools;
 
 pub use agentic_verify::verify_findings_agentic;
+pub use ar_prompts::ReviewSeverity;
 pub use config::{
     load_repo_config, parse_repo_config, parse_repo_config_strict, RepoConfig,
     RepoConfigStrictError, ReviewMode,

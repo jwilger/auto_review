@@ -11,7 +11,7 @@ use crate::pre_merge_llm::evaluate_custom_checks;
 use crate::verify::verify_findings;
 use ar_forgejo::Client as ForgejoClient;
 use ar_llm::Router as LlmRouter;
-use ar_prompts::{render_review_prompt, system_prompt, ReviewPromptInputs};
+use ar_prompts::{render_review_prompt, system_prompt, ReviewPromptInputs, ReviewSeverity};
 use ar_tools::Finding;
 use globset::GlobSet;
 use std::path::Path;
@@ -32,6 +32,16 @@ pub enum VerifyMode {
 pub struct ReviewOutcome {
     pub findings_count: usize,
     pub review_id: u64,
+}
+
+/// Rank for ordered comparison: higher = more severe. Lets the
+/// severity-floor filter use a `>=` comparison.
+fn severity_rank(s: ReviewSeverity) -> u8 {
+    match s {
+        ReviewSeverity::Note => 0,
+        ReviewSeverity::Warning => 1,
+        ReviewSeverity::Error => 2,
+    }
 }
 
 /// All inputs to [`review_pull_request`]. Bundling them into a struct
@@ -77,6 +87,12 @@ pub struct ReviewArgs<'a> {
     /// zero token cost, no semantic review. Selected per-repo via
     /// `.auto_review.yaml`'s `mode:` field.
     pub review_mode: ReviewMode,
+    /// Drop findings below this severity before posting. `Note`
+    /// (default) posts everything. `Warning` suppresses Note-only
+    /// nits. `Error` suppresses everything below high-confidence
+    /// problems — useful for low-noise operations on big diffs
+    /// where stylistic notes drown out real issues.
+    pub min_severity: ReviewSeverity,
 }
 
 /// End-to-end review activity for one PR.
@@ -125,7 +141,7 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         repo_context: args.repo_context,
     });
 
-    let output = match args.review_mode {
+    let mut output = match args.review_mode {
         ReviewMode::LinterOnly => {
             // Skip the LLM entirely. The orchestrator already ran the
             // linters; map their findings straight to the review
@@ -156,6 +172,21 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
             }
         }
     };
+    // Severity-floor filter. Drops findings strictly below
+    // args.min_severity before posting. Order: Note < Warning < Error.
+    let original_count = output.findings.len();
+    output
+        .findings
+        .retain(|f| severity_rank(f.severity) >= severity_rank(args.min_severity));
+    if output.findings.len() != original_count {
+        tracing::info!(
+            kept = output.findings.len(),
+            dropped = original_count - output.findings.len(),
+            min_severity = ?args.min_severity,
+            "severity floor applied"
+        );
+    }
+
     let findings_count = output.findings.len();
 
     let mut req = output_to_review_request(&output, args.head_sha);
@@ -252,6 +283,143 @@ mod tests {
         Router::new().with(ModelTier::Reasoning, provider)
     }
 
+    #[test]
+    fn severity_rank_is_total_order() {
+        assert!(severity_rank(ReviewSeverity::Note) < severity_rank(ReviewSeverity::Warning));
+        assert!(severity_rank(ReviewSeverity::Warning) < severity_rank(ReviewSeverity::Error));
+    }
+
+    #[tokio::test]
+    async fn severity_floor_warning_drops_note_findings_before_posting() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/x b/x\n@@ -1,2 +1,2 @@\n-old1\n+new1\n-old2\n+new2\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "x", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        // Capture the posted review request so we can inspect
+        // which findings made it through the floor.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "id": 1, "state": "COMMENT"
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        // The reasoning model emits three findings spanning every
+        // severity. Floor should drop the Note one.
+        let provider = Arc::new(CannedProvider::new(vec![r#"{
+            "summary": "mixed",
+            "findings": [
+                {"path":"x","line_start":1,"severity":"note","message":"style"},
+                {"path":"x","line_start":2,"severity":"warning","message":"bad"},
+                {"path":"x","line_start":2,"severity":"error","message":"unsafe"}
+            ]
+        }"#]));
+        let llm = router_with(provider);
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "deadbeef",
+            pr_title: "t",
+            pr_body: "b",
+            linter_findings: &[],
+            ignored_paths: &GlobSet::empty(),
+            custom_pre_merge_checks: &[],
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            review_mode: ReviewMode::Full,
+            min_severity: ReviewSeverity::Warning,
+        })
+        .await
+        .expect("review ok");
+        // Note dropped; Warning + Error kept.
+        assert_eq!(outcome.findings_count, 2);
+    }
+
+    #[tokio::test]
+    async fn severity_floor_error_drops_everything_below_error() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/x b/x\n@@ -1 +1 @@\n+x\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "x", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                    "id": 1, "state": "COMMENT"
+                })),
+            )
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CannedProvider::new(vec![r#"{
+            "summary": "minor",
+            "findings": [
+                {"path":"x","line_start":1,"severity":"note","message":"a"},
+                {"path":"x","line_start":1,"severity":"warning","message":"b"}
+            ]
+        }"#]));
+        let llm = router_with(provider);
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "x",
+            pr_title: "t",
+            pr_body: "b",
+            linter_findings: &[],
+            ignored_paths: &GlobSet::empty(),
+            custom_pre_merge_checks: &[],
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            review_mode: ReviewMode::Full,
+            min_severity: ReviewSeverity::Error,
+        })
+        .await
+        .expect("review ok");
+        // Both findings are below Error → both dropped.
+        assert_eq!(outcome.findings_count, 0);
+    }
+
     #[tokio::test]
     async fn review_pull_request_end_to_end_happy_path() {
         let server = MockServer::start().await;
@@ -310,6 +478,7 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             review_mode: ReviewMode::Full,
+            min_severity: ReviewSeverity::Note,
         })
         .await
         .expect("review ok");
@@ -349,6 +518,7 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             review_mode: ReviewMode::Full,
+            min_severity: ReviewSeverity::Note,
         })
         .await
         .expect_err("err");
@@ -405,6 +575,7 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             review_mode: ReviewMode::Full,
+            min_severity: ReviewSeverity::Note,
         })
         .await
         .expect("ok");
@@ -466,6 +637,7 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             review_mode: ReviewMode::Full,
+            min_severity: ReviewSeverity::Note,
         })
         .await
         .expect("ok");

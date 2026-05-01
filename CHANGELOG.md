@@ -601,6 +601,32 @@ default in-memory store to the SQLite-backed one.
   which is correct (a user named `auto_review_helper` was
   previously silently ignored).
 
+#### Severity floor (M3 signal-to-noise lever)
+
+- New `AR_SEVERITY_FLOOR` gateway env var drops findings
+  below an operator-configured severity threshold before
+  posting. Values: `note` (default, post everything),
+  `warning` (suppress note-only nits), `error` (only post
+  Error-severity findings). Bot still generates and
+  verifies the dropped findings, so metric counters and
+  the latency histogram are unaffected — only the
+  posted-comment volume changes.
+- Plumbed through `ReviewArgs.min_severity`. Pipeline
+  filters via `severity_rank` (Note < Warning < Error)
+  after the verifier and before mapping. Logs `kept`
+  and `dropped` counts so operators can confirm the
+  floor is engaging on a per-review basis.
+- Unrecognised env-var values fall through to `note`
+  with a tracing warn — a typo doesn't accidentally
+  suppress real findings. Catch typos at config-load
+  time with `auto_review validate-config --strict`.
+- 3 new tests: severity ordering, Warning-floor drops
+  Note-only findings (verified via the pipeline's
+  return value), Error-floor drops both Note and
+  Warning.
+- Documented in `OPERATIONS.md` §7.2.5 and the systemd
+  `auto_review.env.example`.
+
 #### Linter-only review mode (M3 cost lever)
 
 - New `.auto_review.yaml` field `mode:` (default `full`,

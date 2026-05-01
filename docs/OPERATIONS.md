@@ -359,6 +359,24 @@ section. Validate locally:
 auto_review validate-config .auto_review.yaml
 ```
 
+### 7.2.5 Tune signal-to-noise via `AR_SEVERITY_FLOOR`
+
+Set the gateway env var to `warning` to suppress every Note-
+severity finding before posting; `error` to only post
+high-confidence problems. The bot still generates and
+verifies the dropped findings, so the metric counters and
+duration histogram are unaffected — only the posted-comment
+volume changes. Operators on busy monorepos use this to keep
+PR pages from drowning in stylistic nits.
+
+```
+AR_SEVERITY_FLOOR=warning   # most common: drop notes, keep warnings + errors
+```
+
+The bot validates this at startup; an unrecognised value
+falls through to `note` (post everything) with a warning log,
+so a typo doesn't accidentally suppress real findings.
+
 ### 7.3 Disable a noisy linter
 
 ```yaml
