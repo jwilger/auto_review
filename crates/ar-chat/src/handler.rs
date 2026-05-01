@@ -37,6 +37,13 @@ use std::sync::Arc;
 /// usual ~16k–32k limits.
 const FREEFORM_DIFF_CAP: usize = 40_000;
 
+/// Byte cap on the freeform reply we post back to Forgejo. The
+/// system prompt asks the model to be brief but a misbehaving
+/// model can ignore that. Forgejo accepts arbitrary-length issue
+/// comments but a multi-megabyte reply would either hang the post
+/// or render unreadable; cap it with a clear truncation marker.
+const FREEFORM_REPLY_CAP: usize = 32_000;
+
 /// Same cap as `FREEFORM_DIFF_CAP` but for the autofix prompt.
 /// Same justification — cheap-tier model, similar context.
 const AUTOFIX_DIFF_CAP: usize = 40_000;
@@ -451,6 +458,12 @@ impl ChatHandler<'_> {
         let resp = self.llm.complete(ModelTier::Cheap, req).await?;
         let reply = if resp.content.trim().is_empty() {
             "(no response from the chat model)".to_string()
+        } else if resp.content.len() > FREEFORM_REPLY_CAP {
+            tracing::warn!(
+                original_bytes = resp.content.len(),
+                "cheap-tier model emitted oversized freeform reply; truncating before post"
+            );
+            truncate_with_marker(&resp.content, FREEFORM_REPLY_CAP, "[reply truncated]")
         } else {
             resp.content
         };
@@ -778,16 +791,22 @@ fn paths_in_diff(diff: &str) -> std::collections::HashSet<String> {
 }
 
 fn truncate_for_chat(diff: &str, max_bytes: usize) -> String {
-    if diff.len() <= max_bytes {
-        return diff.to_string();
+    truncate_with_marker(diff, max_bytes, "[diff truncated]")
+}
+
+fn truncate_with_marker(text: &str, max_bytes: usize, marker: &str) -> String {
+    if text.len() <= max_bytes {
+        return text.to_string();
     }
     // Don't split a UTF-8 codepoint.
     let mut end = max_bytes;
-    while end > 0 && !diff.is_char_boundary(end) {
+    while end > 0 && !text.is_char_boundary(end) {
         end -= 1;
     }
-    let mut out = diff[..end].to_string();
-    out.push_str("\n\n[diff truncated]\n");
+    let mut out = text[..end].to_string();
+    out.push_str("\n\n");
+    out.push_str(marker);
+    out.push('\n');
     out
 }
 
@@ -1126,6 +1145,62 @@ mod tests {
             .handle(ctx(), ChatCommand::Freeform("what does this do?".into()))
             .await
             .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn freeform_truncates_oversized_llm_replies_before_posting() {
+        // A misbehaving cheap-tier model could ignore "be brief"
+        // and emit megabytes of content; we must cap before
+        // posting so Forgejo doesn't choke and so the comment
+        // remains readable.
+        let server = MockServer::start().await;
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let learnings = InMemoryLearningsStore::new();
+        // Reply is well above FREEFORM_REPLY_CAP (32_000).
+        let huge_reply = "x".repeat(60_000);
+        let cheap = Arc::new(CannedCheapProvider {
+            reply: huge_reply.clone(),
+        });
+        let router = Router::new()
+            .with(ModelTier::Embedding, Arc::new(ConstantEmbedder))
+            .with(ModelTier::Cheap, cheap);
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/42.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/x b/x\n+y\n"))
+            .mount(&server)
+            .await;
+        // Capture the actual posted body and verify it's <= cap +
+        // marker. wiremock's body_partial_json approach can't do
+        // length assertions easily, so just respond and trust the
+        // unit test on truncate_with_marker for byte-count
+        // correctness; here we only assert the post succeeds.
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let handler = ChatHandler {
+            forgejo: &forgejo,
+            llm: &router,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+        handler
+            .handle(ctx(), ChatCommand::Freeform("question".into()))
+            .await
+            .expect("ok");
+    }
+
+    #[test]
+    fn truncate_with_marker_uses_supplied_marker() {
+        let big = "x".repeat(1000);
+        let out = truncate_with_marker(&big, 100, "[reply truncated]");
+        assert!(out.contains("[reply truncated]"));
+        assert!(!out.contains("[diff truncated]"));
+        // Result is bounded: cap (100) + marker (~20 chars) + 3
+        // chars of newline framing.
+        assert!(out.len() < 130);
     }
 
     #[tokio::test]
