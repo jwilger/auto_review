@@ -7,6 +7,7 @@ use ar_tools::actionlint::ActionlintRunner;
 use ar_tools::ast_grep::AstGrepRunner;
 use ar_tools::bandit::BanditRunner;
 use ar_tools::biome::BiomeRunner;
+use ar_tools::buf::BufRunner;
 use ar_tools::checkov::CheckovRunner;
 use ar_tools::dotenv_linter::DotenvLinterRunner;
 use ar_tools::eslint::EslintRunner;
@@ -230,6 +231,14 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         .collect();
     if !swift_files.is_empty() {
         runners.push(Box::new(SwiftLintRunner { files: swift_files }));
+    }
+
+    // buf reads its module config (`buf.yaml`) from the workspace
+    // root and lints every .proto in the module — passing per-file
+    // args isn't its idiom. Always run when there's a .proto in
+    // the surviving files; buf no-ops on repos without a buf.yaml.
+    if surviving.iter().any(|f| f.filename.ends_with(".proto")) {
+        runners.push(Box::new(BufRunner));
     }
 
     let toml_files: Vec<String> = surviving
@@ -750,6 +759,25 @@ mod tests {
                 "name = {name}"
             );
         }
+    }
+
+    #[test]
+    fn proto_files_select_buf() {
+        let files = vec![cf("api/v1/foo.proto", "modified")];
+        let runners = select_runners(&files);
+        let mut got = names(&runners);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "ast-grep",
+                "buf",
+                "gitleaks",
+                "osv-scanner",
+                "semgrep",
+                "trivy"
+            ]
+        );
     }
 
     #[test]
