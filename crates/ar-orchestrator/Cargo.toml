@@ -26,3 +26,14 @@ sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio",
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
+# End-to-end synthetic test in tests/synthetic_e2e.rs drives the full
+# webhook -> dispatcher -> review pipeline path in-process; needs the
+# gateway's router, wiremock-based Forgejo, and HMAC signing.
+ar-gateway = { path = "../ar-gateway" }
+ar-forgejo = { path = "../ar-forgejo" }
+axum.workspace = true
+hex.workspace = true
+hmac.workspace = true
+sha2.workspace = true
+tower = { workspace = true, features = ["util"] }
+wiremock.workspace = true

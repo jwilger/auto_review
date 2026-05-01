@@ -210,19 +210,26 @@ version = "0.0.1"
 dependencies = [
  "anyhow",
  "ar-forgejo",
+ "ar-gateway",
  "ar-index",
  "ar-llm",
  "ar-review",
  "ar-sandbox",
  "ar-tools",
  "async-trait",
+ "axum",
+ "hex",
+ "hmac",
  "serde",
  "serde_json",
+ "sha2",
  "sqlx",
  "tempfile",
  "thiserror",
  "tokio",
+ "tower",
  "tracing",
+ "wiremock",
 ]
 
 [[package]]
