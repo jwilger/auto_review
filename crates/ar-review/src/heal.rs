@@ -26,7 +26,11 @@ pub async fn generate_with_self_heal(
     let mut messages: Vec<Message> = vec![Message::user(user_prompt)];
     let mut last_error: Option<ValidationError> = None;
 
-    for attempt in 1..=config.max_attempts {
+    // Clamp at-least-one so the loop body always runs once. A
+    // misconfigured `max_attempts: 0` would otherwise leave
+    // `last_error == None` and trip the `.expect` below.
+    let max_attempts = config.max_attempts.max(1);
+    for attempt in 1..=max_attempts {
         let req = CompleteRequest {
             system: Some(system.to_string()),
             messages: messages.clone(),
@@ -59,7 +63,7 @@ pub async fn generate_with_self_heal(
     }
 
     Err(ReviewError::Unhealable {
-        attempts: config.max_attempts,
+        attempts: max_attempts,
         last_error: last_error.expect("loop ran at least once"),
     })
 }
@@ -146,6 +150,24 @@ mod tests {
             .expect("ok");
         assert_eq!(out.summary, "ok");
         assert_eq!(provider.call_count(), 2);
+    }
+
+    #[tokio::test]
+    async fn max_attempts_zero_clamps_to_one_attempt_no_panic() {
+        // Defence in depth: a misconfigured `max_attempts: 0`
+        // should not panic. The previous implementation called
+        // `.expect("loop ran at least once")` on an unset
+        // last_error when the loop range was empty.
+        let (router, provider) = router_with(vec!["not json"]);
+        let err = generate_with_self_heal(&router, "sys", "user", HealConfig { max_attempts: 0 })
+            .await
+            .expect_err("should fail");
+        match err {
+            ReviewError::Unhealable { attempts, .. } => assert_eq!(attempts, 1),
+            other => panic!("unexpected: {other:?}"),
+        }
+        // Loop ran exactly once despite the zero-attempts request.
+        assert_eq!(provider.call_count(), 1);
     }
 
     #[tokio::test]

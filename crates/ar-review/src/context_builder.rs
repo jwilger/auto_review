@@ -72,15 +72,34 @@ pub async fn build_review_context(
         .filter(|s| file_contents.contains_key(&s.path))
         .collect();
 
-    let scored_symbols = embed_and_query_symbols(router, &symbols, &file_contents, diff, top_k)
+    // Embed the diff once and reuse for both the symbol-similarity
+    // and learnings-similarity queries. Previously each helper
+    // re-embedded the diff independently — wasted one round-trip
+    // per review with both stores configured.
+    let query_vec = match router
+        .embed(ModelTier::Embedding, &[diff.to_string()])
         .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "symbol embedding/query failed; skipping that section");
-            Vec::new()
-        });
+    {
+        Ok(mut vecs) => vecs.pop().unwrap_or_default(),
+        Err(e) => {
+            tracing::warn!(error = %e, "diff embedding failed; skipping RAG context");
+            return Ok(String::new());
+        }
+    };
+    if query_vec.is_empty() {
+        return Ok(String::new());
+    }
+
+    let scored_symbols =
+        embed_and_query_symbols(router, &symbols, &file_contents, &query_vec, top_k)
+            .await
+            .unwrap_or_else(|e| {
+                tracing::warn!(error = %e, "symbol embedding/query failed; skipping that section");
+                Vec::new()
+            });
 
     let scored_learnings = match learnings {
-        Some(store) => query_learnings(router, store, diff, top_k)
+        Some(store) => query_learnings(store, &query_vec, top_k)
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "learnings query failed; skipping that section");
@@ -96,7 +115,7 @@ async fn embed_and_query_symbols(
     router: &Router,
     symbols: &[ar_index::IndexedSymbol],
     file_contents: &HashMap<String, String>,
-    diff: &str,
+    query_vec: &[f32],
     top_k: usize,
 ) -> Result<Vec<ScoredSymbol>, ContextBuildError> {
     if symbols.is_empty() {
@@ -112,20 +131,7 @@ async fn embed_and_query_symbols(
         }))
     })?;
 
-    // Embed the diff itself as the query vector.
-    let query_vec = router
-        .embed(ModelTier::Embedding, &[diff.to_string()])
-        .await
-        .map_err(EmbedError::Llm)?
-        .into_iter()
-        .next()
-        .unwrap_or_default();
-
-    if query_vec.is_empty() {
-        return Ok(Vec::new());
-    }
-
-    let scored = store.query_nearest(&query_vec, top_k).await.map_err(|e| {
+    let scored = store.query_nearest(query_vec, top_k).await.map_err(|e| {
         ContextBuildError::Embed(EmbedError::Llm(ar_llm::Error::Provider {
             status: 500,
             body: e.to_string(),
@@ -135,22 +141,11 @@ async fn embed_and_query_symbols(
 }
 
 async fn query_learnings(
-    router: &Router,
     store: &(dyn LearningsStore + Sync),
-    diff: &str,
+    query_vec: &[f32],
     top_k: usize,
 ) -> Result<Vec<ScoredLearning>, ContextBuildError> {
-    let query_vec = router
-        .embed(ModelTier::Embedding, &[diff.to_string()])
-        .await
-        .map_err(EmbedError::Llm)?
-        .into_iter()
-        .next()
-        .unwrap_or_default();
-    if query_vec.is_empty() {
-        return Ok(Vec::new());
-    }
-    let scored = store.query_nearest(&query_vec, top_k).await.map_err(|e| {
+    let scored = store.query_nearest(query_vec, top_k).await.map_err(|e| {
         ContextBuildError::Embed(EmbedError::Llm(ar_llm::Error::Provider {
             status: 500,
             body: e.to_string(),
@@ -226,6 +221,36 @@ mod tests {
             .await
             .expect("ok");
         assert!(result.is_empty());
+    }
+
+    #[tokio::test]
+    async fn diff_is_embedded_only_once_even_with_learnings_store() {
+        // Regression: previously the diff was embedded twice — once
+        // for symbol-similarity, once for learnings-similarity. This
+        // test pins the dedup so a future refactor doesn't silently
+        // re-introduce the double-call.
+        use ar_index::InMemoryLearningsStore;
+
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "pub fn foo() {}\n").unwrap();
+
+        let embedder = std::sync::Arc::new(DeterministicEmbedder::new());
+        let calls_handle = embedder.clone();
+        let router = Router::new().with(ModelTier::Embedding, embedder);
+        let store = InMemoryLearningsStore::new();
+
+        let _ = build_review_context(dir.path(), &router, "diff text", Some(&store), 3)
+            .await
+            .expect("ok");
+
+        // Expected calls: 1 for symbols batch + 1 for diff = 2.
+        // Previously was 1 + 2 (two diff embeds, one per query
+        // helper) = 3.
+        let calls = *calls_handle.calls.lock().unwrap();
+        assert_eq!(
+            calls, 2,
+            "expected one symbols embed + one diff embed; got {calls}"
+        );
     }
 
     #[tokio::test]
