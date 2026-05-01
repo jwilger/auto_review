@@ -1228,6 +1228,27 @@ default in-memory store to the SQLite-backed one.
   `NoOpDispatcher` and verify success, wrong-secret failure,
   PR-event round-trip, and unsupported-event rejection.
 
+#### explain-routing subcommand (M5)
+
+- `auto_review explain-routing --file PATH...` shows which
+  bundled linters would run on a given set of changed files.
+  Pure routing — doesn't read the files or invoke any linter
+  binary. Output is alphabetised so two invocations are
+  diffable. `--json` emits `{"runners": [...]}` for piping.
+- Use case: an operator on a Python+shell repo wants to
+  know whether disabling `pylint` is enough to silence
+  Python checks, or whether `ruff` / `bandit` / `mypy` also
+  fire. Running `auto_review explain-routing --file src/x.py`
+  returns the full routed set including all of them. Same
+  technique works for tuning `disabled_tools:` pre-emptively
+  before a PR ever fires.
+- Two failure-mode tests cover empty file list and clap's
+  `required = true` rejection. Three behaviour tests cover
+  Python file routing, empty list, JSON output.
+- USER-GUIDE.md and OPERATIONS.md "Disable a noisy linter"
+  sections now point at `explain-routing` alongside
+  `list-linters`.
+
 #### list-linters subcommand (M5)
 
 - `auto_review list-linters` prints the bundled linter

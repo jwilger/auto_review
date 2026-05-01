@@ -435,9 +435,15 @@ disabled_tools:
 Names match `LinterRunner::name()`. Enumerate them with:
 
 ```bash
-auto_review list-linters                  # full table
-auto_review list-linters --language python # filter by language tag
-auto_review list-linters --json | jq      # machine-readable
+auto_review list-linters                   # full table
+auto_review list-linters --language python  # filter by language tag
+auto_review list-linters --json | jq       # machine-readable
+
+# To check which linters route to a specific set of files
+# (useful for understanding why something fired on a PR or for
+# pre-emptively trimming `disabled_tools:` for a typical PR):
+auto_review explain-routing \
+    --file src/x.py --file scripts/build.sh
 ```
 
 ---

@@ -62,6 +62,13 @@ pub enum Command {
     /// specific stack; pass `--json` for machine-readable output.
     ListLinters(ListLintersArgs),
 
+    /// Show which linters would run for a given set of changed
+    /// files. Useful for tuning `disabled_tools:` in
+    /// `.auto_review.yaml` or understanding why a particular
+    /// linter fires on a PR. Accepts one or more `--file` paths
+    /// and prints the routed-runner set.
+    ExplainRouting(ExplainRoutingArgs),
+
     /// Send an HMAC-signed `ping` webhook to a running gateway and
     /// print the response. Smoke-tests the intake path (network
     /// reachability + signature secret + header forwarding through
@@ -332,6 +339,20 @@ pub struct TestWebhookArgs {
     /// network egress problem.
     #[arg(long, default_value_t = 10)]
     pub timeout_secs: u64,
+}
+
+#[derive(clap::Args, Debug)]
+pub struct ExplainRoutingArgs {
+    /// One or more changed-file paths to route. Repeat the
+    /// flag for additional files. Paths are relative to the
+    /// repo root; the routing logic doesn't actually read them.
+    #[arg(long, required = true)]
+    pub file: Vec<String>,
+
+    /// Emit the result as JSON for piping into `jq`. Shape:
+    /// `{"runners": ["gitleaks", "ruff", ...]}`.
+    #[arg(long)]
+    pub json: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -906,6 +927,32 @@ mod tests {
             }
             _ => panic!("expected TestWebhook"),
         }
+    }
+
+    #[test]
+    fn explain_routing_required_args() {
+        let cli = Cli::try_parse_from([
+            "auto_review",
+            "explain-routing",
+            "--file",
+            "src/main.py",
+            "--file",
+            "Dockerfile",
+        ])
+        .expect("parse");
+        match cli.command {
+            Command::ExplainRouting(a) => {
+                assert_eq!(a.file, vec!["src/main.py", "Dockerfile"]);
+                assert!(!a.json);
+            }
+            _ => panic!("expected ExplainRouting"),
+        }
+    }
+
+    #[test]
+    fn explain_routing_requires_at_least_one_file() {
+        let res = Cli::try_parse_from(["auto_review", "explain-routing"]);
+        assert!(res.is_err());
     }
 
     #[test]

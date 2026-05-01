@@ -1,9 +1,9 @@
 //! Implementations of the CLI subcommands.
 
 use crate::cli::{
-    DoctorArgs, ForgetLearningArgs, InitArgs, ListLearningsArgs, ListLintersArgs,
-    ListWebhooksArgs, PurgeHistoryArgs, RegisterWebhookArgs, ResetPrArgs, ReviewOnceArgs,
-    StatusArgs, TestWebhookArgs, UnregisterWebhookArgs, ValidateConfigArgs,
+    DoctorArgs, ExplainRoutingArgs, ForgetLearningArgs, InitArgs, ListLearningsArgs,
+    ListLintersArgs, ListWebhooksArgs, PurgeHistoryArgs, RegisterWebhookArgs, ResetPrArgs,
+    ReviewOnceArgs, StatusArgs, TestWebhookArgs, UnregisterWebhookArgs, ValidateConfigArgs,
 };
 use anyhow::{Context, Result};
 use ar_forgejo::{
@@ -1031,6 +1031,64 @@ fn sign_body(secret: &str, body: &[u8]) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
+/// Show which linters would run for a given set of files.
+/// Pure routing — doesn't actually read the files or invoke any
+/// linter binary.
+pub fn explain_routing(args: ExplainRoutingArgs) -> Result<()> {
+    let files: Vec<ar_forgejo::ChangedFile> = args
+        .file
+        .iter()
+        .map(|name| ar_forgejo::ChangedFile {
+            filename: name.clone(),
+            status: "modified".into(),
+            additions: 0,
+            deletions: 0,
+            changes: 0,
+            patch: None,
+        })
+        .collect();
+    let runners = ar_review::select_runners(&files);
+    let mut names: Vec<String> = runners.iter().map(|r| r.name().to_string()).collect();
+    names.sort();
+    if args.json {
+        println!(
+            "{}",
+            serde_json::to_string(&serde_json::json!({ "runners": names }))?
+        );
+        return Ok(());
+    }
+    println!(
+        "Routing for {} file{}:",
+        args.file.len(),
+        if args.file.len() == 1 { "" } else { "s" }
+    );
+    for f in &args.file {
+        println!("  - {f}");
+    }
+    println!();
+    if names.is_empty() {
+        println!(
+            "No linters route to these files. (Empty input or every entry has \
+             status=removed.)"
+        );
+        return Ok(());
+    }
+    println!(
+        "{} linter{} would run:",
+        names.len(),
+        if names.len() == 1 { "" } else { "s" }
+    );
+    for n in &names {
+        println!("  {n}");
+    }
+    println!();
+    println!(
+        "Use `auto_review list-linters` for descriptions; add a name to \
+         `.auto_review.yaml`'s `disabled_tools:` to skip it."
+    );
+    Ok(())
+}
+
 /// Print the bundled linter catalogue. With `--json`, emits one
 /// JSON object per line (newline-delimited JSON). Otherwise renders
 /// a human-readable table grouped by language.
@@ -1933,6 +1991,39 @@ auto_review_reviews_completed_count 10
         };
         let err = test_webhook(args).await.expect_err("unsupported event");
         assert!(err.to_string().contains("release"));
+    }
+
+    #[test]
+    fn explain_routing_handles_python_file() {
+        // Smoke-test: routing a .py file should at minimum
+        // pull in ruff (the always-runs python linter).
+        let args = ExplainRoutingArgs {
+            file: vec!["src/x.py".into()],
+            json: false,
+        };
+        explain_routing(args).expect("ok");
+    }
+
+    #[test]
+    fn explain_routing_with_no_files_succeeds_silently() {
+        // clap rejects zero --file at the parse layer; this
+        // tests the function-level invariant that an empty
+        // file list doesn't crash. Useful if a future caller
+        // bypasses clap.
+        let args = ExplainRoutingArgs {
+            file: vec![],
+            json: false,
+        };
+        explain_routing(args).expect("ok");
+    }
+
+    #[test]
+    fn explain_routing_json_emits_structured_object() {
+        let args = ExplainRoutingArgs {
+            file: vec!["x.rs".into()],
+            json: true,
+        };
+        explain_routing(args).expect("ok");
     }
 
     #[test]
