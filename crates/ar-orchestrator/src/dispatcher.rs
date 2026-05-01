@@ -415,8 +415,6 @@ pub async fn run_review_job(
         }
     }
 
-    observe(ReviewObservation::Started);
-
     let _ = forgejo
         .post_commit_status(
             &job.owner,
@@ -574,6 +572,14 @@ pub async fn run_review_job(
         VerifyMode::Simple
     };
     let workspace_path = workspace.as_ref().map(|w| w.path());
+
+    // Fire Started AFTER all early-skip checks (same_sha,
+    // trivial_files, disabled_by_config) have passed. Means each
+    // review job emits exactly one of {Skipped_*, Started + (one
+    // of Succeeded / Failed_*)} — no double-count when an early
+    // skip also fired Started. Operator dashboards rely on
+    // `started_total ≈ succeeded + failed_*` for sanity checks.
+    observe(ReviewObservation::Started);
 
     let result = review_pull_request(ReviewArgs {
         forgejo,
