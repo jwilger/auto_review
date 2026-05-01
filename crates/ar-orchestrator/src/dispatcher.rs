@@ -488,6 +488,7 @@ pub async fn run_review_job(
         ignored_paths,
         guidelines,
         repo_context,
+        raw_diff,
         pre_merge_checks,
         review_mode,
         workspace,
@@ -524,6 +525,7 @@ pub async fn run_review_job(
             ignored_paths,
             guidelines,
             repo_context,
+            raw_diff,
             pre_merge_checks,
             review_mode,
             workspace,
@@ -535,6 +537,7 @@ pub async fn run_review_job(
                 ignored_paths,
                 guidelines,
                 repo_context,
+                raw_diff,
                 pre_merge_checks,
                 review_mode,
                 workspace,
@@ -545,6 +548,7 @@ pub async fn run_review_job(
             (
                 Vec::new(),
                 GlobSet::empty(),
+                String::new(),
                 String::new(),
                 String::new(),
                 Vec::new(),
@@ -603,7 +607,18 @@ pub async fn run_review_job(
         min_severity: severity_floor_from_env(),
         guidelines: &guidelines,
         repo_context: &repo_context,
-        diff_override: incremental_diff.as_deref(),
+        // Reuse the diff prepare_and_lint already fetched. For
+        // incremental reviews we override with the compare-diff
+        // (smaller, focused on new commits); otherwise fall back
+        // to the full PR diff already in hand. Passing the empty
+        // raw_diff (lint phase failed to fetch) as Some("") would
+        // suppress the pipeline's own get_pr_diff retry, so map
+        // empty back to None to preserve the retry semantics.
+        diff_override: incremental_diff.as_deref().or(if raw_diff.is_empty() {
+            None
+        } else {
+            Some(raw_diff.as_str())
+        }),
         verify_mode,
         workspace_path,
     })
@@ -692,6 +707,13 @@ struct LintPhaseOutput {
     ignored_paths: GlobSet,
     guidelines: String,
     repo_context: String,
+    /// The raw PR diff fetched by prepare_and_lint for triage and
+    /// context building. Surfaced back so the review pipeline can
+    /// reuse it as `diff_override` instead of refetching the same
+    /// diff a second time. Empty string when the get_pr_diff call
+    /// failed inside the lint phase (we degrade-but-continue;
+    /// the pipeline will refetch and likely also fail consistently).
+    raw_diff: String,
     /// From `.auto_review.yaml`'s `pre_merge_checks:` — passed through
     /// to the review pipeline so the LLM can evaluate them.
     pre_merge_checks: Vec<String>,
@@ -738,6 +760,7 @@ async fn prepare_and_lint(
             ignored_paths,
             guidelines,
             repo_context: String::new(),
+            raw_diff: String::new(),
             pre_merge_checks: Vec::new(),
             review_mode: ReviewMode::Full,
             workspace: None,
@@ -804,6 +827,7 @@ async fn prepare_and_lint(
         ignored_paths,
         guidelines,
         repo_context,
+        raw_diff,
         pre_merge_checks: config.pre_merge_checks.clone(),
         review_mode: config.mode,
         workspace: Some(workspace),
