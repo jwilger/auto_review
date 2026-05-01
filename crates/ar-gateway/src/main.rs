@@ -103,11 +103,10 @@ async fn main() -> Result<()> {
     // it into the LLM prompt. Reuses LLM_BASE_URL + LLM_API_KEY by
     // default; override with LLM_EMBEDDING_BASE_URL / _API_KEY when
     // your embedder lives on a different endpoint.
-    if let Ok(embedding_model) = env::var("LLM_EMBEDDING_MODEL") {
-        let embed_base = env::var("LLM_EMBEDDING_BASE_URL").unwrap_or_else(|_| llm_base.clone());
-        let embed_key = env::var("LLM_EMBEDDING_API_KEY")
-            .ok()
-            .or_else(|| llm_api_key.clone());
+    if let Some(embedding_model) = read_non_empty_env("LLM_EMBEDDING_MODEL") {
+        let embed_base =
+            read_non_empty_env("LLM_EMBEDDING_BASE_URL").unwrap_or_else(|| llm_base.clone());
+        let embed_key = read_non_empty_env("LLM_EMBEDDING_API_KEY").or_else(|| llm_api_key.clone());
         let mut provider = OpenAiProvider::new(&embed_base, embed_key.as_deref(), &embedding_model)
             .context("embedding LLM provider")?;
         provider = provider.with_embedding_model(&embedding_model);
@@ -119,11 +118,10 @@ async fn main() -> Result<()> {
     }
 
     // Optional Cheap tier — used by the LLM-driven file triage step.
-    if let Ok(cheap_model) = env::var("LLM_CHEAP_MODEL") {
-        let cheap_base = env::var("LLM_CHEAP_BASE_URL").unwrap_or_else(|_| llm_base.clone());
-        let cheap_key = env::var("LLM_CHEAP_API_KEY")
-            .ok()
-            .or_else(|| llm_api_key.clone());
+    if let Some(cheap_model) = read_non_empty_env("LLM_CHEAP_MODEL") {
+        let cheap_base =
+            read_non_empty_env("LLM_CHEAP_BASE_URL").unwrap_or_else(|| llm_base.clone());
+        let cheap_key = read_non_empty_env("LLM_CHEAP_API_KEY").or_else(|| llm_api_key.clone());
         let provider = Arc::new(
             OpenAiProvider::new(&cheap_base, cheap_key.as_deref(), &cheap_model)
                 .context("cheap LLM provider")?,
@@ -405,6 +403,25 @@ async fn shutdown_signal() {
 /// Without `AR_SANDBOX_IMAGE`, linter binaries spawn directly on the
 /// host. That's fine for local dev but exposes the operator to the
 /// Kudelski-class RCE risk for any internet-facing deploy.
+/// Read an env var, treating both "unset" and "empty / whitespace-only"
+/// as `None`. Most operator-facing env vars take a meaningful default
+/// when unset; an explicit empty assignment (`FOO=`) is almost always
+/// a misconfiguration that should fall through to the same default
+/// rather than silently producing a broken empty string.
+fn read_non_empty_env(name: &str) -> Option<String> {
+    match env::var(name) {
+        Ok(v) if v.trim().is_empty() => {
+            tracing::warn!(
+                env = name,
+                "env var set to an empty/whitespace value; treating as unset"
+            );
+            None
+        }
+        Ok(v) => Some(v),
+        Err(_) => None,
+    }
+}
+
 fn build_sandbox() -> Result<Arc<dyn Sandbox>> {
     if let Ok(image) = env::var("AR_SANDBOX_IMAGE") {
         let memory_mib = env::var("AR_SANDBOX_MEMORY_MIB")
