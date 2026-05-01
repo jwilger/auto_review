@@ -6,6 +6,7 @@
 //! background.
 
 pub mod hmac;
+pub mod metrics;
 pub mod poller;
 pub mod webhook;
 
@@ -13,8 +14,12 @@ use ar_forgejo::Client as ForgejoClient;
 use ar_index::LearningsStore;
 use ar_llm::Router as LlmRouter;
 use ar_orchestrator::JobDispatcher;
+use axum::extract::State;
+use axum::http::{header, StatusCode};
+use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
+use metrics::Metrics;
 use std::sync::Arc;
 
 #[derive(Clone)]
@@ -26,6 +31,7 @@ pub struct AppState {
     /// leave [`Self::chat`] as `None` and `issue_comment` events will
     /// be parsed-but-not-handled.
     pub chat: Option<ChatDeps>,
+    pub metrics: Arc<Metrics>,
 }
 
 /// Dependencies the chat handler needs. Bundled so the optional-ness
@@ -43,6 +49,7 @@ impl AppState {
             webhook_secret: Arc::new(webhook_secret.into()),
             dispatcher,
             chat: None,
+            metrics: Arc::new(Metrics::new()),
         }
     }
 
@@ -56,6 +63,7 @@ pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
         .route("/version", get(version_handler))
+        .route("/metrics", get(metrics_handler))
         .route("/webhooks/forgejo", post(webhook::handle))
         .with_state(state)
 }
@@ -65,4 +73,12 @@ async fn version_handler() -> axum::response::Json<serde_json::Value> {
         "name": "auto_review",
         "version": env!("CARGO_PKG_VERSION"),
     }))
+}
+
+async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
+    (
+        StatusCode::OK,
+        [(header::CONTENT_TYPE, "text/plain; version=0.0.4")],
+        state.metrics.render(),
+    )
 }

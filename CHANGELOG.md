@@ -151,6 +151,18 @@ PR's changed file extensions.
 
 - `GET /healthz` — cheap liveness check.
 - `GET /version` — JSON `{"name", "version"}` from `CARGO_PKG_VERSION`.
+- `GET /metrics` — Prometheus-format counters: webhooks
+  bucketed by event (`pull_request`, `issue_comment`, `ping`,
+  `other`), HMAC signature failures, malformed-payload
+  failures, jobs dispatched, chat commands received, and
+  chat commands dropped because `ChatDeps` was not wired in.
+  Sustained increases in
+  `auto_review_webhook_signature_failures_total` are the
+  primary alerting signal for secret-rotation drift or active
+  probing; `auto_review_webhook_payload_failures_total` is the
+  signal for Forgejo version mismatch. No external metrics
+  crate dependency — counters are `AtomicU64`s rendered to the
+  text exposition format on scrape.
 - `POST /webhooks/forgejo` — HMAC-verified PR/event intake.
 
 #### Documentation

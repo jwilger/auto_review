@@ -25,10 +25,12 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
         .or_else(|| headers.get(FALLBACK_SIG_HEADER))
         .and_then(|v| v.to_str().ok());
     let Some(sig) = sig else {
+        state.metrics.record_signature_failure();
         return reject(StatusCode::UNAUTHORIZED, "missing signature");
     };
 
     if let Err(e) = verify(&state.webhook_secret, &body, sig) {
+        state.metrics.record_signature_failure();
         let status = match e {
             HmacError::Mismatch => StatusCode::UNAUTHORIZED,
             HmacError::Missing | HmacError::NotHex => StatusCode::BAD_REQUEST,
@@ -42,6 +44,7 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
         .or_else(|| headers.get(FALLBACK_EVENT_HEADER))
         .and_then(|v| v.to_str().ok())
         .unwrap_or("");
+    state.metrics.record_event(event);
 
     match event {
         "pull_request" => handle_pull_request(&state, &body).await,
@@ -57,7 +60,10 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
 async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
     let evt: IssueCommentEvent = match serde_json::from_slice(body) {
         Ok(e) => e,
-        Err(e) => return reject(StatusCode::BAD_REQUEST, &format!("payload decode: {e}")),
+        Err(e) => {
+            state.metrics.record_payload_failure();
+            return reject(StatusCode::BAD_REQUEST, &format!("payload decode: {e}"));
+        }
     };
     if !evt.is_pull_request_comment() {
         // Plain issue (not PR) — ignored.
@@ -72,6 +78,7 @@ async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
     if matches!(cmd, ChatCommand::NotMentioned) {
         return (StatusCode::ACCEPTED, "").into_response();
     }
+    state.metrics.record_chat_command();
 
     // Hand off to the chat handler if it's wired up. Spawn the work so
     // the webhook ack stays fast — chat replies typically involve at
@@ -103,6 +110,7 @@ async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
             }
         });
     } else {
+        state.metrics.record_chat_unconfigured();
         tracing::warn!(
             repo = %evt.repository.full_name,
             issue = evt.issue.number,
@@ -124,7 +132,10 @@ fn is_bot_self(sender_login: &str) -> bool {
 async fn handle_pull_request(state: &AppState, body: &[u8]) -> Response {
     let evt: PullRequestEvent = match serde_json::from_slice(body) {
         Ok(e) => e,
-        Err(e) => return reject(StatusCode::BAD_REQUEST, &format!("payload decode: {e}")),
+        Err(e) => {
+            state.metrics.record_payload_failure();
+            return reject(StatusCode::BAD_REQUEST, &format!("payload decode: {e}"));
+        }
     };
     if !is_actionable(evt.action) {
         tracing::debug!(action = ?evt.action, "ignoring non-review-triggering action");
@@ -142,6 +153,7 @@ async fn handle_pull_request(state: &AppState, body: &[u8]) -> Response {
         "accepted PR for review",
     );
     state.dispatcher.dispatch(ReviewJob::from(&evt)).await;
+    state.metrics.record_job_dispatched();
     (StatusCode::ACCEPTED, "").into_response()
 }
 
@@ -325,6 +337,69 @@ mod tests {
         let req = Request::get("/healthz").body(Body::empty()).unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::OK);
+    }
+
+    #[tokio::test]
+    async fn metrics_endpoint_emits_prometheus_text_format() {
+        let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)));
+        let req = Request::get("/metrics").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let ct = resp
+            .headers()
+            .get("content-type")
+            .unwrap()
+            .to_str()
+            .unwrap()
+            .to_owned();
+        assert!(ct.starts_with("text/plain"));
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("# HELP auto_review_webhooks_pull_request_total"));
+        assert!(text.contains("# TYPE auto_review_webhooks_pull_request_total counter"));
+        assert!(text.contains("auto_review_jobs_dispatched_total 0\n"));
+    }
+
+    #[tokio::test]
+    async fn metrics_track_dispatched_pr() {
+        let body = pr_payload("opened", false);
+        let sig = sign("s", &body);
+        let recorder = RecordingDispatcher::new();
+        let app =
+            build_router(AppState::new("s", recorder.clone() as Arc<dyn JobDispatcher>));
+        let req = Request::post("/webhooks/forgejo")
+            .header(EVENT_HEADER, "pull_request")
+            .header(SIG_HEADER, sig)
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        let req = Request::get("/metrics").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("auto_review_webhooks_pull_request_total 1\n"));
+        assert!(text.contains("auto_review_jobs_dispatched_total 1\n"));
+    }
+
+    #[tokio::test]
+    async fn metrics_track_signature_failures() {
+        let body = pr_payload("opened", false);
+        let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)));
+        let req = Request::post("/webhooks/forgejo")
+            .header(EVENT_HEADER, "pull_request")
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.clone().oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+
+        let req = Request::get("/metrics").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let text = String::from_utf8_lossy(&bytes);
+        assert!(text.contains("auto_review_webhook_signature_failures_total 1\n"));
+        assert!(text.contains("auto_review_jobs_dispatched_total 0\n"));
     }
 
     #[tokio::test]
