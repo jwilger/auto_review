@@ -88,15 +88,32 @@ pub async fn evaluate_custom_checks(
         .collect()
 }
 
+/// Same cheap-tier context-budget rationale as the triage and
+/// verifier diff caps. Custom pre-merge checks run on the cheap
+/// tier; an uncapped diff would trip context-overflow refusals.
+const PRE_MERGE_DIFF_CAP: usize = 40 * 1024;
+
 /// Compose the user-side prompt: the diff, then a numbered list of
 /// the custom checks. Numbering keeps the LLM aligned with input
 /// order (the schema requires same-order results).
 fn render_user_prompt(checks: &[String], diff: &str) -> String {
-    let mut s = String::with_capacity(diff.len() + 256);
+    let mut s = String::with_capacity(diff.len().min(PRE_MERGE_DIFF_CAP) + 256);
     s.push_str("Pull-request diff:\n\n```diff\n");
-    s.push_str(diff);
-    if !diff.ends_with('\n') {
-        s.push('\n');
+    if diff.len() <= PRE_MERGE_DIFF_CAP {
+        s.push_str(diff);
+        if !diff.ends_with('\n') {
+            s.push('\n');
+        }
+    } else {
+        let mut cut = PRE_MERGE_DIFF_CAP;
+        while cut > 0 && !diff.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        s.push_str(&diff[..cut]);
+        if !s.ends_with('\n') {
+            s.push('\n');
+        }
+        s.push_str("[diff truncated for pre-merge checks]\n");
     }
     s.push_str("```\n\nCustom pre-merge checks (one result per check, same order):\n");
     for (i, c) in checks.iter().enumerate() {
