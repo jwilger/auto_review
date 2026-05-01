@@ -920,6 +920,31 @@ default in-memory store to the SQLite-backed one.
   is green; tags vulnerability alerts with the
   `security` label.
 
+#### QUICKSTART.md refresh (M5 docs)
+
+- New §5a "Verify the deploy (recommended)" introduces the
+  `doctor` + `test-webhook` + `status` diagnostic triad
+  shipped over the M5 iterations. Operators following
+  QUICKSTART now land on the verification commands as part
+  of the linear walkthrough rather than discovering them
+  by accident.
+- Forgejo Action note updated: was "Not yet packaged"; now
+  references `deploy/forgejo-action/` which actually ships.
+- New "systemd" deployment-options subsection points at
+  `deploy/systemd/`.
+- Troubleshooting section restructured: doctor /
+  test-webhook / explain-routing are the first stop, with
+  the original "common failure modes" list as fall-back.
+  Adds a closing pointer to the Prometheus rules pack +
+  Grafana dashboard.
+- Configuration reference expanded from 8 to 17 env vars
+  covering everything shipped over the M5 iterations
+  (AR_BOT_*, AR_HISTORY_DB, AR_LEARNINGS_DB,
+  AR_SEVERITY_FLOOR, AR_WEBHOOK_RATE_PER_SEC,
+  AR_DEDUP_CAPACITY, AR_READINESS_TTL_SECS,
+  AR_POLL_INTERVAL_SECS, AR_SANDBOX_IMAGE,
+  LLM_CHEAP_MODEL, LLM_EMBEDDING_MODEL).
+
 #### CONTRIBUTING.md cookbook sections (M5 docs)
 
 - Two new "How to add a..." cookbook sections complement

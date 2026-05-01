@@ -88,6 +88,31 @@ directly inside your private network).
 This subscribes the bot to `pull_request` and `issue_comment` events,
 secured with `WEBHOOK_SECRET`.
 
+## 5a. Verify the deploy (recommended)
+
+Three CLI commands cover deploy-time verification — drop them
+into your deploy script:
+
+```sh
+# Outbound deps: Forgejo PAT valid? LLM endpoint reachable?
+# Configured models actually loaded? Webhook secret strong?
+./target/release/auto_review doctor
+
+# Inbound: gateway accepts a signed webhook end-to-end?
+./target/release/auto_review test-webhook \
+    --gateway-url https://reviewer.example.com \
+    --webhook-secret "$WEBHOOK_SECRET"
+
+# Live snapshot: confirms /info, /metrics, runtime config
+./target/release/auto_review status \
+    --gateway-url https://reviewer.example.com
+```
+
+Each exits non-zero on a real problem so they fit cleanly in
+shell pipes (`auto_review doctor && auto_review test-webhook ...`).
+See `docs/OPERATIONS.md` §0 for the full pre-deploy/post-deploy
+checklist these implement.
+
 ## 5b. (Optional) Smoke-test against a real PR without a webhook
 
 Before flipping the gateway live, you can run the full pipeline against
@@ -135,34 +160,78 @@ docker compose -f deploy/docker-compose.yml up -d
 
 ### Forgejo Action
 
-Not yet packaged. The gateway expects a long-running HTTP server
-today; an Action-based mode is on the roadmap.
+`deploy/forgejo-action/` ships a workflow template for users who
+want to run the bot as a Forgejo Actions job (one shot per PR
+event) instead of a long-running gateway. See that directory's
+README for the install steps.
+
+### systemd
+
+Self-hosters running on bare metal use the unit at
+`deploy/systemd/auto_review.service` plus the env-file template
+at `deploy/systemd/auto_review.env.example`. See
+`deploy/systemd/README.md` for the install walkthrough.
 
 ## Troubleshooting
 
+First stop: run the diagnostic triad (see §5a). They cover most
+of the common failure modes with explicit error messages.
+
+If those pass and reviews still don't appear:
 - **Gateway returns 401 Unauthorized**: the webhook signature didn't
-  verify. Check that the secret in Forgejo's webhook config matches
-  `WEBHOOK_SECRET` byte-for-byte.
+  verify. `auto_review test-webhook` confirms whether the gateway-
+  side secret is correct; if it passes, check that Forgejo's
+  webhook config has the same secret byte-for-byte.
 - **Reviews never appear**: check the gateway logs (`RUST_LOG=debug`).
-  Common causes: bot user lacks repo access, LLM endpoint unreachable,
-  invalid `FORGEJO_TOKEN`.
-- **LLM returns malformed JSON repeatedly**: the self-heal loop
-  bounded at 3 attempts. Smaller local models (≤7B) may struggle with
-  strict JSON schemas; try a larger model or switch
+  Common causes: bot user lacks repo access (run
+  `auto_review doctor`), LLM endpoint unreachable, invalid
+  `FORGEJO_TOKEN`.
+- **LLM returns malformed JSON repeatedly**: the self-heal loop is
+  bounded at 3 attempts. Smaller local models (≤7B) may struggle
+  with strict JSON schemas; try a larger model or switch
   `LLM_REASONING_MODEL` to a cloud option.
 - **Linter findings missing**: the linter's binary may not be on
-  `$PATH`. Install it, or accept that the bot reviews without it
-  (the LLM still works).
+  `$PATH`. Use `auto_review explain-routing --file <path>` to
+  see which linters would run for a given file. Install the
+  missing binary, or accept that the bot reviews without it (the
+  LLM still works).
+
+For Prometheus operators, drop in
+`deploy/prometheus/auto_review.rules.yaml` and
+`deploy/grafana/auto_review.dashboard.json` for ready-baked
+alerting + dashboards.
 
 ## Configuration reference
 
-| Env var | Required | Default | Notes |
-|---|---|---|---|
-| `FORGEJO_BASE_URL` | yes | — | e.g. `https://forgejo.example.com` |
-| `FORGEJO_TOKEN` | yes | — | bot user's PAT (`auto_review init`) |
-| `WEBHOOK_SECRET` | yes | — | HMAC secret; matches Forgejo's webhook config |
-| `LLM_BASE_URL` | yes | — | OpenAI-compatible endpoint root |
-| `LLM_API_KEY` | no | — | omit for local Ollama |
-| `LLM_REASONING_MODEL` | no | `qwen2.5-coder:32b` | model name passed to the LLM endpoint |
-| `AR_GATEWAY_BIND` | no | `0.0.0.0:8080` | listen address |
-| `RUST_LOG` | no | `info,ar_gateway=debug` | tracing-subscriber filter |
+Required:
+
+| Env var | Notes |
+|---|---|
+| `FORGEJO_BASE_URL` | e.g. `https://forgejo.example.com` |
+| `FORGEJO_TOKEN` | bot user's PAT (`auto_review init`) |
+| `WEBHOOK_SECRET` | HMAC secret; matches Forgejo's webhook config |
+| `LLM_BASE_URL` | OpenAI-compatible endpoint root |
+
+Common optional env vars:
+
+| Env var | Default | Notes |
+|---|---|---|
+| `LLM_API_KEY` | — | omit for local Ollama |
+| `LLM_REASONING_MODEL` | `qwen2.5-coder:32b` | model name on the LLM endpoint |
+| `LLM_CHEAP_MODEL` | — | optional triage / verifier tier (recommended) |
+| `LLM_EMBEDDING_MODEL` | — | optional RAG retrieval (recommended) |
+| `AR_GATEWAY_BIND` | `0.0.0.0:8080` | listen address |
+| `AR_BOT_LOGIN` | `auto_review` | bot's Forgejo username (self-loop detection) |
+| `AR_BOT_NAME` | `=AR_BOT_LOGIN` | mention handle (`@<bot_name>`) |
+| `AR_LEARNINGS_DB` | — | path → SQLite-backed learnings; unset → in-memory |
+| `AR_HISTORY_DB` | — | path → SQLite-backed review history; unset → in-memory |
+| `AR_POLL_INTERVAL_SECS` | `60` | inline-thread mention poll cadence; `0` disables |
+| `AR_SANDBOX_IMAGE` | — | OCI image for the linter sandbox; unset → unsafe direct mode |
+| `AR_SEVERITY_FLOOR` | `note` | drop findings below this severity (`warning` / `error`) |
+| `AR_WEBHOOK_RATE_PER_SEC` | — | enable webhook rate limiting (paired with `AR_WEBHOOK_BURST`) |
+| `AR_DEDUP_CAPACITY` | `256` | LRU size for `X-Forgejo-Delivery` retry dedup; `0` disables |
+| `AR_READINESS_TTL_SECS` | `10` | cache TTL for `/readyz` Forgejo probe |
+| `RUST_LOG` | `info,ar_gateway=debug` | tracing-subscriber filter |
+
+Full reference (every env var with rationale): see
+`deploy/systemd/auto_review.env.example`.
