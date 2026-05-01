@@ -2,6 +2,7 @@
 //! that should run against the cloned workspace.
 
 use ar_forgejo::ChangedFile;
+use ar_tools::eslint::EslintRunner;
 use ar_tools::hadolint::HadolintRunner;
 use ar_tools::markdownlint::MarkdownLintRunner;
 use ar_tools::ruff::RuffRunner;
@@ -34,6 +35,15 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
 
     if surviving.iter().any(|f| has_python_ext(&f.filename)) {
         runners.push(Box::new(RuffRunner));
+    }
+
+    let js_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| has_js_ext(&f.filename))
+        .map(|f| f.filename.clone())
+        .collect();
+    if !js_files.is_empty() {
+        runners.push(Box::new(EslintRunner { files: js_files }));
     }
 
     let shell_files: Vec<String> = surviving
@@ -70,6 +80,13 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
 
 fn has_python_ext(name: &str) -> bool {
     name.ends_with(".py")
+}
+
+fn has_js_ext(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [".js", ".jsx", ".ts", ".tsx", ".cjs", ".mjs"]
+        .iter()
+        .any(|ext| lower.ends_with(ext))
 }
 
 fn has_shell_ext(name: &str) -> bool {
@@ -146,11 +163,31 @@ mod tests {
             cf("b.sh", "modified"),
             cf("Dockerfile", "modified"),
             cf("c.md", "modified"),
+            cf("ui/d.tsx", "modified"),
         ];
         let runners = select_runners(&files);
         let mut got = names(&runners);
         got.sort();
-        assert_eq!(got, vec!["hadolint", "markdownlint", "ruff", "shellcheck"]);
+        assert_eq!(
+            got,
+            vec!["eslint", "hadolint", "markdownlint", "ruff", "shellcheck"]
+        );
+    }
+
+    #[test]
+    fn javascript_typescript_extensions_select_eslint() {
+        for name in [
+            "src/a.js",
+            "src/b.jsx",
+            "src/c.ts",
+            "src/d.tsx",
+            "src/e.cjs",
+            "src/f.mjs",
+        ] {
+            let files = vec![cf(name, "modified")];
+            let runners = select_runners(&files);
+            assert_eq!(names(&runners), vec!["eslint"], "name = {name}");
+        }
     }
 
     #[test]

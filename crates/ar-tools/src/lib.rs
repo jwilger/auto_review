@@ -9,6 +9,7 @@
 //! markdownlint) running directly against the repo. Milestone 3 introduces
 //! the OCI sandbox; runners are unchanged but execution moves into the jail.
 
+pub mod eslint;
 pub mod finding;
 pub mod hadolint;
 pub mod markdownlint;
