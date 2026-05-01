@@ -1,4 +1,6 @@
-use crate::types::{ChangedFile, CommitStatus, CreateReviewRequest};
+use crate::types::{
+    ChangedFile, CommitStatus, CreateReviewRequest, CreateWebhookRequest, CreatedWebhook,
+};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -116,6 +118,18 @@ impl Client {
             });
         }
         Ok(())
+    }
+
+    /// Register a webhook on a repository so it POSTs PR events to
+    /// `request.config.url`. `secret` is what the gateway HMAC-verifies.
+    pub async fn create_webhook(
+        &self,
+        owner: &str,
+        repo: &str,
+        request: &CreateWebhookRequest,
+    ) -> Result<CreatedWebhook, Error> {
+        let url = self.url(&format!("repos/{owner}/{repo}/hooks"))?;
+        json_post(&self.http, url, request).await
     }
 }
 
@@ -264,6 +278,36 @@ mod tests {
             .post_commit_status("o", "r", "abc123", &status)
             .await
             .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn create_webhook_posts_expected_body() {
+        let (server, client) = mock_client().await;
+        let req = crate::types::CreateWebhookRequest {
+            kind: "forgejo".into(),
+            config: crate::types::WebhookConfig {
+                url: "https://reviewer.example.com/webhooks/forgejo".into(),
+                content_type: "json".into(),
+                secret: "shh".into(),
+            },
+            events: vec!["pull_request".into()],
+            active: true,
+        };
+
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/hooks"))
+            .and(body_json(&req))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 7,
+                "active": true,
+                "events": ["pull_request"]
+            })))
+            .mount(&server)
+            .await;
+
+        let created = client.create_webhook("o", "r", &req).await.expect("ok");
+        assert_eq!(created.id, 7);
+        assert!(created.active);
     }
 
     #[tokio::test]

@@ -7,11 +7,15 @@
 //! - `POST /repos/{owner}/{repo}/statuses/{sha}` → commit status
 
 pub mod client;
+pub mod init;
 pub mod types;
 pub mod webhook;
 
 pub use client::{Client, Error};
+pub use init::InitClient;
 pub use types::{
-    ChangedFile, CommitStatus, CommitStatusState, CreateReviewRequest, ReviewComment, ReviewEvent,
+    ChangedFile, CommitStatus, CommitStatusState, CreateAccessTokenRequest, CreateReviewRequest,
+    CreateWebhookRequest, CreatedAccessToken, CreatedWebhook, ReviewComment, ReviewEvent,
+    WebhookConfig,
 };
 pub use webhook::{PullRequestAction, PullRequestEvent};

@@ -59,3 +59,46 @@ pub struct CommitStatus {
     pub description: String,
     pub context: String,
 }
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateAccessTokenRequest {
+    pub name: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CreatedAccessToken {
+    pub id: u64,
+    pub name: String,
+    /// The actual token secret. Forgejo returns it once at creation time;
+    /// callers must save it immediately.
+    pub sha1: String,
+    #[serde(default)]
+    pub scopes: Vec<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct CreateWebhookRequest {
+    #[serde(rename = "type")]
+    pub kind: String,
+    pub config: WebhookConfig,
+    pub events: Vec<String>,
+    pub active: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct WebhookConfig {
+    pub url: String,
+    pub content_type: String,
+    pub secret: String,
+}
+
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct CreatedWebhook {
+    pub id: u64,
+    #[serde(default)]
+    pub active: bool,
+    #[serde(default)]
+    pub events: Vec<String>,
+}
