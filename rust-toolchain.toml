@@ -1,18 +1,20 @@
 [toolchain]
 # Pinned single source of truth for the project's Rust toolchain.
 #
-# 1.88 is the floor required by the current dep tree:
-#   - rpassword 7.5.1 uses `let`-chains in if conditions (1.88)
-#   - idna / icu_* (via url 2.5) need 1.86
-# The previous channel pin (`stable`) drifted across rebuilds
-# and let CI's `rust:1.85-slim-bookworm` image fail to compile
-# while local dev on 1.94 looked fine.
+# `nightly` because auto_review is an application we control end-
+# to-end, not a library: there's no MSRV obligation, and we want
+# newer compiler optimizations, stricter clippy lints, and access
+# to language features as they land. The text "nightly" looks
+# floating, but the *actual* resolved toolchain is locked by
+# `flake.lock`'s rust-overlay revision — every dev shell and CI
+# job picks up the same nightly snapshot bit-for-bit until you
+# explicitly run `nix flake update`.
 #
 # The flake reads this file via `rust-overlay`'s
 # `fromRustupToolchainFile`; the dev shell, every `nix flake
-# check`, and CI all use the same toolchain. Bumping here
-# propagates everywhere — no separate Docker-image pin to keep in
-# sync.
-channel = "1.88"
-components = ["rustfmt", "clippy", "rust-src"]
+# check`, and CI all use the same toolchain. Bumping is done by
+# running `nix flake update rust-overlay` and committing the
+# resulting `flake.lock` change.
+channel = "nightly"
+components = ["rustfmt", "clippy", "rust-src", "rust-analyzer"]
 profile = "minimal"

@@ -77,8 +77,8 @@ pub async fn embed_symbols(
 
     let out = symbols
         .iter()
-        .zip(snippets.into_iter())
-        .zip(vectors.into_iter())
+        .zip(snippets)
+        .zip(vectors)
         .map(|((sym, content), embedding)| EmbeddedSymbol {
             indexed: sym.clone(),
             content,
