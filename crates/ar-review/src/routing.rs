@@ -9,6 +9,7 @@ use ar_tools::bandit::BanditRunner;
 use ar_tools::biome::BiomeRunner;
 use ar_tools::buf::BufRunner;
 use ar_tools::checkov::CheckovRunner;
+use ar_tools::cppcheck::CppcheckRunner;
 use ar_tools::dotenv_linter::DotenvLinterRunner;
 use ar_tools::eslint::EslintRunner;
 use ar_tools::gitleaks::GitleaksRunner;
@@ -159,6 +160,15 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         .collect();
     if !php_files.is_empty() {
         runners.push(Box::new(PhpstanRunner { files: php_files }));
+    }
+
+    let c_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| has_c_ext(&f.filename))
+        .map(|f| f.filename.clone())
+        .collect();
+    if !c_files.is_empty() {
+        runners.push(Box::new(CppcheckRunner { files: c_files }));
     }
 
     let js_files: Vec<String> = surviving
@@ -327,6 +337,15 @@ fn has_php_ext(name: &str) -> bool {
         || name.ends_with(".php5")
         || name.ends_with(".php7")
         || name.ends_with(".phps")
+}
+
+fn has_c_ext(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        ".c", ".cc", ".cpp", ".cxx", ".c++", ".h", ".hh", ".hpp", ".hxx", ".h++",
+    ]
+    .iter()
+    .any(|ext| lower.ends_with(ext))
 }
 
 fn has_terraform_ext(name: &str) -> bool {
@@ -775,6 +794,36 @@ mod tests {
                     "gitleaks",
                     "osv-scanner",
                     "phpstan",
+                    "semgrep",
+                    "trivy",
+                    "typos"
+                ],
+                "name = {name}"
+            );
+        }
+    }
+
+    #[test]
+    fn c_and_cpp_files_select_cppcheck() {
+        for name in [
+            "src/main.c",
+            "src/util.cpp",
+            "src/parse.cc",
+            "src/x.cxx",
+            "include/lib.h",
+            "include/lib.hpp",
+        ] {
+            let files = vec![cf(name, "modified")];
+            let runners = select_runners(&files);
+            let mut got = names(&runners);
+            got.sort();
+            assert_eq!(
+                got,
+                vec![
+                    "ast-grep",
+                    "cppcheck",
+                    "gitleaks",
+                    "osv-scanner",
                     "semgrep",
                     "trivy",
                     "typos"

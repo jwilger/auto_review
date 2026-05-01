@@ -15,6 +15,7 @@ pub mod bandit;
 pub mod biome;
 pub mod buf;
 pub mod checkov;
+pub mod cppcheck;
 pub mod dotenv_linter;
 pub mod eslint;
 pub mod finding;

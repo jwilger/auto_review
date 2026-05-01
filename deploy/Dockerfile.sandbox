@@ -14,11 +14,11 @@
 # Forgejo token / LLM creds / learnings DB.
 #
 # Linter set (in alphabetical order):
-#   actionlint, ast-grep, bandit, biome, buf, checkov, dotenv-linter,
-#   eslint, gitleaks, golangci-lint, hadolint, kubeconform,
-#   markdownlint, mypy, osv-scanner, oxlint, phpstan, rubocop, ruff,
-#   semgrep, shellcheck, sqlfluff, swiftlint, taplo, trivy, typos,
-#   vale, yamllint
+#   actionlint, ast-grep, bandit, biome, buf, checkov, cppcheck,
+#   dotenv-linter, eslint, gitleaks, golangci-lint, hadolint,
+#   kubeconform, markdownlint, mypy, osv-scanner, oxlint, phpstan,
+#   rubocop, ruff, semgrep, shellcheck, sqlfluff, swiftlint, taplo,
+#   trivy, typos, vale, yamllint
 #
 # All entrypoints stay on PATH so the orchestrator can invoke them by
 # bare name (e.g. `ruff`, `shellcheck`).
@@ -32,6 +32,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         # debian-packaged linters
         shellcheck \
         yamllint \
+        cppcheck \
         # interpreters used by linters that ship as scripts
         nodejs npm \
         python3 python3-pip \

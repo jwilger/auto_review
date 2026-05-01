@@ -44,7 +44,7 @@ since the start of the project.
   `run_review_job` posts pending → final commit statuses around the
   triage → clone → lint → review → post sequence.
 
-#### Linters (28 of CodeRabbit's ~45 set)
+#### Linters (29 of CodeRabbit's ~45 set)
 
 | Tool | Languages / files | Source-tool name |
 |---|---|---|
@@ -65,6 +65,7 @@ since the start of the project.
 | `phpstan` | PHP (.php / .phtml / .php3-7 / .phps) | `phpstan` |
 | `swiftlint` | Swift (.swift) | `swiftlint` |
 | `buf` | Protocol Buffers (.proto) | `buf` |
+| `cppcheck` | C / C++ static analysis (.c/.cpp/.cc/.cxx/.h/.hpp/…) | `cppcheck` |
 | `shellcheck` | Bash / sh | `shellcheck` |
 | `hadolint` | Dockerfiles | `hadolint` |
 | `markdownlint` | `*.md` / `*.markdown` | `markdownlint` |
@@ -274,7 +275,7 @@ default in-memory store to the SQLite-backed one.
   paths cover correctness; LanceDB is the scale lever).
 - youki-based `Sandbox` impl as a lighter alternative to the
   podman shell-out.
-- Remaining ~17 linters from CodeRabbit's set
+- Remaining ~16 linters from CodeRabbit's set
   (languagetool, terragrunt, detekt, prettier-check, helm-lint, …).
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
