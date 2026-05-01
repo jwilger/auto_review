@@ -196,10 +196,7 @@ async fn main() -> Result<()> {
     // a burst of N PRs spawns N tmpdirs + N in-flight LLM calls.
     // For high-traffic instances or expensive cloud LLMs the
     // operator wants a cap; small deployments leave it unset.
-    if let Some(max) = env::var("AR_REVIEW_CONCURRENCY")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-    {
+    if let Some(max) = parse_env::<usize>("AR_REVIEW_CONCURRENCY") {
         dispatcher_builder = dispatcher_builder.with_concurrency_limit(max);
         tracing::info!(max, "review concurrency cap enabled");
     }
@@ -210,10 +207,8 @@ async fn main() -> Result<()> {
     // mentions. Forgejo doesn't fire pull_request_review_comment
     // webhooks reliably for thread replies (gitea#26023), so we
     // poll. Disabled when AR_POLL_INTERVAL_SECS=0.
-    let poll_interval_secs = env::var("AR_POLL_INTERVAL_SECS")
-        .ok()
-        .and_then(|s| s.parse::<u64>().ok())
-        .unwrap_or(DEFAULT_POLL_INTERVAL.as_secs());
+    let poll_interval_secs =
+        parse_env::<u64>("AR_POLL_INTERVAL_SECS").unwrap_or(DEFAULT_POLL_INTERVAL.as_secs());
     if poll_interval_secs > 0 {
         let dispatcher_dyn: Arc<dyn ar_orchestrator::JobDispatcher> = dispatcher.clone();
         ChatPoller::new(
@@ -247,10 +242,7 @@ async fn main() -> Result<()> {
     // handler uses. The TTL (default 10s) is tuneable via env so
     // operators with aggressive k8s probe schedules can lengthen it
     // to avoid hammering Forgejo.
-    let readiness_ttl_secs = env::var("AR_READINESS_TTL_SECS")
-        .ok()
-        .and_then(|s| s.parse().ok())
-        .unwrap_or(10);
+    let readiness_ttl_secs = parse_env::<u64>("AR_READINESS_TTL_SECS").unwrap_or(10);
     let readiness = Arc::new(ReadinessProbe::with_ttl(
         forgejo.clone(),
         Duration::from_secs(readiness_ttl_secs),
@@ -304,10 +296,7 @@ async fn main() -> Result<()> {
     // Webhook delivery dedup. On by default with a 256-ID LRU;
     // operators can override via AR_DEDUP_CAPACITY (set to 0 to
     // disable, e.g. for tests that want every delivery dispatched).
-    let dedup_capacity = env::var("AR_DEDUP_CAPACITY")
-        .ok()
-        .and_then(|s| s.parse::<usize>().ok())
-        .unwrap_or(256);
+    let dedup_capacity = parse_env::<usize>("AR_DEDUP_CAPACITY").unwrap_or(256);
     if dedup_capacity > 0 {
         let dedup = Arc::new(RecentDeliveries::new(dedup_capacity));
         state = state.with_webhook_dedup(dedup);
@@ -320,12 +309,8 @@ async fn main() -> Result<()> {
     // vars. The intended values for a self-host fronting a single
     // Forgejo instance are tens of req/s and a burst around 30 —
     // legitimate Forgejo traffic is well under that.
-    let rate_per_sec = env::var("AR_WEBHOOK_RATE_PER_SEC")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok());
-    let burst = env::var("AR_WEBHOOK_BURST")
-        .ok()
-        .and_then(|s| s.parse::<u32>().ok());
+    let rate_per_sec = parse_env::<u32>("AR_WEBHOOK_RATE_PER_SEC");
+    let burst = parse_env::<u32>("AR_WEBHOOK_BURST");
     match (rate_per_sec, burst) {
         (Some(rate), Some(burst)) => {
             let bucket = Arc::new(TokenBucket::new(burst, rate));
@@ -441,24 +426,37 @@ fn read_non_empty_env(name: &str) -> Option<String> {
     }
 }
 
+/// Parse an env var as an integer, distinguishing "unset" from
+/// "set but unparseable". The previous `.parse::<X>().ok()` pattern
+/// silently swallowed garbage values like `AR_REVIEW_CONCURRENCY=ten`,
+/// leaving the operator with no signal that their config didn't take
+/// effect. This warn-and-fall-through variant surfaces the typo.
+fn parse_env<T>(name: &str) -> Option<T>
+where
+    T: std::str::FromStr,
+    <T as std::str::FromStr>::Err: std::fmt::Display,
+{
+    let raw = read_non_empty_env(name)?;
+    match raw.parse::<T>() {
+        Ok(v) => Some(v),
+        Err(e) => {
+            tracing::warn!(
+                env = name,
+                value = %raw,
+                error = %e,
+                "env var set to an unparseable value; using the built-in default"
+            );
+            None
+        }
+    }
+}
+
 fn build_sandbox() -> Result<Arc<dyn Sandbox>> {
     if let Some(image) = read_non_empty_env("AR_SANDBOX_IMAGE") {
-        let memory_mib = env::var("AR_SANDBOX_MEMORY_MIB")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(512);
-        let cpus = env::var("AR_SANDBOX_CPUS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(1.0);
-        let pids_limit = env::var("AR_SANDBOX_PIDS_LIMIT")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(128);
-        let wall_clock_secs = env::var("AR_SANDBOX_TIMEOUT_SECS")
-            .ok()
-            .and_then(|s| s.parse().ok())
-            .unwrap_or(60);
+        let memory_mib = parse_env::<u64>("AR_SANDBOX_MEMORY_MIB").unwrap_or(512);
+        let cpus = parse_env::<f64>("AR_SANDBOX_CPUS").unwrap_or(1.0);
+        let pids_limit = parse_env::<u32>("AR_SANDBOX_PIDS_LIMIT").unwrap_or(128);
+        let wall_clock_secs = parse_env::<u64>("AR_SANDBOX_TIMEOUT_SECS").unwrap_or(60);
         let podman_bin = env::var("AR_SANDBOX_PODMAN_BIN").unwrap_or_else(|_| "podman".into());
         let cfg = PodmanSandboxConfig {
             image: image.clone(),
