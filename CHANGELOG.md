@@ -1096,6 +1096,25 @@ default in-memory store to the SQLite-backed one.
   forget-learning behavioural (drop existing record,
   unknown-id errors clearly).
 
+#### Grafana dashboard: Quality and capacity row
+
+- New row + two panels covering the recently-shipped quality
+  and concurrency metrics:
+  - **Verifier hallucination ratio** —
+    `verifier_findings_dropped / (review_findings_sum + dropped)`
+    rendered as a percentunit gauge with green/yellow/red
+    thresholds at 0.0/0.2/0.3 (matching the OPERATIONS.md
+    action threshold).
+  - **Concurrency cap saturation** —
+    `queue_waits / reviews_started` rendered with thresholds
+    at 0.0/0.05/0.1 (matching the
+    `AutoReviewQueueSaturation` alert's 0.10 trigger).
+- Both panels use `clamp_min(.., 0.0001)` on the denominator
+  so an idle deployment shows 0% rather than NaN.
+- Total panel count: 13 (was 11). The contract test
+  (`shipped_grafana_dashboard_only_references_real_metrics`)
+  verifies the new panel queries reference real metrics.
+
 #### Prometheus alert: AutoReviewQueueSaturation
 
 - New alert in

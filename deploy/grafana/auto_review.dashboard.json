@@ -253,6 +253,62 @@
         {"expr": "rate(auto_review_poll_chat_failures_total[5m])", "legendFormat": "chat-handler failures", "refId": "D"}
       ],
       "fieldConfig": {"defaults": {"unit": "reqps"}}
+    },
+    {
+      "type": "row",
+      "title": "Quality and capacity",
+      "gridPos": {"h": 1, "w": 24, "x": 0, "y": 42},
+      "panels": []
+    },
+    {
+      "type": "timeseries",
+      "title": "Verifier hallucination ratio",
+      "description": "Fraction of reasoning-model findings the cheap-tier verifier dropped. > ~0.30 sustained means the reasoning model is hallucinating heavily; switch to a higher-quality model or tighten the system prompt.",
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 43},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "rate(auto_review_verifier_findings_dropped_total[5m]) / clamp_min(rate(auto_review_review_findings_sum[5m]) + rate(auto_review_verifier_findings_dropped_total[5m]), 0.0001)", "legendFormat": "drop ratio", "refId": "A"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": 0},
+              {"color": "yellow", "value": 0.2},
+              {"color": "red", "value": 0.3}
+            ]
+          }
+        }
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Concurrency cap saturation",
+      "description": "Fraction of dispatched reviews that had to wait on the AR_REVIEW_CONCURRENCY semaphore before starting. > ~0.10 sustained drives the AutoReviewQueueSaturation alert. Stays at 0 when the cap is unset.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 43},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "rate(auto_review_review_queue_waits_total[5m]) / clamp_min(rate(auto_review_reviews_started_total[5m]), 0.0001)", "legendFormat": "queue ratio", "refId": "A"}
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "min": 0,
+          "max": 1,
+          "thresholds": {
+            "mode": "absolute",
+            "steps": [
+              {"color": "green", "value": 0},
+              {"color": "yellow", "value": 0.05},
+              {"color": "red", "value": 0.1}
+            ]
+          }
+        }
+      }
     }
   ],
   "refresh": "30s",
