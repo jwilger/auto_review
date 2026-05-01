@@ -42,6 +42,12 @@ pub struct Metrics {
     pub reviews_failed_workspace: AtomicU64,
     pub reviews_failed_llm: AtomicU64,
     pub reviews_failed_unhealable: AtomicU64,
+    /// Failure classes we don't recognise. Routes here instead of
+    /// silently misbucketing into `reviews_failed_unhealable`. Drift
+    /// alarm: a non-zero value means the orchestrator's
+    /// `error_class()` returned a string this metrics sink wasn't
+    /// updated to handle.
+    pub reviews_failed_unknown: AtomicU64,
     pub reviews_skipped_same_sha: AtomicU64,
     pub reviews_skipped_trivial: AtomicU64,
     pub reviews_skipped_disabled: AtomicU64,
@@ -154,7 +160,15 @@ impl Metrics {
             "forgejo" => &self.reviews_failed_forgejo,
             "workspace" => &self.reviews_failed_workspace,
             "llm" => &self.reviews_failed_llm,
-            _ => &self.reviews_failed_unhealable,
+            "unhealable" => &self.reviews_failed_unhealable,
+            other => {
+                tracing::warn!(
+                    error_class = other,
+                    "unknown review failure class; routing to reviews_failed_unknown — \
+                     update the metrics map to track this class explicitly"
+                );
+                &self.reviews_failed_unknown
+            }
         };
         counter.fetch_add(1, Ordering::Relaxed);
         self.reviews_completed_count.fetch_add(1, Ordering::Relaxed);
@@ -308,6 +322,11 @@ impl Metrics {
                 "auto_review_reviews_failed_unhealable_total",
                 "Review jobs whose LLM output never satisfied the schema validator after the self-heal retry budget.",
                 &self.reviews_failed_unhealable,
+            ),
+            (
+                "auto_review_reviews_failed_unknown_total",
+                "Review jobs that failed for an error class this metrics sink doesn't recognise. Non-zero indicates orchestrator/metrics drift; update the failure-class map.",
+                &self.reviews_failed_unknown,
             ),
             (
                 "auto_review_reviews_skipped_same_sha_total",
@@ -826,6 +845,46 @@ mod tests {
         assert!(out.contains("auto_review_reviews_completed_count 4\n"));
         // 3 + 1 = 4 findings across the two successes.
         assert!(out.contains("auto_review_review_findings_sum 4\n"));
+    }
+
+    #[test]
+    fn unknown_failure_class_routes_to_unknown_bucket_not_unhealable() {
+        // Defense-in-depth: a new error_class string from
+        // ar-orchestrator must NOT silently land in
+        // reviews_failed_unhealable. Unknown classes go to a separate
+        // bucket so operators can alert on the drift.
+        let m = Metrics::new();
+        m.record_review_failed(100, "definitely_not_a_real_class");
+        let out = m.render();
+        assert!(
+            out.contains("auto_review_reviews_failed_unknown_total 1\n"),
+            "unknown class should bucket to failed_unknown, got:\n{out}"
+        );
+        assert!(
+            out.contains("auto_review_reviews_failed_unhealable_total 0\n"),
+            "unknown class must not land in failed_unhealable (silent misclassification), got:\n{out}"
+        );
+        assert!(out.contains("auto_review_reviews_failed_forgejo_total 0\n"));
+        assert!(out.contains("auto_review_reviews_failed_workspace_total 0\n"));
+        assert!(out.contains("auto_review_reviews_failed_llm_total 0\n"));
+        // Duration and completed-count still track unknown failures.
+        assert!(out.contains("auto_review_reviews_completed_count 1\n"));
+        assert!(out.contains("auto_review_review_duration_ms_sum 100\n"));
+    }
+
+    #[test]
+    fn known_failure_classes_route_to_their_dedicated_buckets() {
+        let m = Metrics::new();
+        m.record_review_failed(10, "forgejo");
+        m.record_review_failed(20, "workspace");
+        m.record_review_failed(30, "llm");
+        m.record_review_failed(40, "unhealable");
+        let out = m.render();
+        assert!(out.contains("auto_review_reviews_failed_forgejo_total 1\n"));
+        assert!(out.contains("auto_review_reviews_failed_workspace_total 1\n"));
+        assert!(out.contains("auto_review_reviews_failed_llm_total 1\n"));
+        assert!(out.contains("auto_review_reviews_failed_unhealable_total 1\n"));
+        assert!(out.contains("auto_review_reviews_failed_unknown_total 0\n"));
     }
 
     #[test]
