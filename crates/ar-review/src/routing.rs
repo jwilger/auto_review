@@ -26,6 +26,7 @@ use ar_tools::osv_scanner::OsvScannerRunner;
 use ar_tools::oxlint::OxlintRunner;
 use ar_tools::phpstan::PhpstanRunner;
 use ar_tools::pmd::PmdRunner;
+use ar_tools::prettier::PrettierRunner;
 use ar_tools::pylint::PylintRunner;
 use ar_tools::rubocop::RubocopRunner;
 use ar_tools::ruff::RuffRunner;
@@ -304,6 +305,21 @@ pub fn select_runners(files: &[ChangedFile]) -> Vec<Box<dyn LinterRunner>> {
         runners.push(Box::new(HtmlhintRunner { files: html_files }));
     }
 
+    // prettier covers formatting drift across most of our linted
+    // file types — orthogonal to biome/eslint/oxlint (semantics)
+    // and stylelint/markdownlint (rule violations). Run on the
+    // union of file types prettier supports out of the box.
+    let prettier_files: Vec<String> = surviving
+        .iter()
+        .filter(|f| has_prettier_ext(&f.filename))
+        .map(|f| f.filename.clone())
+        .collect();
+    if !prettier_files.is_empty() {
+        runners.push(Box::new(PrettierRunner {
+            files: prettier_files,
+        }));
+    }
+
     // buf reads its module config (`buf.yaml`) from the workspace
     // root and lints every .proto in the module — passing per-file
     // args isn't its idiom. Always run when there's a .proto in
@@ -417,6 +433,34 @@ fn has_css_ext(name: &str) -> bool {
     [".css", ".scss", ".sass", ".less"]
         .iter()
         .any(|ext| lower.ends_with(ext))
+}
+
+fn has_prettier_ext(name: &str) -> bool {
+    let lower = name.to_ascii_lowercase();
+    [
+        ".js",
+        ".jsx",
+        ".ts",
+        ".tsx",
+        ".cjs",
+        ".mjs",
+        ".css",
+        ".scss",
+        ".less",
+        ".html",
+        ".htm",
+        ".vue",
+        ".json",
+        ".jsonc",
+        ".yml",
+        ".yaml",
+        ".md",
+        ".markdown",
+        ".graphql",
+        ".gql",
+    ]
+    .iter()
+    .any(|ext| lower.ends_with(ext))
 }
 
 fn has_terraform_ext(name: &str) -> bool {
@@ -620,7 +664,7 @@ mod tests {
     }
 
     #[test]
-    fn markdown_files_select_markdownlint_and_vale() {
+    fn markdown_files_select_markdownlint_vale_and_prettier() {
         let files = vec![cf("README.md", "modified")];
         let runners = select_runners(&files);
         let mut got = names(&runners);
@@ -632,6 +676,7 @@ mod tests {
                 "gitleaks",
                 "markdownlint",
                 "osv-scanner",
+                "prettier",
                 "semgrep",
                 "trivy",
                 "typos",
@@ -665,6 +710,7 @@ mod tests {
                 "mypy",
                 "osv-scanner",
                 "oxlint",
+                "prettier",
                 "pylint",
                 "ruff",
                 "semgrep",
@@ -696,6 +742,7 @@ mod tests {
                     "gitleaks",
                     "kubeconform",
                     "osv-scanner",
+                    "prettier",
                     "semgrep",
                     "trivy",
                     "typos",
@@ -720,6 +767,7 @@ mod tests {
                 "gitleaks",
                 "kubeconform",
                 "osv-scanner",
+                "prettier",
                 "semgrep",
                 "trivy",
                 "typos",
@@ -730,7 +778,7 @@ mod tests {
     }
 
     #[test]
-    fn javascript_typescript_extensions_select_eslint_biome_and_oxlint() {
+    fn javascript_typescript_extensions_select_eslint_biome_oxlint_and_prettier() {
         for name in [
             "src/a.js",
             "src/b.jsx",
@@ -752,6 +800,7 @@ mod tests {
                     "gitleaks",
                     "osv-scanner",
                     "oxlint",
+                    "prettier",
                     "semgrep",
                     "trivy",
                     "typos"
@@ -956,7 +1005,8 @@ mod tests {
 
     #[test]
     fn html_files_select_htmlhint() {
-        for name in ["public/index.html", "site/about.htm", "doc/page.xhtml"] {
+        // .html and .htm are also prettier-supported. .xhtml isn't.
+        for name in ["public/index.html", "site/about.htm"] {
             let files = vec![cf(name, "modified")];
             let runners = select_runners(&files);
             let mut got = names(&runners);
@@ -968,6 +1018,7 @@ mod tests {
                     "gitleaks",
                     "htmlhint",
                     "osv-scanner",
+                    "prettier",
                     "semgrep",
                     "trivy",
                     "typos"
@@ -975,14 +1026,32 @@ mod tests {
                 "name = {name}"
             );
         }
+        // .xhtml: htmlhint covers it, prettier does not.
+        let files = vec![cf("doc/page.xhtml", "modified")];
+        let runners = select_runners(&files);
+        let mut got = names(&runners);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "ast-grep",
+                "gitleaks",
+                "htmlhint",
+                "osv-scanner",
+                "semgrep",
+                "trivy",
+                "typos"
+            ]
+        );
     }
 
     #[test]
     fn css_files_select_stylelint() {
+        // .sass isn't a prettier extension; pin separately so the
+        // expectations stay accurate for both groups.
         for name in [
             "src/styles/main.css",
             "src/styles/theme.scss",
-            "src/styles/old.sass",
             "src/styles/legacy.less",
         ] {
             let files = vec![cf(name, "modified")];
@@ -995,6 +1064,7 @@ mod tests {
                     "ast-grep",
                     "gitleaks",
                     "osv-scanner",
+                    "prettier",
                     "semgrep",
                     "stylelint",
                     "trivy",
@@ -1003,6 +1073,23 @@ mod tests {
                 "name = {name}"
             );
         }
+        // .sass: stylelint covers it, prettier does not.
+        let files = vec![cf("src/styles/old.sass", "modified")];
+        let runners = select_runners(&files);
+        let mut got = names(&runners);
+        got.sort();
+        assert_eq!(
+            got,
+            vec![
+                "ast-grep",
+                "gitleaks",
+                "osv-scanner",
+                "semgrep",
+                "stylelint",
+                "trivy",
+                "typos"
+            ]
+        );
     }
 
     #[test]

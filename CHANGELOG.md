@@ -44,7 +44,7 @@ since the start of the project.
   `run_review_job` posts pending → final commit statuses around the
   triage → clone → lint → review → post sequence.
 
-#### Linters (38 of CodeRabbit's ~45 set)
+#### Linters (39 of CodeRabbit's ~45 set)
 
 | Tool | Languages / files | Source-tool name |
 |---|---|---|
@@ -64,6 +64,7 @@ since the start of the project.
 | `oxlint` | JS / JSX / TS / TSX / CJS / MJS (Rust rewrite of eslint) | `oxlint` |
 | `stylelint` | CSS / SCSS / Sass / Less | `stylelint` |
 | `htmlhint` | HTML (.html / .htm / .xhtml) | `htmlhint` |
+| `prettier` | Format-drift across JS/TS/CSS/HTML/JSON/YAML/Markdown/GraphQL | `prettier` |
 | `golangci-lint` | Go (errcheck, govet, staticcheck, …) | `golangci-lint` |
 | `gosec` | Go security scanner (subprocess injection, weak crypto, …) | `gosec` |
 | `staticcheck` | Go static analysis (deprecation, simplification, …) | `staticcheck` |
@@ -284,8 +285,8 @@ default in-memory store to the SQLite-backed one.
   paths cover correctness; LanceDB is the scale lever).
 - youki-based `Sandbox` impl as a lighter alternative to the
   podman shell-out.
-- Remaining ~7 linters from CodeRabbit's set
-  (languagetool, prettier-check, helm-lint, shfmt, jsonlint, …).
+- Remaining ~6 linters from CodeRabbit's set
+  (languagetool, helm-lint, shfmt, jsonlint, vint, nilaway).
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
   wiremock + canned LLM providers.
