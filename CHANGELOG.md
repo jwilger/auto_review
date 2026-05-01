@@ -294,6 +294,12 @@ default in-memory store to the SQLite-backed one.
   (languagetool — Java HTTP server, complex setup; deferred).
   At 44 bundled the project has covered nearly every concrete
   linter the feasibility study itemized.
+- A larger labelled-corpus benchmark — the harness now scores
+  precision/recall against `expected` labels, but the corpus
+  itself is minimum-viable (one labelled fixture). Growing it
+  past the ~50-PR threshold where precision/recall numbers
+  become statistically meaningful is curation work, not
+  autonomous-doable.
 - Real-world end-to-end verification on a live Forgejo + LLM;
   everything to date has been unit/integration-tested with
   wiremock + canned LLM providers.
@@ -416,5 +422,14 @@ default in-memory store to the SQLite-backed one.
   findings counts and latency, plus an aggregate
   (successes/failures, totals, mean/median/p99 latency).
   `--json` emits the aggregate as a single line of JSON for
-  piping into a regression dashboard. Two starter fixtures
-  ship under `bench/fixtures/`.
+  piping into a regression dashboard. Three starter fixtures
+  ship under `bench/fixtures/` (one labelled).
+- **Labelled-corpus scoring**: fixtures with an `expected`
+  array of `{path, line, note?}` entries get precision/recall
+  scored against the model's findings, matched by
+  `(path, line)`. The aggregate report adds a "Label scoring"
+  section with matched/missed/spurious counts and
+  precision/recall figures. Each expected entry is matched at
+  most once (duplicate model findings at the same coordinate
+  count as spurious), so the precision number penalises
+  noise correctly.

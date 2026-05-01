@@ -12,6 +12,7 @@
 use crate::cli::BenchArgs;
 use anyhow::{Context, Result};
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
+use ar_prompts::ReviewOutput;
 use ar_prompts::{render_review_prompt, system_prompt, ReviewPromptInputs};
 use ar_review::{generate_with_self_heal, verify_findings, HealConfig};
 use ar_tools::Finding;
@@ -39,6 +40,25 @@ pub struct Fixture {
     pub guidelines: String,
     #[serde(default)]
     pub repo_context: String,
+    /// Optional ground-truth findings the reviewer is expected to
+    /// surface. When present, the bench harness computes
+    /// precision/recall against them by matching on (path, line).
+    #[serde(default)]
+    pub expected: Vec<ExpectedFinding>,
+}
+
+/// One ground-truth finding for a labelled fixture. We match by
+/// (path, line) — the LLM's exact wording will vary across runs and
+/// models, so message-equality isn't useful for scoring. `note` is
+/// for human readers (the JSON file) only; it doesn't influence
+/// scoring and isn't read at runtime.
+#[derive(Debug, Clone, Deserialize, Default)]
+pub struct ExpectedFinding {
+    pub path: String,
+    pub line: u32,
+    #[serde(default)]
+    #[allow(dead_code)]
+    pub note: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -48,6 +68,22 @@ struct FixtureResult {
     findings_after_verify: usize,
     latency_ms: u128,
     error: Option<String>,
+    /// Per-fixture precision/recall stats. `None` when the fixture
+    /// has no `expected` array (regression-tracking only).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label_match: Option<LabelMatch>,
+}
+
+/// Confusion-matrix-style match against a fixture's labelled
+/// `expected` findings. `kept` and `missed` partition the expected
+/// set; `spurious` is the count of model findings that weren't in
+/// the expected set.
+#[derive(Debug, Clone, Serialize)]
+struct LabelMatch {
+    expected: usize,
+    matched: usize,
+    missed: usize,
+    spurious: usize,
 }
 
 #[derive(Debug, Serialize)]
@@ -60,6 +96,28 @@ struct Aggregate {
     mean_latency_ms: u128,
     median_latency_ms: u128,
     p99_latency_ms: u128,
+    /// Aggregate precision/recall over fixtures that carry
+    /// `expected` labels. `None` when no fixture is labelled.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    label_score: Option<LabelScore>,
+}
+
+/// Aggregate precision/recall across all labelled fixtures in a
+/// run. Computed only over fixtures whose `expected` array is
+/// non-empty; unlabelled fixtures don't contribute.
+#[derive(Debug, Clone, Serialize)]
+struct LabelScore {
+    labelled_fixtures: usize,
+    expected_total: usize,
+    matched_total: usize,
+    missed_total: usize,
+    spurious_total: usize,
+    /// matched / (matched + spurious) — fraction of model findings
+    /// that lined up with a labelled-expected one.
+    precision: f64,
+    /// matched / (matched + missed) — fraction of labelled-expected
+    /// findings the model actually surfaced.
+    recall: f64,
 }
 
 pub async fn run(args: BenchArgs) -> Result<()> {
@@ -142,6 +200,7 @@ async fn run_one(path: &Path, llm: &LlmRouter, verifier_enabled: bool) -> Fixtur
                 findings_after_verify: 0,
                 latency_ms: 0,
                 error: Some(format!("read fixture: {e}")),
+                label_match: None,
             };
         }
     };
@@ -154,6 +213,7 @@ async fn run_one(path: &Path, llm: &LlmRouter, verifier_enabled: bool) -> Fixtur
                 findings_after_verify: 0,
                 latency_ms: 0,
                 error: Some(format!("parse fixture: {e}")),
+                label_match: None,
             };
         }
     };
@@ -181,14 +241,15 @@ async fn run_one(path: &Path, llm: &LlmRouter, verifier_enabled: bool) -> Fixtur
                     findings_after_verify: 0,
                     latency_ms: started.elapsed().as_millis(),
                     error: Some(format!("review LLM call failed: {e}")),
+                    label_match: None,
                 };
             }
         };
     let findings_initial = initial.findings.len();
 
-    let after_verify = if verifier_enabled {
+    let scored_output = if verifier_enabled {
         match verify_findings(llm, initial, &fixture.diff).await {
-            Ok(o) => o.findings.len(),
+            Ok(o) => o,
             Err(e) => {
                 return FixtureResult {
                     name: fixture.name,
@@ -196,11 +257,19 @@ async fn run_one(path: &Path, llm: &LlmRouter, verifier_enabled: bool) -> Fixtur
                     findings_after_verify: findings_initial,
                     latency_ms: started.elapsed().as_millis(),
                     error: Some(format!("verifier failed: {e}")),
+                    label_match: None,
                 };
             }
         }
     } else {
-        findings_initial
+        initial
+    };
+    let after_verify = scored_output.findings.len();
+
+    let label_match = if fixture.expected.is_empty() {
+        None
+    } else {
+        Some(score_against_labels(&scored_output, &fixture.expected))
     };
 
     FixtureResult {
@@ -209,6 +278,44 @@ async fn run_one(path: &Path, llm: &LlmRouter, verifier_enabled: bool) -> Fixtur
         findings_after_verify: after_verify,
         latency_ms: started.elapsed().as_millis(),
         error: None,
+        label_match,
+    }
+}
+
+/// Match the model's findings against the labelled `expected` set
+/// by (path, line) coordinates. A model finding is "matched" if it
+/// shares a (path, line) with some expected entry that hasn't been
+/// claimed yet; otherwise it's "spurious". Expected entries that
+/// nothing claimed are "missed".
+fn score_against_labels(output: &ReviewOutput, expected: &[ExpectedFinding]) -> LabelMatch {
+    let mut claimed: Vec<bool> = vec![false; expected.len()];
+    let mut matched = 0usize;
+    let mut spurious = 0usize;
+
+    for f in &output.findings {
+        let mut hit = false;
+        for (i, e) in expected.iter().enumerate() {
+            if claimed[i] {
+                continue;
+            }
+            if e.path == f.path && e.line == f.line_start {
+                claimed[i] = true;
+                matched += 1;
+                hit = true;
+                break;
+            }
+        }
+        if !hit {
+            spurious += 1;
+        }
+    }
+
+    let missed = claimed.iter().filter(|c| !**c).count();
+    LabelMatch {
+        expected: expected.len(),
+        matched,
+        missed,
+        spurious,
     }
 }
 
@@ -232,6 +339,8 @@ fn aggregate(results: &[FixtureResult]) -> Aggregate {
     let median = percentile(&latencies, 50.0);
     let p99 = percentile(&latencies, 99.0);
 
+    let label_score = compute_label_score(results);
+
     Aggregate {
         fixtures: results.len(),
         successes,
@@ -241,7 +350,43 @@ fn aggregate(results: &[FixtureResult]) -> Aggregate {
         mean_latency_ms: mean,
         median_latency_ms: median,
         p99_latency_ms: p99,
+        label_score,
     }
+}
+
+fn compute_label_score(results: &[FixtureResult]) -> Option<LabelScore> {
+    let labelled: Vec<&LabelMatch> = results
+        .iter()
+        .filter_map(|r| r.label_match.as_ref())
+        .collect();
+    if labelled.is_empty() {
+        return None;
+    }
+    let expected_total: usize = labelled.iter().map(|m| m.expected).sum();
+    let matched_total: usize = labelled.iter().map(|m| m.matched).sum();
+    let missed_total: usize = labelled.iter().map(|m| m.missed).sum();
+    let spurious_total: usize = labelled.iter().map(|m| m.spurious).sum();
+    // Precision = TP / (TP + FP). FP = spurious.
+    let precision = if matched_total + spurious_total == 0 {
+        0.0
+    } else {
+        matched_total as f64 / (matched_total + spurious_total) as f64
+    };
+    // Recall = TP / (TP + FN). FN = missed.
+    let recall = if matched_total + missed_total == 0 {
+        0.0
+    } else {
+        matched_total as f64 / (matched_total + missed_total) as f64
+    };
+    Some(LabelScore {
+        labelled_fixtures: labelled.len(),
+        expected_total,
+        matched_total,
+        missed_total,
+        spurious_total,
+        precision,
+        recall,
+    })
 }
 
 /// Nearest-rank percentile. `pct` is in `[0, 100]`. Returns 0 on
@@ -260,11 +405,19 @@ fn percentile(sorted: &[u128], pct: f64) -> u128 {
 fn print_row(r: &FixtureResult) {
     if let Some(err) = &r.error {
         println!("{:>40}  ERROR  {err}", r.name);
-    } else {
+        return;
+    }
+    let base = format!(
+        "{:>40}  {:>3} findings  → {:>3} after verify  {:>6} ms",
+        r.name, r.findings_initial, r.findings_after_verify, r.latency_ms,
+    );
+    if let Some(lm) = &r.label_match {
         println!(
-            "{:>40}  {:>3} findings  → {:>3} after verify  {:>6} ms",
-            r.name, r.findings_initial, r.findings_after_verify, r.latency_ms,
+            "{base}   labels: {}/{} matched, {} missed, {} spurious",
+            lm.matched, lm.expected, lm.missed, lm.spurious
         );
+    } else {
+        println!("{base}");
     }
 }
 
@@ -291,6 +444,19 @@ fn print_aggregate(a: &Aggregate, verifier_enabled: bool) {
     println!("  mean latency:                {} ms", a.mean_latency_ms);
     println!("  median latency:              {} ms", a.median_latency_ms);
     println!("  p99 latency:                 {} ms", a.p99_latency_ms);
+    if let Some(s) = &a.label_score {
+        println!();
+        println!(
+            "─── Label scoring ({} labelled fixture(s)) ───",
+            s.labelled_fixtures
+        );
+        println!("  expected total:              {}", s.expected_total);
+        println!("  matched:                     {}", s.matched_total);
+        println!("  missed:                      {}", s.missed_total);
+        println!("  spurious:                    {}", s.spurious_total);
+        println!("  precision:                   {:.3}", s.precision);
+        println!("  recall:                      {:.3}", s.recall);
+    }
 }
 
 #[cfg(test)]
@@ -329,6 +495,7 @@ mod tests {
                 findings_after_verify: 2,
                 latency_ms: 100,
                 error: None,
+                label_match: None,
             },
             FixtureResult {
                 name: "b".into(),
@@ -336,6 +503,7 @@ mod tests {
                 findings_after_verify: 1,
                 latency_ms: 200,
                 error: None,
+                label_match: None,
             },
             FixtureResult {
                 name: "c".into(),
@@ -343,6 +511,7 @@ mod tests {
                 findings_after_verify: 0,
                 latency_ms: 0,
                 error: Some("boom".into()),
+                label_match: None,
             },
         ];
         let agg = aggregate(&results);
@@ -353,6 +522,135 @@ mod tests {
         assert_eq!(agg.total_findings_after_verify, 3);
         assert_eq!(agg.mean_latency_ms, 150);
         assert_eq!(agg.median_latency_ms, 100);
+        assert!(
+            agg.label_score.is_none(),
+            "no labelled fixtures = no label score"
+        );
+    }
+
+    #[test]
+    fn label_match_partitions_findings_correctly() {
+        use ar_prompts::{ReviewFinding, ReviewSeverity};
+        let output = ReviewOutput {
+            summary: String::new(),
+            walkthrough: String::new(),
+            mermaid: String::new(),
+            findings: vec![
+                ReviewFinding {
+                    path: "src/auth.rs".into(),
+                    line_start: 42,
+                    line_end: None,
+                    severity: ReviewSeverity::Warning,
+                    message: "x".into(),
+                },
+                ReviewFinding {
+                    path: "src/util.rs".into(),
+                    line_start: 7,
+                    line_end: None,
+                    severity: ReviewSeverity::Note,
+                    message: "y".into(),
+                },
+            ],
+        };
+        let expected = vec![
+            ExpectedFinding {
+                path: "src/auth.rs".into(),
+                line: 42,
+                note: "should be flagged".into(),
+            },
+            ExpectedFinding {
+                path: "src/missed.rs".into(),
+                line: 1,
+                note: "model didn't see this".into(),
+            },
+        ];
+        let m = score_against_labels(&output, &expected);
+        // First model finding matches first expected. Second model
+        // finding is spurious. Second expected is missed.
+        assert_eq!(m.expected, 2);
+        assert_eq!(m.matched, 1);
+        assert_eq!(m.missed, 1);
+        assert_eq!(m.spurious, 1);
+    }
+
+    #[test]
+    fn label_match_each_expected_consumed_at_most_once() {
+        use ar_prompts::{ReviewFinding, ReviewSeverity};
+        // Two model findings at the same (path, line); only one
+        // expected to share that coordinate. The second model
+        // finding can't claim the already-consumed expected.
+        let output = ReviewOutput {
+            summary: String::new(),
+            walkthrough: String::new(),
+            mermaid: String::new(),
+            findings: vec![
+                ReviewFinding {
+                    path: "x.rs".into(),
+                    line_start: 1,
+                    line_end: None,
+                    severity: ReviewSeverity::Warning,
+                    message: "a".into(),
+                },
+                ReviewFinding {
+                    path: "x.rs".into(),
+                    line_start: 1,
+                    line_end: None,
+                    severity: ReviewSeverity::Warning,
+                    message: "b".into(),
+                },
+            ],
+        };
+        let expected = vec![ExpectedFinding {
+            path: "x.rs".into(),
+            line: 1,
+            note: String::new(),
+        }];
+        let m = score_against_labels(&output, &expected);
+        assert_eq!(m.matched, 1);
+        assert_eq!(m.spurious, 1);
+        assert_eq!(m.missed, 0);
+    }
+
+    #[test]
+    fn label_score_aggregates_precision_and_recall() {
+        let results = vec![
+            FixtureResult {
+                name: "a".into(),
+                findings_initial: 3,
+                findings_after_verify: 3,
+                latency_ms: 10,
+                error: None,
+                label_match: Some(LabelMatch {
+                    expected: 3,
+                    matched: 2,
+                    missed: 1,
+                    spurious: 1,
+                }),
+            },
+            FixtureResult {
+                name: "b".into(),
+                findings_initial: 2,
+                findings_after_verify: 2,
+                latency_ms: 20,
+                error: None,
+                label_match: Some(LabelMatch {
+                    expected: 2,
+                    matched: 2,
+                    missed: 0,
+                    spurious: 0,
+                }),
+            },
+        ];
+        let agg = aggregate(&results);
+        let score = agg.label_score.expect("score present");
+        assert_eq!(score.labelled_fixtures, 2);
+        assert_eq!(score.matched_total, 4);
+        assert_eq!(score.missed_total, 1);
+        assert_eq!(score.spurious_total, 1);
+        // precision = 4 / (4 + 1) = 0.8
+        assert!((score.precision - 0.8).abs() < 1e-9);
+        // recall    = 4 / (4 + 1) = 0.8
+        assert!((score.recall - 0.8).abs() < 1e-9);
     }
 
     #[test]

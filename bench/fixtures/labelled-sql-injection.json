@@ -1,0 +1,21 @@
+{
+    "name": "labelled-sql-injection",
+    "repo_full_name": "example/widgets",
+    "pr_number": 7,
+    "pr_title": "feat: lookup user by email",
+    "pr_body": "Adds a helper that fetches a user record by email address.",
+    "diff": "diff --git a/src/users.py b/src/users.py\nindex 1111111..2222222 100644\n--- a/src/users.py\n+++ b/src/users.py\n@@ -10,3 +10,8 @@ class UserRepo:\n     def __init__(self, conn):\n         self.conn = conn\n \n+    def find_by_email(self, email):\n+        cur = self.conn.cursor()\n+        sql = \"SELECT * FROM users WHERE email = '\" + email + \"'\"\n+        cur.execute(sql)\n+        return cur.fetchone()\n",
+    "changed_files": [
+        "src/users.py"
+    ],
+    "linter_findings": [],
+    "guidelines": "Never construct SQL by string concatenation; use parameterised queries.",
+    "repo_context": "",
+    "expected": [
+        {
+            "path": "src/users.py",
+            "line": 14,
+            "note": "SQL injection — email is user-controlled and concatenated into the query string instead of bound as a parameter."
+        }
+    ]
+}

@@ -5,11 +5,16 @@ fixtures through the LLM-review path (prompt rendering → reasoning
 model → self-heal → optional verifier) and reports per-fixture
 finding counts and latency, plus an aggregate over the batch.
 
-It is **not** a precision/recall benchmark — there is no labelled
-ground truth here. It is a regression-tracking and model-comparison
+By default it's a regression-tracking and model-comparison
 harness: run the same fixture set against two models, two prompt
 revisions, or before/after a code change, and see how the numbers
 move.
+
+Fixtures that include an `expected` array (see *Labelled fixtures*
+below) additionally produce precision/recall scores against the
+labelled ground truth. The minimum-viable labelled corpus that
+ships in this repo is enough to demonstrate the format; growing
+it requires manual curation per PR.
 
 ## Running
 
@@ -53,7 +58,43 @@ Optional fields:
 | `linter_findings` | Finding[] | `[]` | Pre-computed linter findings to inject as supplementary context. Same shape as `ar_tools::Finding`. |
 | `guidelines` | string | `""` | Repo guidelines, as if loaded from `.auto_review.yaml`. |
 | `repo_context` | string | `""` | Pre-rendered RAG context. Skip if you don't want to wire RAG retrieval. |
+| `expected` | ExpectedFinding[] | `[]` | Ground-truth findings the reviewer is expected to surface. Each has `{path, line, note?}`. When present, the harness compares the model's findings to this list by `(path, line)` and contributes to the run's aggregate precision/recall. |
 
-Two starter fixtures live in this directory; treat them as the
-minimal baseline. Add your own real PRs (with sensitive content
-removed) to grow the corpus over time.
+## Labelled fixtures
+
+A labelled fixture carries an `expected` array describing the
+findings a *good* reviewer would surface for the diff:
+
+```json
+"expected": [
+    {
+        "path": "src/users.py",
+        "line": 14,
+        "note": "SQL injection — email is user-controlled and concatenated"
+    }
+]
+```
+
+`note` is for human readers only; matching is by `(path, line)`
+because the LLM's exact wording will vary across runs and models.
+
+The aggregate report adds a *Label scoring* section with:
+
+- **expected total** — total expected findings across labelled
+  fixtures.
+- **matched** — model finding shared `(path, line)` with an
+  expected entry. Each expected entry can be matched at most once
+  (a duplicate model finding at the same coordinate counts as
+  spurious).
+- **missed** — expected entries no model finding claimed.
+- **spurious** — model findings that don't share `(path, line)`
+  with any expected entry.
+- **precision** = matched / (matched + spurious).
+- **recall** = matched / (matched + missed).
+
+A few starter fixtures live in this directory; the
+`labelled-*.json` files are the labelled ones. Adding more
+labelled fixtures (with sensitive content removed) is the
+intended way to grow a real corpus over time — `(path, line)`
+labels are quick to write per PR and the precision/recall numbers
+become meaningful as the corpus grows past a few dozen entries.
