@@ -79,6 +79,10 @@ impl SqliteVectorStore {
         let n: i64 = row.get("n");
         Ok(n as usize)
     }
+
+    pub async fn is_empty(&self) -> Result<bool, VectorStoreError> {
+        Ok(self.len().await? == 0)
+    }
 }
 
 #[async_trait]
@@ -410,8 +414,10 @@ mod tests {
         let r = store.query_nearest(&[1.0, 0.0], 100).await.unwrap();
         assert_eq!(r.len(), kinds.len());
         // Verify each kind round-tripped through the DB intact.
-        let mut got: Vec<SymbolKind> =
-            r.into_iter().map(|s| s.symbol.indexed.symbol.kind).collect();
+        let mut got: Vec<SymbolKind> = r
+            .into_iter()
+            .map(|s| s.symbol.indexed.symbol.kind)
+            .collect();
         got.sort_by_key(|k| symbol_kind_to_str(*k));
         let mut expected: Vec<SymbolKind> = kinds.to_vec();
         expected.sort_by_key(|k| symbol_kind_to_str(*k));

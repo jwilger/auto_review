@@ -111,9 +111,10 @@ async fn webhook_through_dispatcher_through_pipeline_posts_review() {
 
     Mock::given(method("GET"))
         .and(path("/api/v1/repos/o/r/pulls/7.diff"))
-        .respond_with(ResponseTemplate::new(200).set_body_string(
-            "diff --git a/src/x.rs b/src/x.rs\n@@ -1 +1 @@\n-old\n+new\n",
-        ))
+        .respond_with(
+            ResponseTemplate::new(200)
+                .set_body_string("diff --git a/src/x.rs b/src/x.rs\n@@ -1 +1 @@\n-old\n+new\n"),
+        )
         .mount(&server)
         .await;
 
@@ -137,9 +138,8 @@ async fn webhook_through_dispatcher_through_pipeline_posts_review() {
         .mount(&server)
         .await;
 
-    let forgejo_client = Arc::new(
-        ForgejoClient::new(&server.uri(), "tok").expect("forgejo client"),
-    );
+    let forgejo_client =
+        Arc::new(ForgejoClient::new(&server.uri(), "tok").expect("forgejo client"));
 
     let provider = Arc::new(CannedProvider::new(vec![
         r#"{"summary":"looks fine","findings":[]}"#,

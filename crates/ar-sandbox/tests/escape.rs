@@ -140,10 +140,7 @@ async fn sandbox_escape_fork_bomb_is_contained_by_pids_limit() {
     let res = sb
         .run(&cmd(
             "sh",
-            vec![
-                "-c".into(),
-                ":(){ :|:& };: ; sleep 5".into(),
-            ],
+            vec!["-c".into(), ":(){ :|:& };: ; sleep 5".into()],
             dir.path().to_path_buf(),
         ))
         .await;
@@ -237,10 +234,7 @@ async fn sandbox_escape_no_new_privileges_blocks_setuid() {
     let res = sb
         .run(&cmd(
             "sh",
-            vec![
-                "-c".into(),
-                "grep '^NoNewPrivs' /proc/self/status".into(),
-            ],
+            vec!["-c".into(), "grep '^NoNewPrivs' /proc/self/status".into()],
             dir.path().to_path_buf(),
         ))
         .await;

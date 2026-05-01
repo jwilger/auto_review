@@ -12,9 +12,11 @@
 //! is fine" semantics as the CLI runners.
 //!
 //! Severity mapping mirrors LanguageTool's own categorisation:
+//!
 //! - `TYPOS` / `MISC` → Warning (likely-genuine mistakes)
 //! - everything else (`STYLE`, `REDUNDANCY`, `GRAMMAR` outside
 //!   typos, etc.) → Note (subjective / nit-level)
+//!
 //! Operators wanting a stricter floor can use `AR_SEVERITY_FLOOR`.
 
 use crate::finding::{Finding, Severity};
@@ -108,7 +110,10 @@ fn severity_from_category(cat: Option<&str>) -> Severity {
 fn byte_offset_to_line(text: &str, offset: usize) -> u32 {
     let cap = offset.min(text.len());
     // 1-based: line 1 is everything before the first '\n'.
-    let newlines = text.as_bytes()[..cap].iter().filter(|&&b| b == b'\n').count();
+    let newlines = text.as_bytes()[..cap]
+        .iter()
+        .filter(|&&b| b == b'\n')
+        .count();
     (newlines as u32).saturating_add(1)
 }
 
