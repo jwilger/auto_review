@@ -152,12 +152,35 @@ pub enum RepoConfigStrictError {
     UnknownKeys(Vec<String>),
 }
 
+/// Hard cap on the bytes we'll read from a repo-supplied
+/// `.auto_review.yaml`. The file lives in the PR-cloned
+/// workspace, so an attacker submitting a PR controls its
+/// content. Without a cap, a malicious 1 GiB YAML would OOM the
+/// gateway during load. 64 KiB easily holds any real config (the
+/// example file in the repo is well under 1 KiB) — beyond that is
+/// almost certainly an attack or a paste mistake.
+const REPO_CONFIG_MAX_BYTES: u64 = 64 * 1024;
+
 /// Load the repo-level config from a cloned workspace. Returns
 /// `RepoConfig::default()` if no config file is present or parsing fails;
 /// in the latter case, a warning is logged.
 pub fn load_repo_config(workspace_path: &Path) -> RepoConfig {
     for name in [CONFIG_FILENAME, ALT_CONFIG_FILENAME] {
         let path = workspace_path.join(name);
+        // Refuse to read pathologically large YAML files. A PR
+        // can commit anything; without this, the read_to_string
+        // call below would happily slurp gigabytes into RAM.
+        if let Ok(meta) = std::fs::metadata(&path) {
+            if meta.len() > REPO_CONFIG_MAX_BYTES {
+                tracing::warn!(
+                    path = %path.display(),
+                    bytes = meta.len(),
+                    cap = REPO_CONFIG_MAX_BYTES,
+                    "repo config exceeds size cap; using defaults"
+                );
+                return RepoConfig::default();
+            }
+        }
         match std::fs::read_to_string(&path) {
             Ok(contents) => match serde_yaml::from_str::<RepoConfig>(&contents) {
                 Ok(cfg) => {
@@ -382,6 +405,23 @@ disabled_tools:
         // Loader falls back to RepoConfig::default() on parse error;
         // RepoConfig::default().mode is Full.
         assert_eq!(cfg.mode, ReviewMode::Full);
+    }
+
+    #[test]
+    fn oversized_config_file_falls_back_to_defaults_without_reading() {
+        // A malicious PR could commit a multi-MB .auto_review.yaml
+        // and OOM the gateway during load. The size-cap check
+        // bypasses the read entirely on oversized files.
+        let dir = tempdir().unwrap();
+        // 200 KiB > 64 KiB cap. Content is irrelevant — the loader
+        // shouldn't even parse it.
+        let huge: String = "ignored_paths:\n  - foo\n".repeat(20_000);
+        fs::write(dir.path().join(".auto_review.yaml"), &huge).unwrap();
+        let cfg = load_repo_config(dir.path());
+        // Default config — the oversize triggered the bypass, so
+        // `ignored_paths` came from RepoConfig::default() (empty).
+        assert!(cfg.ignored_paths.is_empty());
+        assert!(cfg.enabled);
     }
 
     #[test]
