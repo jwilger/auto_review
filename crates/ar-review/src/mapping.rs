@@ -79,15 +79,33 @@ fn render_body(out: &ReviewOutput) -> String {
     body
 }
 
+/// Cap on the `message` text inlined into each review comment's
+/// body. The review JSON schema enforces minLength=1 but no max,
+/// so a misbehaving LLM could emit multi-KB-per-finding messages.
+/// With many findings × huge messages, the create_review payload
+/// would either 422 (size limit) or render an unreadable wall of
+/// text. 4 KiB per message comfortably holds any actionable
+/// reviewer comment.
+const FINDING_MESSAGE_MAX_BYTES: usize = 4_096;
+
 fn finding_to_comment(f: &ReviewFinding) -> ReviewComment {
+    let message = if f.message.len() > FINDING_MESSAGE_MAX_BYTES {
+        let mut cut = FINDING_MESSAGE_MAX_BYTES;
+        while cut > 0 && !f.message.is_char_boundary(cut) {
+            cut -= 1;
+        }
+        format!("{}… [truncated]", &f.message[..cut])
+    } else {
+        f.message.clone()
+    };
     let body = match f.line_end {
         Some(end) if end > f.line_start => {
             let label = severity_label(f.severity);
-            format!("{label} **Lines {}–{}:** {}", f.line_start, end, f.message)
+            format!("{label} **Lines {}–{}:** {message}", f.line_start, end)
         }
         _ => {
             let label = severity_label(f.severity);
-            format!("{label} {}", f.message)
+            format!("{label} {message}")
         }
     };
     ReviewComment {
@@ -265,6 +283,29 @@ mod tests {
         assert!(req.body.contains("[review body truncated]"));
         // Bounded by cap + framing.
         assert!(req.body.len() <= REVIEW_BODY_MAX_BYTES + 64);
+    }
+
+    #[test]
+    fn oversized_finding_message_is_truncated() {
+        // Per-finding message length isn't bounded by the schema.
+        // A misbehaving LLM emitting 50 findings × 100 KiB message
+        // each would 422 the create_review payload.
+        let huge = "x".repeat(20_000);
+        let f = ReviewFinding {
+            path: "src/x.rs".into(),
+            line_start: 1,
+            line_end: None,
+            severity: ReviewSeverity::Note,
+            message: huge,
+        };
+        let req = output_to_review_request(&output("ok", vec![f]), "x");
+        let comment_body = &req.comments[0].body;
+        assert!(comment_body.contains("[truncated]"));
+        assert!(
+            comment_body.len() < FINDING_MESSAGE_MAX_BYTES + 64,
+            "expected ≤ cap + framing, got {}",
+            comment_body.len()
+        );
     }
 
     #[test]
