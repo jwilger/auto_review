@@ -59,11 +59,16 @@ impl Client {
         let base =
             Url::parse(&normalized).map_err(|_| Error::InvalidBaseUrl(normalized.clone()))?;
         let mut headers = HeaderMap::new();
-        headers.insert(
-            AUTHORIZATION,
-            HeaderValue::from_str(&format!("token {token}"))
-                .map_err(|_| Error::InvalidBaseUrl("non-ascii token".into()))?,
-        );
+        let mut auth_value = HeaderValue::from_str(&format!("token {token}"))
+            .map_err(|_| Error::InvalidBaseUrl("non-ascii token".into()))?;
+        // Mark the auth header as sensitive so reqwest's Debug
+        // impl and any HTTP/2 frame logging redacts it. The
+        // InitClient already does this; the main Client should
+        // too — without it, a stray `tracing::debug!(?client)`
+        // anywhere in the stack would leak the bot's PAT into
+        // operator logs.
+        auth_value.set_sensitive(true);
+        headers.insert(AUTHORIZATION, auth_value);
         headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         headers.insert(
