@@ -2,7 +2,7 @@ use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullR
 use ar_llm::Router as LlmRouter;
 use ar_review::{
     build_glob_set, lint_workspace_with, load_repo_config, pr_is_skippable, prepare_workspace,
-    review_pull_request, GlobSet, ReviewError, WorkspaceError,
+    review_pull_request, GlobSet, ReviewArgs, ReviewError, WorkspaceError,
 };
 use ar_tools::Finding;
 use async_trait::async_trait;
@@ -242,19 +242,22 @@ pub async fn run_review_job(
         }
     };
 
-    let result = review_pull_request(
+    let result = review_pull_request(ReviewArgs {
         forgejo,
         llm,
-        &job.owner,
-        &job.repo,
-        job.pr_number,
-        &job.head_sha,
-        &job.pr_title,
-        &job.pr_body,
-        &findings,
-        &ignored_paths,
-        &guidelines,
-    )
+        owner: &job.owner,
+        repo: &job.repo,
+        pr_number: job.pr_number,
+        head_sha: &job.head_sha,
+        pr_title: &job.pr_title,
+        pr_body: &job.pr_body,
+        linter_findings: &findings,
+        ignored_paths: &ignored_paths,
+        guidelines: &guidelines,
+        // RAG-retrieved context lands here once build_review_context
+        // is wired in.
+        repo_context: "",
+    })
     .await;
 
     let final_status = match &result {

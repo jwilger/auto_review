@@ -15,6 +15,28 @@ pub struct ReviewOutcome {
     pub review_id: u64,
 }
 
+/// All inputs to [`review_pull_request`]. Bundling them into a struct
+/// keeps the call sites readable and makes adding new context (RAG
+/// snippets, learnings, etc.) a one-line change instead of churning
+/// every test.
+pub struct ReviewArgs<'a> {
+    pub forgejo: &'a ForgejoClient,
+    pub llm: &'a LlmRouter,
+    pub owner: &'a str,
+    pub repo: &'a str,
+    pub pr_number: u64,
+    pub head_sha: &'a str,
+    pub pr_title: &'a str,
+    pub pr_body: &'a str,
+    pub linter_findings: &'a [Finding],
+    pub ignored_paths: &'a GlobSet,
+    pub guidelines: &'a str,
+    /// RAG-retrieved markdown context (similar code, learnings,
+    /// co-change neighbors). Empty string when the index hasn't
+    /// been built or returned no matches.
+    pub repo_context: &'a str,
+}
+
 /// End-to-end review activity for one PR.
 ///
 /// Fetches the diff and changed-file list, calls the reasoning LLM with
@@ -22,22 +44,12 @@ pub struct ReviewOutcome {
 /// request, and posts it. The orchestrator is responsible for cloning the
 /// repo and running linters; their findings are passed in via
 /// `linter_findings` and surfaced to the LLM as supplementary context.
-#[allow(clippy::too_many_arguments)]
-pub async fn review_pull_request(
-    forgejo: &ForgejoClient,
-    llm: &LlmRouter,
-    owner: &str,
-    repo: &str,
-    pr_number: u64,
-    head_sha: &str,
-    pr_title: &str,
-    pr_body: &str,
-    linter_findings: &[Finding],
-    ignored_paths: &GlobSet,
-    guidelines: &str,
-) -> Result<ReviewOutcome, ReviewError> {
-    let raw_diff = forgejo.get_pr_diff(owner, repo, pr_number).await?;
-    let pruned = filter_diff_paths(&raw_diff, ignored_paths);
+pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, ReviewError> {
+    let raw_diff = args
+        .forgejo
+        .get_pr_diff(args.owner, args.repo, args.pr_number)
+        .await?;
+    let pruned = filter_diff_paths(&raw_diff, args.ignored_paths);
     let diff = cap_diff(&pruned, DEFAULT_MAX_DIFF_BYTES);
     if diff.len() < raw_diff.len() {
         tracing::info!(
@@ -47,30 +59,35 @@ pub async fn review_pull_request(
             "diff filtered/capped before sending to LLM"
         );
     }
-    let raw_files = forgejo.list_changed_files(owner, repo, pr_number).await?;
-    let files = filter_changed_files(&raw_files, ignored_paths);
+    let raw_files = args
+        .forgejo
+        .list_changed_files(args.owner, args.repo, args.pr_number)
+        .await?;
+    let files = filter_changed_files(&raw_files, args.ignored_paths);
     let changed_filenames: Vec<String> = files.iter().map(|f| f.filename.clone()).collect();
 
+    let repo_full = format!("{}/{}", args.owner, args.repo);
     let prompt = render_review_prompt(&ReviewPromptInputs {
-        repo_full_name: &format!("{owner}/{repo}"),
-        pr_number,
-        pr_title,
-        pr_body,
+        repo_full_name: &repo_full,
+        pr_number: args.pr_number,
+        pr_title: args.pr_title,
+        pr_body: args.pr_body,
         diff: &diff,
         changed_files: &changed_filenames,
-        linter_findings,
-        guidelines,
-        // RAG-retrieved context: when the index integration lands,
-        // this becomes a formatted snippet from ar-index.
-        repo_context: "",
+        linter_findings: args.linter_findings,
+        guidelines: args.guidelines,
+        repo_context: args.repo_context,
     });
 
     let output =
-        generate_with_self_heal(llm, system_prompt(), &prompt, HealConfig::default()).await?;
+        generate_with_self_heal(args.llm, system_prompt(), &prompt, HealConfig::default()).await?;
     let findings_count = output.findings.len();
 
-    let req = output_to_review_request(&output, head_sha);
-    let created = forgejo.create_review(owner, repo, pr_number, &req).await?;
+    let req = output_to_review_request(&output, args.head_sha);
+    let created = args
+        .forgejo
+        .create_review(args.owner, args.repo, args.pr_number, &req)
+        .await?;
 
     Ok(ReviewOutcome {
         findings_count,
@@ -174,19 +191,20 @@ mod tests {
         ]));
         let llm = router_with(provider);
 
-        let outcome = review_pull_request(
-            &forgejo,
-            &llm,
-            "o",
-            "r",
-            7,
-            "deadbeef",
-            "title",
-            "body",
-            &[],
-            &GlobSet::empty(),
-            "",
-        )
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "deadbeef",
+            pr_title: "title",
+            pr_body: "body",
+            linter_findings: &[],
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+        })
         .await
         .expect("review ok");
 
@@ -207,19 +225,20 @@ mod tests {
         let provider = Arc::new(CannedProvider::new(vec![]));
         let llm = router_with(provider);
 
-        let err = review_pull_request(
-            &forgejo,
-            &llm,
-            "o",
-            "r",
-            7,
-            "x",
-            "t",
-            "b",
-            &[],
-            &GlobSet::empty(),
-            "",
-        )
+        let err = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "x",
+            pr_title: "t",
+            pr_body: "b",
+            linter_findings: &[],
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+        })
         .await
         .expect_err("err");
         assert!(matches!(err, ReviewError::Forgejo(_)));
@@ -257,19 +276,20 @@ mod tests {
         let provider = Arc::new(CannedProvider::new(vec![bad]));
         let llm = router_with(provider);
 
-        let outcome = review_pull_request(
-            &forgejo,
-            &llm,
-            "o",
-            "r",
-            7,
-            "sha",
-            "t",
-            "b",
-            &[],
-            &GlobSet::empty(),
-            "",
-        )
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "sha",
+            pr_title: "t",
+            pr_body: "b",
+            linter_findings: &[],
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+        })
         .await
         .expect("ok");
         assert_eq!(outcome.findings_count, 1);
@@ -312,19 +332,20 @@ mod tests {
             message: "var unused".into(),
         }];
 
-        review_pull_request(
-            &forgejo,
-            &llm,
-            "o",
-            "r",
-            7,
-            "sha",
-            "t",
-            "b",
-            &findings,
-            &GlobSet::empty(),
-            "",
-        )
+        review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "sha",
+            pr_title: "t",
+            pr_body: "b",
+            linter_findings: &findings,
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+        })
         .await
         .expect("ok");
 
