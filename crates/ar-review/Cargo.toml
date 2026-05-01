@@ -14,9 +14,13 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
+url.workspace = true
+tokio = { workspace = true, features = ["process", "macros", "rt"] }
+tempfile = "3"
 ar-forgejo = { path = "../ar-forgejo" }
 ar-llm = { path = "../ar-llm" }
 ar-prompts = { path = "../ar-prompts" }
+ar-tools = { path = "../ar-tools" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

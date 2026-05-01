@@ -155,7 +155,7 @@ fn review_summary(findings_count: usize) -> String {
 
 fn error_state(err: &ReviewError) -> CommitStatusState {
     match err {
-        ReviewError::Forgejo(_) => CommitStatusState::Error,
+        ReviewError::Forgejo(_) | ReviewError::Workspace(_) => CommitStatusState::Error,
         ReviewError::Llm(_) | ReviewError::Unhealable { .. } => CommitStatusState::Failure,
     }
 }

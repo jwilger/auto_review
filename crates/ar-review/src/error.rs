@@ -11,4 +11,6 @@ pub enum ReviewError {
         attempts: u32,
         last_error: ValidationError,
     },
+    #[error("workspace error: {0}")]
+    Workspace(String),
 }

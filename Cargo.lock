@@ -139,12 +139,15 @@ dependencies = [
  "ar-forgejo",
  "ar-llm",
  "ar-prompts",
+ "ar-tools",
  "async-trait",
  "serde",
  "serde_json",
+ "tempfile",
  "thiserror",
  "tokio",
  "tracing",
+ "url",
  "wiremock",
 ]
 
