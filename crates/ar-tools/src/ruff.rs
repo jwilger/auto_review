@@ -1,11 +1,11 @@
 //! Ruff Python linter runner. Parses `ruff check --output-format=json`.
 
 use crate::finding::{Finding, Severity};
-use crate::runner::{LinterRunner, RunnerError};
+use crate::runner::{run_in_sandbox, LinterRunner, RunnerError};
+use ar_sandbox::Sandbox;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
 
 const TOOL: &str = "ruff";
 
@@ -60,17 +60,24 @@ impl LinterRunner for RuffRunner {
         TOOL
     }
 
-    async fn run(&self, repo_dir: &Path) -> Result<Vec<Finding>, RunnerError> {
-        let output = match Command::new("ruff")
-            .args(["check", "--output-format=json", "--exit-zero", "."])
-            .current_dir(repo_dir)
-            .output()
-            .await
-        {
-            Ok(o) => o,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(e) => return Err(RunnerError::Io(e)),
-        };
+    async fn run(
+        &self,
+        sandbox: &dyn Sandbox,
+        repo_dir: &Path,
+    ) -> Result<Vec<Finding>, RunnerError> {
+        let output = run_in_sandbox(
+            sandbox,
+            repo_dir,
+            "ruff",
+            vec![
+                "check".into(),
+                "--output-format=json".into(),
+                "--exit-zero".into(),
+                ".".into(),
+            ],
+            vec![],
+        )
+        .await?;
         if output.stdout.is_empty() {
             return Ok(vec![]);
         }

@@ -1,11 +1,11 @@
 //! Hadolint Dockerfile linter runner. Parses `hadolint --format=json` output.
 
 use crate::finding::{Finding, Severity};
-use crate::runner::{LinterRunner, RunnerError};
+use crate::runner::{run_in_sandbox, LinterRunner, RunnerError};
+use ar_sandbox::Sandbox;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::Path;
-use tokio::process::Command;
 
 const TOOL: &str = "hadolint";
 
@@ -56,21 +56,17 @@ impl LinterRunner for HadolintRunner {
         TOOL
     }
 
-    async fn run(&self, repo_dir: &Path) -> Result<Vec<Finding>, RunnerError> {
+    async fn run(
+        &self,
+        sandbox: &dyn Sandbox,
+        repo_dir: &Path,
+    ) -> Result<Vec<Finding>, RunnerError> {
         if self.files.is_empty() {
             return Ok(vec![]);
         }
-        let output = match Command::new("hadolint")
-            .args(["--format=json", "--no-fail"])
-            .args(&self.files)
-            .current_dir(repo_dir)
-            .output()
-            .await
-        {
-            Ok(o) => o,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(e) => return Err(RunnerError::Io(e)),
-        };
+        let mut args = vec!["--format=json".into(), "--no-fail".into()];
+        args.extend(self.files.iter().cloned());
+        let output = run_in_sandbox(sandbox, repo_dir, "hadolint", args, vec![]).await?;
         if output.stdout.is_empty() {
             return Ok(vec![]);
         }

@@ -227,6 +227,7 @@ dependencies = [
  "ar-index",
  "ar-llm",
  "ar-prompts",
+ "ar-sandbox",
  "ar-tools",
  "async-trait",
  "globset",
@@ -258,6 +259,7 @@ name = "ar-tools"
 version = "0.0.1"
 dependencies = [
  "anyhow",
+ "ar-sandbox",
  "async-trait",
  "futures",
  "regex",

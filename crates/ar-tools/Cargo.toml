@@ -17,6 +17,7 @@ async-trait.workspace = true
 tokio = { workspace = true, features = ["process", "macros", "rt"] }
 futures = "0.3"
 regex = "1"
+ar-sandbox = { path = "../ar-sandbox" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

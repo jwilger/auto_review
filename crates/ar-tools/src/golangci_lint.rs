@@ -7,11 +7,11 @@
 //! Text + Pos {Filename, Line, Column} + Severity.
 
 use crate::finding::{Finding, Severity};
-use crate::runner::{LinterRunner, RunnerError};
+use crate::runner::{run_in_sandbox, LinterRunner, RunnerError};
+use ar_sandbox::Sandbox;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::Path;
-use tokio::process::Command;
 
 const TOOL: &str = "golangci-lint";
 
@@ -80,19 +80,25 @@ impl LinterRunner for GolangciLintRunner {
         TOOL
     }
 
-    async fn run(&self, repo_dir: &Path) -> Result<Vec<Finding>, RunnerError> {
+    async fn run(
+        &self,
+        sandbox: &dyn Sandbox,
+        repo_dir: &Path,
+    ) -> Result<Vec<Finding>, RunnerError> {
         // --issues-exit-code=0: don't exit non-zero when issues are
         // found (we want the JSON, not a process error).
-        let output = match Command::new("golangci-lint")
-            .args(["run", "--out-format=json", "--issues-exit-code=0"])
-            .current_dir(repo_dir)
-            .output()
-            .await
-        {
-            Ok(o) => o,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(e) => return Err(RunnerError::Io(e)),
-        };
+        let output = run_in_sandbox(
+            sandbox,
+            repo_dir,
+            "golangci-lint",
+            vec![
+                "run".into(),
+                "--out-format=json".into(),
+                "--issues-exit-code=0".into(),
+            ],
+            vec![],
+        )
+        .await?;
         if output.stdout.is_empty() {
             return Ok(vec![]);
         }

@@ -5,11 +5,11 @@
 //! secrets can live in any file, so there's no extension-based filter.
 
 use crate::finding::{Finding, Severity};
-use crate::runner::{LinterRunner, RunnerError};
+use crate::runner::{run_in_sandbox, LinterRunner, RunnerError};
+use ar_sandbox::Sandbox;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::Path;
-use tokio::process::Command;
 
 const TOOL: &str = "gitleaks";
 
@@ -56,26 +56,28 @@ impl LinterRunner for GitleaksRunner {
         TOOL
     }
 
-    async fn run(&self, repo_dir: &Path) -> Result<Vec<Finding>, RunnerError> {
+    async fn run(
+        &self,
+        sandbox: &dyn Sandbox,
+        repo_dir: &Path,
+    ) -> Result<Vec<Finding>, RunnerError> {
         // gitleaks exits non-zero when it finds anything; --no-git scans
         // the working tree (we don't want git-history scanning here, we
         // already have a shallow clone).
-        let output = match Command::new("gitleaks")
-            .args([
-                "detect",
-                "--no-git",
-                "--report-format=json",
-                "--report-path=/dev/stdout",
-                "--exit-code=0",
-            ])
-            .current_dir(repo_dir)
-            .output()
-            .await
-        {
-            Ok(o) => o,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(e) => return Err(RunnerError::Io(e)),
-        };
+        let output = run_in_sandbox(
+            sandbox,
+            repo_dir,
+            "gitleaks",
+            vec![
+                "detect".into(),
+                "--no-git".into(),
+                "--report-format=json".into(),
+                "--report-path=/dev/stdout".into(),
+                "--exit-code=0".into(),
+            ],
+            vec![],
+        )
+        .await?;
         // gitleaks writes a banner to stdout before the JSON when
         // --report-path is /dev/stdout. Find the first '[' to trim.
         let stdout = String::from_utf8_lossy(&output.stdout);

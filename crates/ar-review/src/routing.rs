@@ -2,6 +2,7 @@
 //! that should run against the cloned workspace.
 
 use ar_forgejo::ChangedFile;
+use ar_sandbox::{DirectSandbox, Sandbox};
 use ar_tools::actionlint::ActionlintRunner;
 use ar_tools::eslint::EslintRunner;
 use ar_tools::gitleaks::GitleaksRunner;
@@ -22,6 +23,11 @@ use std::path::Path;
 /// every finding. Dispatches to `select_runners` for routing and
 /// `ar_tools::run_all` for parallel execution; missing binaries and
 /// individual runner failures are absorbed (they don't fail the review).
+///
+/// Uses [`DirectSandbox`] (no isolation) — appropriate for tests, CI
+/// against trusted repos, and the development gateway. Production
+/// deployments should call [`lint_workspace_via`] with a
+/// [`PodmanSandbox`](ar_sandbox::PodmanSandbox).
 pub async fn lint_workspace(repo_dir: &Path, files: &[ChangedFile]) -> Vec<Finding> {
     lint_workspace_with(repo_dir, files, &[]).await
 }
@@ -33,6 +39,19 @@ pub async fn lint_workspace_with(
     files: &[ChangedFile],
     disabled_tools: &[String],
 ) -> Vec<Finding> {
+    let sandbox = DirectSandbox::new();
+    lint_workspace_via(&sandbox, repo_dir, files, disabled_tools).await
+}
+
+/// Like [`lint_workspace_with`] but takes a caller-provided sandbox.
+/// Wire this with a [`PodmanSandbox`](ar_sandbox::PodmanSandbox) in
+/// production so untrusted PR contents can't escape.
+pub async fn lint_workspace_via(
+    sandbox: &dyn Sandbox,
+    repo_dir: &Path,
+    files: &[ChangedFile],
+    disabled_tools: &[String],
+) -> Vec<Finding> {
     let mut runners = select_runners(files);
     if !disabled_tools.is_empty() {
         runners.retain(|r| !disabled_tools.iter().any(|d| d == r.name()));
@@ -40,7 +59,7 @@ pub async fn lint_workspace_with(
     if runners.is_empty() {
         return Vec::new();
     }
-    run_all(&runners, repo_dir).await
+    run_all(&runners, sandbox, repo_dir).await
 }
 
 /// Pick the linters to run for a given set of changed files.

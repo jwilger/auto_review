@@ -25,4 +25,4 @@ pub mod trivy;
 pub mod yamllint;
 
 pub use finding::{Finding, Severity};
-pub use runner::{run_all, LinterRunner};
+pub use runner::{run_all, run_in_sandbox, LinterRunner};

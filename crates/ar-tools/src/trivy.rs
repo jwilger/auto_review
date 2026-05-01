@@ -10,11 +10,11 @@
 //! the package name in the rule_id.
 
 use crate::finding::{Finding, Severity};
-use crate::runner::{LinterRunner, RunnerError};
+use crate::runner::{run_in_sandbox, LinterRunner, RunnerError};
+use ar_sandbox::Sandbox;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::Path;
-use tokio::process::Command;
 
 const TOOL: &str = "trivy";
 
@@ -162,23 +162,25 @@ impl LinterRunner for TrivyRunner {
         TOOL
     }
 
-    async fn run(&self, repo_dir: &Path) -> Result<Vec<Finding>, RunnerError> {
-        let output = match Command::new("trivy")
-            .args([
-                "fs",
-                "--format=json",
-                "--severity=MEDIUM,HIGH,CRITICAL",
-                "--quiet",
-                ".",
-            ])
-            .current_dir(repo_dir)
-            .output()
-            .await
-        {
-            Ok(o) => o,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(e) => return Err(RunnerError::Io(e)),
-        };
+    async fn run(
+        &self,
+        sandbox: &dyn Sandbox,
+        repo_dir: &Path,
+    ) -> Result<Vec<Finding>, RunnerError> {
+        let output = run_in_sandbox(
+            sandbox,
+            repo_dir,
+            "trivy",
+            vec![
+                "fs".into(),
+                "--format=json".into(),
+                "--severity=MEDIUM,HIGH,CRITICAL".into(),
+                "--quiet".into(),
+                ".".into(),
+            ],
+            vec![],
+        )
+        .await?;
         if output.stdout.is_empty() {
             return Ok(vec![]);
         }

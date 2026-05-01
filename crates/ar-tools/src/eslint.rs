@@ -5,11 +5,11 @@
 //! per-file messages out into individual [`Finding`]s.
 
 use crate::finding::{Finding, Severity};
-use crate::runner::{LinterRunner, RunnerError};
+use crate::runner::{run_in_sandbox, LinterRunner, RunnerError};
+use ar_sandbox::Sandbox;
 use async_trait::async_trait;
 use serde::Deserialize;
 use std::path::{Path, PathBuf};
-use tokio::process::Command;
 
 const TOOL: &str = "eslint";
 
@@ -81,21 +81,20 @@ impl LinterRunner for EslintRunner {
         TOOL
     }
 
-    async fn run(&self, repo_dir: &Path) -> Result<Vec<Finding>, RunnerError> {
+    async fn run(
+        &self,
+        sandbox: &dyn Sandbox,
+        repo_dir: &Path,
+    ) -> Result<Vec<Finding>, RunnerError> {
         if self.files.is_empty() {
             return Ok(vec![]);
         }
-        let output = match Command::new("eslint")
-            .args(["--format=json", "--no-error-on-unmatched-pattern"])
-            .args(&self.files)
-            .current_dir(repo_dir)
-            .output()
-            .await
-        {
-            Ok(o) => o,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(e) => return Err(RunnerError::Io(e)),
-        };
+        let mut args = vec![
+            "--format=json".into(),
+            "--no-error-on-unmatched-pattern".into(),
+        ];
+        args.extend(self.files.iter().cloned());
+        let output = run_in_sandbox(sandbox, repo_dir, "eslint", args, vec![]).await?;
         if output.stdout.is_empty() {
             return Ok(vec![]);
         }

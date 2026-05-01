@@ -4,12 +4,12 @@
 //! `path:line:col: [level] message (rule)`
 
 use crate::finding::{Finding, Severity};
-use crate::runner::{LinterRunner, RunnerError};
+use crate::runner::{run_in_sandbox, LinterRunner, RunnerError};
+use ar_sandbox::Sandbox;
 use async_trait::async_trait;
 use regex::Regex;
 use std::path::Path;
 use std::sync::OnceLock;
-use tokio::process::Command;
 
 const TOOL: &str = "yamllint";
 
@@ -71,21 +71,17 @@ impl LinterRunner for YamlLintRunner {
         TOOL
     }
 
-    async fn run(&self, repo_dir: &Path) -> Result<Vec<Finding>, RunnerError> {
+    async fn run(
+        &self,
+        sandbox: &dyn Sandbox,
+        repo_dir: &Path,
+    ) -> Result<Vec<Finding>, RunnerError> {
         if self.files.is_empty() {
             return Ok(vec![]);
         }
-        let output = match Command::new("yamllint")
-            .args(["--format", "parsable"])
-            .args(&self.files)
-            .current_dir(repo_dir)
-            .output()
-            .await
-        {
-            Ok(o) => o,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(vec![]),
-            Err(e) => return Err(RunnerError::Io(e)),
-        };
+        let mut args = vec!["--format".into(), "parsable".into()];
+        args.extend(self.files.iter().cloned());
+        let output = run_in_sandbox(sandbox, repo_dir, "yamllint", args, vec![]).await?;
         // yamllint writes findings to stdout in parsable format.
         let stdout = String::from_utf8_lossy(&output.stdout);
         if stdout.trim().is_empty() {
