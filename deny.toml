@@ -1,0 +1,92 @@
+# Configuration for `cargo deny check`.
+#
+# https://embarkstudios.github.io/cargo-deny/
+#
+# Run locally before opening a PR:
+#   cargo deny check
+#
+# CI runs this on every push (see .forgejo/workflows/ci.yml).
+# Failures here block the merge — supply-chain drift on a tool
+# that holds a write-scoped Forgejo PAT is non-negotiable.
+
+[graph]
+# Check every target the workspace builds for. Avoids a
+# missed-dep blind spot if a dep brings in something
+# Linux-x86-only.
+all-features = false
+no-default-features = false
+
+[output]
+feature-depth = 1
+
+# ---------------------------------------------------------------
+# Advisories: known vulnerabilities + maintenance signals from
+# https://github.com/rustsec/advisory-db
+# ---------------------------------------------------------------
+[advisories]
+db-path = "~/.cargo/advisory-db"
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# Block the merge on:
+yanked = "deny"
+# Surface but don't block on:
+unmaintained = "workspace"
+unsound = "warn"
+notice = "warn"
+ignore = []
+
+# ---------------------------------------------------------------
+# License compatibility. The project ships under AGPL-3.0-or-later
+# so we accept dependencies under permissive (MIT/Apache/BSD/ISC/
+# 0BSD/Unlicense/CC0/Zlib) and weak-copyleft (MPL-2.0) licenses.
+# Strong-copyleft licenses (GPL/LGPL) are technically compatible
+# with AGPL but we avoid them in the dep tree to keep relicensing
+# options open should the project ever change.
+# ---------------------------------------------------------------
+[licenses]
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "AGPL-3.0-or-later",
+    "MIT",
+    "MITNFA",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "ISC",
+    "0BSD",
+    "BSD-1-Clause",
+    "CC0-1.0",
+    "Unlicense",
+    "Zlib",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unicode-DFS-2016",
+    # Used by `tinyvec` and friends; permissive in practice.
+    "BSL-1.0",
+    "OpenSSL",
+]
+confidence-threshold = 0.93
+exceptions = []
+
+# ---------------------------------------------------------------
+# Banned crates and version constraints. The list stays empty by
+# default — add specific entries when a real concern surfaces.
+# ---------------------------------------------------------------
+[bans]
+multiple-versions = "warn"
+wildcards = "deny"
+highlight = "all"
+allow = []
+deny = []
+skip = []
+skip-tree = []
+
+# ---------------------------------------------------------------
+# Source allowlist: only registry-published crates and our own
+# git-pinned deps (none today). Refusing unknown registries
+# prevents a typo-squatting attack from sneaking through.
+# ---------------------------------------------------------------
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+allow-git = []

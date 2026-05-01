@@ -25,7 +25,16 @@ cargo fmt --all -- --check
 ```
 
 CI runs the same four checks (see `.forgejo/workflows/ci.yml`). Land
-no commit that fails any of them.
+no commit that fails any of them. CI additionally runs
+`cargo deny check` against the supply-chain config in
+[`deny.toml`](./deny.toml) — license compatibility, RUSTSEC
+advisories, source allowlist. Run it locally before bumping a
+dep:
+
+```sh
+cargo install --locked cargo-deny
+cargo deny check
+```
 
 ## Workflow
 

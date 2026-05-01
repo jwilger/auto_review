@@ -574,6 +574,32 @@ default in-memory store to the SQLite-backed one.
 - 18 new tests cover each check's pass/fail/skip paths plus
   the markdown renderer.
 
+#### Supply-chain checks (M5 CI)
+
+- `deny.toml` at the repo root configures `cargo deny check`:
+  - **Advisories**: `yanked = "deny"`, `unmaintained = "workspace"`,
+    `unsound = "warn"`, `notice = "warn"`. Every push is checked
+    against the RUSTSEC advisory database.
+  - **Licenses**: explicit allowlist tuned for an
+    AGPL-3.0-or-later project (permissive: MIT / Apache-2.0 /
+    BSD-* / ISC / 0BSD / Unlicense / CC0-1.0 / Zlib / Unicode /
+    BSL-1.0 / OpenSSL; weak-copyleft: MPL-2.0; own:
+    AGPL-3.0-or-later). Strong-copyleft GPL/LGPL deliberately
+    not allowed even though they're AGPL-compatible — keeps
+    relicensing options open.
+  - **Bans**: `wildcards = "deny"` to prevent `*` version specs;
+    `multiple-versions = "warn"` so dep duplication surfaces
+    without blocking.
+  - **Sources**: `unknown-registry = "deny"`, `unknown-git =
+    "deny"`. Only crates.io is allow-listed; typo-squat
+    registries can't sneak through.
+- `.forgejo/workflows/ci.yml` gains a `supply-chain` job that
+  installs `cargo-deny` and runs `cargo deny check` on every
+  push. Drift here blocks the merge — a Forgejo bot with a
+  write-scoped PAT can't accept dep tree drift.
+- `CONTRIBUTING.md` updated with the local-run command for
+  reproducing CI's check before bumping a dep.
+
 #### systemd unit (M5 deploy)
 
 - `deploy/systemd/auto_review.service`: hardened systemd

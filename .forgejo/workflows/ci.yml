@@ -20,3 +20,17 @@ jobs:
         run: cargo clippy --workspace --all-targets -- -D warnings
       - name: test
         run: cargo test --workspace --all-targets
+
+  supply-chain:
+    runs-on: docker
+    container:
+      image: rust:1.85-slim-bookworm
+    steps:
+      - uses: actions/checkout@v4
+      # `cargo install` builds from source which is slow but
+      # reliable across architectures. Pinning the version
+      # keeps the supply-chain check itself reproducible.
+      - name: install cargo-deny
+        run: cargo install --locked cargo-deny@0.16.4
+      - name: cargo deny check
+        run: cargo deny check
