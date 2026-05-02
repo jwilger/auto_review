@@ -19,6 +19,12 @@ pub struct OpenAiProvider {
     base: Url,
     chat_model: String,
     embedding_model: Option<String>,
+    /// Optional Ollama `options.num_ctx` sent on every `/v1/embeddings`
+    /// POST. Hosted OpenAI ignores unknown fields, but Ollama uses
+    /// it to size the model's context window for that request — so
+    /// inputs sized to the operator's configured byte cap aren't
+    /// silently truncated by Ollama's default `num_ctx=2048`.
+    embed_num_ctx: Option<u32>,
 }
 
 impl OpenAiProvider {
@@ -56,11 +62,23 @@ impl OpenAiProvider {
             base,
             chat_model: chat_model.to_string(),
             embedding_model: None,
+            embed_num_ctx: None,
         })
     }
 
     pub fn with_embedding_model(mut self, model: impl Into<String>) -> Self {
         self.embedding_model = Some(model.into());
+        self
+    }
+
+    /// Set Ollama's `options.num_ctx` for embedding requests. Use
+    /// when pointing the embedding tier at Ollama (or any backend
+    /// that honours the Ollama options block) so inputs the size
+    /// of the operator's configured byte cap aren't silently
+    /// truncated by the server's default 2048-token context. Has
+    /// no effect on hosted OpenAI (extra fields are ignored).
+    pub fn with_embed_num_ctx(mut self, num_ctx: u32) -> Self {
+        self.embed_num_ctx = Some(num_ctx);
         self
     }
 
@@ -107,6 +125,7 @@ impl LlmProvider for OpenAiProvider {
         let body = EmbedRequest {
             model,
             input: texts,
+            options: self.embed_num_ctx.map(|num_ctx| EmbedOptions { num_ctx }),
         };
         let url = self.url("embeddings")?;
         let resp = self.http.post(url).json(&body).send().await?;
@@ -249,6 +268,13 @@ struct Usage {
 struct EmbedRequest<'a> {
     model: &'a str,
     input: &'a [String],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<EmbedOptions>,
+}
+
+#[derive(Debug, Serialize)]
+struct EmbedOptions {
+    num_ctx: u32,
 }
 
 #[derive(Debug, Deserialize)]
@@ -416,6 +442,66 @@ mod tests {
         let v = provider.embed(&["a".into(), "b".into()]).await.expect("ok");
         assert_eq!(v.len(), 2);
         assert_eq!(v[0], vec![0.1, 0.2]);
+    }
+
+    #[tokio::test]
+    async fn embed_includes_options_num_ctx_when_configured() {
+        // Pointing the embedding tier at Ollama: explicit options.num_ctx
+        // keeps the server from silently truncating to its default 2048
+        // even though the operator raised the byte cap.
+        let server = MockServer::start().await;
+        let provider = OpenAiProvider::new(&server.uri(), None, "ignored")
+            .expect("provider")
+            .with_embedding_model("nomic-embed-text")
+            .with_embed_num_ctx(4096);
+
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .and(body_partial_json(serde_json::json!({
+                "model": "nomic-embed-text",
+                "input": ["a"],
+                "options": {"num_ctx": 4096}
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"embedding": [0.1]}]
+            })))
+            .mount(&server)
+            .await;
+
+        let v = provider.embed(&["a".into()]).await.expect("ok");
+        assert_eq!(v.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn embed_omits_options_field_when_not_configured() {
+        // Hosted OpenAI ignores extra fields, but emitting an empty
+        // `options: {}` (or worse, `options: null`) would still hit
+        // the wire. Guard against that.
+        let server = MockServer::start().await;
+        let provider = OpenAiProvider::new(&server.uri(), None, "ignored")
+            .expect("provider")
+            .with_embedding_model("text-embedding-3-small");
+
+        Mock::given(method("POST"))
+            .and(path("/v1/embeddings"))
+            .and(wiremock::matchers::body_string_contains(
+                "text-embedding-3-small",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [{"embedding": [0.1]}]
+            })))
+            .mount(&server)
+            .await;
+
+        let _ = provider.embed(&["a".into()]).await.expect("ok");
+
+        let received = server.received_requests().await.expect("requests");
+        assert_eq!(received.len(), 1);
+        let body: serde_json::Value = serde_json::from_slice(&received[0].body).expect("json body");
+        assert!(
+            body.get("options").is_none(),
+            "expected no `options` field in default OpenAI embed body, got: {body}"
+        );
     }
 
     #[tokio::test]

@@ -14,7 +14,10 @@ pub mod vector_store;
 pub mod walker;
 
 pub use co_change::{compute_co_change, parse_git_log_co_change, CoChangeError, CoChangeGraph};
-pub use embed::{embed_symbols, EmbedError, EmbeddedSymbol};
+pub use embed::{
+    embed_symbols, embed_symbols_with_config, EmbedConfig, EmbedError, EmbeddedSymbol,
+    DEFAULT_EMBED_BATCH_SIZE, DEFAULT_EMBED_INPUT_CAP_BYTES,
+};
 pub use learnings::{
     InMemoryLearningsStore, LearningRecord, LearningSource, LearningsError, LearningsStore,
     ScoredLearning,

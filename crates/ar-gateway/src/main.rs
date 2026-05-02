@@ -143,6 +143,13 @@ async fn main() -> Result<()> {
         let mut provider = OpenAiProvider::new(&embed_base, embed_key.as_deref(), &embedding_model)
             .context("embedding LLM provider")?;
         provider = provider.with_embedding_model(&embedding_model);
+        // For Ollama-backed embedders, explicitly send options.num_ctx
+        // so a bigger byte cap doesn't get silently truncated by the
+        // server's default 2048. Ignored by hosted OpenAI.
+        if let Some(num_ctx) = parse_env::<u32>("AR_EMBED_NUM_CTX") {
+            provider = provider.with_embed_num_ctx(num_ctx);
+            tracing::info!(num_ctx, "embedding num_ctx override enabled");
+        }
         let provider = Arc::new(provider);
         router = router.with(ModelTier::Embedding, provider);
         tracing::info!(model = %embedding_model, "embedding tier configured; RAG enabled");

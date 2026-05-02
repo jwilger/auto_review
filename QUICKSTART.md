@@ -232,6 +232,9 @@ Common optional env vars:
 | `LLM_REASONING_MODEL` | `qwen2.5-coder:32b` | model name on the LLM endpoint |
 | `LLM_CHEAP_MODEL` | — | optional triage / verifier tier (recommended) |
 | `LLM_EMBEDDING_MODEL` | — | optional RAG retrieval (recommended) |
+| `AR_EMBED_INPUT_CAP_BYTES` | `6144` | per-snippet byte cap before embedding; raise to ~24576 for hosted OpenAI embedders |
+| `AR_EMBED_BATCH_SIZE` | `32` | inputs per `/v1/embeddings` POST |
+| `AR_EMBED_NUM_CTX` | — | sends `options.num_ctx` on embed requests; set when pointing at Ollama so a raised input cap isn't silently truncated by the server's default 2048 |
 | `AR_GATEWAY_BIND` | `0.0.0.0:8080` | listen address |
 | `AR_BOT_LOGIN` | `auto_review` | bot's Forgejo username (self-loop detection) |
 | `AR_BOT_NAME` | `=AR_BOT_LOGIN` | mention handle (`@<bot_name>`) |
