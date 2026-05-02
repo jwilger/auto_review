@@ -618,6 +618,11 @@ default in-memory store to the SQLite-backed one.
 
 ### Fixed
 
+- The built-in pre-merge **Tests touched** check now treats added Rust
+  in-file test markers (for example `#[test]` inside `#[cfg(test)] mod
+  tests`) as test changes. Previously source files with adjacent unit
+  tests still failed the check unless the path itself looked like a test
+  file. Closes #29.
 - `pre_merge::contains_todo_marker` now scans every occurrence of
   each marker on a line. The previous `find()`-based loop only
   examined the first hit, so a real `FIXME` after a substring

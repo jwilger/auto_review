@@ -127,14 +127,15 @@ fn check_tests(files: &[ChangedFile]) -> CheckResult {
             detail: "no source files in the diff".into(),
         };
     }
-    let any_test_change = files
-        .iter()
-        .any(|f| f.status != "removed" && is_test_file(&f.filename));
+    let any_test_change = files.iter().any(|f| {
+        f.status != "removed"
+            && (is_test_file(&f.filename) || adds_rust_test(&f.filename, f.patch.as_deref()))
+    });
     if any_test_change {
         CheckResult {
             name: CheckName::Tests,
             status: CheckStatus::Pass,
-            detail: "test file is in the diff".into(),
+            detail: "test changes are in the diff".into(),
         }
     } else {
         CheckResult {
@@ -234,6 +235,24 @@ fn is_test_file(filename: &str) -> bool {
         || last.ends_with(".spec.js")
 }
 
+fn adds_rust_test(filename: &str, patch: Option<&str>) -> bool {
+    if !filename.to_ascii_lowercase().ends_with(".rs") {
+        return false;
+    }
+    patch
+        .into_iter()
+        .flat_map(str::lines)
+        .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+        .map(|line| line[1..].trim_start())
+        .any(|line| {
+            line.starts_with("#[test]")
+                || line.starts_with("#[cfg(test)]")
+                || line.starts_with("#[tokio::test")
+                || line.starts_with("#[rstest")
+                || line.starts_with("#[test_case")
+        })
+}
+
 /// Render a checklist suitable for appending to a review body.
 /// Skipped checks are included so the PR author sees the full list
 /// and isn't surprised when a check doesn't appear later.
@@ -287,6 +306,17 @@ mod tests {
             deletions: 0,
             changes: 0,
             patch: None,
+        }
+    }
+
+    fn cf_with_patch(name: &str, status: &str, patch: &str) -> ChangedFile {
+        ChangedFile {
+            filename: name.into(),
+            status: status.into(),
+            additions: 0,
+            deletions: 0,
+            changes: 0,
+            patch: Some(patch.into()),
         }
     }
 
@@ -353,6 +383,19 @@ mod tests {
     fn tests_check_fails_when_source_changed_without_tests() {
         let files = vec![cf("src/x.rs", "modified")];
         assert_eq!(check_tests(&files).status, CheckStatus::Fail);
+    }
+
+    #[test]
+    fn tests_touched_accepts_added_rust_inline_test() {
+        let files = vec![cf_with_patch(
+            "src/x.rs",
+            "modified",
+            "@@ -10,0 +11,4 @@ mod tests {\n+    #[test]\n+    fn parses_empty_input() {\n+        assert!(parse(\"\").is_none());\n+    }\n",
+        )];
+
+        let result = check_tests(&files);
+
+        assert_eq!(result.status, CheckStatus::Pass);
     }
 
     #[test]
