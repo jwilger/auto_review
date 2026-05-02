@@ -22,6 +22,16 @@ cargo deny check licenses bans sources
 
 `cargo deny check advisories` requires network and is excluded from `nix flake check`'s sandbox; run it manually when bumping deps.
 
+For an interactive run-and-restart-on-edit dev loop, use **bacon** (also in the dev shell):
+
+```sh
+bacon            # default `run` job: builds + restarts ar-gateway on source change
+bacon clippy     # lint loop
+bacon test       # nextest loop
+```
+
+Job definitions live in `bacon.toml` at the repo root.
+
 ### Running a single test
 
 ```sh

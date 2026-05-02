@@ -112,11 +112,11 @@
             jq
             pkg-config
             openssl
-            # Used by the run-ar-gateway skill's watcher to drive
-            # zellij tabs (Ctrl-C + relaunch on rebuild). Including
-            # it here pins the version that matches the running
-            # session and removes a host-system dependency.
-            zellij
+            # Local dev loop: `bacon` watches workspace sources and
+            # re-runs the configured job (see bacon.toml). The default
+            # `run` job builds + restarts ar-gateway on every change,
+            # replacing the older zellij-tab watcher script.
+            bacon
           ];
 
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";

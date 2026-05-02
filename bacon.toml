@@ -1,0 +1,19 @@
+# bacon — local dev loop for ar-gateway.
+#
+# `bacon` (no args) launches the `run` job: cargo-builds ar-gateway,
+# starts it, and on any source change kills the running process and
+# restarts the new binary. Replaces the previous zellij-watcher skill
+# (.claude/skills/run-ar-gateway, removed).
+#
+# Other useful jobs ship as bacon defaults: `bacon clippy`, `bacon test`,
+# `bacon check`. See `bacon --help` or https://dystroy.org/bacon.
+
+default_job = "run"
+
+[jobs.run]
+command = ["cargo", "run", "-p", "ar-gateway", "--bin", "ar-gateway"]
+need_stdout = true
+allow_warnings = true
+background = true
+on_change_strategy = "kill_then_restart"
+show_command_error_code = true
