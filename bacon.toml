@@ -7,11 +7,18 @@
 #
 # Other useful jobs ship as bacon defaults: `bacon clippy`, `bacon test`,
 # `bacon check`. See `bacon --help` or https://dystroy.org/bacon.
+#
+# The run job deliberately uses a dev-only port so it can coexist with a
+# systemd-managed gateway on the production default (127.0.0.1:8080). When
+# registering a local Forgejo webhook for bacon-driven testing, point it at
+# http://127.0.0.1:8090/webhooks/forgejo (or your tunnel/reverse-proxy URL
+# forwarding to that port).
 
 default_job = "run"
 
 [jobs.run]
 command = ["cargo", "run", "-p", "ar-gateway", "--bin", "ar-gateway"]
+env.AR_GATEWAY_BIND = "127.0.0.1:8090"
 need_stdout = true
 allow_warnings = true
 background = true

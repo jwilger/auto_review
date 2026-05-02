@@ -12,6 +12,13 @@ since the start of the project.
 
 ### Added
 
+#### Local bacon gateway port
+
+- The default `bacon` run job now binds `ar-gateway` to the dev-only
+  `127.0.0.1:8090` address so a local watch loop can coexist with a
+  systemd-managed gateway on the production `:8080` default. The
+  `bacon.toml` comments call out the matching local webhook URL.
+
 #### Default-on persistence for runtime state
 
 - **Persistent SQLite is now the default** for the four stores the
