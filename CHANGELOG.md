@@ -31,6 +31,13 @@ since the start of the project.
   expose a PAT-authenticated REST endpoint for resolving inline review
   conversations, so comment resolution remains a manual UI action.
 
+#### Rustfmt toolchain alignment
+
+- The Nix `cargo-fmt` check now sets `RUSTFMT` to the exact rustfmt
+  binary from the dev-shell Rust toolchain, preventing local `cargo fmt`
+  and CI's crane formatter check from resolving different rustfmt
+  packages with the same version.
+
 #### Default-on persistence for runtime state
 
 - **Persistent SQLite is now the default** for the four stores the

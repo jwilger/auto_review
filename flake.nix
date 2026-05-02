@@ -165,6 +165,11 @@
           cargo-fmt = craneLib.cargoFmt {
             inherit src;
             pname = "auto_review";
+            # Force Cargo's formatter lookup to the exact rustfmt
+            # binary exposed by the dev shell's rustToolchain. This
+            # keeps local `cargo fmt` and crane's cargo-fmt check on
+            # the same tool package, not merely the same version.
+            RUSTFMT = "${rustToolchain}/bin/rustfmt";
           };
 
           # Clippy with `-D warnings` so the lint set the project
