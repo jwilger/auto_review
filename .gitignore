@@ -10,9 +10,9 @@
 /.vscode
 .DS_Store
 /.remember/
-/.claude/ralph-loop.local.md
-/.claude/settings.local.json
-/.claude/scheduled_tasks.lock
+/.kilo/node_modules/
+/.kilo/worktrees/
+/.kilo/agent-manager.json
 # Nix dev environment
 /.direnv/
 /.dependencies/

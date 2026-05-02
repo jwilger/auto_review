@@ -1,0 +1,37 @@
+{
+  "$schema": "https://app.kilo.ai/config.json",
+  "instructions": [
+    "AGENTS.md",
+    ".kilo/rules/*.md"
+  ],
+  "default_agent": "auto-review-rust-implementer",
+  "skills": {
+    "paths": [".kilo/skills"]
+  },
+  "permission": {
+    "read": "allow",
+    "glob": "allow",
+    "grep": "allow",
+    "list": "allow",
+    "task": "allow",
+    "skill": "allow",
+    "todowrite": "allow",
+    "bash": "allow",
+    "edit": {
+      ".env": "deny",
+      ".env.*": "deny",
+      "**/*secret*": "ask",
+      "**/*credential*": "ask",
+      "**/*.key": "deny",
+      "**/*.pem": "deny",
+      "*": "allow"
+    },
+    "external_directory": "ask"
+  },
+  "compaction": {
+    "auto": true,
+    "prune": true
+  },
+  "snapshot": true,
+  "share": "manual"
+}
