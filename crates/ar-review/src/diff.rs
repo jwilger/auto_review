@@ -44,6 +44,24 @@ pub fn cap_for_prompt(body: &str, max_bytes: usize, marker: &str) -> String {
     out
 }
 
+/// Cap `body` at `max_bytes` for inclusion in an embedding request.
+///
+/// Unlike [`cap_for_prompt`], this returns the exact prefix (walked
+/// back to a UTF-8 character boundary) with no trailing marker —
+/// embeddings represent semantic content rather than literal text,
+/// and a "[truncated]" suffix would only inflate token usage.
+/// Hard upper bound: the returned string is `<= max_bytes`.
+pub fn cap_for_embed(body: &str, max_bytes: usize) -> String {
+    if body.len() <= max_bytes {
+        return body.to_string();
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !body.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    body[..cut].to_string()
+}
+
 /// Cap a unified diff at `max_bytes`, splitting at `diff --git ` file
 /// boundaries. Returns the original diff unchanged when it already fits.
 pub fn cap_diff(diff: &str, max_bytes: usize) -> String {
@@ -215,5 +233,28 @@ diff --git a/b b/b
         // Result must be valid UTF-8.
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
         assert!(out.contains("[m]"));
+    }
+
+    #[test]
+    fn cap_for_embed_passes_short_input_through() {
+        assert_eq!(cap_for_embed("brief", 100), "brief");
+    }
+
+    #[test]
+    fn cap_for_embed_strictly_bounds_output_to_max_bytes() {
+        let big = "x".repeat(200);
+        let out = cap_for_embed(&big, 100);
+        // No marker, no trailing newlines: strict <= max_bytes.
+        assert_eq!(out.len(), 100);
+    }
+
+    #[test]
+    fn cap_for_embed_walks_back_to_utf8_boundary() {
+        let mut s = "x".repeat(98);
+        s.push_str("🦀tail");
+        let out = cap_for_embed(&s, 100);
+        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
+        // Cut must land on a char boundary at or before byte 100.
+        assert!(out.len() <= 100);
     }
 }

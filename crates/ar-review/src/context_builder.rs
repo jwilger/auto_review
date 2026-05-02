@@ -8,8 +8,8 @@
 
 use crate::rag_context::format_repo_context;
 use ar_index::{
-    embed_symbols, index_workspace, EmbedError, EmbeddedSymbol, InMemoryVectorStore,
-    LearningsStore, ScoredLearning, ScoredSymbol, VectorStore, WalkError,
+    embed_symbols_with_config, index_workspace, EmbedConfig, EmbedError, EmbeddedSymbol,
+    InMemoryVectorStore, LearningsStore, ScoredLearning, ScoredSymbol, VectorStore, WalkError,
 };
 use ar_llm::{ModelTier, Router};
 use std::collections::HashMap;
@@ -77,16 +77,13 @@ pub async fn build_review_context(
     // re-embedded the diff independently — wasted one round-trip
     // per review with both stores configured.
     //
-    // Cap the embedded text. OpenAI's text-embedding-3-small caps
-    // at 8191 tokens (~32 KiB English). A multi-MB diff would
-    // otherwise burn the embed call on a refused request. Cap
-    // explicitly so the cheap path stays cheap.
-    //
-    // Empty marker: the embed endpoint doesn't need a "[truncated]"
-    // signal — embeddings represent semantic content, not literal
-    // text — so we just feed the prefix.
-    const EMBED_QUERY_CAP: usize = 32 * 1024;
-    let query_text = crate::diff::cap_for_prompt(diff, EMBED_QUERY_CAP, "");
+    // Cap the embedded text using the same EmbedConfig that governs
+    // symbol embeddings, so a single AR_EMBED_INPUT_CAP_BYTES knob
+    // controls every embed call and providers with tight token
+    // ceilings (e.g. text-embedding-3-small at 8192 tokens) don't
+    // get a 400 they can't recover from. See #26.
+    let cfg = EmbedConfig::from_env();
+    let query_text = crate::diff::cap_for_embed(diff, cfg.input_cap_bytes);
     let query_vec = match router.embed(ModelTier::Embedding, &[query_text]).await {
         Ok(mut vecs) => vecs.pop().unwrap_or_default(),
         Err(e) => {
@@ -99,7 +96,7 @@ pub async fn build_review_context(
     }
 
     let scored_symbols =
-        embed_and_query_symbols(router, &symbols, &file_contents, &query_vec, top_k)
+        embed_and_query_symbols(router, &symbols, &file_contents, &query_vec, top_k, &cfg)
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "symbol embedding/query failed; skipping that section");
@@ -125,11 +122,13 @@ async fn embed_and_query_symbols(
     file_contents: &HashMap<String, String>,
     query_vec: &[f32],
     top_k: usize,
+    cfg: &EmbedConfig,
 ) -> Result<Vec<ScoredSymbol>, ContextBuildError> {
     if symbols.is_empty() {
         return Ok(Vec::new());
     }
-    let embedded: Vec<EmbeddedSymbol> = embed_symbols(router, symbols, file_contents).await?;
+    let embedded: Vec<EmbeddedSymbol> =
+        embed_symbols_with_config(router, symbols, file_contents, cfg).await?;
 
     let store = InMemoryVectorStore::new();
     store.upsert(&embedded).await.map_err(|e| {
@@ -172,16 +171,21 @@ mod tests {
     use tempfile::tempdir;
 
     /// Embedder that returns deterministic 3-D vectors keyed off
-    /// content. Different test inputs get distinct directions.
+    /// content and records every batch it was asked to embed.
+    /// Different test inputs get distinct directions.
     struct DeterministicEmbedder {
-        calls: Mutex<u32>,
+        seen: Mutex<Vec<Vec<String>>>,
     }
 
     impl DeterministicEmbedder {
         fn new() -> Self {
             Self {
-                calls: Mutex::new(0),
+                seen: Mutex::new(Vec::new()),
             }
+        }
+
+        fn call_count(&self) -> usize {
+            self.seen.lock().unwrap().len()
         }
     }
 
@@ -191,7 +195,7 @@ mod tests {
             unimplemented!()
         }
         async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LlmError> {
-            *self.calls.lock().unwrap() += 1;
+            self.seen.lock().unwrap().push(texts.to_vec());
             Ok(texts
                 .iter()
                 .map(|t| {
@@ -254,10 +258,47 @@ mod tests {
         // Expected calls: 1 for symbols batch + 1 for diff = 2.
         // Previously was 1 + 2 (two diff embeds, one per query
         // helper) = 3.
-        let calls = *calls_handle.calls.lock().unwrap();
+        let calls = calls_handle.call_count();
         assert_eq!(
             calls, 2,
             "expected one symbols embed + one diff embed; got {calls}"
+        );
+    }
+
+    #[tokio::test]
+    async fn diff_embedding_input_is_capped_to_embed_config_default() {
+        // Regression for #26: the diff used to be capped at a hardcoded
+        // 32 KiB byte cap that exceeded text-embedding-3-small's
+        // 8192-token limit on dense source. The cap must follow
+        // EmbedConfig::input_cap_bytes (default 6 KiB) so the same
+        // AR_EMBED_INPUT_CAP_BYTES knob governs both diff embedding
+        // and symbol embedding.
+        use ar_index::DEFAULT_EMBED_INPUT_CAP_BYTES;
+
+        let dir = tempdir().unwrap();
+        // One small symbol file so build_review_context proceeds past
+        // its early-return; the symbol embed call is filtered out of
+        // the assertion below by the leading-`x` predicate.
+        fs::write(dir.path().join("a.rs"), "pub fn ok() {}\n").unwrap();
+
+        let embedder = std::sync::Arc::new(DeterministicEmbedder::new());
+        let recorder = embedder.clone();
+        let router = Router::new().with(ModelTier::Embedding, embedder);
+
+        // 256 KiB diff — well above the historical 32 KiB cap and
+        // many multiples of the 6 KiB default.
+        let big_diff = "x".repeat(256 * 1024);
+        let _ = build_review_context(dir.path(), &router, &big_diff, None, 3).await;
+
+        let seen = recorder.seen.lock().unwrap();
+        let diff_call = seen
+            .iter()
+            .find(|batch| batch.iter().any(|t| t.starts_with('x')))
+            .expect("expected a diff embed call");
+        let diff_input_bytes = diff_call[0].len();
+        assert!(
+            diff_input_bytes <= DEFAULT_EMBED_INPUT_CAP_BYTES,
+            "diff embed input was {diff_input_bytes} bytes; expected <= {DEFAULT_EMBED_INPUT_CAP_BYTES} (EmbedConfig default)"
         );
     }
 

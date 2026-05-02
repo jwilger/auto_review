@@ -590,6 +590,17 @@ default in-memory store to the SQLite-backed one.
   the `/pulls/{n}/comments` path, which doesn't exist in
   Forgejo (verified against 15.0.0; the chat poller was
   logging a 404 on every cycle).
+- `ar_review::context_builder` now caps the diff sent to the
+  embedder via `EmbedConfig::input_cap_bytes` (default 6 KiB,
+  override `AR_EMBED_INPUT_CAP_BYTES`) instead of a hardcoded
+  32 KiB byte cap that exceeded `text-embedding-3-small`'s
+  8192-token limit on dense source. Large PR diffs were
+  triggering HTTP 400 from the embedder, silently dropping
+  RAG context for the entire review. The new
+  `crate::diff::cap_for_embed` helper enforces a strict
+  byte upper bound (no marker overhead) and the symbol-embed
+  pass now reuses the same `EmbedConfig`, so one knob
+  governs every embed call. Closes #26.
 
 ### Pending (roadmap, per the feasibility study)
 
