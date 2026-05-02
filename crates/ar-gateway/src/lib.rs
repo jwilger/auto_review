@@ -5,6 +5,7 @@
 //! gateway return 202 immediately while the actual review runs in the
 //! background.
 
+pub mod config;
 pub mod dedup;
 pub mod hmac;
 pub mod metrics;
@@ -58,10 +59,11 @@ pub struct AppState {
     /// model. None = no throttling (current default for tests and
     /// trust-the-environment deployments).
     pub webhook_rate_limit: Option<Arc<crate::ratelimit::TokenBucket>>,
-    /// Optional in-memory dedup of recently-seen `X-Forgejo-Delivery`
-    /// IDs. None = no dedup (caller dispatches every well-signed
-    /// webhook even on Forgejo retry).
-    pub webhook_dedup: Option<Arc<crate::dedup::RecentDeliveries>>,
+    /// Optional dedup of recently-seen `X-Forgejo-Delivery` IDs.
+    /// `None` = no dedup (caller dispatches every well-signed
+    /// webhook even on Forgejo retry). Backed by either the in-memory
+    /// LRU or the SQLite table — `main.rs` picks based on env.
+    pub webhook_dedup: Option<Arc<dyn crate::dedup::DeliveryDedup>>,
 }
 
 /// Runtime-config snapshot returned from `GET /info`. Captured once
@@ -80,13 +82,20 @@ pub struct GatewayInfo {
     /// (Kudelski-class RCE risk; only safe for trusted-PR sources);
     /// `"podman"` = the hardened production path.
     pub sandbox: &'static str,
-    /// Which `LearningsStore` impl is wired up. `"sqlite"` =
-    /// persistent across restart; `"in-memory"` = volatile.
-    pub learnings: &'static str,
-    /// Which `ReviewHistory` impl is wired up. `"sqlite"` =
-    /// persistent (incremental-review dedup survives restarts);
-    /// `"in-memory"` = volatile.
-    pub history: &'static str,
+    /// Concrete `LearningsStore` backing — either `"in-memory"` or
+    /// `"sqlite:<path>"`. The path lets operators verify the bot
+    /// opened the file they intended.
+    pub learnings: String,
+    /// Concrete `ReviewHistory` backing — either `"in-memory"` or
+    /// `"sqlite:<path>"`.
+    pub history: String,
+    /// Concrete `VectorStore` backing — either `"in-memory"` or
+    /// `"sqlite:<path>"`. Symbol embeddings persist when SQLite is
+    /// chosen; in-memory means every review re-embeds the workspace.
+    pub vector: String,
+    /// Concrete webhook delivery dedup backing — `"disabled"`,
+    /// `"in-memory(capacity=N)"`, or `"sqlite:<path>"`.
+    pub dedup: String,
     /// Which LLM tiers have a provider configured. Order is
     /// stable: `["reasoning", "cheap", "embedding"]`.
     pub llm_tiers: Vec<&'static str>,
@@ -187,10 +196,10 @@ impl AppState {
         self
     }
 
-    /// Wire in a recently-seen-delivery LRU so retried webhooks
+    /// Wire in a recently-seen-delivery dedup so retried webhooks
     /// (same `X-Forgejo-Delivery` UUID) are answered 200 OK
     /// without re-dispatching to the orchestrator.
-    pub fn with_webhook_dedup(mut self, dedup: Arc<crate::dedup::RecentDeliveries>) -> Self {
+    pub fn with_webhook_dedup(mut self, dedup: Arc<dyn crate::dedup::DeliveryDedup>) -> Self {
         self.webhook_dedup = Some(dedup);
         self
     }

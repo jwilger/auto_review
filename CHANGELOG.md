@@ -12,6 +12,41 @@ since the start of the project.
 
 ### Added
 
+#### Default-on persistence for runtime state
+
+- **Persistent SQLite is now the default** for the four stores the
+  gateway accumulates state in: learnings, review history, symbol
+  embeddings, and webhook delivery dedup. Each opens at
+  `$XDG_STATE_HOME/auto_review/<name>.db` (falling back to
+  `$HOME/.local/state/auto_review/`) unless the operator overrides
+  the path or opts out with `<VAR>=:memory:`. Previously only
+  learnings and history could persist (and only when the operator
+  explicitly set `AR_LEARNINGS_DB`/`AR_HISTORY_DB`); embeddings
+  and dedup were always volatile.
+- New env vars: `AR_VECTOR_DB` (path or `:memory:`) and
+  `AR_DEDUP_DB` (path or `:memory:`). Existing `AR_LEARNINGS_DB`
+  and `AR_HISTORY_DB` keep their semantics; the only behaviour
+  change is the default — unset now means "open at the XDG path"
+  rather than "in-memory."
+- **Symbol embeddings are reused across reviews** when the
+  symbol's `(path, name, line_start)` is in the store and its
+  source bytes are unchanged. A re-review of an open PR no longer
+  re-embeds the entire workspace — only the diff and any symbols
+  whose snippet changed. Implemented as a `fetch_by_keys` lookup
+  on `VectorStore` plus content equality check before embedding.
+- **Webhook delivery dedup survives restarts.** A new
+  `SqliteDeliveries` impl backs the `DeliveryDedup` trait alongside
+  the existing `RecentDeliveries` LRU. Forgejo retries that arrive
+  during or after a gateway bounce are still recognised as
+  duplicates.
+- `/info` now surfaces the concrete backing for every store
+  (`sqlite:<path>` or `in-memory`) so operators can confirm at a
+  glance which file the bot opened. New fields: `vector`, `dedup`.
+  `learnings` and `history` change from a tag (`"sqlite"`) to a
+  full backing string (`"sqlite:/path/learnings.db"`).
+- A single startup log line summarises the four backings:
+  `persistence backings selected learnings=… history=… vector=… dedup=…`.
+
 #### Reproducible build via Nix flake
 
 - **`flake.nix`** pins the entire toolchain (rust nightly via

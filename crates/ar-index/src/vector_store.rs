@@ -7,6 +7,7 @@
 
 use crate::embed::EmbeddedSymbol;
 use async_trait::async_trait;
+use std::collections::HashMap;
 
 #[derive(Debug, thiserror::Error)]
 pub enum VectorStoreError {
@@ -29,6 +30,15 @@ pub trait VectorStore: Send + Sync {
         query: &[f32],
         top_k: usize,
     ) -> Result<Vec<ScoredSymbol>, VectorStoreError>;
+
+    /// Look up rows whose `(path, name, line_start)` matches one of
+    /// `keys`. Returned map is keyed by the same tuple. Callers use
+    /// this to skip embedding work for symbols whose stored content
+    /// matches the current snippet.
+    async fn fetch_by_keys(
+        &self,
+        keys: &[(String, String, u32)],
+    ) -> Result<HashMap<(String, String, u32), EmbeddedSymbol>, VectorStoreError>;
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -103,6 +113,21 @@ impl VectorStore for InMemoryVectorStore {
         });
         scored.truncate(top_k);
         Ok(scored)
+    }
+
+    async fn fetch_by_keys(
+        &self,
+        keys: &[(String, String, u32)],
+    ) -> Result<HashMap<(String, String, u32), EmbeddedSymbol>, VectorStoreError> {
+        let guard = self.inner.lock().await;
+        let mut out = HashMap::with_capacity(keys.len());
+        for sym in guard.iter() {
+            let key = symbol_key(sym);
+            if keys.contains(&key) {
+                out.insert(key, sym.clone());
+            }
+        }
+        Ok(out)
     }
 }
 
@@ -211,6 +236,28 @@ mod tests {
         // Mismatched length → 0.0
         let r = store.query_nearest(&[1.0], 1).await.unwrap();
         assert_eq!(r[0].score, 0.0);
+    }
+
+    #[tokio::test]
+    async fn in_memory_fetch_by_keys_returns_only_matches() {
+        let store = InMemoryVectorStore::new();
+        store
+            .upsert(&[
+                esym("a.rs", "foo", 1, vec![1.0]),
+                esym("a.rs", "bar", 5, vec![0.5]),
+            ])
+            .await
+            .unwrap();
+        let got = store
+            .fetch_by_keys(&[
+                ("a.rs".into(), "foo".into(), 1),
+                ("a.rs".into(), "missing".into(), 9),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        let key = ("a.rs".to_string(), "foo".to_string(), 1u32);
+        assert_eq!(got.get(&key).unwrap().embedding, vec![1.0]);
     }
 
     #[tokio::test]

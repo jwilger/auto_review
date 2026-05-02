@@ -157,6 +157,47 @@ impl VectorStore for SqliteVectorStore {
         scored.truncate(top_k);
         Ok(scored)
     }
+
+    async fn fetch_by_keys(
+        &self,
+        keys: &[(String, String, u32)],
+    ) -> Result<std::collections::HashMap<(String, String, u32), EmbeddedSymbol>, VectorStoreError>
+    {
+        let mut out = std::collections::HashMap::new();
+        if keys.is_empty() {
+            return Ok(out);
+        }
+        // SQLite parameter limit defaults to 999. Typical RAG calls
+        // see a few hundred symbols max; chunking to 200 keeps us
+        // well clear and is still one round-trip per chunk.
+        for chunk in keys.chunks(200) {
+            let mut sql = String::from(
+                "SELECT path, name, kind, line_start, line_end, content, embedding \
+                 FROM vector_symbols WHERE ",
+            );
+            let clauses: Vec<&str> =
+                vec!["(path = ? AND name = ? AND line_start = ?)"; chunk.len()];
+            sql.push_str(&clauses.join(" OR "));
+            let mut q = sqlx::query(&sql);
+            for (path, name, line_start) in chunk {
+                q = q.bind(path).bind(name).bind(*line_start as i64);
+            }
+            let rows = q
+                .fetch_all(&self.pool)
+                .await
+                .map_err(|e| VectorStoreError::Storage(e.to_string()))?;
+            for row in rows {
+                let symbol = row_to_embedded(row)?;
+                let key = (
+                    symbol.indexed.path.clone(),
+                    symbol.indexed.symbol.name.clone(),
+                    symbol.indexed.symbol.line_start,
+                );
+                out.insert(key, symbol);
+            }
+        }
+        Ok(out)
+    }
 }
 
 fn row_to_embedded(row: sqlx::sqlite::SqliteRow) -> Result<EmbeddedSymbol, VectorStoreError> {
@@ -422,6 +463,29 @@ mod tests {
         let mut expected: Vec<SymbolKind> = kinds.to_vec();
         expected.sort_by_key(|k| symbol_kind_to_str(*k));
         assert_eq!(got, expected);
+    }
+
+    #[tokio::test]
+    async fn fetch_by_keys_returns_only_matching_keys() {
+        let store = SqliteVectorStore::in_memory().await.expect("open");
+        store
+            .upsert(&[
+                esym("a.rs", "foo", 1, vec![1.0]),
+                esym("a.rs", "bar", 5, vec![0.5]),
+            ])
+            .await
+            .unwrap();
+        let got = store
+            .fetch_by_keys(&[
+                ("a.rs".into(), "foo".into(), 1),
+                ("a.rs".into(), "missing".into(), 10),
+            ])
+            .await
+            .unwrap();
+        assert_eq!(got.len(), 1);
+        let key = ("a.rs".to_string(), "foo".to_string(), 1u32);
+        let cached = got.get(&key).expect("foo present");
+        assert_eq!(cached.embedding, vec![1.0]);
     }
 
     #[tokio::test]

@@ -34,7 +34,9 @@ pub use config::{
     load_repo_config, parse_repo_config, parse_repo_config_strict, RepoConfig,
     RepoConfigStrictError, ReviewMode,
 };
-pub use context_builder::{build_review_context, ContextBuildError};
+pub use context_builder::{
+    build_review_context, build_review_context_with_store, ContextBuildError,
+};
 pub use diff::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 pub use error::ReviewError;
 pub use globset::GlobSet;

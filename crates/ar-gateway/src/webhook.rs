@@ -70,16 +70,30 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
             .or_else(|| headers.get(FALLBACK_DELIVERY_HEADER))
             .and_then(|v| v.to_str().ok());
         if let Some(id) = delivery_id {
-            if matches!(
-                dedup.check_and_record(id),
-                crate::dedup::CheckResult::Duplicate
-            ) {
-                state.metrics.record_duplicate();
-                tracing::debug!(
-                    delivery_id = id,
-                    "duplicate delivery; replying OK without dispatch"
-                );
-                return (StatusCode::OK, "duplicate").into_response();
+            match dedup.check_and_record(id).await {
+                Ok(crate::dedup::CheckResult::Duplicate) => {
+                    state.metrics.record_duplicate();
+                    tracing::debug!(
+                        delivery_id = id,
+                        "duplicate delivery; replying OK without dispatch"
+                    );
+                    return (StatusCode::OK, "duplicate").into_response();
+                }
+                Ok(crate::dedup::CheckResult::FirstSight) => {}
+                Err(e) => {
+                    // Fail-open: if the dedup store is unreachable
+                    // (disk full, sqlx pool exhausted), prefer
+                    // dispatching a possible duplicate over silently
+                    // dropping a real webhook. The unbounded growth
+                    // of duplicate dispatches is bounded by the
+                    // upstream review_history check; missed dispatches
+                    // are not.
+                    tracing::warn!(
+                        error = %e,
+                        delivery_id = id,
+                        "dedup check failed; dispatching anyway"
+                    );
+                }
             }
         }
         // No header present: nothing to dedup against. Fall
@@ -410,8 +424,10 @@ mod tests {
             bot_login: "pr-bot".into(),
             bot_name: "pr-bot".into(),
             sandbox: "podman",
-            learnings: "sqlite",
-            history: "sqlite",
+            learnings: "sqlite".into(),
+            history: "sqlite".into(),
+            vector: "sqlite".into(),
+            dedup: "sqlite".into(),
             llm_tiers: vec!["reasoning", "cheap", "embedding"],
             reasoning_model: "qwen2.5-coder:32b".into(),
             poller_enabled: true,
@@ -436,6 +452,44 @@ mod tests {
             .map(|v| v.as_str().unwrap().to_owned())
             .collect();
         assert_eq!(tiers, vec!["reasoning", "cheap", "embedding"]);
+    }
+
+    #[tokio::test]
+    async fn info_surfaces_concrete_sqlite_path_for_persistent_backings() {
+        // Operators inspecting /info need to know *which* file the
+        // bot opened, not just that "sqlite" was selected — otherwise
+        // a deploy that picks the wrong XDG_STATE_HOME (or where the
+        // caller meant to override but the env var fell through to
+        // the default) is invisible to introspection.
+        use crate::GatewayInfo;
+        let info = Arc::new(GatewayInfo {
+            name: "auto_review",
+            version: "0.0.1",
+            bot_login: "pr-bot".into(),
+            bot_name: "pr-bot".into(),
+            sandbox: "podman",
+            learnings: "sqlite:/var/lib/auto_review/learnings.db".into(),
+            history: "sqlite:/var/lib/auto_review/history.db".into(),
+            vector: "sqlite:/var/lib/auto_review/vector.db".into(),
+            dedup: "sqlite:/var/lib/auto_review/dedup.db".into(),
+            llm_tiers: vec!["reasoning", "cheap", "embedding"],
+            reasoning_model: "qwen2.5-coder:32b".into(),
+            poller_enabled: true,
+            readiness_enabled: true,
+        });
+        let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)).with_info(info));
+        let req = Request::get("/info").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(
+            json["learnings"],
+            "sqlite:/var/lib/auto_review/learnings.db"
+        );
+        assert_eq!(json["history"], "sqlite:/var/lib/auto_review/history.db");
+        assert_eq!(json["vector"], "sqlite:/var/lib/auto_review/vector.db");
+        assert_eq!(json["dedup"], "sqlite:/var/lib/auto_review/dedup.db");
     }
 
     #[tokio::test]

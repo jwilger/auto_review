@@ -1,11 +1,12 @@
 use crate::review_history::{InMemoryReviewHistory, PrKey, ReviewHistory};
 use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullRequestEvent};
-use ar_index::LearningsStore;
+use ar_index::{LearningsStore, VectorStore};
 use ar_llm::Router as LlmRouter;
 use ar_review::{
-    build_glob_set, build_review_context, filter_reviewable, lint_workspace_via, load_repo_config,
-    pr_is_skippable, prepare_workspace, review_pull_request, triage_files_with_llm, GlobSet,
-    PreparedWorkspace, ReviewArgs, ReviewError, ReviewMode, VerifyMode, WorkspaceError,
+    build_glob_set, build_review_context_with_store, filter_reviewable, lint_workspace_via,
+    load_repo_config, pr_is_skippable, prepare_workspace, review_pull_request,
+    triage_files_with_llm, GlobSet, PreparedWorkspace, ReviewArgs, ReviewError, ReviewMode,
+    VerifyMode, WorkspaceError,
 };
 use ar_sandbox::{DirectSandbox, Sandbox};
 use ar_tools::Finding;
@@ -131,6 +132,12 @@ pub struct SpawningDispatcher {
     forgejo_token: Arc<String>,
     history: Arc<dyn ReviewHistory>,
     learnings: Option<Arc<dyn LearningsStore>>,
+    /// Optional shared vector store for symbol embeddings. When set,
+    /// embeddings persist across reviews (and, when SQLite-backed,
+    /// across gateway restarts) so re-reviews of the same PR don't
+    /// re-embed unchanged symbols. None ⇒ build_review_context_with_store
+    /// constructs a per-call in-memory store as a back-compat default.
+    vector_store: Option<Arc<dyn VectorStore>>,
     sandbox: Arc<dyn Sandbox>,
     observer: Option<Arc<dyn ReviewObserver>>,
     /// Optional cap on concurrent in-flight reviews. When set, a
@@ -155,6 +162,7 @@ impl SpawningDispatcher {
             forgejo_token: Arc::new(forgejo_token.into()),
             history: Arc::new(InMemoryReviewHistory::new()),
             learnings: None,
+            vector_store: None,
             // Default: no isolation. Override with `with_sandbox` in
             // production to wrap linter spawns in a hardened container.
             sandbox: Arc::new(DirectSandbox::new()),
@@ -201,6 +209,14 @@ impl SpawningDispatcher {
         self
     }
 
+    /// Wire in a shared vector store so symbol embeddings persist
+    /// across reviews. Without this, every review constructs a
+    /// throwaway in-memory store and re-embeds the entire workspace.
+    pub fn with_vector_store(mut self, store: Arc<dyn VectorStore>) -> Self {
+        self.vector_store = Some(store);
+        self
+    }
+
     /// Override the default direct sandbox. Production deployments
     /// should pass a [`PodmanSandbox`](ar_sandbox::PodmanSandbox) so
     /// linter binaries run with no network, dropped caps, and resource
@@ -220,6 +236,7 @@ impl JobDispatcher for SpawningDispatcher {
         let token = self.forgejo_token.clone();
         let history = self.history.clone();
         let learnings = self.learnings.clone();
+        let vector_store = self.vector_store.clone();
         let sandbox = self.sandbox.clone();
         let observer = self.observer.clone();
         let concurrency_limit = self.concurrency_limit.clone();
@@ -278,6 +295,7 @@ impl JobDispatcher for SpawningDispatcher {
                     &token,
                     history.as_ref(),
                     learnings.as_deref(),
+                    vector_store.as_deref(),
                     sandbox.as_ref(),
                     observer.as_deref(),
                     job,
@@ -347,6 +365,7 @@ pub async fn run_review_job(
     forgejo_token: &str,
     history: &dyn ReviewHistory,
     learnings: Option<&dyn LearningsStore>,
+    vector_store: Option<&dyn VectorStore>,
     sandbox: &dyn Sandbox,
     observer: Option<&dyn ReviewObserver>,
     job: ReviewJob,
@@ -478,6 +497,7 @@ pub async fn run_review_job(
         forgejo_base,
         forgejo_token,
         learnings,
+        vector_store,
         sandbox,
         &job,
         changed_files,
@@ -734,6 +754,7 @@ async fn prepare_and_lint(
     base: &str,
     token: &str,
     learnings: Option<&dyn LearningsStore>,
+    vector_store: Option<&dyn VectorStore>,
     sandbox: &dyn Sandbox,
     job: &ReviewJob,
     prefetched_files: Option<Vec<ar_forgejo::ChangedFile>>,
@@ -813,12 +834,19 @@ async fn prepare_and_lint(
     let repo_context = if raw_diff.is_empty() {
         String::new()
     } else {
-        build_review_context(workspace.path(), llm, &raw_diff, learnings, 5)
-            .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "RAG context build failed; continuing");
-                String::new()
-            })
+        build_review_context_with_store(
+            workspace.path(),
+            llm,
+            &raw_diff,
+            learnings,
+            5,
+            vector_store,
+        )
+        .await
+        .unwrap_or_else(|e| {
+            tracing::warn!(error = %e, "RAG context build failed; continuing");
+            String::new()
+        })
     };
 
     Ok(LintPhaseOutput {

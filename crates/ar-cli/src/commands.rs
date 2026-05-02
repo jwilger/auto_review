@@ -120,6 +120,10 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
         // review-once is a one-shot debug command — no learnings
         // store wired in. Future: take a path to a SQLite file.
         None,
+        // Same: no shared vector store. Each invocation builds a
+        // fresh in-memory store via build_review_context's back-compat
+        // path, then drops it.
+        None,
         &sandbox,
         // No observer either: review-once prints to stdout, doesn't
         // export Prometheus metrics.
@@ -1997,8 +2001,10 @@ auto_review_reviews_completed_count 10
             bot_login: "pr-bot".into(),
             bot_name: "pr-bot".into(),
             sandbox: "podman",
-            learnings: "sqlite",
-            history: "sqlite",
+            learnings: "sqlite".into(),
+            history: "sqlite".into(),
+            vector: "sqlite".into(),
+            dedup: "sqlite".into(),
             llm_tiers: vec!["reasoning"],
             reasoning_model: "test-model".into(),
             poller_enabled: true,

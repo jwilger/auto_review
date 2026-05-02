@@ -1,18 +1,22 @@
 use anyhow::{Context, Result};
 use ar_forgejo::Client as ForgejoClient;
-use ar_gateway::dedup::RecentDeliveries;
+use ar_gateway::config::{compose_state_path, resolve_db_backing, DbBacking};
+use ar_gateway::dedup::{DeliveryDedup, RecentDeliveries, SqliteDeliveries};
 use ar_gateway::metrics::{Metrics, MetricsObserver};
 use ar_gateway::poller::{ChatPoller, DEFAULT_POLL_INTERVAL};
 use ar_gateway::ratelimit::TokenBucket;
 use ar_gateway::{build_router, AppState, ChatDeps, GatewayInfo, ReadinessProbe};
-use ar_index::{InMemoryLearningsStore, SqliteLearningsStore};
+use ar_index::{
+    InMemoryLearningsStore, InMemoryVectorStore, SqliteLearningsStore, SqliteVectorStore,
+    VectorStore,
+};
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::review_history::{InMemoryReviewHistory, ReviewHistory};
 use ar_orchestrator::sqlite_history::SqliteReviewHistory;
 use ar_orchestrator::SpawningDispatcher;
 use ar_sandbox::{DirectSandbox, PodmanSandbox, PodmanSandboxConfig, Sandbox};
 use std::env;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -176,20 +180,33 @@ async fn main() -> Result<()> {
 
     // Single shared learnings store: writes from the chat handler
     // (remember/forget) become visible to RAG retrieval in subsequent
-    // reviews. Set AR_LEARNINGS_DB to a filesystem path to persist
-    // across restarts; otherwise an in-memory store is used.
-    let learnings: Arc<dyn ar_index::LearningsStore> = match read_non_empty_env("AR_LEARNINGS_DB") {
-        Some(path) => {
-            let path = PathBuf::from(path);
-            let store = SqliteLearningsStore::open(&path)
+    // reviews. Persistent SQLite by default (at the per-store XDG path);
+    // operators opt out with `AR_LEARNINGS_DB=:memory:` or override
+    // the path with `AR_LEARNINGS_DB=/path/to/learnings.db`.
+    let learnings_backing = resolve_db_backing(
+        env::var("AR_LEARNINGS_DB").ok().as_deref(),
+        &default_state_path("learnings.db"),
+    );
+    let (learnings, learnings_info) = match &learnings_backing {
+        DbBacking::Sqlite(path) => {
+            ensure_parent_dir(path).with_context(|| {
+                format!("create parent dir for learnings db at {}", path.display())
+            })?;
+            let store = SqliteLearningsStore::open(path)
                 .await
                 .with_context(|| format!("open learnings db at {}", path.display()))?;
             tracing::info!(path = %path.display(), "learnings store: SQLite (persistent)");
-            Arc::new(store)
+            (
+                Arc::new(store) as Arc<dyn ar_index::LearningsStore>,
+                format!("sqlite:{}", path.display()),
+            )
         }
-        None => {
-            tracing::info!("learnings store: in-memory (volatile across restarts)");
-            Arc::new(InMemoryLearningsStore::new())
+        DbBacking::InMemory => {
+            tracing::info!("learnings store: in-memory (AR_LEARNINGS_DB=:memory: opt-out)");
+            (
+                Arc::new(InMemoryLearningsStore::new()) as Arc<dyn ar_index::LearningsStore>,
+                "in-memory".to_string(),
+            )
         }
     };
 
@@ -198,22 +215,113 @@ async fn main() -> Result<()> {
     // Shared review history. Both the orchestrator's incremental-
     // review dedup AND the chat poller need to enumerate the PRs
     // we've reviewed; constructing one Arc and threading it through
-    // both keeps them consistent. Set AR_HISTORY_DB to a filesystem
-    // path to persist across restarts; otherwise an in-memory store
-    // is used (every restart triggers a fresh full review on the
-    // next webhook for any open PR).
-    let history: Arc<dyn ReviewHistory> = match read_non_empty_env("AR_HISTORY_DB") {
-        Some(path) => {
-            let path = PathBuf::from(path);
-            let store = SqliteReviewHistory::open(&path)
+    // both keeps them consistent. Persistent SQLite by default;
+    // `AR_HISTORY_DB=:memory:` opts out (every restart triggers a
+    // fresh full review on the next webhook for any open PR).
+    let history_backing = resolve_db_backing(
+        env::var("AR_HISTORY_DB").ok().as_deref(),
+        &default_state_path("history.db"),
+    );
+    let (history, history_info) = match &history_backing {
+        DbBacking::Sqlite(path) => {
+            ensure_parent_dir(path).with_context(|| {
+                format!("create parent dir for history db at {}", path.display())
+            })?;
+            let store = SqliteReviewHistory::open(path)
                 .await
                 .with_context(|| format!("open history db at {}", path.display()))?;
             tracing::info!(path = %path.display(), "review history: SQLite (persistent)");
-            Arc::new(store)
+            (
+                Arc::new(store) as Arc<dyn ReviewHistory>,
+                format!("sqlite:{}", path.display()),
+            )
         }
-        None => {
-            tracing::info!("review history: in-memory (volatile across restarts)");
-            Arc::new(InMemoryReviewHistory::new())
+        DbBacking::InMemory => {
+            tracing::info!("review history: in-memory (AR_HISTORY_DB=:memory: opt-out)");
+            (
+                Arc::new(InMemoryReviewHistory::new()) as Arc<dyn ReviewHistory>,
+                "in-memory".to_string(),
+            )
+        }
+    };
+
+    // Shared symbol-embedding store. Persistent SQLite by default
+    // so symbol embeddings survive across reviews (and across gateway
+    // restarts). `AR_VECTOR_DB=:memory:` opts out — useful for tests
+    // and ephemeral previews where re-embedding on each review is
+    // acceptable. The wins matter most for the slow local Ollama
+    // embedder; hosted OpenAI is fast enough that operators may not
+    // bother with persistence.
+    let vector_backing = resolve_db_backing(
+        env::var("AR_VECTOR_DB").ok().as_deref(),
+        &default_state_path("vector.db"),
+    );
+    let (vector_store, vector_info) = match &vector_backing {
+        DbBacking::Sqlite(path) => {
+            ensure_parent_dir(path).with_context(|| {
+                format!("create parent dir for vector db at {}", path.display())
+            })?;
+            let store = SqliteVectorStore::open(path)
+                .await
+                .with_context(|| format!("open vector db at {}", path.display()))?;
+            tracing::info!(path = %path.display(), "vector store: SQLite (persistent)");
+            (
+                Arc::new(store) as Arc<dyn VectorStore>,
+                format!("sqlite:{}", path.display()),
+            )
+        }
+        DbBacking::InMemory => {
+            tracing::info!("vector store: in-memory (AR_VECTOR_DB=:memory: opt-out)");
+            (
+                Arc::new(InMemoryVectorStore::new()) as Arc<dyn VectorStore>,
+                "in-memory".to_string(),
+            )
+        }
+    };
+
+    // Webhook delivery dedup. Persistent SQLite by default; operators
+    // opt out of persistence with `AR_DEDUP_DB=:memory:` (in-memory
+    // LRU bounded by `AR_DEDUP_CAPACITY`, default 256), or disable
+    // dedup entirely with `AR_DEDUP_CAPACITY=0` (mostly for tests
+    // that want every well-signed delivery dispatched). Computed
+    // upfront so the chosen backing lands in /info alongside the
+    // others, even though the actual `with_webhook_dedup` call
+    // happens further down once `state` exists.
+    let dedup_capacity = parse_env::<usize>("AR_DEDUP_CAPACITY").unwrap_or(256);
+    let dedup_backing = resolve_db_backing(
+        env::var("AR_DEDUP_DB").ok().as_deref(),
+        &default_state_path("dedup.db"),
+    );
+    let (dedup_store, dedup_info): (Option<Arc<dyn DeliveryDedup>>, String) = if dedup_capacity == 0
+    {
+        tracing::info!("webhook delivery dedup: disabled (AR_DEDUP_CAPACITY=0)");
+        (None, "disabled".into())
+    } else {
+        match &dedup_backing {
+            DbBacking::Sqlite(path) => {
+                ensure_parent_dir(path).with_context(|| {
+                    format!("create parent dir for dedup db at {}", path.display())
+                })?;
+                let store = SqliteDeliveries::open(path)
+                    .await
+                    .with_context(|| format!("open dedup db at {}", path.display()))?;
+                tracing::info!(path = %path.display(), "webhook delivery dedup: SQLite (persistent)");
+                (
+                    Some(Arc::new(store) as Arc<dyn DeliveryDedup>),
+                    format!("sqlite:{}", path.display()),
+                )
+            }
+            DbBacking::InMemory => {
+                let store = RecentDeliveries::new(dedup_capacity);
+                tracing::info!(
+                    capacity = dedup_capacity,
+                    "webhook delivery dedup: in-memory LRU (AR_DEDUP_DB=:memory: opt-out)"
+                );
+                (
+                    Some(Arc::new(store) as Arc<dyn DeliveryDedup>),
+                    format!("in-memory(capacity={dedup_capacity})"),
+                )
+            }
         }
     };
 
@@ -229,6 +337,7 @@ async fn main() -> Result<()> {
     )
     .with_history(history.clone())
     .with_learnings(learnings.clone())
+    .with_vector_store(vector_store.clone())
     .with_sandbox(sandbox)
     .with_observer(observer);
 
@@ -301,16 +410,10 @@ async fn main() -> Result<()> {
         } else {
             "direct"
         },
-        learnings: if read_non_empty_env("AR_LEARNINGS_DB").is_some() {
-            "sqlite"
-        } else {
-            "in-memory"
-        },
-        history: if read_non_empty_env("AR_HISTORY_DB").is_some() {
-            "sqlite"
-        } else {
-            "in-memory"
-        },
+        learnings: learnings_info.clone(),
+        history: history_info.clone(),
+        vector: vector_info.clone(),
+        dedup: dedup_info.clone(),
         llm_tiers: {
             let mut tiers = vec!["reasoning"]; // always present (required)
             if read_non_empty_env("LLM_CHEAP_MODEL").is_some() {
@@ -333,15 +436,21 @@ async fn main() -> Result<()> {
         .with_readiness(readiness)
         .with_info(info);
 
-    // Webhook delivery dedup. On by default with a 256-ID LRU;
-    // operators can override via AR_DEDUP_CAPACITY (set to 0 to
-    // disable, e.g. for tests that want every delivery dispatched).
-    let dedup_capacity = parse_env::<usize>("AR_DEDUP_CAPACITY").unwrap_or(256);
-    if dedup_capacity > 0 {
-        let dedup = Arc::new(RecentDeliveries::new(dedup_capacity));
+    if let Some(dedup) = dedup_store {
         state = state.with_webhook_dedup(dedup);
-        tracing::info!(capacity = dedup_capacity, "webhook delivery dedup enabled");
     }
+
+    // Single-line summary of the four persistence backings, so an
+    // operator can confirm at startup which file the bot opened
+    // (or that everything's volatile) without diffing four
+    // separate lines above.
+    tracing::info!(
+        learnings = %learnings_info,
+        history = %history_info,
+        vector = %vector_info,
+        dedup = %dedup_info,
+        "persistence backings selected",
+    );
 
     // Optional global webhook throttle (T7 mitigation). Off by
     // default so existing deployments don't suddenly start
@@ -452,6 +561,26 @@ async fn shutdown_signal() {
 /// when unset; an explicit empty assignment (`FOO=`) is almost always
 /// a misconfiguration that should fall through to the same default
 /// rather than silently producing a broken empty string.
+/// Compute the per-store XDG default sqlite path for `filename`. Thin
+/// wrapper around the pure [`compose_state_path`] so unit tests don't
+/// have to mutate the process env.
+fn default_state_path(filename: &str) -> PathBuf {
+    let xdg = env::var_os("XDG_STATE_HOME").map(PathBuf::from);
+    let home = env::var_os("HOME").map(PathBuf::from);
+    compose_state_path(xdg.as_deref(), home.as_deref(), filename)
+}
+
+/// Create the parent directory of `path` if it doesn't exist. The
+/// SQLite stores' `open()` would otherwise fail with a confusing
+/// "unable to open database file" on first run when the XDG state
+/// dir is missing. `create_dir_all` is idempotent.
+fn ensure_parent_dir(path: &Path) -> std::io::Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    Ok(())
+}
+
 fn read_non_empty_env(name: &str) -> Option<String> {
     match env::var(name) {
         Ok(v) if v.trim().is_empty() => {
