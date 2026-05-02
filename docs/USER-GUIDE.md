@@ -97,6 +97,11 @@ The bot's findings are advisory. If you think a finding is wrong:
 There's no "this comment is wrong" button. The right escalation is
 a guideline (durable) or a reply (per-PR).
 
+Forgejo currently does not expose a PAT-authenticated REST endpoint
+that marks inline review conversations resolved. Even when a finding
+is fixed, the bot cannot press the UI's **Resolve conversation** button
+for you; that action remains manual for a signed-in Forgejo user.
+
 ## Skipping the bot
 
 For a single PR: open it as a **draft**. The bot's webhook handler

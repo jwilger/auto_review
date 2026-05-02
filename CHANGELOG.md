@@ -25,6 +25,12 @@ since the start of the project.
   applies a short restart grace period, making mid-edit transient compile
   failures recover on the next save instead of requiring a manual refresh.
 
+#### Forgejo review-comment resolution gap
+
+- Operator and user docs now call out that Forgejo does not currently
+  expose a PAT-authenticated REST endpoint for resolving inline review
+  conversations, so comment resolution remains a manual UI action.
+
 #### Default-on persistence for runtime state
 
 - **Persistent SQLite is now the default** for the four stores the

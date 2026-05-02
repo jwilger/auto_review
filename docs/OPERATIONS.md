@@ -547,6 +547,23 @@ If the new version fails to start, the old binary is still on disk
 at `target/release/ar-gateway.bak` (manual; we do not auto-back-up).
 Roll back, file an issue.
 
+## 9.1 Forgejo review-comment resolution gap
+
+Forgejo 15.0.0 does not provide a token-authenticated REST API for
+resolving inline review conversations. Gitea documents
+`POST /repos/{owner}/{repo}/pulls/comments/{id}/resolve`, but on
+Forgejo that route currently returns `405 Method Not Allowed` with
+`Allow: GET`. The working resolver is Forgejo's web form endpoint,
+`/{owner}/{repo}/issues/resolve_conversation`, which is protected by
+CSRF and requires a browser session cookie.
+
+Operationally, keep `auto_review` on PAT-based API auth only and treat
+conversation resolution as a manual reviewer action in the Forgejo UI.
+Do not plan automations that auto-resolve comments after a fix unless a
+future Forgejo release exposes an API endpoint that works with the bot's
+token. Re-check this during Forgejo upgrades by probing the REST route
+against a test PR before depending on it.
+
 ---
 
 ## 10. Filing an issue
