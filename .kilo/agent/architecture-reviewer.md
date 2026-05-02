@@ -1,7 +1,7 @@
 ---
 description: Read-only reviewer for crate boundaries, pipeline architecture, public-surface docs, env validation, errors, and observability contracts.
 mode: subagent
-steps: 20
+steps: 200
 color: "#6F42C1"
 permission:
   read: allow

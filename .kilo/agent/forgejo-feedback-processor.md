@@ -1,7 +1,7 @@
 ---
 description: Subagent for Forgejo PR feedback. Reflects, classifies, remediates, and prepares inline thread replies.
 mode: subagent
-steps: 30
+steps: 200
 color: "#F66A0A"
 permission:
   read: allow

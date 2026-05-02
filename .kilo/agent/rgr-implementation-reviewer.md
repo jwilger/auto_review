@@ -1,7 +1,7 @@
 ---
 description: Read-only reviewer for GREEN implementation minimality, architecture fit, and test demand in RGR microcycles.
 mode: subagent
-steps: 20
+steps: 200
 color: "#0969DA"
 permission:
   read: allow

@@ -1,7 +1,7 @@
 ---
 description: Read-only reviewer for test coverage, RGR evidence, and whether new production behavior was demanded by tests.
 mode: subagent
-steps: 20
+steps: 200
 color: "#D6A100"
 permission:
   read: allow

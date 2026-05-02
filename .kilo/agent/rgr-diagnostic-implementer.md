@@ -1,7 +1,7 @@
 ---
 description: Edit-capable subagent for clearing exactly one current RGR diagnostic with the smallest demanded change.
 mode: subagent
-steps: 20
+steps: 200
 color: "#2DA44E"
 permission:
   read: allow

@@ -1,7 +1,7 @@
 ---
 description: Read-only reviewer for RED test fit, API pressure, and architecture before production edits.
 mode: subagent
-steps: 20
+steps: 200
 color: "#8A63D2"
 permission:
   read: allow

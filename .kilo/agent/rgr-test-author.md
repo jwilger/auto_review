@@ -1,7 +1,7 @@
 ---
 description: Edit-capable subagent for writing or activating the next smallest RED test in outside-in RGR workflows.
 mode: subagent
-steps: 20
+steps: 200
 color: "#B45AF2"
 permission:
   read: allow

@@ -1,7 +1,7 @@
 ---
 description: Optional read-only reviewer for operator docs, deployment files, systemd env examples, and CHANGELOG consistency.
 mode: subagent
-steps: 15
+steps: 200
 color: "#28A745"
 permission:
   read: allow

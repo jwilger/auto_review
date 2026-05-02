@@ -1,7 +1,7 @@
 ---
 description: Read-only reviewer for security, sandboxing, secret handling, unsafe execution, dependencies, and threat-model coupling.
 mode: subagent
-steps: 20
+steps: 200
 color: "#D73A49"
 permission:
   read: allow

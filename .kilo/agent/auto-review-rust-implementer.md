@@ -1,7 +1,6 @@
 ---
 description: Primary implementer for auto_review Rust work. Use for normal code changes, focused tests, and RGR-driven implementation.
 mode: all
-steps: 40
 color: "#4F8EF7"
 permission:
   read: allow
