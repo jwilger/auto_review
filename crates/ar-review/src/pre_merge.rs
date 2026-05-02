@@ -2,12 +2,12 @@
 //! alongside the LLM review and surface as a markdown checklist
 //! appended to the posted review body.
 //!
-//! Each check is **advisory** — failing one doesn't change the
-//! review's `event` (Comment vs RequestChanges) or block merging
-//! anywhere. Operators get a list the PR author can scan: "did you
-//! forget to update CHANGELOG.md?", "did you add a test?". Repos
-//! with their own merge-gating CI keep using that; auto_review's
-//! pre-merge checks are nudges, not gates.
+//! Each check is **advisory** to Forgejo branch protection — failing
+//! one asks for changes in the review event, but auto_review still
+//! doesn't block merging anywhere. Operators get a list the PR author
+//! can scan: "did you forget to update CHANGELOG.md?", "did you add a
+//! test?". Repos with their own merge-gating CI keep using that;
+//! auto_review's pre-merge checks are review signals, not hard gates.
 //!
 //! Built-ins (Milestone 4 first cut):
 //! - `changelog`: CHANGELOG.md exists in the workspace, non-trivial

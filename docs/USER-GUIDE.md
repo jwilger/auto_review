@@ -54,9 +54,10 @@ custom natural-language checks via
 [`pre_merge_checks:`](#repo-config) and the bot evaluates each
 against the diff.
 
-Failing a check is a **nudge, not a gate** — the review's
-Request-changes vs Comment outcome is decided by the inline
-findings' severity, not the checklist.
+Failing a check asks for changes in the posted review, but it is still
+a **nudge, not a merge gate**. auto_review does not enforce branch
+protection; your Forgejo repository settings decide whether a
+Request-changes review blocks merging.
 
 ## Talking to the bot
 

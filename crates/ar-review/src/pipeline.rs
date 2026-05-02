@@ -6,12 +6,16 @@ use crate::heal::{generate_with_self_heal, HealConfig};
 use crate::ignored::{filter_changed_files, filter_diff_paths};
 use crate::linter_only::build_linter_only_output;
 use crate::mapping::output_to_review_request;
-use crate::pre_merge::{evaluate as evaluate_pre_merge_checks, render_combined_section};
-use crate::pre_merge_llm::evaluate_custom_checks;
+use crate::pre_merge::{
+    evaluate as evaluate_pre_merge_checks, render_combined_section, CheckResult, CheckStatus,
+};
+use crate::pre_merge_llm::{evaluate_custom_checks, CustomCheckResult};
 use crate::verify::verify_findings;
-use ar_forgejo::Client as ForgejoClient;
+use ar_forgejo::{Client as ForgejoClient, ReviewEvent};
 use ar_llm::Router as LlmRouter;
-use ar_prompts::{render_review_prompt, system_prompt, ReviewPromptInputs, ReviewSeverity};
+use ar_prompts::{
+    render_review_prompt, system_prompt, PreMergeCustomStatus, ReviewPromptInputs, ReviewSeverity,
+};
 use ar_tools::Finding;
 use globset::GlobSet;
 use std::path::Path;
@@ -271,14 +275,18 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
     // Pre-merge checks: deterministic gates (CHANGELOG / tests /
     // TODOs) plus repo-author-supplied natural-language checks
     // evaluated by the cheap LLM tier. Both surface as a single
-    // markdown checklist appended to the review body. Failing a
-    // check is advisory and does not change the review event.
+    // markdown checklist appended to the review body. Any failed
+    // check requests changes even when inline findings are below
+    // Error severity.
     let pre_merge_results = evaluate_pre_merge_checks(&diff, &files, args.workspace_path);
     let custom_results = if args.custom_pre_merge_checks.is_empty() {
         Vec::new()
     } else {
         evaluate_custom_checks(args.llm, args.custom_pre_merge_checks, &diff).await
     };
+    if pre_merge_has_failure(&pre_merge_results, &custom_results) {
+        req.event = ReviewEvent::RequestChanges;
+    }
     let section = render_combined_section(&pre_merge_results, &custom_results);
     if !section.is_empty() {
         if !req.body.is_empty() {
@@ -311,6 +319,15 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         notes,
         verifier_dropped,
     })
+}
+
+fn pre_merge_has_failure(built_in: &[CheckResult], custom: &[CustomCheckResult]) -> bool {
+    built_in
+        .iter()
+        .any(|check| matches!(check.status, CheckStatus::Fail))
+        || custom
+            .iter()
+            .any(|check| matches!(check.status, PreMergeCustomStatus::Fail))
 }
 
 #[cfg(test)]
@@ -684,20 +701,21 @@ mod tests {
             .mount(&server)
             .await;
         // Body now ends in `## Pre-merge checks` because the
-        // pipeline appends the deterministic check section.
-        // The body field stays excluded from the matcher so this
-        // test focuses on the integration contract (event +
-        // commit_id) — body composition is covered by
-        // mapping/pre_merge tests.
+        // pipeline appends the deterministic check section. This
+        // source-only fixture has no test change, so the pre-merge
+        // checklist asks for changes. The body field stays excluded
+        // from the matcher so this test focuses on the integration
+        // contract (event + commit_id) — body composition is covered
+        // by mapping/pre_merge tests.
         Mock::given(method("POST"))
             .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
             .and(body_partial_json(serde_json::json!({
                 "commit_id": "deadbeef",
-                "event": "COMMENT"
+                "event": "REQUEST_CHANGES"
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "id": 1234,
-                "state": "COMMENT"
+                "state": "REQUEST_CHANGES"
             })))
             .mount(&server)
             .await;
@@ -828,6 +846,80 @@ mod tests {
         .await
         .expect("ok");
         assert_eq!(outcome.findings_count, 1);
+    }
+
+    #[tokio::test]
+    async fn review_pull_request_request_changes_when_pre_merge_check_fails() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("diff --git a/src/x.rs b/src/x.rs\n@@ -1 +1 @@\n-old\n+new\n"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .and(body_partial_json(serde_json::json!({
+                "event": "REQUEST_CHANGES"
+            })))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 100,
+                "state": "REQUEST_CHANGES"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"no inline findings","findings":[]}"#,
+        ]));
+        let llm = router_with(provider);
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "sha",
+            pr_title: "t",
+            pr_body: "b",
+            linter_findings: &[],
+            ignored_paths: &GlobSet::empty(),
+            custom_pre_merge_checks: &[],
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            review_mode: ReviewMode::Full,
+            min_severity: ReviewSeverity::Note,
+        })
+        .await
+        .expect("pre-merge failure should still post review");
+
+        assert_eq!(outcome.review_id, 100);
+        assert_eq!(outcome.findings_count, 0);
+    }
+
+    #[test]
+    fn pre_merge_has_failure_includes_custom_checks() {
+        let custom = vec![CustomCheckResult {
+            check: "PR title explains why".into(),
+            status: PreMergeCustomStatus::Fail,
+            rationale: "title is too vague".into(),
+        }];
+
+        assert!(pre_merge_has_failure(&[], &custom));
     }
 
     #[tokio::test]

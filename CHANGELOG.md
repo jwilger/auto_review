@@ -618,6 +618,11 @@ default in-memory store to the SQLite-backed one.
 
 ### Fixed
 
+- Failed built-in or repo-authored pre-merge checks now post the
+  Forgejo review as **Request changes** even when inline findings are
+  only warnings/notes or absent. The checklist remains advisory to
+  branch protection, but the review event now matches the "don't merge
+  yet" signal. Closes #7.
 - The built-in pre-merge **Tests touched** check now treats added Rust
   in-file test markers (for example `#[test]` inside `#[cfg(test)] mod
   tests`) as test changes. Previously source files with adjacent unit
