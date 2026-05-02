@@ -1,0 +1,42 @@
+name: Sandbox image
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  publish:
+    name: Build and publish sandbox image
+    runs-on: docker
+    steps:
+      - name: Check out source
+        run: |
+          set -euo pipefail
+          git init .
+          git remote add origin "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          git fetch --depth 1 origin "$GITHUB_REF"
+          git checkout --detach FETCH_HEAD
+
+      - name: Log in to Forgejo container registry
+        run: |
+          set -euo pipefail
+          printf '%s' "${{ secrets.GITHUB_TOKEN }}" \
+            | docker login git.johnwilger.com \
+                --username "${{ github.actor }}" \
+                --password-stdin
+
+      - name: Build and publish sandbox image
+        run: |
+          set -euo pipefail
+          image="git.johnwilger.com/jwilger/auto_review/sandbox:${GITHUB_REF_NAME}"
+          docker build \
+            --file deploy/Dockerfile.sandbox \
+            --tag "$image" \
+            .
+          docker push "$image"

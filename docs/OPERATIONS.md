@@ -263,17 +263,23 @@ handler and the background poller honour these.)
 
 ### 5.1 Sandbox limits
 
-Without `AR_SANDBOX_IMAGE` set, linter binaries spawn directly on
-the host. That's only safe for trusted-PR-source environments.
-Production deployments should set:
+`AR_SANDBOX_IMAGE` is required at gateway startup. Without it, the
+gateway fails closed instead of spawning attacker-controlled linter
+processes directly on the host. Production deployments should set:
 
 ```
-AR_SANDBOX_IMAGE=ghcr.io/your-org/auto_review-sandbox:<tag>
+AR_SANDBOX_IMAGE=git.johnwilger.com/jwilger/auto_review/sandbox:<version>
 AR_SANDBOX_MEMORY_MIB=512
 AR_SANDBOX_CPUS=1.0
 AR_SANDBOX_PIDS_LIMIT=128
 AR_SANDBOX_TIMEOUT_SECS=60
 ```
+
+Release tags publish the default image from `deploy/Dockerfile.sandbox`
+to `git.johnwilger.com/jwilger/auto_review/sandbox:<version>`.
+The gateway auto-detects `podman` first and then `docker`. Set
+`AR_SANDBOX_RUNTIME` when the runtime binary has a non-standard name
+or path; startup fails if neither runtime is available.
 
 Tune the limits per-linter empirically — `golangci-lint` on a large
 Go monorepo will need more memory and a longer timeout than

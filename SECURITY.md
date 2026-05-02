@@ -61,9 +61,9 @@ Out of scope (these are upstream / operator concerns):
   homepages.
 - Operator-controlled configuration: an operator who sets
   `WEBHOOK_SECRET=hunter2` is responsible for that decision.
-- An operator who runs without `AR_SANDBOX_IMAGE` is operating in
-  the documented Kudelski-class threat regime; that's a deploy
-  choice, not a vulnerability.
+- Missing `AR_SANDBOX_IMAGE` at gateway startup is a fail-closed
+  operator configuration error. Reports should focus on sandbox bypass
+  or escape paths rather than the removed direct-mode default.
 
 ## What's already documented
 

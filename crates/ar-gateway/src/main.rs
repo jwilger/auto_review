@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 use ar_forgejo::Client as ForgejoClient;
 use ar_gateway::config::{compose_state_path, resolve_db_backing, DbBacking};
 use ar_gateway::dedup::{DeliveryDedup, RecentDeliveries, SqliteDeliveries};
@@ -14,7 +14,7 @@ use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::review_history::{InMemoryReviewHistory, ReviewHistory};
 use ar_orchestrator::sqlite_history::SqliteReviewHistory;
 use ar_orchestrator::SpawningDispatcher;
-use ar_sandbox::{DirectSandbox, PodmanSandbox, PodmanSandboxConfig, Sandbox};
+use ar_sandbox::{PodmanSandbox, PodmanSandboxConfig, Sandbox};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -548,14 +548,11 @@ async fn shutdown_signal() {
     }
 }
 
-/// Choose a sandbox based on env vars. Setting `AR_SANDBOX_IMAGE`
-/// switches the gateway from the unsafe direct-spawn path to a
-/// hardened [`PodmanSandbox`] that wraps every linter invocation
-/// in `podman run --network=none --read-only ...`.
-///
-/// Without `AR_SANDBOX_IMAGE`, linter binaries spawn directly on the
-/// host. That's fine for local dev but exposes the operator to the
-/// Kudelski-class RCE risk for any internet-facing deploy.
+/// Choose a sandbox based on env vars. `AR_SANDBOX_IMAGE` is required for
+/// gateway startup and selects the hardened [`PodmanSandbox`] path that wraps
+/// every linter invocation in `podman run --network=none --read-only ...`.
+/// Missing `AR_SANDBOX_IMAGE` fails closed so production cannot accidentally
+/// fall back to direct host execution.
 /// Read an env var, treating both "unset" and "empty / whitespace-only"
 /// as `None`. Most operator-facing env vars take a meaningful default
 /// when unset; an explicit empty assignment (`FOO=`) is almost always
@@ -620,65 +617,241 @@ where
     }
 }
 
-fn build_sandbox() -> Result<Arc<dyn Sandbox>> {
-    if let Some(image) = read_non_empty_env("AR_SANDBOX_IMAGE") {
-        let memory_mib = parse_env::<u64>("AR_SANDBOX_MEMORY_MIB").unwrap_or(512);
-        let cpus = parse_env::<f64>("AR_SANDBOX_CPUS").unwrap_or(1.0);
-        let pids_limit = parse_env::<u32>("AR_SANDBOX_PIDS_LIMIT").unwrap_or(128);
-        let wall_clock_secs = parse_env::<u64>("AR_SANDBOX_TIMEOUT_SECS").unwrap_or(60);
-        // Operator override: AR_SANDBOX_RUNTIME (preferred, neutral name)
-        // or AR_SANDBOX_PODMAN_BIN (legacy alias). When neither is set,
-        // auto-detect — prefer `podman` (rootless, no daemon) and fall
-        // back to `docker` if podman isn't on PATH. Either binary
-        // accepts our hardening flag set unchanged.
-        let podman_bin = env::var("AR_SANDBOX_RUNTIME")
-            .or_else(|_| env::var("AR_SANDBOX_PODMAN_BIN"))
-            .unwrap_or_else(|_| autodetect_oci_runtime());
-        let cfg = PodmanSandboxConfig {
-            image: image.clone(),
-            memory_mib,
-            cpus,
-            pids_limit,
-            wall_clock: Duration::from_secs(wall_clock_secs),
-            podman_bin: podman_bin.clone(),
-        };
-        tracing::info!(
-            image,
-            memory_mib,
-            cpus,
-            pids_limit,
-            wall_clock_secs,
-            runtime = %podman_bin,
-            "sandbox: oci hardened"
-        );
-        Ok(Arc::new(PodmanSandbox::new(cfg)))
+#[derive(Debug, PartialEq, Eq)]
+enum SandboxSelection {
+    Oci {
+        image: String,
+    },
+    #[cfg(test)]
+    Direct,
+}
+
+#[cfg(test)]
+fn select_sandbox(
+    sandbox_image: Option<String>,
+    dangerously_disable_sandbox: Option<String>,
+    allow_direct: bool,
+) -> Result<SandboxSelection> {
+    if let Some(image) = sandbox_image {
+        Ok(SandboxSelection::Oci { image })
+    } else if allow_direct && dangerously_disable_sandbox.as_deref() == Some("1") {
+        Ok(SandboxSelection::Direct)
+    } else if allow_direct {
+        bail!("AR_SANDBOX_IMAGE must be set unless AR_DANGEROUSLY_DISABLE_SANDBOX=1 is set")
     } else {
-        tracing::warn!(
-            "sandbox: direct (NO ISOLATION). Set AR_SANDBOX_IMAGE for production deploys."
-        );
-        Ok(Arc::new(DirectSandbox::new()))
+        bail!("AR_SANDBOX_IMAGE must be set; direct sandbox mode is disabled for gateway startup")
     }
+}
+
+fn select_gateway_sandbox(
+    sandbox_image: Option<String>,
+    dangerously_disable_sandbox: Option<String>,
+) -> Result<SandboxSelection> {
+    // Gateway startup fails closed: production selection never honors the
+    // dangerous direct-mode escape hatch, even if the env var is set.
+    let _ = dangerously_disable_sandbox;
+    match sandbox_image {
+        Some(image) => Ok(SandboxSelection::Oci { image }),
+        None => bail!(
+            "AR_SANDBOX_IMAGE is required; install Docker/Podman and set it to your sandbox image. See deploy/Dockerfile.sandbox."
+        ),
+    }
+}
+
+fn build_sandbox() -> Result<Arc<dyn Sandbox>> {
+    match select_gateway_sandbox(
+        read_non_empty_env("AR_SANDBOX_IMAGE"),
+        read_non_empty_env("AR_DANGEROUSLY_DISABLE_SANDBOX"),
+    )? {
+        SandboxSelection::Oci { image } => {
+            let memory_mib = parse_env::<u64>("AR_SANDBOX_MEMORY_MIB").unwrap_or(512);
+            let cpus = parse_env::<f64>("AR_SANDBOX_CPUS").unwrap_or(1.0);
+            let pids_limit = parse_env::<u32>("AR_SANDBOX_PIDS_LIMIT").unwrap_or(128);
+            let wall_clock_secs = parse_env::<u64>("AR_SANDBOX_TIMEOUT_SECS").unwrap_or(60);
+            // Operator override: AR_SANDBOX_RUNTIME (preferred, neutral name)
+            // or AR_SANDBOX_PODMAN_BIN (legacy alias). When neither is set,
+            // auto-detect — prefer `podman` (rootless, no daemon) and fall
+            // back to `docker` if podman isn't on PATH. Either binary
+            // accepts our hardening flag set unchanged.
+            let podman_bin = resolve_oci_runtime(
+                read_non_empty_env("AR_SANDBOX_RUNTIME"),
+                read_non_empty_env("AR_SANDBOX_PODMAN_BIN"),
+                runtime_is_available,
+            )?;
+            let cfg = PodmanSandboxConfig {
+                image: image.clone(),
+                memory_mib,
+                cpus,
+                pids_limit,
+                wall_clock: Duration::from_secs(wall_clock_secs),
+                podman_bin: podman_bin.clone(),
+            };
+            tracing::info!(
+                image,
+                memory_mib,
+                cpus,
+                pids_limit,
+                wall_clock_secs,
+                runtime = %podman_bin,
+                "sandbox: oci hardened"
+            );
+            Ok(Arc::new(PodmanSandbox::new(cfg)))
+        }
+        #[cfg(test)]
+        SandboxSelection::Direct => unreachable!("gateway selection never returns DirectSandbox"),
+    }
+}
+
+fn resolve_oci_runtime(
+    configured_runtime: Option<String>,
+    configured_podman_bin: Option<String>,
+    runtime_is_available: impl FnMut(&str) -> bool,
+) -> Result<String> {
+    if let Some(runtime) = configured_runtime.filter(|runtime| !runtime.trim().is_empty()) {
+        return Ok(runtime);
+    }
+    if let Some(podman_bin) =
+        configured_podman_bin.filter(|podman_bin| !podman_bin.trim().is_empty())
+    {
+        return Ok(podman_bin);
+    }
+
+    autodetect_oci_runtime(runtime_is_available)
 }
 
 /// Probe PATH at startup for an OCI runtime. Synchronous because
 /// build_sandbox runs before the tokio runtime is built. Default
 /// preference: podman (rootless, no daemon dependency), then
-/// docker (needs daemon + group membership). When neither is
-/// installed, returns "podman" so the eventual SandboxError on
-/// the first review surfaces a clear "podman binary not found"
-/// message rather than a misleading docker error.
-fn autodetect_oci_runtime() -> String {
+/// docker (needs daemon + group membership).
+fn autodetect_oci_runtime(mut runtime_is_available: impl FnMut(&str) -> bool) -> Result<String> {
     for bin in ["podman", "docker"] {
-        if std::process::Command::new(bin)
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            return bin.to_string();
+        if runtime_is_available(bin) {
+            return Ok(bin.to_string());
         }
     }
-    "podman".to_string()
+
+    bail!(
+        "neither podman nor docker was found on PATH; install podman or docker, or set AR_SANDBOX_RUNTIME (preferred) or AR_SANDBOX_PODMAN_BIN (legacy)"
+    )
+}
+
+fn runtime_is_available(bin: &str) -> bool {
+    std::process::Command::new(bin)
+        .arg("--version")
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{resolve_oci_runtime, select_gateway_sandbox, select_sandbox, SandboxSelection};
+
+    #[test]
+    fn sandbox_selection_errors_clearly_without_image_or_explicit_direct_override() {
+        let err =
+            select_sandbox(None, None, true).expect_err("missing sandbox image should fail closed");
+
+        assert!(
+            err.to_string().contains("AR_SANDBOX_IMAGE"),
+            "error should name AR_SANDBOX_IMAGE, got: {err}"
+        );
+        assert!(
+            err.to_string().contains("AR_DANGEROUSLY_DISABLE_SANDBOX=1"),
+            "error should name the explicit direct-sandbox override, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sandbox_selection_allows_direct_only_with_explicit_override() {
+        let selection = select_sandbox(None, Some("1".to_string()), true)
+            .expect("explicit override should allow direct sandbox");
+
+        assert_eq!(selection, SandboxSelection::Direct);
+    }
+
+    #[test]
+    fn sandbox_selection_rejects_direct_override_values_other_than_exactly_one() {
+        for value in ["0", "true", "yes", " 1 "] {
+            let err = select_sandbox(None, Some(value.to_string()), true)
+                .expect_err("only AR_DANGEROUSLY_DISABLE_SANDBOX=1 should allow direct sandbox");
+
+            assert!(
+                err.to_string().contains("AR_DANGEROUSLY_DISABLE_SANDBOX=1"),
+                "error should name the only accepted override value for {value:?}, got: {err}"
+            );
+        }
+    }
+
+    #[test]
+    fn sandbox_selection_rejects_direct_override_for_default_gateway_selection() {
+        let err = select_gateway_sandbox(None, Some("1".to_string()))
+            .expect_err("production/release selection must not permit direct sandbox override");
+
+        assert!(
+            err.to_string().contains("AR_SANDBOX_IMAGE"),
+            "error should require a hardened sandbox image, got: {err}"
+        );
+    }
+
+    #[test]
+    fn sandbox_runtime_errors_clearly_when_no_configured_or_detected_runtime() {
+        let err = resolve_oci_runtime(None, None, |candidate| {
+            assert!(
+                matches!(candidate, "podman" | "docker"),
+                "runtime detection should only probe supported OCI runtimes, got: {candidate}"
+            );
+            false
+        })
+        .expect_err("missing OCI runtime should fail at startup");
+
+        let message = err.to_string();
+        assert!(
+            message.contains("neither podman nor docker"),
+            "error should clearly state that no supported OCI runtime was found, got: {message}"
+        );
+        assert!(
+            message.contains("AR_SANDBOX_RUNTIME"),
+            "error should name the preferred runtime override, got: {message}"
+        );
+        assert!(
+            message.contains("AR_SANDBOX_PODMAN_BIN"),
+            "error should name the legacy runtime override, got: {message}"
+        );
+    }
+
+    #[test]
+    fn sandbox_runtime_ignores_blank_configured_overrides_when_autodetecting() {
+        for blank in ["", " ", "\t\n"] {
+            let runtime = resolve_oci_runtime(Some(blank.to_string()), None, |candidate| {
+                assert!(
+                    matches!(candidate, "podman" | "docker"),
+                    "runtime detection should only probe supported OCI runtimes, got: {candidate}"
+                );
+                candidate == "docker"
+            })
+            .expect("blank AR_SANDBOX_RUNTIME should be treated as unset");
+
+            assert_eq!(
+                runtime, "docker",
+                "blank AR_SANDBOX_RUNTIME value {blank:?} should fall through to autodetection"
+            );
+
+            let runtime = resolve_oci_runtime(None, Some(blank.to_string()), |candidate| {
+                assert!(
+                    matches!(candidate, "podman" | "docker"),
+                    "runtime detection should only probe supported OCI runtimes, got: {candidate}"
+                );
+                candidate == "docker"
+            })
+            .expect("blank AR_SANDBOX_PODMAN_BIN should be treated as unset");
+
+            assert_eq!(
+                runtime, "docker",
+                "blank AR_SANDBOX_PODMAN_BIN value {blank:?} should fall through to autodetection"
+            );
+        }
+    }
 }

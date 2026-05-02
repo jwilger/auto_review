@@ -241,7 +241,8 @@ Common optional env vars:
 | `AR_LEARNINGS_DB` | — | path → SQLite-backed learnings; unset → in-memory |
 | `AR_HISTORY_DB` | — | path → SQLite-backed review history; unset → in-memory |
 | `AR_POLL_INTERVAL_SECS` | `60` | inline-thread mention poll cadence; `0` disables |
-| `AR_SANDBOX_IMAGE` | — | OCI image for the linter sandbox; unset → unsafe direct mode |
+| `AR_SANDBOX_IMAGE` | — | Required OCI image for the linter sandbox, e.g. `git.johnwilger.com/jwilger/auto_review/sandbox:<version>` built from `deploy/Dockerfile.sandbox` |
+| `AR_SANDBOX_RUNTIME` | auto-detect `podman`, then `docker` | Optional OCI runtime override; startup fails if neither runtime is available |
 | `AR_SEVERITY_FLOOR` | `warning` | drop findings below this severity (`note` to post everything, `error` to only post Error-severity) |
 | `AR_WEBHOOK_RATE_PER_SEC` | — | enable webhook rate limiting (paired with `AR_WEBHOOK_BURST`) |
 | `AR_DEDUP_CAPACITY` | `256` | LRU size for `X-Forgejo-Delivery` retry dedup; `0` disables |

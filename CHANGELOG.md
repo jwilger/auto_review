@@ -12,6 +12,14 @@ since the start of the project.
 
 ### Added
 
+#### Mandatory gateway sandbox
+
+- Gateway startup now requires `AR_SANDBOX_IMAGE` and fails closed when
+  no sandbox image is configured, removing the unsafe direct-host linter
+  fallback for production startup. OCI runtime selection auto-detects
+  `podman` first, then `docker`, and now errors clearly when neither is
+  available. Closes #10.
+
 #### Local bacon gateway port
 
 - The default `bacon` run job now binds `ar-gateway` to the dev-only

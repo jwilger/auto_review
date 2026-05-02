@@ -53,7 +53,7 @@ clone (workspace.rs)
 
 The `@auto_review` chat handler in `ar-chat` runs a poller plus webhook path and supports `help`, `remember <text>`, `forget <id>`, `re-review`, `autofix`, `docstring`, `tests`, and free-form questions. Polling exists because Forgejo does not reliably fire inline-thread reply webhooks.
 
-Every linter spawn and LLM-issued workspace tool goes through `ar-sandbox`. `AR_SANDBOX_IMAGE` selects `PodmanSandbox`; otherwise production logs `sandbox: direct (NO ISOLATION)`.
+Every linter spawn and LLM-issued workspace tool goes through `ar-sandbox`. `AR_SANDBOX_IMAGE` is required for gateway startup and selects `PodmanSandbox`; missing image configuration fails closed instead of falling back to direct host execution.
 
 `ar-llm::Router` maps `ModelTier::{Reasoning, Cheap, Embedding}` to provider implementations. `OpenAiProvider` speaks OpenAI-compatible backends and tier-specific env vars select models, base URLs, and API keys.
 

@@ -13,7 +13,7 @@ trait so production deploys can wrap them in a hardened container.
 | `Sandbox` (trait) | `run(SandboxCommand) -> SandboxOutput`. Object-safe so the orchestrator threads `Arc<dyn Sandbox>` through. |
 | `SandboxCommand` | Argv + working dir + env + wall-clock timeout. |
 | `SandboxOutput` | Status + stdout + stderr. |
-| `DirectSandbox` | The "no isolation" path. Spawns directly via `tokio::process::Command`. **Never use this in production** — it's the trust-the-environment default for development. |
+| `DirectSandbox` | The "no isolation" path. Spawns directly via `tokio::process::Command`. **Never use this in production** — gateway startup now fails closed unless the OCI sandbox image is configured. |
 | `PodmanSandbox` | The hardened production path. Wraps every command in `podman run --network=none --read-only ...` with CPU / memory / pids / wall-clock limits. |
 | `PodmanSandboxConfig` | Image + memory + cpus + pids + timeout + binary path. Built from env vars in the gateway's `main.rs`. |
 

@@ -62,14 +62,14 @@ same hardening flag set.
 
 ### Production sandbox
 
-For internet-facing deploys, set `AR_SANDBOX_IMAGE` to point at the
-hardened linter image (`deploy/Dockerfile.sandbox`). Linter spawns
-go through `podman run --network=none --read-only --cap-drop=ALL
+Production deploys must set `AR_SANDBOX_IMAGE` to point at the
+hardened linter image (`deploy/Dockerfile.sandbox`; release tags publish
+`git.johnwilger.com/jwilger/auto_review/sandbox:<version>`). Linter spawns go through
+`podman run --network=none --read-only --cap-drop=ALL
 --security-opt=no-new-privileges --memory=… --cpus=… --pids-limit=…
 --user 65534:65534 -v <repo>:/work:ro`. Without this set, the
-gateway still works but logs a `sandbox: direct (NO ISOLATION)`
-warning — fine for a local LAN trial, **not** safe for any
-internet-reachable deploy. (Background: an unjailed linter is the
+gateway refuses to start; install podman or docker and set the image
+before exposing the bot to PRs. (Background: an unjailed linter is the
 exact path the [Kudelski writeup](https://research.kudelskisecurity.com/2024/05/01/a-trip-down-coderabbits-rabbit-hole/)
 used to reach RCE on CodeRabbit.)
 

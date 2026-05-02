@@ -99,14 +99,16 @@ intercept LLM traffic.
 *Path:* PR adds `.rubocop.yml` (or eslint plugin, etc.) that loads
 arbitrary code at lint time. CodeRabbit's May-2024 RCE was exactly
 this.
-*Mitigation:* `ar-sandbox`'s podman implementation runs every linter
+*Mitigation:* gateway startup requires `AR_SANDBOX_IMAGE`; without it
+the process fails closed rather than selecting direct host execution.
+`ar-sandbox`'s podman/docker implementation runs every linter
 in `--network=none --read-only` with a writable scratch volume only
 for the working tree. CPU/wall-clock/memory caps. The linter image
 (`Dockerfile.sandbox`) bundles only the required binaries; no
 package manager in the runtime layer. Host env vars (`FORGEJO_TOKEN`,
 `LLM_API_KEY`) are not passed into the sandbox container.
-*Residual risk:* podman daemon itself, kernel exploits in the
-container runtime. Mitigated operationally by keeping podman
+*Residual risk:* podman/docker daemon itself, kernel exploits in the
+container runtime. Mitigated operationally by keeping the runtime
 patched. The pure-Rust youki backend (planned) further removes
 attack surface.
 

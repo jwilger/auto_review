@@ -50,10 +50,12 @@ two production-bound implementations:
   back to docker.
 
 The gateway picks an implementation at startup based on
-`AR_SANDBOX_IMAGE`. When set, every linter goes through the OCI
-runtime. When unset, the gateway logs a `WARN: sandbox: direct
-(NO ISOLATION)` banner so the production-deploy gap is loud and
-discoverable in logs.
+`AR_SANDBOX_IMAGE`. The image is required: when unset, gateway startup
+fails closed with an operator-facing error instead of falling back to
+direct host execution. Runtime selection prefers `podman`, then
+`docker`, unless `AR_SANDBOX_RUNTIME` (or the legacy
+`AR_SANDBOX_PODMAN_BIN`) is set. Startup also fails if no runtime can
+be found on `$PATH`.
 
 **This is the production sandbox.** No further isolation layer
 is required to ship; the threat model the Kudelski incident
@@ -96,11 +98,10 @@ as a security gate that has to land before v1.
   runtime is on PATH; in CI they run against whichever runtime
   the runner provides.
 
-- **DirectSandbox ships in the workspace**: it's tempting to make
-  it test-only. We chose to ship it because (a) tests need it,
-  (b) local-dev needs it, and (c) the warning banner makes the
-  production gap loud. Removing it would push test code into a
-  dev-only crate without making operators safer.
+- **DirectSandbox ships in the workspace**: tests and narrowly scoped
+  debug helpers need a no-container path. The gateway no longer selects
+  it during startup, so shipping the type does not create a production
+  default.
 
 - **Wall-clock timeout enforced host-side**: tokio's `timeout`
   wrapper kills the parent process; podman's `--rm` cleans up the
@@ -114,8 +115,9 @@ as a security gate that has to land before v1.
 - The `ar-tools` crate gained a dependency on `ar-sandbox`. Every
   runner takes `&dyn Sandbox` instead of spawning `Command` directly.
 - The orchestrator (`SpawningDispatcher`) owns one
-  `Arc<dyn Sandbox>`, defaults to `DirectSandbox::new()`, and exposes
-  `with_sandbox(...)` so the gateway can inject a `PodmanSandbox`.
+  `Arc<dyn Sandbox>`, defaults to `DirectSandbox::new()` for tests and
+  debug call sites, and exposes `with_sandbox(...)` so the gateway can
+  inject a mandatory `PodmanSandbox`.
 - The `lint_workspace_via(sandbox, …)` API is the canonical entry
   point. `lint_workspace` and `lint_workspace_with` are kept as
   thin wrappers that build a fresh `DirectSandbox` per call;
