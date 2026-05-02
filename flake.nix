@@ -112,6 +112,11 @@
             jq
             pkg-config
             openssl
+            # Used by the run-ar-gateway skill's watcher to drive
+            # zellij tabs (Ctrl-C + relaunch on rebuild). Including
+            # it here pins the version that matches the running
+            # session and removes a host-system dependency.
+            zellij
           ];
 
           RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
