@@ -19,6 +19,12 @@ since the start of the project.
   systemd-managed gateway on the production `:8080` default. The
   `bacon.toml` comments call out the matching local webhook URL.
 
+#### Bacon run rebuild recovery
+
+- The default `bacon` run job now waits for in-flight cargo runs and
+  applies a short restart grace period, making mid-edit transient compile
+  failures recover on the next save instead of requiring a manual refresh.
+
 #### Default-on persistence for runtime state
 
 - **Persistent SQLite is now the default** for the four stores the

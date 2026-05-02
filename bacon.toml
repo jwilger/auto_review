@@ -13,6 +13,12 @@
 # registering a local Forgejo webhook for bacon-driven testing, point it at
 # http://127.0.0.1:8090/webhooks/forgejo (or your tunnel/reverse-proxy URL
 # forwarding to that port).
+#
+# The run job waits for an in-flight cargo invocation to finish and applies a
+# short grace period before restarting. That coalesces multi-file/atomic editor
+# saves, so a transient compile error from a half-written change is followed by
+# a fresh rebuild when the fixing save lands instead of wedging until manual
+# refresh.
 
 default_job = "run"
 
@@ -21,6 +27,7 @@ command = ["cargo", "run", "-p", "ar-gateway", "--bin", "ar-gateway"]
 env.AR_GATEWAY_BIND = "127.0.0.1:8090"
 need_stdout = true
 allow_warnings = true
-background = true
-on_change_strategy = "kill_then_restart"
+background = false
+grace_period = "500ms"
+on_change_strategy = "wait_then_restart"
 show_command_error_code = true
