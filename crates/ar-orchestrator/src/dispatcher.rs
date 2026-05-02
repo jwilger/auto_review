@@ -3,7 +3,7 @@ use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullR
 use ar_index::{LearningsStore, VectorStore};
 use ar_llm::Router as LlmRouter;
 use ar_review::{
-    build_glob_set, build_review_context_with_store, filter_reviewable, lint_workspace_via,
+    build_glob_set, build_review_context_with_store, filter_reviewable, lint_workspace_report_via,
     load_repo_config, pr_is_skippable, prepare_workspace, review_pull_request,
     triage_files_with_llm, GlobSet, PreparedWorkspace, ReviewArgs, ReviewError, ReviewMode,
     VerifyMode, WorkspaceError,
@@ -505,6 +505,7 @@ pub async fn run_review_job(
     .await;
     let (
         findings,
+        linter_runs,
         ignored_paths,
         guidelines,
         repo_context,
@@ -542,6 +543,7 @@ pub async fn run_review_job(
         }
         Ok(LintPhaseOutput {
             findings,
+            linter_runs,
             ignored_paths,
             guidelines,
             repo_context,
@@ -554,6 +556,7 @@ pub async fn run_review_job(
             tracing::debug!(count = findings.len(), "linter findings collected");
             (
                 findings,
+                linter_runs,
                 ignored_paths,
                 guidelines,
                 repo_context,
@@ -566,6 +569,7 @@ pub async fn run_review_job(
         Err(e) => {
             tracing::warn!(error = %e, "lint phase failed; continuing without findings");
             (
+                Vec::new(),
                 Vec::new(),
                 GlobSet::empty(),
                 String::new(),
@@ -621,6 +625,7 @@ pub async fn run_review_job(
         pr_title: &job.pr_title,
         pr_body: &job.pr_body,
         linter_findings: &findings,
+        linter_runs: &linter_runs,
         ignored_paths: &ignored_paths,
         custom_pre_merge_checks: &pre_merge_checks,
         review_mode,
@@ -723,6 +728,7 @@ enum LintPhaseError {
 
 struct LintPhaseOutput {
     findings: Vec<Finding>,
+    linter_runs: Vec<ar_review::LinterRunSummary>,
     skipped_by_config: bool,
     ignored_paths: GlobSet,
     guidelines: String,
@@ -777,6 +783,7 @@ async fn prepare_and_lint(
     if !config.enabled {
         return Ok(LintPhaseOutput {
             findings: Vec::new(),
+            linter_runs: Vec::new(),
             skipped_by_config: true,
             ignored_paths,
             guidelines,
@@ -824,8 +831,8 @@ async fn prepare_and_lint(
         files
     };
 
-    let findings =
-        lint_workspace_via(sandbox, workspace.path(), &files, &config.disabled_tools).await;
+    let lint_report =
+        lint_workspace_report_via(sandbox, workspace.path(), &files, &config.disabled_tools).await;
 
     // Build the RAG context (best-effort): walks the workspace,
     // embeds symbols, queries top-K against the diff. Returns empty
@@ -850,7 +857,8 @@ async fn prepare_and_lint(
     };
 
     Ok(LintPhaseOutput {
-        findings,
+        findings: lint_report.findings,
+        linter_runs: lint_report.runs,
         skipped_by_config: false,
         ignored_paths,
         guidelines,

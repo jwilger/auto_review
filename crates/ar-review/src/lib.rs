@@ -45,14 +45,19 @@ pub use ignored::{build_glob_set, filter_changed_files, filter_diff_paths};
 pub use linter_only::build_linter_only_output;
 pub use llm_triage::{filter_reviewable, triage_files_with_llm};
 pub use mapping::output_to_review_request;
-pub use pipeline::{review_pull_request, ReviewArgs, ReviewOutcome, VerifyMode};
+pub use pipeline::{
+    review_pull_request, LinterRunStatus, LinterRunSummary, ReviewArgs, ReviewOutcome, VerifyMode,
+};
 pub use pre_merge::{
     evaluate as evaluate_pre_merge_checks, render_section as render_pre_merge_section, CheckName,
     CheckResult, CheckStatus,
 };
 pub use pre_merge_llm::{evaluate_custom_checks, CustomCheckResult};
 pub use rag_context::format_repo_context;
-pub use routing::{lint_workspace, lint_workspace_via, lint_workspace_with, select_runners};
+pub use routing::{
+    lint_workspace, lint_workspace_report_via, lint_workspace_via, lint_workspace_with,
+    select_runners,
+};
 pub use triage::{classify, pr_is_skippable, FileClass};
 pub use verify::verify_findings;
 pub use workspace::{build_clone_url, prepare_workspace, PreparedWorkspace, WorkspaceError};

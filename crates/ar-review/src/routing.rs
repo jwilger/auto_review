@@ -1,6 +1,7 @@
 //! File-extension-based routing from a PR's changed files to the linters
 //! that should run against the cloned workspace.
 
+use crate::pipeline::{LinterRunStatus, LinterRunSummary};
 use ar_forgejo::ChangedFile;
 use ar_sandbox::{DirectSandbox, Sandbox};
 use ar_tools::actionlint::ActionlintRunner;
@@ -33,7 +34,7 @@ use ar_tools::prettier::PrettierRunner;
 use ar_tools::pylint::PylintRunner;
 use ar_tools::rubocop::RubocopRunner;
 use ar_tools::ruff::RuffRunner;
-use ar_tools::runner::{run_all, LinterRunner};
+use ar_tools::runner::{run_all, run_all_with_status, LinterRunner};
 use ar_tools::semgrep::SemgrepRunner;
 use ar_tools::shellcheck::ShellCheckRunner;
 use ar_tools::shfmt::ShfmtRunner;
@@ -92,6 +93,56 @@ pub async fn lint_workspace_via(
         return Vec::new();
     }
     run_all(&runners, sandbox, repo_dir).await
+}
+
+pub struct LintWorkspaceReport {
+    pub findings: Vec<Finding>,
+    pub runs: Vec<LinterRunSummary>,
+}
+
+pub async fn lint_workspace_report_via(
+    sandbox: &dyn Sandbox,
+    repo_dir: &Path,
+    files: &[ChangedFile],
+    disabled_tools: &[String],
+) -> LintWorkspaceReport {
+    let mut runners = select_runners(files);
+    let mut runs = Vec::new();
+    if !disabled_tools.is_empty() {
+        let mut kept = Vec::new();
+        for runner in runners {
+            if disabled_tools.iter().any(|d| d == runner.name()) {
+                runs.push(LinterRunSummary {
+                    name: runner.name().to_string(),
+                    status: LinterRunStatus::Skipped("disabled by repo config".into()),
+                    findings: 0,
+                });
+            } else {
+                kept.push(runner);
+            }
+        }
+        runners = kept;
+    }
+    let completed = run_all_with_status(&runners, sandbox, repo_dir).await;
+    let mut findings = Vec::new();
+    for run in completed {
+        let count = run.findings.len();
+        findings.extend(run.findings);
+        runs.push(LinterRunSummary {
+            name: run.name,
+            status: match run.status {
+                ar_tools::runner::LinterRunStatus::Ok => LinterRunStatus::Ok,
+                ar_tools::runner::LinterRunStatus::Skipped(reason) => {
+                    LinterRunStatus::Skipped(reason)
+                }
+                ar_tools::runner::LinterRunStatus::Failed(reason) => {
+                    LinterRunStatus::Failed(reason)
+                }
+            },
+            findings: count,
+        });
+    }
+    LintWorkspaceReport { findings, runs }
 }
 
 /// Pick the linters to run for a given set of changed files.

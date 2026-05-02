@@ -128,6 +128,7 @@ pub struct ReviewArgs<'a> {
     pub pr_title: &'a str,
     pub pr_body: &'a str,
     pub linter_findings: &'a [Finding],
+    pub linter_runs: &'a [LinterRunSummary],
     pub ignored_paths: &'a GlobSet,
     pub guidelines: &'a str,
     /// Repo-author free-form pre-merge checks (from
@@ -163,6 +164,20 @@ pub struct ReviewArgs<'a> {
     /// problems — useful for low-noise operations on big diffs
     /// where stylistic notes drown out real issues.
     pub min_severity: ReviewSeverity,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinterRunSummary {
+    pub name: String,
+    pub status: LinterRunStatus,
+    pub findings: usize,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinterRunStatus {
+    Ok,
+    Skipped(String),
+    Failed(String),
 }
 
 /// End-to-end review activity for one PR.
@@ -294,6 +309,13 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         }
         req.body.push_str(&section);
     }
+    let linter_section = render_linter_section(args.linter_runs);
+    if !linter_section.is_empty() {
+        if !req.body.is_empty() {
+            req.body.push_str("\n\n");
+        }
+        req.body.push_str(&linter_section);
+    }
 
     let created = args
         .forgejo
@@ -330,6 +352,49 @@ fn pre_merge_has_failure(built_in: &[CheckResult], custom: &[CustomCheckResult])
             .any(|check| matches!(check.status, PreMergeCustomStatus::Fail))
 }
 
+fn render_linter_section(runs: &[LinterRunSummary]) -> String {
+    if runs.is_empty() {
+        return String::new();
+    }
+    let mut out = String::from("<details>\n<summary>Linters</summary>\n\n");
+    for run in runs {
+        let status = match &run.status {
+            LinterRunStatus::Ok => format!(
+                "ok, {} finding{}",
+                run.findings,
+                if run.findings == 1 { "" } else { "s" }
+            ),
+            LinterRunStatus::Skipped(reason) => format!(
+                "skipped: {reason}, {} finding{}",
+                run.findings,
+                if run.findings == 1 { "" } else { "s" }
+            ),
+            LinterRunStatus::Failed(reason) => format!(
+                "failed: {}, {} finding{}",
+                cap_linter_reason(reason),
+                run.findings,
+                if run.findings == 1 { "" } else { "s" }
+            ),
+        };
+        out.push_str(&format!("- {} — {status}\n", run.name));
+    }
+    out.push_str("\n</details>");
+    out
+}
+
+fn cap_linter_reason(reason: &str) -> String {
+    const MAX_BYTES: usize = 200;
+    let normalized = reason.replace(['\r', '\n'], " ");
+    if normalized.len() <= MAX_BYTES {
+        return normalized;
+    }
+    let mut cut = MAX_BYTES;
+    while cut > 0 && !normalized.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}… [truncated]", &normalized[..cut])
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -339,7 +404,7 @@ mod tests {
     use ar_tools::Severity;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
-    use wiremock::matchers::{body_partial_json, method, path};
+    use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// Provider that records each request it receives and returns canned
@@ -512,6 +577,7 @@ mod tests {
             pr_title: "t",
             pr_body: "b",
             linter_findings: &[],
+            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",
@@ -593,6 +659,7 @@ mod tests {
             pr_title: "t",
             pr_body: "b",
             linter_findings: &[],
+            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",
@@ -669,6 +736,7 @@ mod tests {
             pr_title: "t",
             pr_body: "b",
             linter_findings: &[],
+            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",
@@ -736,6 +804,7 @@ mod tests {
             pr_title: "title",
             pr_body: "body",
             linter_findings: &[],
+            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",
@@ -776,6 +845,7 @@ mod tests {
             pr_title: "t",
             pr_body: "b",
             linter_findings: &[],
+            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",
@@ -833,6 +903,7 @@ mod tests {
             pr_title: "t",
             pr_body: "b",
             linter_findings: &[],
+            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",
@@ -894,6 +965,7 @@ mod tests {
             pr_title: "t",
             pr_body: "b",
             linter_findings: &[],
+            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",
@@ -920,6 +992,110 @@ mod tests {
         }];
 
         assert!(pre_merge_has_failure(&[], &custom));
+    }
+
+    #[tokio::test]
+    async fn review_body_includes_linter_summary_section() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("d"))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .and(body_string_contains("<details>"))
+            .and(body_string_contains("<summary>Linters</summary>"))
+            .and(body_string_contains("ruff — ok, 0 findings"))
+            .and(body_string_contains("shellcheck — ok, 2 findings"))
+            .and(body_string_contains(
+                "eslint — skipped: disabled by repo config, 0 findings",
+            ))
+            .and(body_string_contains(
+                "markdownlint — failed: parse failed, 0 findings",
+            ))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 101,
+                "state": "COMMENT"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"lint summary","findings":[]}"#,
+        ]));
+        let llm = router_with(provider);
+        let linter_runs = vec![
+            LinterRunSummary {
+                name: "ruff".into(),
+                status: LinterRunStatus::Ok,
+                findings: 0,
+            },
+            LinterRunSummary {
+                name: "shellcheck".into(),
+                status: LinterRunStatus::Ok,
+                findings: 2,
+            },
+            LinterRunSummary {
+                name: "eslint".into(),
+                status: LinterRunStatus::Skipped("disabled by repo config".into()),
+                findings: 0,
+            },
+            LinterRunSummary {
+                name: "markdownlint".into(),
+                status: LinterRunStatus::Failed("parse failed".into()),
+                findings: 0,
+            },
+        ];
+
+        review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "sha",
+            pr_title: "t",
+            pr_body: "b",
+            linter_findings: &[],
+            linter_runs: &linter_runs,
+            ignored_paths: &GlobSet::empty(),
+            custom_pre_merge_checks: &[],
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            review_mode: ReviewMode::Full,
+            min_severity: ReviewSeverity::Note,
+        })
+        .await
+        .expect("review should include linter section");
+    }
+
+    #[test]
+    fn failed_linter_reason_is_single_line_and_capped() {
+        let noisy_reason = format!("first line\n{}\nlast line", "x".repeat(260));
+        let section = render_linter_section(&[LinterRunSummary {
+            name: "markdownlint".into(),
+            status: LinterRunStatus::Failed(noisy_reason),
+            findings: 0,
+        }]);
+
+        let entry = section
+            .lines()
+            .find(|line| line.starts_with("- markdownlint"))
+            .expect("linter entry rendered");
+        assert!(!entry.contains('\n'));
+        assert!(entry.contains("0 findings"));
+        assert!(entry.contains("[truncated]"));
+        assert!(!entry.contains("last line"));
     }
 
     #[tokio::test]
@@ -969,6 +1145,7 @@ mod tests {
             pr_title: "t",
             pr_body: "b",
             linter_findings: &findings,
+            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",

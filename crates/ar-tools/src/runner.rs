@@ -16,6 +16,8 @@ pub enum RunnerError {
     },
     #[error("parse error in {tool} output: {detail}")]
     Parse { tool: String, detail: String },
+    #[error("skipped: {0}")]
+    Skipped(String),
     #[error("sandbox: {0}")]
     Sandbox(String),
 }
@@ -45,11 +47,25 @@ pub trait LinterRunner: Send + Sync {
     ) -> Result<Vec<Finding>, RunnerError>;
 }
 
-/// Convenience wrapper around [`Sandbox::run`] that swallows the
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LinterRun {
+    pub name: String,
+    pub status: LinterRunStatus,
+    pub findings: Vec<Finding>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LinterRunStatus {
+    Ok,
+    Skipped(String),
+    Failed(String),
+}
+
+/// Convenience wrapper around [`Sandbox::run`] that reports the
 /// "binary not installed" / "sandbox runtime missing" cases as
-/// `Ok(empty_output)` — the runners' own "no stdout → no findings"
-/// branch then takes over. Other sandbox errors propagate as
-/// [`RunnerError::Sandbox`].
+/// [`RunnerError::Skipped`]. `run_all` preserves the historical behavior
+/// by swallowing skips; `run_all_with_status` surfaces them in review-body
+/// linter summaries. Other sandbox errors propagate as [`RunnerError::Sandbox`].
 pub async fn run_in_sandbox(
     sandbox: &dyn Sandbox,
     repo_dir: &Path,
@@ -64,18 +80,15 @@ pub async fn run_in_sandbox(
         env,
     };
     match sandbox.run(&cmd).await {
+        Ok(out) if out.exit_code == Some(127) => Err(RunnerError::Skipped(format!(
+            "{program} not found in sandbox image"
+        ))),
         Ok(out) => Ok(out),
-        Err(SandboxError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => Ok(empty_output()),
-        Err(SandboxError::RuntimeMissing(_)) => Ok(empty_output()),
+        Err(SandboxError::Io(e)) if e.kind() == std::io::ErrorKind::NotFound => {
+            Err(RunnerError::Skipped(format!("{program} not on PATH")))
+        }
+        Err(SandboxError::RuntimeMissing(e)) => Err(RunnerError::Skipped(e.to_string())),
         Err(e) => Err(RunnerError::Sandbox(e.to_string())),
-    }
-}
-
-fn empty_output() -> SandboxOutput {
-    SandboxOutput {
-        exit_code: Some(0),
-        stdout: Vec::new(),
-        stderr: Vec::new(),
     }
 }
 
@@ -90,6 +103,7 @@ pub async fn run_all(
     let futures = runners.iter().map(|r| async move {
         match r.run(sandbox, repo_dir).await {
             Ok(findings) => findings,
+            Err(RunnerError::Skipped(_)) => Vec::new(),
             Err(e) => {
                 tracing::warn!(tool = r.name(), error = %e, "linter failed; ignoring");
                 Vec::new()
@@ -99,11 +113,43 @@ pub async fn run_all(
     join_all(futures).await.into_iter().flatten().collect()
 }
 
+/// Run linters and retain one execution summary per runner for review-body
+/// transparency. Findings remain available by flattening successful runs.
+pub async fn run_all_with_status(
+    runners: &[Box<dyn LinterRunner>],
+    sandbox: &dyn Sandbox,
+    repo_dir: &Path,
+) -> Vec<LinterRun> {
+    let futures = runners.iter().map(|r| async move {
+        match r.run(sandbox, repo_dir).await {
+            Ok(findings) => LinterRun {
+                name: r.name().to_string(),
+                status: LinterRunStatus::Ok,
+                findings,
+            },
+            Err(RunnerError::Skipped(reason)) => LinterRun {
+                name: r.name().to_string(),
+                status: LinterRunStatus::Skipped(reason),
+                findings: Vec::new(),
+            },
+            Err(e) => {
+                tracing::warn!(tool = r.name(), error = %e, "linter failed; ignoring");
+                LinterRun {
+                    name: r.name().to_string(),
+                    status: LinterRunStatus::Failed(e.to_string()),
+                    findings: Vec::new(),
+                }
+            }
+        }
+    });
+    join_all(futures).await
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::finding::Severity;
-    use ar_sandbox::DirectSandbox;
+    use ar_sandbox::{DirectSandbox, SandboxCommand, SandboxError, SandboxOutput};
 
     struct StaticRunner {
         name: &'static str,
@@ -182,11 +228,75 @@ mod tests {
         assert_eq!(all[0].source_tool, "a");
     }
 
+    struct MissingBinaryRunner;
+
+    #[async_trait]
+    impl LinterRunner for MissingBinaryRunner {
+        fn name(&self) -> &str {
+            "missing-tool"
+        }
+
+        async fn run(
+            &self,
+            sandbox: &dyn Sandbox,
+            repo_dir: &Path,
+        ) -> Result<Vec<Finding>, RunnerError> {
+            run_in_sandbox(
+                sandbox,
+                repo_dir,
+                "definitely-not-a-real-binary-zzz",
+                vec![],
+                vec![],
+            )
+            .await?;
+            Ok(Vec::new())
+        }
+    }
+
     #[tokio::test]
-    async fn run_in_sandbox_swallows_missing_binary_as_empty_output() {
+    async fn run_all_with_status_marks_missing_binary_as_skipped() {
+        let runners: Vec<Box<dyn LinterRunner>> = vec![Box::new(MissingBinaryRunner)];
         let sandbox = DirectSandbox::new();
         let cwd = std::env::current_dir().unwrap();
-        let out = run_in_sandbox(
+
+        let runs = run_all_with_status(&runners, &sandbox, &cwd).await;
+
+        assert_eq!(runs.len(), 1);
+        assert_eq!(runs[0].name, "missing-tool");
+        assert!(matches!(runs[0].status, LinterRunStatus::Skipped(_)));
+        assert!(runs[0].findings.is_empty());
+    }
+
+    struct Exit127Sandbox;
+
+    #[async_trait]
+    impl Sandbox for Exit127Sandbox {
+        async fn run(&self, _cmd: &SandboxCommand) -> Result<SandboxOutput, SandboxError> {
+            Ok(SandboxOutput {
+                exit_code: Some(127),
+                stdout: Vec::new(),
+                stderr: b"not found".to_vec(),
+            })
+        }
+    }
+
+    #[tokio::test]
+    async fn run_all_with_status_marks_sandbox_exit_127_as_skipped() {
+        let runners: Vec<Box<dyn LinterRunner>> = vec![Box::new(MissingBinaryRunner)];
+        let cwd = std::env::current_dir().unwrap();
+
+        let runs = run_all_with_status(&runners, &Exit127Sandbox, &cwd).await;
+
+        assert_eq!(runs.len(), 1);
+        assert!(matches!(runs[0].status, LinterRunStatus::Skipped(_)));
+        assert!(runs[0].findings.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_in_sandbox_reports_missing_binary_as_skipped() {
+        let sandbox = DirectSandbox::new();
+        let cwd = std::env::current_dir().unwrap();
+        let err = run_in_sandbox(
             &sandbox,
             &cwd,
             "definitely-not-a-real-binary-zzz",
@@ -194,7 +304,7 @@ mod tests {
             vec![],
         )
         .await
-        .expect("must not error on missing binary");
-        assert!(out.stdout.is_empty());
+        .expect_err("missing binary should be a skipped linter");
+        assert!(matches!(err, RunnerError::Skipped(_)));
     }
 }

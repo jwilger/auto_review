@@ -60,4 +60,6 @@ pub mod yamllint;
 
 pub use catalog::{linter_catalogue, LinterInfo};
 pub use finding::{Finding, Severity};
-pub use runner::{run_all, run_in_sandbox, LinterRunner};
+pub use runner::{
+    run_all, run_all_with_status, run_in_sandbox, LinterRun, LinterRunStatus, LinterRunner,
+};

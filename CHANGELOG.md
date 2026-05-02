@@ -38,6 +38,14 @@ since the start of the project.
   and CI's crane formatter check from resolving different rustfmt
   packages with the same version.
 
+#### Linter transparency in review bodies
+
+- Posted reviews now include a collapsed **Linters** section listing
+  each routed linter that ran, how many findings it produced, and any
+  repo-config skips or runner failures. Operators and PR authors can see
+  when a review had zero findings because tools ran cleanly rather than
+  inferring coverage from inline comments alone. Closes #11.
+
 #### Default-on persistence for runtime state
 
 - **Persistent SQLite is now the default** for the four stores the
