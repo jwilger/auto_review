@@ -7,10 +7,10 @@
 
 `auto_review` is a single-tenant self-hosted bot operators run
 next to their Forgejo instance. It holds a write-scoped PAT,
-shells out to ~44 linters, calls remote LLMs, and serves
+calls remote LLMs, clones PR workspaces for semantic context, and serves
 webhooks from public-internet sources. When something goes
-wrong — a Forgejo blip, an LLM timeout, a poisoned `.rubocop.yml`
-hitting the sandbox, a misconfigured webhook firing in a tight
+wrong — a Forgejo blip, an LLM timeout, a workspace-prep failure,
+a misconfigured webhook firing in a tight
 loop — operators need to figure out *what* and *why* without
 SSH'ing into the box.
 
@@ -21,9 +21,8 @@ PRs/day. It does not scale to:
   wired separately so transient downstream blips don't restart
   the pod.
 - An on-call engineer who needs to know whether the bot is
-  failing because Forgejo is down, the LLM is down, or the
-  sandbox itself is misconfigured — *before* the first PR of
-  the morning fires.
+  failing because Forgejo is down, the LLM is down, or workspace
+  preparation is failing — *before* the first PR of the morning fires.
 - An SRE wiring SLO alerts in Prometheus/Alertmanager.
 
 This ADR documents the design choices made over Milestones 5+
@@ -41,7 +40,7 @@ route:
 | `GET /healthz` | Process liveness. Cheap; no I/O. | k8s `livenessProbe` |
 | `GET /readyz` | Forgejo reachable through the bot's actual client. Async-Mutex-guarded TTL cache so probes don't hammer Forgejo. Returns 503 when downstream Forgejo is down. | k8s `readinessProbe` |
 | `GET /version` | Static `{name, version}`. Useful for confirming a deploy. | Smoke test after `systemctl restart` |
-| `GET /info` | Runtime-config snapshot — sandbox kind, learnings store kind, LLM tiers configured, poller status. Captured once at startup. | Issue-report attachment |
+| `GET /info` | Runtime-config snapshot — learnings/history/vector store kind, LLM tiers configured, poller status. Captured once at startup. | Issue-report attachment |
 | `GET /metrics` | Prometheus text-format counters. | Scrape config |
 | `POST /reviews/ci` | Optional authenticated CI-triggered semantic-review dispatch. Enabled only when `AR_CI_REVIEW_TOKEN` is configured; callers send owner, repo, PR number, head SHA, and trigger metadata after deterministic CI checks pass. | Forgejo Actions job with `needs: [fmt, clippy, test]` |
 

@@ -8,25 +8,22 @@ use ar_prompts::{ReviewFinding, ReviewOutput, ReviewSeverity};
 ///   sections, each on its own paragraph. Keeps the top-level review
 ///   readable on its own.
 /// - `event` is `RequestChanges` if any finding has severity `Error`,
-///   `Approved` if there are no findings, otherwise `Comment`. A clean
-///   `Approved` review is intentional: Forgejo branch protection treats it
-///   as superseding this bot's stale `RequestChanges` reviews after a clean
-///   re-review.
+///   otherwise `Approved`. Advisory findings still become inline comments,
+///   but warning-only or note-only reviews must supersede this bot's stale
+///   `RequestChanges` reviews and satisfy branch protection.
 /// - Each finding becomes one inline `ReviewComment` anchored at
 ///   `new_position = line_start`. Multi-line ranges are rendered as a
 ///   `**Lines N–M:**` prefix in the body since Forgejo's per-line position
 ///   schema doesn't carry an end line.
 pub fn output_to_review_request(out: &ReviewOutput, head_sha: &str) -> CreateReviewRequest {
-    let event = if out.findings.is_empty() {
-        ReviewEvent::Approved
-    } else if out
+    let event = if out
         .findings
         .iter()
         .any(|f| matches!(f.severity, ReviewSeverity::Error))
     {
         ReviewEvent::RequestChanges
     } else {
-        ReviewEvent::Comment
+        ReviewEvent::Approved
     };
 
     let comments = out
@@ -177,18 +174,15 @@ mod tests {
     }
 
     #[test]
-    fn only_warnings_and_notes_stay_comment() {
-        let req = output_to_review_request(
-            &output(
-                "minor",
-                vec![
-                    finding(ReviewSeverity::Warning, 1, None),
-                    finding(ReviewSeverity::Note, 2, None),
-                ],
-            ),
-            "x",
-        );
-        assert_eq!(req.event, ReviewEvent::Comment);
+    fn warning_only_or_note_only_output_is_approved_but_keeps_inline_comments() {
+        for severity in [ReviewSeverity::Warning, ReviewSeverity::Note] {
+            let req =
+                output_to_review_request(&output("minor", vec![finding(severity, 7, None)]), "x");
+            assert_eq!(req.event, ReviewEvent::Approved);
+            assert_eq!(req.comments.len(), 1);
+            assert_eq!(req.comments[0].new_position, Some(7));
+            assert!(req.comments[0].body.contains("do the thing"));
+        }
     }
 
     #[test]

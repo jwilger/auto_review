@@ -57,11 +57,9 @@ RestartSec=5s
 KillSignal=SIGTERM
 TimeoutStopSec=30s
 
-# Hardening — same spirit as the threat model's T1 mitigation
-# for the bot process itself. Sandbox-related directives are
-# additive to the application-level Podman sandbox; this layer
-# protects the host if a future bug lets the gateway process
-# misbehave.
+# Hardening for the bot process itself. Runtime linter execution was retired;
+# these directives are now the service-level guardrail if a future bug lets the
+# gateway process misbehave.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
@@ -81,8 +79,6 @@ RestrictRealtime=true
 RestrictSUIDSGID=true
 LockPersonality=true
 MemoryDenyWriteExecute=false
-# AR_SANDBOX_IMAGE deploys spawn `podman run`; podman needs a
-# pty + fork. If you don't use the sandbox, tighten further.
 SystemCallFilter=@system-service
 SystemCallArchitectures=native
 CapabilityBoundingSet=

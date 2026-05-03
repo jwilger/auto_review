@@ -5,9 +5,7 @@
 //! checks (cyclomatic complexity, too-many-arguments, similar-code),
 //! deeper semantic analysis (E1101 no-member, R0902 too-many-
 //! instance-attributes), and convention rules ruff hasn't ported.
-//! Routes alongside ruff/mypy/bandit on `.py` files. Repos that
-//! already use ruff for everything can disable pylint via
-//! `.auto_review.yaml`'s `disabled_tools`.
+//! Routes alongside ruff/mypy/bandit on `.py` files in the legacy runner set.
 //!
 //! Output: native JSON, top-level array of `{type, line, column,
 //! endLine, endColumn, path, symbol, message, message-id}`. The

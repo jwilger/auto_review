@@ -10,6 +10,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 The first non-pre-release will be `0.1.0`. Everything below is cumulative
 since the start of the project.
 
+### Changed
+
+#### Runtime linter execution retired
+
+- The normal review/orchestrator pipeline no longer runs bundled linters or
+  passes linter findings into the semantic prompt. Deterministic linters,
+  tests, and builds are now owned by CI; `auto_review` performs semantic
+  review after the CI trigger while still preparing workspaces for RAG and
+  agentic verification. Closes #45.
+- `.auto_review.yaml` no longer accepts `mode:` / `linter_only` or
+  `disabled_tools:`. Strict config validation reports them as unknown retired
+  keys, and posted reviews no longer render linter summary sections.
+- Removed the runtime linter sandbox image (`deploy/Dockerfile.sandbox`) and
+  unhooked sandbox selection from gateway/orchestrator review jobs. `ar-sandbox`
+  remains in the workspace pending the issue #46 rescope.
+
+#### Advisory review approval
+
+- `auto_review` now posts an approved Forgejo review when all remaining findings
+  are warning or note severity, while preserving the inline advisory comments.
+  Error findings and pre-merge check failures continue to request changes. Closes
+  #55.
+
 ### Added
 
 #### CI-triggered semantic reviews
@@ -46,14 +69,6 @@ since the start of the project.
   binary from the dev-shell Rust toolchain, preventing local `cargo fmt`
   and CI's crane formatter check from resolving different rustfmt
   packages with the same version.
-
-#### Linter transparency in review bodies
-
-- Posted reviews now include a collapsed **Linters** section listing
-  each routed linter that ran, how many findings it produced, and any
-  repo-config skips or runner failures. Operators and PR authors can see
-  when a review had zero findings because tools ran cleanly rather than
-  inferring coverage from inline comments alone. Closes #11.
 
 #### Default-on persistence for runtime state
 
@@ -205,61 +220,14 @@ since the start of the project.
 - **Per-PR durable state machine** (`ar-orchestrator`): `JobDispatcher`
   trait (NoOpDispatcher for tests, SpawningDispatcher for production).
   `run_review_job` posts pending → final commit statuses around the
-  triage → clone → lint → review → post sequence.
+  triage → clone → context → review → post sequence.
 
-#### Linters (44 of CodeRabbit's ~45 set)
+#### Retired bundled-linter prototype
 
-| Tool | Languages / files | Source-tool name |
-|---|---|---|
-| `gitleaks` | Any (secret detection across the tree) | `gitleaks` |
-| `semgrep` | Multi-language SAST via `--config=auto` | `semgrep` |
-| `trivy` | Vulnerabilities, misconfigs, secrets | `trivy` |
-| `checkov` | Terraform / HCL infrastructure-as-code misconfigs | `checkov` |
-| `tflint` | Terraform-specific lint + provider-plugin checks | `tflint` |
-| `osv-scanner` | Dependency CVEs against Google's OSV DB | `osv-scanner` |
-| `ast-grep` | Custom AST-pattern rules (any tree-sitter language) | `ast-grep` |
-| `ruff` | Python | `ruff` |
-| `mypy` | Python type checker (complements ruff's lint surface) | `mypy` |
-| `bandit` | Python security scanner (dynamic-code, weak crypto, …) | `bandit` |
-| `pylint` | Python lint (design checks, deeper semantics than ruff) | `pylint` |
-| `eslint` | JS / JSX / TS / TSX / CJS / MJS | `eslint` |
-| `biome` | JS / JSX / TS / TSX / CJS / MJS (rule-set distinct from eslint) | `biome` |
-| `oxlint` | JS / JSX / TS / TSX / CJS / MJS (Rust rewrite of eslint) | `oxlint` |
-| `stylelint` | CSS / SCSS / Sass / Less | `stylelint` |
-| `htmlhint` | HTML (.html / .htm / .xhtml) | `htmlhint` |
-| `prettier` | Format-drift across JS/TS/CSS/HTML/JSON/YAML/Markdown/GraphQL | `prettier` |
-| `golangci-lint` | Go (errcheck, govet, staticcheck, …) | `golangci-lint` |
-| `gosec` | Go security scanner (subprocess injection, weak crypto, …) | `gosec` |
-| `staticcheck` | Go static analysis (deprecation, simplification, …) | `staticcheck` |
-| `nilaway` | Go nil-pointer flow analysis (Uber) | `nilaway` |
-| `rubocop` | Ruby (.rb / .rake / Gemfile / Rakefile) | `rubocop` |
-| `phpstan` | PHP (.php / .phtml / .php3-7 / .phps) | `phpstan` |
-| `swiftlint` | Swift (.swift) | `swiftlint` |
-| `buf` | Protocol Buffers (.proto) | `buf` |
-| `cppcheck` | C / C++ static analysis (.c/.cpp/.cc/.cxx/.h/.hpp/…) | `cppcheck` |
-| `pmd` | Java static analysis (.java) | `pmd` |
-| `ktlint` | Kotlin (.kt / .kts) | `ktlint` |
-| `shellcheck` | Bash / sh | `shellcheck` |
-| `shfmt` | Shell-script formatter (drift detection alongside shellcheck) | `shfmt` |
-| `hadolint` | Dockerfiles | `hadolint` |
-| `markdownlint` | `*.md` / `*.markdown` | `markdownlint` |
-| `vale` | Prose linter (grammar/voice/spelling) for `.md`/`.markdown` | `vale` |
-| `vint` | Vim script (.vim / vimrc / .vimrc / gvimrc / .gvimrc) | `vint` |
-| `typos` | Source-tree typo finder (identifiers, comments, strings) | `typos` |
-| `sqlfluff` | SQL (.sql / .dml / .ddl, multi-dialect) | `sqlfluff` |
-| `taplo` | TOML (Cargo.toml, pyproject.toml, …) | `taplo` |
-| `jsonlint` | JSON / JSONC syntax validation | `jsonlint` |
-| `dotenv-linter` | `.env` / `.env.*` files | `dotenv-linter` |
-| `actionlint` | `.github/workflows/`, `.forgejo/workflows/`, `.gitea/workflows/` | `actionlint` |
-| `yamllint` | `*.yml` / `*.yaml` (workflow + general) | `yamllint` |
-| `kubeconform` | Kubernetes manifests (validates against k8s JSON schema) | `kubeconform` |
-| `ansible-lint` | Ansible playbook / role / task linting | `ansible-lint` |
-| `helm` | `helm lint` against any chart with a touched Chart.yaml | `helm` |
-
-`ar-tools::run_all` runs them in parallel; missing binaries are silently
-skipped so a missing linter doesn't break the review.
-`ar-review::routing::select_runners` decides which to run based on the
-PR's changed file extensions.
+- Earlier pre-release builds bundled a large static-analysis catalogue and
+  routed PR files through those tools. That runtime path was retired before
+  0.1.0 by the issue #45 change above; deterministic linters/tests/builds now
+  belong in CI.
 
 #### Triage and cost control
 
@@ -291,8 +259,8 @@ PR's changed file extensions.
   - `ignored_paths`: gitignore-style glob patterns (via `globset`).
     Matching files are stripped from both the diff (per-file sections
     dropped) and the changed-files list before prompt rendering.
-  - `disabled_tools`: linter `name()`s to skip; lets repos with their
-    own CI lint pipeline avoid duplicate findings.
+  - `pre_merge_checks`: repo-author natural-language checks evaluated against
+    the diff by the cheap tier.
 
 #### Walkthrough output
 
@@ -538,22 +506,19 @@ corroborate. Falls open (returns input unchanged) when the cheap
 tier isn't configured or the response is malformed — verifier
 failures shouldn't silently drop real findings.
 
-#### Sandbox (Milestone 3)
+#### Retired linter sandbox prototype (Milestone 3)
 
 `ar-sandbox` ships a `Sandbox` trait + two implementations:
 
-- `DirectSandbox` — spawns linters on the host. No isolation;
-  used by tests and the local-dev gateway.
-- `PodmanSandbox` — wraps every linter spawn in
+- `DirectSandbox` — spawned linters on the host in the retired runtime path.
+- `PodmanSandbox` — wrapped every linter spawn in
   `podman run --rm --network=none --read-only --tmpfs /tmp:size=64m
   --security-opt=no-new-privileges --cap-drop=ALL --memory=… --cpus=…
   --pids-limit=… --user 65534:65534 -v <repo>:/work:ro -w /work …`,
-  plus a tokio-based wall-clock timeout. Production gateways flip
-  to this by setting `AR_SANDBOX_IMAGE` to a pre-pulled linter
-  image (`deploy/Dockerfile.sandbox`).
+  plus a tokio-based wall-clock timeout. The gateway wiring and sandbox image
+  were retired before 0.1.0 by issue #45.
 
-All 12 linter runners go through the trait — none spawn
-`tokio::process::Command` directly anymore.
+This linter-execution path is no longer part of normal review runtime.
 
 #### Agentic chat (Milestone 4)
 
@@ -619,12 +584,10 @@ default in-memory store to the SQLite-backed one.
 #### Deploy artefacts (Milestone 5)
 
 - `deploy/Dockerfile`        — gateway image.
-- `deploy/Dockerfile.sandbox` — minimal image with the 12 linter
-  binaries baked in, intended target for `AR_SANDBOX_IMAGE`.
 - `deploy/docker-compose.yml` — gateway + Postgres template,
-  surfaces `AR_LEARNINGS_DB` and `AR_SANDBOX_IMAGE`.
-- `deploy/helm/`             — Helm chart with the same env-var
-  knobs (`config.learningsDb`, `config.sandboxImage`).
+  surfaces persistent-state env vars.
+- `deploy/helm/`             — Helm chart with matching gateway
+  configuration knobs.
 - `deploy/forgejo-action/`   — composite action wrapping
   `auto_review review-once` for in-CI mode.
 
@@ -698,12 +661,8 @@ default in-memory store to the SQLite-backed one.
 
 - LanceDB-backed `VectorStore` impl (the in-memory + SQLite
   paths cover correctness; LanceDB is the scale lever).
-- youki-based `Sandbox` impl as a lighter alternative to the
-  podman shell-out.
-- Remaining ~1 linter from CodeRabbit's originally-cited set
-  (languagetool — Java HTTP server, complex setup; deferred).
-  At 44 bundled the project has covered nearly every concrete
-  linter the feasibility study itemized.
+- Re-scope any remaining workspace isolation needs after runtime linter removal
+  (issue #46).
 - A larger labelled-corpus benchmark — the harness now scores
   precision/recall against `expected` labels, but the corpus
   itself is minimum-viable (one labelled fixture). Growing it
@@ -922,11 +881,9 @@ default in-memory store to the SQLite-backed one.
   inspects the verifier's user-prompt and asserts dropped
   findings never reach it.
 - Helper extraction: `apply_severity_floor` is a single
-  function called both before the verifier (Full mode)
-  and after the LLM/verifier path (LinterOnly mode, where
-  the floor is the only filter). Idempotent in the Full
-  case — second invocation post-verifier is a no-op since
-  findings are already at-or-above the floor.
+  function called before and after the verifier. The second
+  invocation is idempotent when findings are already at-or-above
+  the floor.
 
 #### Severity floor (M3 signal-to-noise lever)
 
@@ -954,35 +911,12 @@ default in-memory store to the SQLite-backed one.
 - Documented in `OPERATIONS.md` §7.2.5 and the systemd
   `auto_review.env.example`.
 
-#### Linter-only review mode (M3 cost lever)
+#### Retired linter-only review mode prototype
 
-- New `.auto_review.yaml` field `mode:` (default `full`,
-  alternative `linter_only`). When set to `linter_only` the
-  pipeline:
-  - Still clones the workspace, runs the full bundled linter
-    pipeline through the configured sandbox, and applies
-    `disabled_tools` / `ignored_paths` filters.
-  - **Skips** the LLM call (`generate_with_self_heal` and
-    both verifier paths) entirely. Linter findings are
-    mapped straight to inline review comments via the new
-    `ar_review::linter_only::build_linter_only_output`.
-  - **Skips** the verifier — there's no LLM output to drop;
-    linter findings are trusted as-is. Repos that want noisy
-    linters silenced should use `disabled_tools:`.
-- Each comment is prefixed with `[<tool>]` or
-  `[<tool>/<rule>]` so PR authors can see exactly which
-  linter raised what. Severity (Note/Warning/Error) maps
-  one-to-one between `ar_tools::Severity` and
-  `ar_prompts::ReviewSeverity`.
-- Useful for: repos that want centralized linter aggregation
-  without LLM cost; teams trialing `auto_review` who want to
-  start deterministic before opting into LLM review;
-  monorepos where the LLM context budget is too tight for
-  meaningful semantic review.
-- 8 unit tests in `linter_only.rs` cover the mapping
-  (severity, line ranges, prefix format, summary
-  pluralisation). 3 config-parsing tests cover the new
-  `mode:` field including invalid-value fallback.
+- Earlier pre-release builds included a `.auto_review.yaml mode:
+  linter_only` cost lever. That mode was removed before 0.1.0 by issue #45;
+  `auto_review` now focuses on semantic review while CI owns deterministic
+  tools.
 
 #### Pre-merge checks (M4 finishing-touches)
 
@@ -1162,7 +1096,7 @@ default in-memory store to the SQLite-backed one.
 - New "systemd" deployment-options subsection points at
   `deploy/systemd/`.
 - Troubleshooting section restructured: doctor /
-  test-webhook / explain-routing are the first stop, with
+  test-webhook are the first stop, with
   the original "common failure modes" list as fall-back.
   Adds a closing pointer to the Prometheus rules pack +
   Grafana dashboard.
@@ -1171,8 +1105,7 @@ default in-memory store to the SQLite-backed one.
   (AR_BOT_*, AR_HISTORY_DB, AR_LEARNINGS_DB,
   AR_SEVERITY_FLOOR, AR_WEBHOOK_RATE_PER_SEC,
   AR_DEDUP_CAPACITY, AR_READINESS_TTL_SECS,
-  AR_POLL_INTERVAL_SECS, AR_SANDBOX_IMAGE,
-  LLM_CHEAP_MODEL, LLM_EMBEDDING_MODEL).
+  AR_POLL_INTERVAL_SECS, LLM_CHEAP_MODEL, LLM_EMBEDDING_MODEL).
 
 #### CONTRIBUTING.md cookbook sections (M5 docs)
 
@@ -1370,12 +1303,8 @@ default in-memory store to the SQLite-backed one.
   and integration-test targets in some configurations;
   CI uses `--all-targets` so contributors should match.
 - "Prerequisites" linter list said "17 bundled linter
-  binaries" with a hardcoded enumeration (stale since
-  M3's expansion to 44). Replaced with the current count
-  + a pointer to `auto_review list-linters` and
-  `crates/ar-tools/src/catalog.rs` as the canonical
-  source. The hardcoded list would have drifted again on
-  the next linter addition; the pointer doesn't.
+  binaries" with a hardcoded enumeration. That runtime path was
+  later retired before 0.1.0; CI now owns deterministic tools.
 
 #### README freshness sweep
 
@@ -1384,8 +1313,8 @@ default in-memory store to the SQLite-backed one.
     LanceDB embeddings" — LanceDB isn't shipped (the
     in-memory cosine-similarity over the SQLite
     learnings store is what actually runs). Updated to
-    describe the real pipeline (clone → triage → lint
-    fan-out → context curation → review → verify →
+    describe the real pipeline (clone → triage →
+    context curation → review → verify →
     severity floor → post).
   - **LLM provider list** said "OpenAI, Anthropic, Ollama,
     vLLM, OpenRouter". Anthropic isn't shipped — only an
@@ -1397,19 +1326,18 @@ default in-memory store to the SQLite-backed one.
     crate README" pointer.
   - **Crate descriptions** for `ar-index`, `ar-tools`,
     `ar-sandbox`, `ar-cli` updated to reflect current
-    reality (LanceDB removed, 44-linter count added,
-    OCI→Podman, replay→subcommand-count).
+    reality (LanceDB removed, linter-runtime retirement,
+    replay→subcommand-count).
 - **Roadmap section** updated: clarified LanceDB scope
   (in-memory cosine works to thousands; LanceDB is for
-  millions); named the missing linter (`languagetool`)
-  with the deferral reason; concrete count of labelled
-  corpus fixtures (5) and the categories they cover.
+  millions); concrete count of labelled corpus fixtures (5)
+  and the categories they cover.
 
 #### Stale numeric stats sweep
 
 - `docs/ADR-0002-sandbox.md` claimed `~13 linter binaries`
-  in the Context section. Actual is ~44 (matches every
-  other doc). Fixed.
+  in the historical Context section. That linter runtime was later retired
+  before 0.1.0 by issue #45.
 - `CONTRIBUTING.md` "Adding a new CLI subcommand" claimed
   `the existing 22 subcommands` are the template. Actual
   is 16. Fixed.
@@ -1418,17 +1346,15 @@ default in-memory store to the SQLite-backed one.
   was double-counting. Fixed to
   `(7 specific commands + freeform fallback)`.
 - These don't have CI guards — numbers in prose drift
-  silently. The structural drift tests (catalogue ↔
-  Dockerfile, RepoConfig ↔ example, clap ↔ README, etc.)
+  silently. The structural drift tests (RepoConfig ↔ example,
+  clap ↔ README, etc.)
   catch the high-impact cases; numeric stats are
   audited periodically.
 
 #### CLI README / clap subcommands contract test
 
-- `ar-cli/README.md` was missing two subcommand rows:
-  `explain-routing` (M5) and `purge-history` (M5).
-  Operators reading the per-crate README would have
-  missed both features. Added.
+- `ar-cli/README.md` was missing `purge-history` (M5). Operators reading the
+  per-crate README would have missed the feature. Added.
 - New contract test (`readme_documents_every_subcommand`)
   uses clap's `CommandFactory` to enumerate every
   subcommand `Cli` exposes and asserts each appears as
@@ -1457,23 +1383,11 @@ default in-memory store to the SQLite-backed one.
   file. Adding a config field without updating the
   example now fails CI.
 
-#### Sandbox image / catalogue contract test
+#### Retired sandbox image / catalogue contract test
 
-- Stale doc-comment in `deploy/Dockerfile.sandbox` said the
-  image bundled "12 linter binaries" — actually 43 (every
-  catalogue entry except `nilaway`, which has no release
-  binary). Updated to the accurate count + cross-reference
-  to `ar_tools::catalog::linter_catalogue()` so the
-  invariant is discoverable from either side.
-- New contract test
-  (`deploy_dockerfile_sandbox_bundles_every_catalogue_entry`)
-  walks the catalogue and asserts each non-excepted entry
-  appears in `Dockerfile.sandbox`. Two aliases handle
-  package-vs-binary name differences (`vint` →
-  `vim-vint` pip, `markdownlint` → `markdownlint-cli`
-  npm); `nilaway` is the documented exception. Adding a
-  catalogue entry without bundling it in the production
-  sandbox image now fails CI.
+- Earlier pre-release builds had a sandbox-image/catalogue drift test for the
+  bundled-linter runtime. That image and runtime contract were removed before
+  0.1.0 by issue #45.
 
 #### Grafana dashboard: Quality and capacity row
 
@@ -1571,10 +1485,8 @@ default in-memory store to the SQLite-backed one.
   verifier runs (which itself runs after the severity-floor,
   so the count reflects findings the verifier rejected — not
   findings filtered for being below severity threshold).
-- LinterOnly mode reports `verifier_dropped: 0` since no
-  verifier runs. The existing `verifier_dropped` field on
-  `ReviewOutcome` mirrors the observation field for
-  cross-crate visibility.
+- The existing `verifier_dropped` field on `ReviewOutcome` mirrors the
+  observation field for cross-crate visibility.
 - New test
   (`verifier_dropped_counter_sums_across_reviews`)
   exercises two Succeeded observations + one Failed
@@ -1809,41 +1721,11 @@ default in-memory store to the SQLite-backed one.
   `NoOpDispatcher` and verify success, wrong-secret failure,
   PR-event round-trip, and unsupported-event rejection.
 
-#### explain-routing subcommand (M5)
+#### Retired linter CLI prototype (M5)
 
-- `auto_review explain-routing --file PATH...` shows which
-  bundled linters would run on a given set of changed files.
-  Pure routing — doesn't read the files or invoke any linter
-  binary. Output is alphabetised so two invocations are
-  diffable. `--json` emits `{"runners": [...]}` for piping.
-- Use case: an operator on a Python+shell repo wants to
-  know whether disabling `pylint` is enough to silence
-  Python checks, or whether `ruff` / `bandit` / `mypy` also
-  fire. Running `auto_review explain-routing --file src/x.py`
-  returns the full routed set including all of them. Same
-  technique works for tuning `disabled_tools:` pre-emptively
-  before a PR ever fires.
-- Two failure-mode tests cover empty file list and clap's
-  `required = true` rejection. Three behaviour tests cover
-  Python file routing, empty list, JSON output.
-- USER-GUIDE.md and OPERATIONS.md "Disable a noisy linter"
-  sections now point at `explain-routing` alongside
-  `list-linters`.
-
-#### list-linters subcommand (M5)
-
-- `auto_review list-linters` prints the bundled linter
-  catalogue with each entry's canonical name (the string
-  to use under `disabled_tools:` in `.auto_review.yaml`),
-  description, language tags, and homepage. `--language=<tag>`
-  filters by language; `--json` emits one JSON object per
-  line for piping into `jq`. Backed by a new
-  `ar_tools::catalog::linter_catalogue()` returning a
-  `&'static [LinterInfo]` slice. A contract test in
-  `ar_review::routing` instantiates every routed runner
-  through a synthetic comprehensive file set and asserts
-  every name appears in the catalogue, so adding a new
-  runner without updating the catalogue fails CI.
+- Earlier pre-release builds included `auto_review explain-routing` and
+  `auto_review list-linters` for the bundled-linter runtime. Both commands
+  were removed before 0.1.0 by issue #45.
 
 #### validate-config --strict (M5)
 
@@ -1861,8 +1743,7 @@ default in-memory store to the SQLite-backed one.
   key named and the valid-key list shown:
   ```
   ✗ .auto_review.yaml: unknown top-level key(s): enabld;
-    valid keys are: enabled, guidelines, ignored_paths,
-    disabled_tools, mode, pre_merge_checks
+    valid keys are: enabled, guidelines, ignored_paths, pre_merge_checks
   ```
 - New `parse_repo_config_strict` + `RepoConfigStrictError`
   in `ar-review`. A contract test
@@ -1886,5 +1767,5 @@ default in-memory store to the SQLite-backed one.
   it. Exits non-zero on any failure or when no files are
   found, so the subcommand fits cleanly in a pre-commit hook
   or CI step. Repo authors can iterate on `ignored_paths`,
-  `disabled_tools`, and free-form `guidelines` locally
+  `pre_merge_checks`, and free-form `guidelines` locally
   without firing a real PR through the bot.

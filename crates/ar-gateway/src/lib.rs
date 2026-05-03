@@ -85,9 +85,9 @@ pub struct GatewayInfo {
     pub version: &'static str,
     pub bot_login: String,
     pub bot_name: String,
-    /// Which `Sandbox` impl is active. `"direct"` = no isolation
-    /// (Kudelski-class RCE risk; only safe for trusted-PR sources);
-    /// `"podman"` = the hardened production path.
+    /// Runtime sandbox state. `"not-used"` means the normal review runtime does
+    /// not execute bundled linters or wire a sandbox implementation. Older
+    /// pre-#45 values were `"direct"` and `"podman"`.
     pub sandbox: &'static str,
     /// Concrete `LearningsStore` backing — either `"in-memory"` or
     /// `"sqlite:<path>"`. The path lets operators verify the bot

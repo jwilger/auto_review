@@ -1,5 +1,3 @@
-use ar_tools::Finding;
-
 /// Inputs for rendering the review user prompt.
 #[derive(Debug, Clone)]
 pub struct ReviewPromptInputs<'a> {
@@ -9,10 +7,6 @@ pub struct ReviewPromptInputs<'a> {
     pub pr_body: &'a str,
     pub diff: &'a str,
     pub changed_files: &'a [String],
-    /// Pre-computed static-analysis findings to surface to the model so it
-    /// can corroborate, expand on, or dismiss them. Empty if no linters ran
-    /// or none reported anything.
-    pub linter_findings: &'a [Finding],
     /// Free-form repo-author guidelines from `.auto_review.yaml`. Rendered
     /// as a top-level section so the model treats them as authoritative
     /// project conventions. Empty when no config is present.
@@ -44,9 +38,6 @@ Rules:
   return `findings: []` with a `summary` of why.
 - Do not flag style/formatting unless the codebase has explicit conventions \
   in the diff. Do not invent issues to look thorough.
-- Static-analysis findings (when present) are mechanical signals — \
-  corroborate, expand, or dismiss them with judgment; do not blindly \
-  forward them.
 - Severity: `error` = bug or security issue; `warning` = likely bug or risky \
   change; `note` = optional improvement.
 ";
@@ -84,14 +75,6 @@ const GUIDELINES_MAX_BYTES: usize = 8_192;
 /// bound. 16 KiB lets us include a meaningful similar-code window
 /// without burning the full reasoning-tier context.
 const REPO_CONTEXT_MAX_BYTES: usize = 16_384;
-
-/// Cap on the number of static-analysis findings rendered into the
-/// prompt. A noisy linter config (e.g. a freshly-enabled rule
-/// flagging the entire file tree) can produce thousands of findings
-/// — most of which the LLM can't usefully cross-reference against
-/// the diff anyway. 100 covers any reasonable PR; the rest are
-/// summarised with a count.
-const LINTER_FINDINGS_MAX: usize = 100;
 
 /// Render the user-facing prompt the LLM will see. The system prompt is
 /// returned separately by [`system_prompt`].
@@ -152,24 +135,6 @@ pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
         }
     }
 
-    if !inputs.linter_findings.is_empty() {
-        out.push_str("\nStatic-analysis findings:\n");
-        let total = inputs.linter_findings.len();
-        for f in inputs.linter_findings.iter().take(LINTER_FINDINGS_MAX) {
-            let rule = f.rule_id.as_deref().unwrap_or("-");
-            out.push_str(&format!(
-                "- [{}/{}] {}:{} ({:?}) {}\n",
-                f.source_tool, rule, f.path, f.line_start, f.severity, f.message
-            ));
-        }
-        if total > LINTER_FINDINGS_MAX {
-            out.push_str(&format!(
-                "- [{} additional findings omitted to fit prompt budget]\n",
-                total - LINTER_FINDINGS_MAX
-            ));
-        }
-    }
-
     out.push_str("\nUnified diff:\n```diff\n");
     out.push_str(inputs.diff);
     if !inputs.diff.ends_with('\n') {
@@ -201,13 +166,8 @@ fn push_capped(out: &mut String, s: &str, max_bytes: usize, marker: &str) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ar_tools::Severity;
 
-    fn sample<'a>(
-        diff: &'a str,
-        files: &'a [String],
-        findings: &'a [Finding],
-    ) -> ReviewPromptInputs<'a> {
+    fn sample<'a>(diff: &'a str, files: &'a [String]) -> ReviewPromptInputs<'a> {
         ReviewPromptInputs {
             repo_full_name: "alice/widgets",
             pr_number: 42,
@@ -215,7 +175,6 @@ mod tests {
             pr_body: "closes #7",
             diff,
             changed_files: files,
-            linter_findings: findings,
             guidelines: "",
             repo_context: "",
         }
@@ -224,7 +183,7 @@ mod tests {
     #[test]
     fn includes_repo_and_pr_number() {
         let files = vec!["src/main.rs".to_string()];
-        let p = render_review_prompt(&sample("diff body", &files, &[]));
+        let p = render_review_prompt(&sample("diff body", &files));
         assert!(p.contains("alice/widgets"));
         assert!(p.contains("#42"));
     }
@@ -232,7 +191,7 @@ mod tests {
     #[test]
     fn includes_pr_title_and_body() {
         let files: Vec<String> = vec![];
-        let p = render_review_prompt(&sample("d", &files, &[]));
+        let p = render_review_prompt(&sample("d", &files));
         assert!(p.contains("fix off-by-one"));
         assert!(p.contains("closes #7"));
     }
@@ -240,7 +199,7 @@ mod tests {
     #[test]
     fn includes_diff_verbatim() {
         let files: Vec<String> = vec![];
-        let p = render_review_prompt(&sample("@@ -1 +1 @@\n-a\n+b\n", &files, &[]));
+        let p = render_review_prompt(&sample("@@ -1 +1 @@\n-a\n+b\n", &files));
         assert!(p.contains("@@ -1 +1 @@"));
         assert!(p.contains("+b"));
     }
@@ -248,7 +207,7 @@ mod tests {
     #[test]
     fn lists_changed_files() {
         let files = vec!["src/a.rs".to_string(), "src/b.rs".to_string()];
-        let p = render_review_prompt(&sample("d", &files, &[]));
+        let p = render_review_prompt(&sample("d", &files));
         assert!(p.contains("src/a.rs"));
         assert!(p.contains("src/b.rs"));
     }
@@ -263,7 +222,6 @@ mod tests {
             pr_body: "",
             diff: "d",
             changed_files: &files,
-            linter_findings: &[],
             guidelines: "",
             repo_context: "",
         });
@@ -280,7 +238,6 @@ mod tests {
             pr_body: "",
             diff: "d",
             changed_files: &files,
-            linter_findings: &[],
             guidelines: "",
             repo_context: "Function `foo` is called by 14 callers in this repo.",
         });
@@ -290,7 +247,7 @@ mod tests {
 
     #[test]
     fn omits_repo_context_when_empty() {
-        let p = render_review_prompt(&sample("d", &[], &[]));
+        let p = render_review_prompt(&sample("d", &[]));
         assert!(!p.contains("Repository context"));
     }
 
@@ -304,7 +261,6 @@ mod tests {
             pr_body: "",
             diff: "d",
             changed_files: &files,
-            linter_findings: &[],
             guidelines: "Always prefer total functions over partial.",
             repo_context: "",
         });
@@ -314,7 +270,7 @@ mod tests {
 
     #[test]
     fn omits_guidelines_section_when_empty() {
-        let p = render_review_prompt(&sample("d", &[], &[]));
+        let p = render_review_prompt(&sample("d", &[]));
         assert!(!p.contains("Repository guidelines"));
     }
 
@@ -327,57 +283,8 @@ mod tests {
     #[test]
     fn omits_findings_section_when_empty() {
         let files: Vec<String> = vec![];
-        let p = render_review_prompt(&sample("d", &files, &[]));
+        let p = render_review_prompt(&sample("d", &files));
         assert!(!p.to_lowercase().contains("static-analysis findings"));
-    }
-
-    #[test]
-    fn includes_findings_section_when_present() {
-        let files: Vec<String> = vec![];
-        let findings = vec![
-            Finding {
-                source_tool: "ruff".into(),
-                rule_id: Some("E501".into()),
-                path: "src/x.py".into(),
-                line_start: 12,
-                line_end: 12,
-                severity: Severity::Warning,
-                message: "Line too long".into(),
-            },
-            Finding {
-                source_tool: "shellcheck".into(),
-                rule_id: Some("SC2034".into()),
-                path: "scripts/build.sh".into(),
-                line_start: 3,
-                line_end: 3,
-                severity: Severity::Note,
-                message: "var unused".into(),
-            },
-        ];
-        let p = render_review_prompt(&sample("d", &files, &findings));
-        assert!(p.to_lowercase().contains("static-analysis findings"));
-        assert!(p.contains("ruff"));
-        assert!(p.contains("E501"));
-        assert!(p.contains("src/x.py:12"));
-        assert!(p.contains("Line too long"));
-        assert!(p.contains("shellcheck"));
-        assert!(p.contains("SC2034"));
-    }
-
-    #[test]
-    fn finding_with_no_rule_id_renders_as_dash() {
-        let files: Vec<String> = vec![];
-        let findings = vec![Finding {
-            source_tool: "custom".into(),
-            rule_id: None,
-            path: "a".into(),
-            line_start: 1,
-            line_end: 1,
-            severity: Severity::Note,
-            message: "m".into(),
-        }];
-        let p = render_review_prompt(&sample("d", &files, &findings));
-        assert!(p.contains("[custom/-]"));
     }
 
     #[test]
@@ -387,7 +294,6 @@ mod tests {
         // the LLM's context. Cap at 8 KiB and emit a truncation
         // marker so the model can see the description was abridged.
         let files: Vec<String> = vec![];
-        let findings: Vec<Finding> = vec![];
         let huge_body = "x".repeat(20_000);
         let inputs = ReviewPromptInputs {
             repo_full_name: "o/r",
@@ -396,7 +302,6 @@ mod tests {
             pr_body: &huge_body,
             diff: "diff",
             changed_files: &files,
-            linter_findings: &findings,
             guidelines: "",
             repo_context: "",
         };
@@ -414,7 +319,6 @@ mod tests {
     #[test]
     fn pr_title_is_capped_at_512_bytes() {
         let files: Vec<String> = vec![];
-        let findings: Vec<Finding> = vec![];
         let huge_title = "T".repeat(2_000);
         let inputs = ReviewPromptInputs {
             repo_full_name: "o/r",
@@ -423,7 +327,6 @@ mod tests {
             pr_body: "",
             diff: "diff",
             changed_files: &files,
-            linter_findings: &findings,
             guidelines: "",
             repo_context: "",
         };
@@ -436,7 +339,6 @@ mod tests {
     #[test]
     fn guidelines_are_capped_at_8kib() {
         let files: Vec<String> = vec![];
-        let findings: Vec<Finding> = vec![];
         let huge_guidelines = "g".repeat(20_000);
         let inputs = ReviewPromptInputs {
             repo_full_name: "o/r",
@@ -445,7 +347,6 @@ mod tests {
             pr_body: "",
             diff: "diff",
             changed_files: &files,
-            linter_findings: &findings,
             guidelines: &huge_guidelines,
             repo_context: "",
         };
@@ -457,7 +358,6 @@ mod tests {
     #[test]
     fn repo_context_is_capped_at_16kib() {
         let files: Vec<String> = vec![];
-        let findings: Vec<Finding> = vec![];
         let huge_context = "c".repeat(40_000);
         let inputs = ReviewPromptInputs {
             repo_full_name: "o/r",
@@ -466,7 +366,6 @@ mod tests {
             pr_body: "",
             diff: "diff",
             changed_files: &files,
-            linter_findings: &findings,
             guidelines: "",
             repo_context: &huge_context,
         };
@@ -476,55 +375,8 @@ mod tests {
     }
 
     #[test]
-    fn linter_findings_capped_at_100_with_summary_for_overflow() {
-        // A noisy linter config could emit thousands of findings.
-        // Cap rendering at 100 and summarise the rest, so the
-        // LLM doesn't drown in mechanical noise.
-        let files: Vec<String> = vec![];
-        let findings: Vec<Finding> = (0..250)
-            .map(|i| Finding {
-                source_tool: "ruff".into(),
-                rule_id: Some(format!("E{i:03}")),
-                path: format!("file{i}.py"),
-                line_start: 1,
-                line_end: 1,
-                severity: Severity::Note,
-                message: format!("issue {i}"),
-            })
-            .collect();
-        let p = render_review_prompt(&sample("d", &files, &findings));
-        // First and last of the 100 rendered should appear.
-        assert!(p.contains("E000"));
-        assert!(p.contains("E099"));
-        // Anything past 100 should not.
-        assert!(!p.contains("E100"));
-        assert!(!p.contains("E249"));
-        // Summary line for the omitted ones.
-        assert!(p.contains("150 additional findings omitted"));
-    }
-
-    #[test]
-    fn linter_findings_under_cap_render_without_summary() {
-        let files: Vec<String> = vec![];
-        let findings: Vec<Finding> = (0..5)
-            .map(|i| Finding {
-                source_tool: "ruff".into(),
-                rule_id: None,
-                path: format!("f{i}.py"),
-                line_start: 1,
-                line_end: 1,
-                severity: Severity::Note,
-                message: "m".into(),
-            })
-            .collect();
-        let p = render_review_prompt(&sample("d", &files, &findings));
-        assert!(!p.contains("additional findings omitted"));
-    }
-
-    #[test]
     fn pr_body_under_cap_passes_through_unchanged() {
         let files: Vec<String> = vec![];
-        let findings: Vec<Finding> = vec![];
         let inputs = ReviewPromptInputs {
             repo_full_name: "o/r",
             pr_number: 1,
@@ -532,7 +384,6 @@ mod tests {
             pr_body: "Closes #42 — thanks!",
             diff: "diff",
             changed_files: &files,
-            linter_findings: &findings,
             guidelines: "",
             repo_context: "",
         };

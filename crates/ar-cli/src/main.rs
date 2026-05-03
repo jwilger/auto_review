@@ -25,8 +25,6 @@ async fn main() -> Result<()> {
         Command::ReviewOnce(args) => commands::review_once(args).await,
         Command::Bench(args) => bench::run(args).await,
         Command::ValidateConfig(args) => commands::validate_config(args),
-        Command::ListLinters(args) => commands::list_linters(args),
-        Command::ExplainRouting(args) => commands::explain_routing(args),
         Command::TestWebhook(args) => commands::test_webhook(args).await,
         Command::Doctor(args) => commands::doctor(args).await,
         Command::Status(args) => commands::status(args).await,

@@ -1,10 +1,7 @@
 //! oxlint runner. Parses `oxlint --format=json` output.
 //!
 //! oxlint is a JS/TS linter written in Rust — a JS-ecosystem
-//! complement to biome and eslint. We run it alongside the others
-//! because each catches a different rule set in practice; users
-//! disabling overlap via `.auto_review.yaml`'s `disabled_tools`
-//! is the supported escape hatch.
+//! complement to biome and eslint in the legacy runner set.
 //!
 //! Output structure: a top-level `{diagnostics: [...]}` array
 //! (closely modelled on biome's). Each diagnostic carries

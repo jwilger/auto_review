@@ -18,9 +18,8 @@ numbers, "today") before posting.
 > **What it does:**
 > - Listens for `pull_request` webhooks from your Forgejo
 >   instance.
-> - Runs 45 bundled linters in a hardened OCI sandbox
->   (no network, dropped capabilities, read-only repo mount).
-> - Sends the diff + findings + repo-level `.auto_review.yaml`
+> - Runs after your selected CI linters/tests/builds have passed.
+> - Sends the diff + repo-level `.auto_review.yaml`
 >   guidance to a reasoning LLM.
 > - Verifies the model's findings against the actual code,
 >   dropping anything the diff doesn't corroborate.
@@ -37,13 +36,9 @@ numbers, "today") before posting.
 > 32B-class coding model reviews real PRs end-to-end with no
 > internet egress.
 >
-> **Sandbox is non-negotiable.** Linters and any LLM-issued
-> shell commands run in a podman or docker container with
-> `--network=none --read-only --cap-drop=ALL --user 65534:65534
-> --pids-limit=128` — direct response to the Kudelski-class
-> RCE that bit a SaaS competitor in 2024. Auto-detect picks
-> whichever runtime is on PATH; operators can pin via
-> `AR_SANDBOX_RUNTIME`.
+> **CI owns deterministic checks.** auto_review does not execute
+> bundled linters in the gateway; projects keep objective pass/fail
+> gates in Forgejo Actions and trigger semantic review afterwards.
 >
 > **What makes this different from PR-Agent:** verification
 > agent (drops hallucinated findings before they hit your PR),
@@ -75,23 +70,14 @@ numbers, "today") before posting.
 > is GitHub-only and SaaS-only. Forgejo, the natural home for
 > sovereignty-conscious self-hosters, has no equivalent. Qodo's
 > PR-Agent has a Gitea provider but is single-LLM-call-per-tool —
-> no linter pipeline, no sandboxed execution, no persistent
+> no CI-triggered semantic-review flow, no persistent
 > learnings, no agentic verification.
 >
 > **What auto_review ships:**
 > - Webhook intake → durable job dispatch → review pipeline →
 >   posted review.
-> - 45 bundled linters (ruff, eslint, golangci-lint, clippy via
->   the repo's own CI, semgrep, trivy, gitleaks, hadolint,
->   shellcheck, markdownlint, vale, …) routed per-language.
->   languagetool is opt-in via `LANGUAGETOOL_URL` (HTTP API,
->   no JVM dep on the gateway host).
-> - **Hardened sandbox** for every linter and every LLM-issued
->   shell call: podman/docker with `--network=none --read-only
->   --cap-drop=ALL --user nobody --pids-limit=128`. Sandbox-
->   escape harness (`cargo test -p ar-sandbox --test escape --
->   --ignored`) verifies the hardening contract under hostile
->   inputs.
+> - CI-triggered semantic reviews: run your linters/tests/builds in
+>   Forgejo Actions, then call the gateway once deterministic gates pass.
 > - **LLM router** with Ollama, vLLM, OpenAI, Anthropic, and
 >   OpenRouter providers. Defaults assume you want local-only
 >   (`qwen2.5-coder:7b` cheap-tier, `qwen2.5-coder:32b`
@@ -104,8 +90,8 @@ numbers, "today") before posting.
 >   LanceDB drop-in fits behind the same trait).
 >   `@auto_review remember "do X"` in any PR comment to add a
 >   guideline.
-> - Per-repo `.auto_review.yaml` for ignored paths, custom
->   pre-merge checks, and disabled tools.
+> - Per-repo `.auto_review.yaml` for ignored paths and custom
+>   pre-merge checks.
 > - `/metrics` endpoint with Prometheus counters; Grafana
 >   dashboard + Helm chart in `deploy/`.
 >
@@ -130,31 +116,23 @@ numbers, "today") before posting.
 ## lobste.rs submission
 
 **Title:** `auto_review — open-source AI PR reviewer for Forgejo
-with hardened sandboxing and local LLMs`
+with CI-triggered reviews and local LLMs`
 
 **Body:**
 
 > A Rust-implemented, self-hostable analogue of CodeRabbit
 > targeting Forgejo. The interesting bits:
 >
-> - **Sandboxing as a first-class design constraint.** A 2024
->   Kudelski writeup of a CodeRabbit RCE (an unsandboxed
->   Rubocop invocation, full host access, write to ~1M
->   private repos) drove every linter and every LLM-issued
->   shell call into podman/docker with `--network=none
->   --read-only --cap-drop=ALL --user 65534:65534
->   --pids-limit=128`. Escape harness (`tests/escape.rs`)
->   verifies the hardening under hostile inputs — fork-bomb,
->   wget-egress, /etc/passwd write, setuid via no-new-
->   privileges, capability inspection.
+> - **CI-triggered semantic reviews.** Deterministic linters,
+>   tests, and builds stay in Forgejo Actions, where projects
+>   already control the required gates. auto_review runs after
+>   those checks pass and focuses on semantic/fuzzy review.
 >
-> - **Hybrid pipeline + agentic** — same shape as CodeRabbit's
->   public architecture, not pure ReAct loops. Triage
->   (cheap-model classification) → linter fan-out → context
->   curation (vector search + ast-grep + sandboxed shell
->   tools) → review generation → verification (drops
->   findings the diff doesn't corroborate) → self-heal loop
->   on JSON-schema validation.
+> - **Hybrid pipeline + agentic** — not pure ReAct loops.
+>   Triage (cheap-model classification) → context curation
+>   (vector search + read-only workspace tools) → review
+>   generation → verification (drops findings the diff doesn't
+>   corroborate) → self-heal loop on JSON-schema validation.
 >
 > - **Local-LLM-only profile is a first-class deployment
 >   target**, not an afterthought. Ollama / vLLM via OpenAI-

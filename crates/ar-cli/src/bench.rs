@@ -15,7 +15,6 @@ use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_prompts::ReviewOutput;
 use ar_prompts::{render_review_prompt, system_prompt, ReviewPromptInputs};
 use ar_review::{generate_with_self_heal, verify_findings, HealConfig};
-use ar_tools::Finding;
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -34,8 +33,6 @@ pub struct Fixture {
     pub diff: String,
     #[serde(default)]
     pub changed_files: Vec<String>,
-    #[serde(default)]
-    pub linter_findings: Vec<Finding>,
     #[serde(default)]
     pub guidelines: String,
     #[serde(default)]
@@ -406,7 +403,6 @@ async fn run_one(path: &Path, llm: &LlmRouter, verifier_enabled: bool) -> Fixtur
         pr_body: &fixture.pr_body,
         diff: &fixture.diff,
         changed_files: &fixture.changed_files,
-        linter_findings: &fixture.linter_findings,
         guidelines: &fixture.guidelines,
         repo_context: &fixture.repo_context,
     });

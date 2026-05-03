@@ -1,9 +1,9 @@
 //! Implementations of the CLI subcommands.
 
 use crate::cli::{
-    DoctorArgs, ExplainRoutingArgs, ForgetLearningArgs, InitArgs, ListLearningsArgs,
-    ListLintersArgs, ListWebhooksArgs, PurgeHistoryArgs, RegisterWebhookArgs, ResetPrArgs,
-    ReviewOnceArgs, StatusArgs, TestWebhookArgs, UnregisterWebhookArgs, ValidateConfigArgs,
+    DoctorArgs, ForgetLearningArgs, InitArgs, ListLearningsArgs, ListWebhooksArgs,
+    PurgeHistoryArgs, RegisterWebhookArgs, ResetPrArgs, ReviewOnceArgs, StatusArgs,
+    TestWebhookArgs, UnregisterWebhookArgs, ValidateConfigArgs,
 };
 use anyhow::{Context, Result};
 use ar_forgejo::{
@@ -13,7 +13,6 @@ use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::{run_review_job, InMemoryReviewHistory, ReviewJob};
 use ar_prompts::{render_review_prompt, ReviewPromptInputs};
 use ar_review::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
-use ar_sandbox::DirectSandbox;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::sync::Arc;
@@ -108,9 +107,6 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
     // shot debug command, so the no-incremental fall-through is what
     // we want.
     let history = InMemoryReviewHistory::new();
-    // CLI debug command: no isolation. The user's host already has
-    // the linter binaries; that's what they're testing.
-    let sandbox = DirectSandbox::new();
     run_review_job(
         &forgejo,
         &llm,
@@ -124,7 +120,6 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
         // fresh in-memory store via build_review_context's back-compat
         // path, then drops it.
         None,
-        &sandbox,
         // No observer either: review-once prints to stdout, doesn't
         // export Prometheus metrics.
         None,
@@ -159,7 +154,6 @@ async fn print_dry_run_prompt(
         pr_body,
         diff: &diff,
         changed_files: &changed_files,
-        linter_findings: &[],
         guidelines: "",
         repo_context: "",
     });
@@ -1111,118 +1105,6 @@ fn sign_body(secret: &str, body: &[u8]) -> String {
     hex::encode(mac.finalize().into_bytes())
 }
 
-/// Show which linters would run for a given set of files.
-/// Pure routing — doesn't actually read the files or invoke any
-/// linter binary.
-pub fn explain_routing(args: ExplainRoutingArgs) -> Result<()> {
-    let files: Vec<ar_forgejo::ChangedFile> = args
-        .file
-        .iter()
-        .map(|name| ar_forgejo::ChangedFile {
-            filename: name.clone(),
-            status: "modified".into(),
-            additions: 0,
-            deletions: 0,
-            changes: 0,
-            patch: None,
-        })
-        .collect();
-    let runners = ar_review::select_runners(&files);
-    let mut names: Vec<String> = runners.iter().map(|r| r.name().to_string()).collect();
-    names.sort();
-    if args.json {
-        println!(
-            "{}",
-            serde_json::to_string(&serde_json::json!({ "runners": names }))?
-        );
-        return Ok(());
-    }
-    println!(
-        "Routing for {} file{}:",
-        args.file.len(),
-        if args.file.len() == 1 { "" } else { "s" }
-    );
-    for f in &args.file {
-        println!("  - {f}");
-    }
-    println!();
-    if names.is_empty() {
-        println!(
-            "No linters route to these files. (Empty input or every entry has \
-             status=removed.)"
-        );
-        return Ok(());
-    }
-    println!(
-        "{} linter{} would run:",
-        names.len(),
-        if names.len() == 1 { "" } else { "s" }
-    );
-    for n in &names {
-        println!("  {n}");
-    }
-    println!();
-    println!(
-        "Use `auto_review list-linters` for descriptions; add a name to \
-         `.auto_review.yaml`'s `disabled_tools:` to skip it."
-    );
-    Ok(())
-}
-
-/// Print the bundled linter catalogue. With `--json`, emits one
-/// JSON object per line (newline-delimited JSON). Otherwise renders
-/// a human-readable table grouped by language.
-pub fn list_linters(args: ListLintersArgs) -> Result<()> {
-    let mut entries: Vec<&ar_tools::LinterInfo> = ar_tools::linter_catalogue().iter().collect();
-    if let Some(lang) = args.language.as_deref() {
-        let lang = lang.to_ascii_lowercase();
-        entries.retain(|e| e.languages.iter().any(|l| l.eq_ignore_ascii_case(&lang)));
-        if entries.is_empty() {
-            anyhow::bail!(
-                "no linters tagged with language `{lang}`. Run `auto_review list-linters` (no filter) to see all tags."
-            );
-        }
-    }
-    if args.json {
-        for entry in &entries {
-            println!("{}", serde_json::to_string(entry)?);
-        }
-        return Ok(());
-    }
-    // Human-readable: column-aligned name + description.
-    let widest = entries.iter().map(|e| e.name.len()).max().unwrap_or(0);
-    println!(
-        "{} bundled linter{}{}",
-        entries.len(),
-        if entries.len() == 1 { "" } else { "s" },
-        match args.language.as_deref() {
-            Some(l) => format!(" tagged `{l}`"),
-            None => String::new(),
-        }
-    );
-    println!();
-    for entry in &entries {
-        println!(
-            "  {:width$}  {}",
-            entry.name,
-            entry.description,
-            width = widest
-        );
-        println!(
-            "  {:width$}  languages: {}",
-            "",
-            entry.languages.join(", "),
-            width = widest
-        );
-        println!("  {:width$}  {}", "", entry.homepage, width = widest);
-        println!();
-    }
-    println!(
-        "Use any of these names under `disabled_tools:` in .auto_review.yaml to skip a linter."
-    );
-    Ok(())
-}
-
 /// Validate one or more `.auto_review.yaml` files. Each path can be a
 /// file or a directory; directories are scanned for the standard
 /// config filenames. Returns Ok with the count of validated files;
@@ -1264,11 +1146,10 @@ pub fn validate_config(args: ValidateConfigArgs) -> Result<()> {
         match parsed {
             Ok(cfg) => {
                 println!(
-                    "✓ {}: enabled={}, ignored={}, disabled_tools={}",
+                    "✓ {}: enabled={}, ignored={}",
                     file.display(),
                     cfg.enabled,
-                    cfg.ignored_paths.len(),
-                    cfg.disabled_tools.len()
+                    cfg.ignored_paths.len()
                 );
             }
             Err(detail) => {
@@ -2111,67 +1992,6 @@ auto_review_reviews_completed_count 10
         };
         let err = test_webhook(args).await.expect_err("unsupported event");
         assert!(err.to_string().contains("release"));
-    }
-
-    #[test]
-    fn explain_routing_handles_python_file() {
-        // Smoke-test: routing a .py file should at minimum
-        // pull in ruff (the always-runs python linter).
-        let args = ExplainRoutingArgs {
-            file: vec!["src/x.py".into()],
-            json: false,
-        };
-        explain_routing(args).expect("ok");
-    }
-
-    #[test]
-    fn explain_routing_with_no_files_succeeds_silently() {
-        // clap rejects zero --file at the parse layer; this
-        // tests the function-level invariant that an empty
-        // file list doesn't crash. Useful if a future caller
-        // bypasses clap.
-        let args = ExplainRoutingArgs {
-            file: vec![],
-            json: false,
-        };
-        explain_routing(args).expect("ok");
-    }
-
-    #[test]
-    fn explain_routing_json_emits_structured_object() {
-        let args = ExplainRoutingArgs {
-            file: vec!["x.rs".into()],
-            json: true,
-        };
-        explain_routing(args).expect("ok");
-    }
-
-    #[test]
-    fn list_linters_no_filter_succeeds() {
-        let args = ListLintersArgs {
-            language: None,
-            json: false,
-        };
-        list_linters(args).expect("default catalogue print");
-    }
-
-    #[test]
-    fn list_linters_with_known_language_succeeds() {
-        let args = ListLintersArgs {
-            language: Some("python".into()),
-            json: true,
-        };
-        list_linters(args).expect("python filter");
-    }
-
-    #[test]
-    fn list_linters_with_unknown_language_errors() {
-        let args = ListLintersArgs {
-            language: Some("klingon".into()),
-            json: false,
-        };
-        let err = list_linters(args).expect_err("unknown language should fail");
-        assert!(err.to_string().contains("klingon"));
     }
 
     #[test]

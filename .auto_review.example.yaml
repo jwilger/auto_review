@@ -34,22 +34,6 @@ ignored_paths:
   - "src/generated/**"
   - "*.snap"
 
-# Linter names (matching ar-tools::LinterRunner::name()) to skip. Useful
-# when your CI already runs the same linter and you don't want duplicate
-# findings cluttering the review.
-disabled_tools:
-  # - markdownlint
-  # - eslint
-
-# Review behaviour. `full` (default) runs the LLM-driven review with
-# linter findings as supplementary context. `linter_only` skips the LLM
-# entirely — the bot still clones the workspace, runs every applicable
-# linter, and posts findings as inline comments, but no LLM tokens are
-# spent. Useful for repos that want centralized linter aggregation
-# without the cost of LLM review, or as a stepping stone before opting
-# into the full review.
-# mode: linter_only
-
 # Repo-author-supplied natural-language pre-merge checks. Each entry is
 # evaluated against the diff by the cheap LLM tier (LLM_CHEAP_MODEL on
 # the gateway) and surfaces in the review body's "Pre-merge checks"

@@ -3,13 +3,10 @@ use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullR
 use ar_index::{LearningsStore, VectorStore};
 use ar_llm::Router as LlmRouter;
 use ar_review::{
-    build_glob_set, build_review_context_with_store, filter_reviewable, lint_workspace_report_via,
-    load_repo_config, pr_is_skippable, prepare_workspace, review_pull_request,
-    triage_files_with_llm, GlobSet, PreparedWorkspace, ReviewArgs, ReviewError, ReviewMode,
+    build_glob_set, build_review_context_with_store, load_repo_config, pr_is_skippable,
+    prepare_workspace, review_pull_request, GlobSet, PreparedWorkspace, ReviewArgs, ReviewError,
     VerifyMode, WorkspaceError,
 };
-use ar_sandbox::{DirectSandbox, Sandbox};
-use ar_tools::Finding;
 use async_trait::async_trait;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -27,7 +24,7 @@ pub enum ReviewObservation {
     /// *attempts* including ones that immediately fail.
     Started,
     /// A review finished and posted comments successfully. `duration`
-    /// covers the whole pipeline (clone + lint + LLM + verify +
+    /// covers the whole pipeline (clone + context prep + LLM + verify +
     /// post). `findings_count` is what landed on the PR; zero is the
     /// happy path, not an error. `verifier_dropped` is the number
     /// of findings the verifier corrected away (sums to the
@@ -121,7 +118,7 @@ impl JobDispatcher for NoOpDispatcher {
 /// [`run_review_job`] in the background, and returns to the caller.
 ///
 /// Owns the Forgejo base URL + bot token in addition to the API client
-/// because the lint phase needs them to build a clone URL. Also owns
+/// because workspace prep needs them to build a clone URL. Also owns
 /// a [`ReviewHistory`] so subsequent commits on the same PR can use
 /// `compare_diff` instead of re-reviewing the whole PR.
 #[derive(Clone)]
@@ -138,7 +135,6 @@ pub struct SpawningDispatcher {
     /// re-embed unchanged symbols. None ⇒ build_review_context_with_store
     /// constructs a per-call in-memory store as a back-compat default.
     vector_store: Option<Arc<dyn VectorStore>>,
-    sandbox: Arc<dyn Sandbox>,
     observer: Option<Arc<dyn ReviewObserver>>,
     /// Optional cap on concurrent in-flight reviews. When set, a
     /// burst of webhooks beyond the cap waits in the spawn queue
@@ -163,9 +159,6 @@ impl SpawningDispatcher {
             history: Arc::new(InMemoryReviewHistory::new()),
             learnings: None,
             vector_store: None,
-            // Default: no isolation. Override with `with_sandbox` in
-            // production to wrap linter spawns in a hardened container.
-            sandbox: Arc::new(DirectSandbox::new()),
             observer: None,
             concurrency_limit: None,
         }
@@ -216,15 +209,6 @@ impl SpawningDispatcher {
         self.vector_store = Some(store);
         self
     }
-
-    /// Override the default direct sandbox. Production deployments
-    /// should pass a [`PodmanSandbox`](ar_sandbox::PodmanSandbox) so
-    /// linter binaries run with no network, dropped caps, and resource
-    /// limits.
-    pub fn with_sandbox(mut self, sandbox: Arc<dyn Sandbox>) -> Self {
-        self.sandbox = sandbox;
-        self
-    }
 }
 
 #[async_trait]
@@ -237,7 +221,6 @@ impl JobDispatcher for SpawningDispatcher {
         let history = self.history.clone();
         let learnings = self.learnings.clone();
         let vector_store = self.vector_store.clone();
-        let sandbox = self.sandbox.clone();
         let observer = self.observer.clone();
         let concurrency_limit = self.concurrency_limit.clone();
         // Outer spawn returns immediately so the webhook handler can ack.
@@ -296,7 +279,6 @@ impl JobDispatcher for SpawningDispatcher {
                     history.as_ref(),
                     learnings.as_deref(),
                     vector_store.as_deref(),
-                    sandbox.as_ref(),
                     observer.as_deref(),
                     job,
                 )
@@ -350,10 +332,8 @@ impl JobDispatcher for SpawningDispatcher {
 /// Run one review job to completion.
 ///
 /// 1. Post a "pending" commit status.
-/// 2. Clone the repo at the head SHA and run language-appropriate linters.
-///    A failure here is logged but doesn't abort the review — the model
-///    can still produce useful output without static-analysis context.
-/// 3. Call [`review_pull_request`] with the linter findings.
+/// 2. Clone the repo at the head SHA and prepare review context.
+/// 3. Call [`review_pull_request`].
 /// 4. Post the final success/error commit status.
 ///
 /// Errors are logged and swallowed; the gateway has already returned 202.
@@ -366,7 +346,6 @@ pub async fn run_review_job(
     history: &dyn ReviewHistory,
     learnings: Option<&dyn LearningsStore>,
     vector_store: Option<&dyn VectorStore>,
-    sandbox: &dyn Sandbox,
     observer: Option<&dyn ReviewObserver>,
     job: ReviewJob,
 ) {
@@ -451,15 +430,14 @@ pub async fn run_review_job(
 
     // Triage: if every changed file is trivial (lockfile bumps, vendored,
     // generated), skip the LLM call entirely and post a success status.
-    // Fetch once and reuse — prepare_and_lint downstream needed the
-    // same list and was duplicating the API call.
+    // Fetch once for the trivial-file skip check.
     let changed_files = match forgejo
         .list_changed_files(&job.owner, &job.repo, job.pr_number)
         .await
     {
         Ok(files) => Some(files),
         Err(e) => {
-            tracing::warn!(error = %e, "triage file-list failed; proceeding to lint+review");
+            tracing::warn!(error = %e, "triage file-list failed; proceeding to review");
             None
         }
     };
@@ -491,102 +469,79 @@ pub async fn run_review_job(
         }
     }
 
-    let lint_outcome = prepare_and_lint(
+    let prep_outcome = prepare_workspace_context(
         forgejo,
         llm,
         forgejo_base,
         forgejo_token,
         learnings,
         vector_store,
-        sandbox,
         &job,
-        changed_files,
     )
     .await;
-    let (
-        findings,
-        linter_runs,
-        ignored_paths,
-        guidelines,
-        repo_context,
-        raw_diff,
-        pre_merge_checks,
-        review_mode,
-        workspace,
-    ) = match lint_outcome {
-        Ok(LintPhaseOutput {
-            skipped_by_config: true,
-            ..
-        }) => {
-            tracing::info!(
-                repo = format!("{}/{}", job.owner, job.repo),
-                pr = job.pr_number,
-                "skipping review: disabled by .auto_review.yaml"
-            );
-            let _ = forgejo
-                .post_commit_status(
-                    &job.owner,
-                    &job.repo,
-                    &job.head_sha,
-                    &CommitStatus {
-                        state: CommitStatusState::Success,
-                        target_url: String::new(),
-                        description: "auto_review: disabled by repo config".into(),
-                        context: STATUS_CONTEXT.into(),
-                    },
-                )
-                .await;
-            observe(ReviewObservation::Skipped {
-                reason: "disabled_by_config",
-            });
-            return;
-        }
-        Ok(LintPhaseOutput {
-            findings,
-            linter_runs,
-            ignored_paths,
-            guidelines,
-            repo_context,
-            raw_diff,
-            pre_merge_checks,
-            review_mode,
-            workspace,
-            ..
-        }) => {
-            tracing::debug!(count = findings.len(), "linter findings collected");
-            (
-                findings,
-                linter_runs,
+    let (ignored_paths, guidelines, repo_context, raw_diff, pre_merge_checks, workspace) =
+        match prep_outcome {
+            Ok(WorkspacePrepOutput {
+                skipped_by_config: true,
+                ..
+            }) => {
+                tracing::info!(
+                    repo = format!("{}/{}", job.owner, job.repo),
+                    pr = job.pr_number,
+                    "skipping review: disabled by .auto_review.yaml"
+                );
+                let _ = forgejo
+                    .post_commit_status(
+                        &job.owner,
+                        &job.repo,
+                        &job.head_sha,
+                        &CommitStatus {
+                            state: CommitStatusState::Success,
+                            target_url: String::new(),
+                            description: "auto_review: disabled by repo config".into(),
+                            context: STATUS_CONTEXT.into(),
+                        },
+                    )
+                    .await;
+                observe(ReviewObservation::Skipped {
+                    reason: "disabled_by_config",
+                });
+                return;
+            }
+            Ok(WorkspacePrepOutput {
                 ignored_paths,
                 guidelines,
                 repo_context,
                 raw_diff,
                 pre_merge_checks,
-                review_mode,
                 workspace,
-            )
-        }
-        Err(e) => {
-            tracing::warn!(error = %e, "lint phase failed; continuing without findings");
-            (
-                Vec::new(),
-                Vec::new(),
-                GlobSet::empty(),
-                String::new(),
-                String::new(),
-                String::new(),
-                Vec::new(),
-                ReviewMode::Full,
-                None,
-            )
-        }
-    };
+                ..
+            }) => (
+                ignored_paths,
+                guidelines,
+                repo_context,
+                raw_diff,
+                pre_merge_checks,
+                workspace,
+            ),
+            Err(e) => {
+                tracing::warn!(error = %e, "workspace/context prep failed; continuing without workspace context");
+                (
+                    GlobSet::empty(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    Vec::new(),
+                    None,
+                )
+            }
+        };
 
     // The agentic verifier needs the cloned workspace to inspect.
     // Operators opt in by setting AR_AGENTIC_VERIFIER=1; without it,
     // the simple verifier (one-pass diff judgement) keeps running.
     // Either way we silently downgrade to Simple when no workspace
-    // was prepared (e.g. the lint phase failed) — but log the
+    // was prepared (e.g. workspace prep failed) — but log the
     // downgrade so operators who set the flag aren't left wondering
     // why findings stopped being verified against the workspace.
     let agentic_requested = std::env::var("AR_AGENTIC_VERIFIER")
@@ -624,19 +579,16 @@ pub async fn run_review_job(
         head_sha: &job.head_sha,
         pr_title: &job.pr_title,
         pr_body: &job.pr_body,
-        linter_findings: &findings,
-        linter_runs: &linter_runs,
         ignored_paths: &ignored_paths,
         custom_pre_merge_checks: &pre_merge_checks,
-        review_mode,
         min_severity: severity_floor_from_env(),
         guidelines: &guidelines,
         repo_context: &repo_context,
-        // Reuse the diff prepare_and_lint already fetched. For
+        // Reuse the diff workspace/context prep already fetched. For
         // incremental reviews we override with the compare-diff
         // (smaller, focused on new commits); otherwise fall back
         // to the full PR diff already in hand. Passing the empty
-        // raw_diff (lint phase failed to fetch) as Some("") would
+        // raw_diff (workspace prep failed to fetch) as Some("") would
         // suppress the pipeline's own get_pr_diff retry, so map
         // empty back to None to preserve the retry semantics.
         diff_override: incremental_diff.as_deref().or(if raw_diff.is_empty() {
@@ -719,120 +671,72 @@ pub async fn run_review_job(
 }
 
 #[derive(Debug, thiserror::Error)]
-enum LintPhaseError {
+enum WorkspacePrepError {
     #[error("forgejo: {0}")]
     Forgejo(#[from] ar_forgejo::Error),
     #[error("workspace: {0}")]
     Workspace(#[from] WorkspaceError),
 }
 
-struct LintPhaseOutput {
-    findings: Vec<Finding>,
-    linter_runs: Vec<ar_review::LinterRunSummary>,
+struct WorkspacePrepOutput {
     skipped_by_config: bool,
     ignored_paths: GlobSet,
     guidelines: String,
     repo_context: String,
-    /// The raw PR diff fetched by prepare_and_lint for triage and
+    /// The raw PR diff fetched for triage and
     /// context building. Surfaced back so the review pipeline can
     /// reuse it as `diff_override` instead of refetching the same
     /// diff a second time. Empty string when the get_pr_diff call
-    /// failed inside the lint phase (we degrade-but-continue;
+    /// failed during workspace/context prep (we degrade-but-continue;
     /// the pipeline will refetch and likely also fail consistently).
     raw_diff: String,
     /// From `.auto_review.yaml`'s `pre_merge_checks:` — passed through
     /// to the review pipeline so the LLM can evaluate them.
     pre_merge_checks: Vec<String>,
-    /// From `.auto_review.yaml`'s `mode:` — switches the pipeline
-    /// between Full (LLM-driven) and LinterOnly (no LLM call).
-    review_mode: ReviewMode,
     /// Held by the orchestrator until the review pipeline finishes
     /// so the agentic verifier (when enabled) can inspect the
-    /// cloned working tree. `None` when the lint phase exited
+    /// cloned working tree. `None` when workspace prep exited
     /// without cloning (skipped_by_config doesn't reach this).
     workspace: Option<PreparedWorkspace>,
 }
 
 #[allow(clippy::too_many_arguments)]
-async fn prepare_and_lint(
+async fn prepare_workspace_context(
     forgejo: &ForgejoClient,
     llm: &LlmRouter,
     base: &str,
     token: &str,
     learnings: Option<&dyn LearningsStore>,
     vector_store: Option<&dyn VectorStore>,
-    sandbox: &dyn Sandbox,
     job: &ReviewJob,
-    prefetched_files: Option<Vec<ar_forgejo::ChangedFile>>,
-) -> Result<LintPhaseOutput, LintPhaseError> {
-    // Reuse the file list the caller already fetched for the
-    // trivial-skip check. If they didn't (the API failed up there
-    // and they passed None), refetch — the lint phase needs it.
-    let files = match prefetched_files {
-        Some(f) => f,
-        None => {
-            forgejo
-                .list_changed_files(&job.owner, &job.repo, job.pr_number)
-                .await?
-        }
-    };
+) -> Result<WorkspacePrepOutput, WorkspacePrepError> {
     let workspace = prepare_workspace(base, token, &job.owner, &job.repo, &job.head_sha).await?;
     let config = load_repo_config(workspace.path());
     let ignored_paths = build_glob_set(&config.ignored_paths);
     let guidelines = config.guidelines.clone();
     if !config.enabled {
-        return Ok(LintPhaseOutput {
-            findings: Vec::new(),
-            linter_runs: Vec::new(),
+        return Ok(WorkspacePrepOutput {
             skipped_by_config: true,
             ignored_paths,
             guidelines,
             repo_context: String::new(),
             raw_diff: String::new(),
             pre_merge_checks: Vec::new(),
-            review_mode: ReviewMode::Full,
             workspace: None,
         });
     }
-    // Fetch the diff once for both LLM triage and the RAG context
-    // build that follow. Failure here just means we skip those
-    // optional steps; the review still proceeds.
+    // Fetch the diff once for the RAG context build. Failure here just means we
+    // skip optional context; the review still proceeds.
     let raw_diff = match forgejo
         .get_pr_diff(&job.owner, &job.repo, job.pr_number)
         .await
     {
         Ok(d) => d,
         Err(e) => {
-            tracing::warn!(error = %e, "diff fetch for triage/context failed; continuing");
+            tracing::warn!(error = %e, "diff fetch for context failed; continuing");
             String::new()
         }
     };
-
-    // LLM triage (optional, opt-in via Cheap tier configuration):
-    // narrow the file list to those classified as Simple/Complex.
-    let files = if !raw_diff.is_empty() {
-        match triage_files_with_llm(llm, &files, &raw_diff).await {
-            Ok(Some(triage)) => {
-                let kept = filter_reviewable(&files, &triage);
-                tracing::info!(
-                    in_count = files.len(),
-                    out_count = kept.len(),
-                    "LLM triage filtered changed files"
-                );
-                kept
-            }
-            Ok(None) => files,
-            Err(e) => {
-                tracing::warn!(error = %e, "LLM triage failed; falling through to all files");
-                files
-            }
-        }
-    } else {
-        files
-    };
-
-    let lint_report =
-        lint_workspace_report_via(sandbox, workspace.path(), &files, &config.disabled_tools).await;
 
     // Build the RAG context (best-effort): walks the workspace,
     // embeds symbols, queries top-K against the diff. Returns empty
@@ -856,16 +760,13 @@ async fn prepare_and_lint(
         })
     };
 
-    Ok(LintPhaseOutput {
-        findings: lint_report.findings,
-        linter_runs: lint_report.runs,
+    Ok(WorkspacePrepOutput {
         skipped_by_config: false,
         ignored_paths,
         guidelines,
         repo_context,
         raw_diff,
         pre_merge_checks: config.pre_merge_checks.clone(),
-        review_mode: config.mode,
         workspace: Some(workspace),
     })
 }
@@ -1076,14 +977,12 @@ mod tests {
         // even on pathological config.
         use ar_forgejo::Client as ForgejoClient;
         use ar_llm::Router;
-        use ar_sandbox::DirectSandbox;
         use std::sync::Arc;
 
         let forgejo = Arc::new(ForgejoClient::new("http://x", "tok").unwrap());
         let llm = Arc::new(Router::new());
-        let dispatcher = SpawningDispatcher::new(forgejo, llm, "http://x", "tok")
-            .with_sandbox(Arc::new(DirectSandbox::new()))
-            .with_concurrency_limit(0);
+        let dispatcher =
+            SpawningDispatcher::new(forgejo, llm, "http://x", "tok").with_concurrency_limit(0);
         // Available permits should be 1, not 0 (clamped).
         let sem = dispatcher.concurrency_limit.as_ref().expect("limit set");
         assert_eq!(sem.available_permits(), 1);
@@ -1105,14 +1004,12 @@ mod tests {
         // rely on.
         use ar_forgejo::Client as ForgejoClient;
         use ar_llm::Router;
-        use ar_sandbox::DirectSandbox;
         use std::sync::Arc;
 
         let forgejo = Arc::new(ForgejoClient::new("http://x", "tok").unwrap());
         let llm = Arc::new(Router::new());
-        let dispatcher = SpawningDispatcher::new(forgejo, llm, "http://x", "tok")
-            .with_sandbox(Arc::new(DirectSandbox::new()))
-            .with_concurrency_limit(2);
+        let dispatcher =
+            SpawningDispatcher::new(forgejo, llm, "http://x", "tok").with_concurrency_limit(2);
         let sem = dispatcher.concurrency_limit.as_ref().expect("limit set");
         // Initially 2 permits available.
         assert_eq!(sem.available_permits(), 2);

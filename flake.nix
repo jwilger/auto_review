@@ -60,9 +60,6 @@
                 && pkgs.lib.hasSuffix ".json" path)
             || (pkgs.lib.hasInfix "/deploy/prometheus/" strPath
                 && pkgs.lib.hasSuffix ".yaml" path)
-            # Dockerfile.sandbox is read by ar-tools/catalog.rs's
-            # bundling contract test.
-            || baseName == "Dockerfile.sandbox"
             # ar-review's config tests verify the example YAML
             # documents every known key.
             || baseName == ".auto_review.example.yaml";

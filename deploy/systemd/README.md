@@ -61,8 +61,8 @@ appropriate for an internet-facing service:
 - `CapabilityBoundingSet=` (empty), `AmbientCapabilities=` (empty)
 - `SystemCallFilter=@system-service`
 
-These layer on top of the application's own
-[Podman sandbox](../Dockerfile.sandbox) for linter execution
+Deterministic linters/tests/builds now run in CI before the semantic review
+trigger; the gateway unit only needs to protect clone/context/LLM review work
 (see [docs/THREAT-MODEL.md](../../docs/THREAT-MODEL.md) §T1).
 
 ## Per-host customisation

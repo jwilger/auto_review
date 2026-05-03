@@ -4,9 +4,7 @@
 //! shfmt focuses purely on formatting (indentation, spacing,
 //! redirection layout, command-substitution style) — orthogonal to
 //! shellcheck's bug-finding. Routes on `.sh` / `.bash` files
-//! alongside shellcheck. Repos that get formatting from another
-//! tool can disable shfmt via `.auto_review.yaml`'s
-//! `disabled_tools`.
+//! alongside shellcheck in the legacy runner set.
 //!
 //! Output: shfmt prints a unified diff to stdout for each file that
 //! differs from canonical formatting. We parse just the `--- path`

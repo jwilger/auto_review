@@ -15,10 +15,6 @@ Thanks for considering a contribution to `auto_review`.
 - Optional: [direnv](https://direnv.net/) for automatic shell
   setup — `direnv allow` from this directory loads the flake's
   dev shell on every `cd`.
-- Optional: any of the 45 bundled linter binaries you want
-  exercised end-to-end (`auto_review list-linters` for the set;
-  missing binaries are silently skipped, so absence isn't a
-  build blocker).
 
 The dev shell does NOT use any system rustup, cargo, or rust
 binaries. Project-local `CARGO_HOME` / `RUSTUP_HOME` directories
@@ -95,7 +91,7 @@ everyone (and CI) picks up the same versions.
 ## Architecture overview
 
 See `docs/ADR-0001-architecture.md` for the high-level decision,
-`docs/ADR-0002-sandbox.md` for why every linter spawn is sandboxed,
+`docs/ADR-0002-sandbox.md` for the superseded linter-sandbox decision,
 `docs/ADR-0003-observability.md` for the metrics / readiness /
 runtime-introspection design, and `docs/FEASIBILITY.md` for the
 longer reasoning. The crate layout:
@@ -106,47 +102,22 @@ the navigation aid. The summary table:
 
 | Crate | Responsibility |
 |---|---|
-| `ar-gateway` | HTTP server, HMAC verification, webhook intake, sandbox selection |
+| `ar-gateway` | HTTP server, HMAC verification, webhook intake, chat poller |
 | `ar-orchestrator` | JobDispatcher trait + production SpawningDispatcher |
 | `ar-forgejo` | REST client + InitClient for HTTP-Basic bootstrap |
 | `ar-llm` | Provider trait + tier-based Router |
 | `ar-prompts` | Prompt templates + JSON schemas + validation |
-| `ar-review` | Pipeline activities (clone, lint, review, verify, self-heal) |
-| `ar-tools` | Static-analysis runners + result parsers (44 linters) |
+| `ar-review` | Pipeline activities (review, verify, self-heal, RAG context, repo config) |
+| `ar-tools` | Legacy static-analysis runners retained outside normal runtime |
 | `ar-cli` | Operator CLI (init / register-webhook / review-once / bench / doctor / status / 16 more — see crate README) |
 | `ar-sandbox` | Sandbox trait + DirectSandbox + PodmanSandbox (see ADR-0002) |
 | `ar-chat` | Agentic `@auto_review` chat handler (7 specific commands + freeform fallback) |
 | `ar-index` | Tree-sitter symbols, embeddings, co-change graph, learnings store |
 
-## Adding a new linter
-
-1. Pick a JSON output format the binary supports (most do); for
-   text-only tools, wrap a small parser around the line format
-   (`yamllint` does this).
-2. Create `crates/ar-tools/src/<tool>.rs`:
-   - `parse_<tool>_output(...) -> Result<Vec<Finding>, RunnerError>`
-     — pure function, no I/O. Test it directly against captured tool
-     output.
-   - `<Tool>Runner` implementing `LinterRunner`. Build a
-     `SandboxCommand` and dispatch via the `run_in_sandbox` helper —
-     never spawn `tokio::process::Command` directly. The helper
-     swallows "binary not installed" / "sandbox runtime missing" as
-     `Ok(empty)` so a missing optional linter can't fail the batch.
-3. Add the module to `crates/ar-tools/src/lib.rs`.
-4. Wire routing in `crates/ar-review/src/routing.rs::select_runners`
-   and update the affected test assertions (the routing tests sort
-   the runner names alphabetically, so insertion order in
-   `select_runners` doesn't matter — the tests do).
-5. Add the binary to `deploy/Dockerfile.sandbox` so production
-   deployments using `AR_SANDBOX_IMAGE` get it.
-6. Update the linter table in `README.md` and `CHANGELOG.md`.
-
-The existing 44 linters in `crates/ar-tools/src/` are the template.
-
 ## Adding a new CLI subcommand
 
 The bot's operator CLI lives in `crates/ar-cli/`. Each subcommand
-follows a five-step shape; the existing 16 subcommands are
+follows a five-step shape; the existing subcommands are
 templates.
 
 1. **Define the args struct** in `crates/ar-cli/src/cli.rs`:
