@@ -8,22 +8,6 @@
 use serde::{Deserialize, Serialize};
 use std::path::Path;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum ReviewMode {
-    /// LLM-driven review with linter findings as supplementary
-    /// context. The default; what every existing deployment runs.
-    #[default]
-    Full,
-    /// Skip the LLM review entirely. The bot still clones the
-    /// workspace and runs the linter pipeline; findings are mapped
-    /// straight to inline review comments. No LLM tokens are spent.
-    /// Useful for repos that want centralized linter aggregation
-    /// without the cost or latency of LLM review, or as a stepping
-    /// stone before opting into the full review.
-    LinterOnly,
-}
-
 const CONFIG_FILENAME: &str = ".auto_review.yaml";
 const ALT_CONFIG_FILENAME: &str = ".auto_review.yml";
 
@@ -41,23 +25,10 @@ pub struct RepoConfig {
     pub guidelines: String,
 
     /// Path globs to skip reviewing. Gitignore-flavored — anything
-    /// matching is filtered out of the changed-files list before linter
-    /// routing and prompt rendering.
+    /// matching is filtered out of the changed-files list before prompt
+    /// rendering.
     #[serde(default)]
     pub ignored_paths: Vec<String>,
-
-    /// Names of linters to disable (matching `LinterRunner::name()`).
-    /// Useful for repos that have their own CI lint pipeline and don't
-    /// want duplicate findings.
-    #[serde(default)]
-    pub disabled_tools: Vec<String>,
-
-    /// Review behaviour. `Full` (default) runs the full LLM
-    /// review with linter context. `LinterOnly` skips the LLM
-    /// entirely and posts linter findings as inline comments —
-    /// zero token cost but no semantic review.
-    #[serde(default)]
-    pub mode: ReviewMode,
 
     /// Repo-author-supplied natural-language pre-merge checks. Each
     /// entry is evaluated against the diff by the cheap LLM tier and
@@ -82,8 +53,6 @@ impl Default for RepoConfig {
             enabled: true,
             guidelines: String::new(),
             ignored_paths: Vec::new(),
-            disabled_tools: Vec::new(),
-            mode: ReviewMode::Full,
             pre_merge_checks: Vec::new(),
         }
     }
@@ -102,14 +71,7 @@ pub fn parse_repo_config(yaml: &str) -> Result<RepoConfig, serde_yaml::Error> {
 /// in sync with [`RepoConfig`] manually — the contract test
 /// `strict_allowlist_matches_struct_fields` in `config.rs` pins
 /// the relationship.
-const KNOWN_KEYS: &[&str] = &[
-    "enabled",
-    "guidelines",
-    "ignored_paths",
-    "disabled_tools",
-    "mode",
-    "pre_merge_checks",
-];
+const KNOWN_KEYS: &[&str] = &["enabled", "guidelines", "ignored_paths", "pre_merge_checks"];
 
 /// Strict parser: surfaces unknown top-level keys as errors so a
 /// typo like `enabld: true` (missing `e`) is caught at validation
@@ -188,7 +150,6 @@ pub fn load_repo_config(workspace_path: &Path) -> RepoConfig {
                         path = %path.display(),
                         enabled = cfg.enabled,
                         ignored = cfg.ignored_paths.len(),
-                        disabled_tools = cfg.disabled_tools.len(),
                         "loaded repo config"
                     );
                     return cfg;
@@ -220,7 +181,6 @@ mod tests {
         assert!(cfg.enabled);
         assert!(cfg.guidelines.is_empty());
         assert!(cfg.ignored_paths.is_empty());
-        assert!(cfg.disabled_tools.is_empty());
     }
 
     #[test]
@@ -243,8 +203,6 @@ guidelines: |
 ignored_paths:
   - "vendor/**"
   - "src/generated/**"
-disabled_tools:
-  - markdownlint
 "#,
         )
         .unwrap();
@@ -253,7 +211,6 @@ disabled_tools:
         assert!(cfg.enabled);
         assert!(cfg.guidelines.contains("total functions"));
         assert_eq!(cfg.ignored_paths.len(), 2);
-        assert_eq!(cfg.disabled_tools, vec!["markdownlint"]);
     }
 
     #[test]
@@ -377,34 +334,19 @@ disabled_tools:
     }
 
     #[test]
+    fn strict_rejects_retired_linter_keys() {
+        let yaml = "mode: linter_only\ndisabled_tools:\n  - ruff\n";
+        let err = parse_repo_config_strict(yaml).expect_err("retired keys should fail");
+        let msg = format!("{err}");
+        assert!(msg.contains("disabled_tools"), "{msg}");
+        assert!(msg.contains("mode"), "{msg}");
+    }
+
+    #[test]
     fn strict_propagates_value_level_errors_through_serde() {
         let yaml = "enabled: not_a_bool\n";
         let err = parse_repo_config_strict(yaml).expect_err("should fail");
         assert!(matches!(err, RepoConfigStrictError::Parse(_)));
-    }
-
-    #[test]
-    fn mode_defaults_to_full() {
-        let cfg = RepoConfig::default();
-        assert_eq!(cfg.mode, ReviewMode::Full);
-    }
-
-    #[test]
-    fn mode_linter_only_parses() {
-        let dir = tempdir().unwrap();
-        fs::write(dir.path().join(".auto_review.yaml"), "mode: linter_only\n").unwrap();
-        let cfg = load_repo_config(dir.path());
-        assert_eq!(cfg.mode, ReviewMode::LinterOnly);
-    }
-
-    #[test]
-    fn mode_invalid_value_falls_back_to_default_via_loader() {
-        let dir = tempdir().unwrap();
-        fs::write(dir.path().join(".auto_review.yaml"), "mode: bogus\n").unwrap();
-        let cfg = load_repo_config(dir.path());
-        // Loader falls back to RepoConfig::default() on parse error;
-        // RepoConfig::default().mode is Full.
-        assert_eq!(cfg.mode, ReviewMode::Full);
     }
 
     #[test]

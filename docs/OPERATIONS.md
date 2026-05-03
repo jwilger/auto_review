@@ -20,7 +20,7 @@ keep it healthy.
 | Reviews failing with `Workspace` errors                      | Disk full / network egress blocked / token revoked     | §3.2    |
 | Bot replies to itself in a chat thread                       | `AR_BOT_LOGIN` mismatch                                | §4.1    |
 | Bot ignores `@<name>` mentions                               | `AR_BOT_NAME` mismatch                                 | §4.1    |
-| Reviewer host high CPU / memory                              | Sandbox limits not set; runaway linter                 | §5.1    |
+| Reviewer host high CPU / memory                              | Too many concurrent reviews / large workspaces          | §5.1    |
 | Same PR reviewed in a loop                                   | Bot self-detection broken; check `AR_BOT_LOGIN`        | §4.1    |
 
 ---
@@ -330,23 +330,13 @@ handler and the background poller honour these.)
 
 ## 5. Resource pressure
 
-### 5.1 Sandbox limits
+### 5.1 Runtime review pressure
 
-Without `AR_SANDBOX_IMAGE` set, linter binaries spawn directly on
-the host. That's only safe for trusted-PR-source environments.
-Production deployments should set:
-
-```
-AR_SANDBOX_IMAGE=ghcr.io/your-org/auto_review-sandbox:<tag>
-AR_SANDBOX_MEMORY_MIB=512
-AR_SANDBOX_CPUS=1.0
-AR_SANDBOX_PIDS_LIMIT=128
-AR_SANDBOX_TIMEOUT_SECS=60
-```
-
-Tune the limits per-linter empirically — `golangci-lint` on a large
-Go monorepo will need more memory and a longer timeout than
-`shellcheck`.
+`auto_review` no longer runs bundled linters during review jobs. CI owns
+deterministic linters, tests, and builds; the gateway handles clone/context
+preparation, semantic LLM review, verification, and posting. Host CPU/memory
+pressure now usually means too many concurrent reviews, large workspaces, or
+slow LLM calls rather than runaway linter execution.
 
 ### 5.1.5 Cap concurrent in-flight reviews
 
@@ -377,9 +367,8 @@ own. If reviews start taking minutes, check:
 2. Workspace clone size. Monorepos clone slowly. Consider
    `--depth=1` (already set) and shallow-fetch (set by the workspace
    builder).
-3. Linter wall-clock. Increase `AR_SANDBOX_TIMEOUT_SECS` only if you
-   have a known-slow linter; raising it for everything masks
-   genuine fork-bomb attacks.
+3. CI latency. If semantic reviews are CI-triggered, slow deterministic jobs
+   delay the trigger before the gateway receives work.
 
 ---
 
@@ -527,31 +516,6 @@ The bot validates the value at startup; an unrecognised
 spelling falls through to the default (`warning`) with a warn
 log so a typo doesn't silently invert the operator's signal-
 to-noise expectation.
-
-### 7.3 Disable a noisy linter
-
-```yaml
-# .auto_review.yaml
-disabled_tools:
-  - markdownlint
-  - phpstan
-```
-
-Names match `LinterRunner::name()`. Enumerate them with:
-
-```bash
-auto_review list-linters                   # full table
-auto_review list-linters --language python  # filter by language tag
-auto_review list-linters --json | jq       # machine-readable
-
-# To check which linters route to a specific set of files
-# (useful for understanding why something fired on a PR or for
-# pre-emptively trimming `disabled_tools:` for a typical PR):
-auto_review explain-routing \
-    --file src/x.py --file scripts/build.sh
-```
-
----
 
 ## 8. Learnings store
 

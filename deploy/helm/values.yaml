@@ -26,11 +26,6 @@ config:
   # forgets every `@<bot> remember` entry.
   learningsDb: ""        # e.g. "/data/learnings.sqlite"
   historyDb: ""          # e.g. "/data/review_history.sqlite"
-  # OCI image to invoke linters from. When set, linter spawns are
-  # routed through `podman run --network=none --read-only ...` with
-  # dropped caps. Leave empty for local-dev clusters where the
-  # gateway pod itself has the linter binaries baked in.
-  sandboxImage: ""
   # Bot identity. Operators usually want a dedicated Forgejo user
   # named something other than `auto_review` for clarity in PR
   # threads. botLogin is what the bot authenticates as;

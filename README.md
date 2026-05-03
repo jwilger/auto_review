@@ -10,8 +10,7 @@ you control, with optional support for fully local LLMs.
 
 **Alpha.** End-to-end review pipeline works: webhook intake → LLM
 triage (skip lockfile-only PRs, route trivial files away from the
-reasoning model) → shallow-clone → 45 bundled linters fanned out
-in parallel inside an optional sandbox → tree-sitter + embedding
+reasoning model) → shallow-clone → tree-sitter + embedding
 RAG context + persistent learnings memory → reasoning-tier LLM
 with strict-JSON-schema output and self-heal validation → cheap-
 tier verifier drops unfounded findings → post inline review
@@ -41,8 +40,8 @@ plan; [ADR-0001](./docs/ADR-0001-architecture.md) captures the
 architecture decision; the [threat model](./docs/THREAT-MODEL.md)
 enumerates attacker profiles, trust boundaries, and per-class
 mitigations (read this before exposing the bot to drive-by PRs).
-[ADR-0002](./docs/ADR-0002-sandbox.md) documents why every linter
-spawn is sandboxed; [ADR-0003](./docs/ADR-0003-observability.md)
+[ADR-0002](./docs/ADR-0002-sandbox.md) records the superseded linter
+sandbox decision and the issue #46 rescope; [ADR-0003](./docs/ADR-0003-observability.md)
 documents the metrics / readiness / runtime-introspection design;
 [ADR-0004](./docs/ADR-0004-vector-store.md) explains why
 embeddings persist via SQLite today rather than LanceDB.
@@ -54,35 +53,20 @@ command injection / hardcoded secrets / path traversal / XSS,
 but a production-quality precision-recall sweep needs more); a
 LanceDB-backed vector store as a drop-in for the SQLite path
 (documented in ADR-0004) when a deployment outgrows
-brute-force cosine. The languagetool prose linter ships behind
-an opt-in `LANGUAGETOOL_URL` (HTTP API, no JVM dep); a
-youki-based pure-Rust sandbox is documented as future-work in
-ADR-0002 — not blocking today since podman OR docker apply the
-same hardening flag set.
-
-### Production sandbox
-
-For internet-facing deploys, set `AR_SANDBOX_IMAGE` to point at the
-hardened linter image (`deploy/Dockerfile.sandbox`). Linter spawns
-go through `podman run --network=none --read-only --cap-drop=ALL
---security-opt=no-new-privileges --memory=… --cpus=… --pids-limit=…
---user 65534:65534 -v <repo>:/work:ro`. Without this set, the
-gateway still works but logs a `sandbox: direct (NO ISOLATION)`
-warning — fine for a local LAN trial, **not** safe for any
-internet-reachable deploy. (Background: an unjailed linter is the
-exact path the [Kudelski writeup](https://research.kudelskisecurity.com/2024/05/01/a-trip-down-coderabbits-rabbit-hole/)
-used to reach RCE on CodeRabbit.)
+brute-force cosine. The runtime no longer bundles or runs linters;
+deterministic linters/tests/builds belong in CI, which can trigger
+semantic review after required checks pass.
 
 ## Architecture (one-paragraph)
 
 A Forgejo webhook lands at the **gateway**, which enqueues a job for the
 **orchestrator**. The orchestrator runs a per-PR review pipeline:
-clone → triage → static-analysis fan-out → context curation
+clone → triage → context curation
 (tree-sitter symbols + in-memory cosine-similarity over the
 learnings store) → review generation → verification (drop unfounded
 findings) → severity-floor filter → post review.
-All untrusted execution (linters, LLM-issued workspace tools) runs in
-a Podman sandbox. LLM calls go through a pluggable provider abstraction
+LLM workspace tools are read-only and constrained to the clone root; CI owns
+deterministic tool execution. LLM calls go through a pluggable provider abstraction
 that today ships an OpenAI-compatible client (works against hosted
 OpenAI, Ollama, vLLM, OpenRouter, Together, Groq, etc.).
 
@@ -95,12 +79,12 @@ OpenAI, Ollama, vLLM, OpenRouter, Together, Groq, etc.).
 | `ar-forgejo` | Forgejo REST client |
 | `ar-llm` | LLM provider trait + implementations |
 | `ar-index` | Tree-sitter parsers + embeddings + co-change graph + learnings store |
-| `ar-tools` | Static-analysis runners + result normalization (45 linters) |
-| `ar-sandbox` | Podman / docker linter sandbox |
+| `ar-tools` | Legacy static-analysis runners retained while runtime linter execution is retired |
+| `ar-sandbox` | Sandbox abstraction retained pending issue #46 rescope |
 | `ar-prompts` | Prompt templates and JSON schemas |
 | `ar-review` | Review pipeline activities |
 | `ar-chat` | Agentic `@auto_review` chat handler |
-| `ar-cli` | Operator CLI (16 subcommands; see `crates/ar-cli/README.md`) |
+| `ar-cli` | Operator CLI; see `crates/ar-cli/README.md` |
 
 ## License
 

@@ -1,13 +1,21 @@
 # ADR-0002: Linter Sandbox
 
-Status: **Accepted**
-Date: 2026-04-30 (revised 2026-04-30 to clarify the OCI-runtime
+Status: **Superseded for normal review runtime** (see issue #45; `ar-sandbox`
+remains pending issue #46 rescope)
+Date: 2026-04-30 (revised 2026-05-03 to note runtime linter execution removal;
+2026-04-30 to clarify the OCI-runtime
 position: podman OR docker is the production sandbox; youki is
 explicitly future work)
 
-## Context
+> As of issue #45, normal review/orchestrator jobs no longer execute bundled
+> linters or route linter findings into semantic review. Deterministic
+> linters/tests/builds are owned by CI before it triggers `auto_review`.
+> Historical rationale below remains useful background for any future sandbox
+> rescope, but `AR_SANDBOX_IMAGE` and `deploy/Dockerfile.sandbox` are retired.
 
-`auto_review` runs ~44 linter binaries against the working tree of an
+## Historical context (superseded)
+
+Before issue #45, `auto_review` ran ~44 linter binaries against the working tree of an
 incoming pull request. The PR's contents are attacker-controlled by
 construction — anyone can open a PR, including a hostile contributor.
 Several linters in the bundle (rubocop, golangci-lint, eslint via
@@ -21,14 +29,28 @@ reference incident: an unjailed `rubocop` invocation, fed a malicious
 the attacker had RCE, they harvested the GitHub bot's PAT and gained
 write access to roughly one million customer repos.
 
-Without isolation, `auto_review` shipping in this state would expose
+Without isolation, that design would have exposed
 operators to the same class of attack the moment the bot is reachable
 from any untrusted PR source.
 
 ## Decision
 
-Every linter spawn goes through an `ar_sandbox::Sandbox` trait with
-two production-bound implementations:
+Issue #45 supersedes the linter-driven decision for the normal gateway and
+orchestrator runtime:
+
+- Normal review jobs do **not** execute bundled linters.
+- Normal review prompts do **not** receive linter findings.
+- Gateway startup no longer selects `AR_SANDBOX_IMAGE`, and
+  `deploy/Dockerfile.sandbox` is retired.
+- Deterministic linters, tests, and builds belong in project CI before the
+  CI-triggered `auto_review` request.
+
+The old sandbox design below is retained as historical threat-model context
+for issue #46's rescope of any remaining workspace read/write/tool paths. It
+is no longer normative for normal semantic review.
+
+Historically, every linter spawn went through an `ar_sandbox::Sandbox` trait with
+two implementations:
 
 - `DirectSandbox` — a thin pass-through that spawns the binary with
   `tokio::process::Command`. **No isolation.** Suitable only for tests
@@ -49,25 +71,17 @@ two production-bound implementations:
   startup, preferring podman (rootless, no daemon) and falling
   back to docker.
 
-The gateway picks an implementation at startup based on
-`AR_SANDBOX_IMAGE`. When set, every linter goes through the OCI
-runtime. When unset, the gateway logs a `WARN: sandbox: direct
-(NO ISOLATION)` banner so the production-deploy gap is loud and
-discoverable in logs.
+Historically, the gateway selected an implementation at startup based on
+`AR_SANDBOX_IMAGE`. That gateway wiring was removed with issue #45. Any future
+runtime execution path must be re-evaluated explicitly in issue #46 rather than
+inheriting this linter-era decision.
 
-**This is the production sandbox.** No further isolation layer
-is required to ship; the threat model the Kudelski incident
-defines is fully covered by the flag set above. youki is
-documented below as future-work for performance ergonomics, not
-as a security gate that has to land before v1.
+## Historical trade-offs (superseded)
 
-## Trade-offs
-
-- **Operator overhead**: production deploys need a podman daemon
-  reachable from the gateway and a pre-pulled sandbox image
-  (`deploy/Dockerfile.sandbox`). This is a real onboarding step.
-  We accept it: the alternative (bundling everything in one image
-  and hoping for the best) is what got CodeRabbit owned.
+- **Operator overhead**: the old design required a podman daemon
+  reachable from the gateway and a pre-pulled sandbox image. That was a real
+  onboarding step. The issue #45 design removes this linter-driven startup
+  requirement from normal review runtime.
 
 - **No youki yet — and that's fine for v1.** youki is a Rust-
   native OCI runtime that would let us skip the shell-out
@@ -111,15 +125,8 @@ as a security gate that has to land before v1.
 
 ## Consequences
 
-- The `ar-tools` crate gained a dependency on `ar-sandbox`. Every
-  runner takes `&dyn Sandbox` instead of spawning `Command` directly.
-- The orchestrator (`SpawningDispatcher`) owns one
-  `Arc<dyn Sandbox>`, defaults to `DirectSandbox::new()`, and exposes
-  `with_sandbox(...)` so the gateway can inject a `PodmanSandbox`.
-- The `lint_workspace_via(sandbox, …)` API is the canonical entry
-  point. `lint_workspace` and `lint_workspace_with` are kept as
-  thin wrappers that build a fresh `DirectSandbox` per call;
-  appropriate for tests and for the CLI's `review-once` debug path.
+- Normal review/orchestrator jobs no longer own or receive a sandbox handle.
+- `ar-review` no longer exposes linter routing or linter-only review APIs.
 - `ar_sandbox::PodmanSandbox` is exercised today only by argv-shape
   unit tests — no live podman integration test runs in the workspace
   CI. That's a deliberate boundary; running real podman in CI is

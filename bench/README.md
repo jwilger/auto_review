@@ -92,7 +92,6 @@ Optional fields:
 | `pr_number` | u64 | `0` | |
 | `pr_body` | string | `""` | |
 | `changed_files` | string[] | `[]` | List of repo-relative paths; surfaced to the prompt. |
-| `linter_findings` | Finding[] | `[]` | Pre-computed linter findings to inject as supplementary context. Same shape as `ar_tools::Finding`. |
 | `guidelines` | string | `""` | Repo guidelines, as if loaded from `.auto_review.yaml`. |
 | `repo_context` | string | `""` | Pre-rendered RAG context. Skip if you don't want to wire RAG retrieval. |
 | `expected` | ExpectedFinding[] | `[]` | Ground-truth findings the reviewer is expected to surface. Each has `{path, line, note?}`. When present, the harness compares the model's findings to this list by `(path, line)` and contributes to the run's aggregate precision/recall. |

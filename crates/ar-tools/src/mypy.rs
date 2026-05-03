@@ -2,10 +2,9 @@
 //!
 //! mypy is the de-facto Python type checker — distinct from ruff
 //! (a linter) and bandit (a security scanner). Routes on `.py`
-//! files alongside ruff. Without a project-level config (mypy.ini,
-//! pyproject.toml [tool.mypy]) mypy emits a lot of false positives;
-//! repos that haven't configured it can disable via
-//! `.auto_review.yaml`'s `disabled_tools`.
+//! files alongside ruff in the legacy runner set. Without a project-level
+//! config (mypy.ini, pyproject.toml [tool.mypy]) mypy emits a lot of false
+//! positives.
 //!
 //! Output format: lines of
 //! `path/to/file.py:LINE: severity: message [error-code]`.

@@ -1,6 +1,6 @@
 # ar-review
 
-Review-pipeline activities: clone the PR workspace, run linters,
+Review-pipeline activities: clone the PR workspace,
 build RAG context, render the LLM prompt, validate output via
 self-heal, optionally verify findings, evaluate pre-merge checks,
 and map the result to a Forgejo review request.
@@ -9,11 +9,9 @@ and map the result to a Forgejo review request.
 
 | Module | What's in it |
 |--------|-------------|
-| `pipeline::review_pull_request` | Top-level activity. Inputs via `ReviewArgs`; outputs a `ReviewOutcome`. Branches on `ReviewMode::{Full, LinterOnly}` and `VerifyMode::{Simple, Agentic}`. |
+| `pipeline::review_pull_request` | Top-level semantic review activity. Inputs via `ReviewArgs`; outputs a `ReviewOutcome`. Branches on `VerifyMode::{Simple, Agentic}`. |
 | `config::RepoConfig` | `.auto_review.yaml` parser. `parse_repo_config` (permissive runtime loader) and `parse_repo_config_strict` (typo-rejecting validator) cover the two use cases. |
 | `workspace::prepare_workspace` | Shallow `git clone` of the PR's head SHA into a tmpfs workdir. Token-redacting URL builder. |
-| `routing::select_runners` | Per-file routing into the ~44 bundled linters. |
-| `linter_only::build_linter_only_output` | Maps `Vec<Finding>` directly to a `ReviewOutput`, skipping the LLM. |
 | `pre_merge::evaluate` | Three deterministic built-in checks (CHANGELOG / tests / TODOs). |
 | `pre_merge_llm::evaluate_custom_checks` | LLM-backed evaluation of repo-author-supplied free-form checks from `.auto_review.yaml`. |
 | `verify::verify_findings`, `agentic_verify::verify_findings_agentic` | Two verifier modes; the agentic one uses the workspace tools. |
@@ -26,22 +24,17 @@ and map the result to a Forgejo review request.
 ```
 prepare_workspace
    ↓
-load_repo_config (ignored_paths, disabled_tools, mode, …)
+load_repo_config (ignored_paths, guidelines, pre_merge_checks, …)
    ↓
 list_changed_files → filter (ignored_paths)
-   ↓
-[optional] LLM triage (cheap tier) drops trivial files
-   ↓
-lint_workspace_via (sandboxed)
    ↓
 build_review_context (RAG, optional)
    ↓
 render_review_prompt
    ↓
-generate_with_self_heal (reasoning tier, mode=Full)
-   OR build_linter_only_output (mode=LinterOnly)
+generate_with_self_heal (reasoning tier)
    ↓
-verify_findings / verify_findings_agentic (mode=Full)
+verify_findings / verify_findings_agentic
    ↓
 filter by min_severity (AR_SEVERITY_FLOOR)
    ↓
@@ -60,6 +53,9 @@ pin threat-model T3/T4/T7/T8/T9 mitigations as CI-enforced
 contracts.
 
 ## Dependencies
+
+Deterministic linters/tests/builds are expected to run in CI before the
+CI-triggered semantic review endpoint calls this pipeline.
 
 `globset` for the `.auto_review.yaml` `ignored_paths`,
 `serde_yaml` for the config parser, `git2` indirectly via the

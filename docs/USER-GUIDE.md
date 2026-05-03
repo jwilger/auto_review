@@ -9,11 +9,11 @@ on a Forgejo instance. If you're operating the bot, see
 When you open or update a pull request, the bot:
 
 1. Clones your branch at the head SHA into an isolated workspace.
-2. Runs ~44 bundled linters across every changed file, scoped by
-   language.
-3. Sends the diff (plus linter findings, your repo's
-   [`.auto_review.yaml`](#repo-config) guidelines, and any RAG
-   context) to a reasoning-tier language model.
+2. Gathers review context from the diff, changed-file list, repo
+   guidelines, learnings, and indexed symbols. Deterministic
+   linters/tests/builds are expected to run in CI before review.
+3. Sends the diff (plus your repo's [`.auto_review.yaml`](#repo-config)
+   guidelines and any RAG context) to a reasoning-tier language model.
 4. Verifies the model's findings against the actual code, dropping
    the ones the diff doesn't corroborate.
 5. Posts a single review with inline comments and an overall
@@ -136,16 +136,6 @@ ignored_paths:
   - "vendor/**"
   - "src/generated/**"
 
-# Linter names to disable (run `auto_review list-linters` to
-# see the canonical names).
-disabled_tools:
-  - markdownlint
-
-# Review behaviour. `full` (default) runs the LLM review with
-# linter context. `linter_only` skips the LLM entirely and posts
-# linter findings as inline comments — zero token cost.
-mode: full
-
 # Free-form English checks evaluated by the cheap LLM tier. Each
 # one renders as a checklist item under the "Pre-merge checks"
 # section of the review body. Skipped when no cheap-tier model
@@ -173,10 +163,11 @@ auto_review validate-config --strict .auto_review.yaml
 
 ## What the bot can't do
 
-- **Run code.** The sandbox prevents linter binaries from making
-  network calls or writing outside the workspace, and the LLM
-  doesn't have a shell tool. Findings are static-analysis +
-  LLM-reasoning only.
+- **Run code.** The review runtime no longer executes bundled
+  linters or repo-controlled tool configuration. Deterministic
+  linters/tests/builds should run in CI before `auto_review` is
+  triggered. Findings come from semantic LLM review plus verifier
+  checks against the diff and read-only workspace context.
 - **Merge or approve.** No write capability beyond posting reviews
   and inline comments.
 - **See secrets in your environment.** The bot reads only what's

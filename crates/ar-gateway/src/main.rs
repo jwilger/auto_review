@@ -14,7 +14,6 @@ use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::review_history::{InMemoryReviewHistory, ReviewHistory};
 use ar_orchestrator::sqlite_history::SqliteReviewHistory;
 use ar_orchestrator::SpawningDispatcher;
-use ar_sandbox::{DirectSandbox, PodmanSandbox, PodmanSandboxConfig, Sandbox};
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -210,8 +209,6 @@ async fn main() -> Result<()> {
         }
     };
 
-    let sandbox = build_sandbox()?;
-
     // Shared review history. Both the orchestrator's incremental-
     // review dedup AND the chat poller need to enumerate the PRs
     // we've reviewed; constructing one Arc and threading it through
@@ -338,7 +335,6 @@ async fn main() -> Result<()> {
     .with_history(history.clone())
     .with_learnings(learnings.clone())
     .with_vector_store(vector_store.clone())
-    .with_sandbox(sandbox)
     .with_observer(observer);
 
     // Optional concurrency cap on in-flight reviews. Without this,
@@ -405,11 +401,7 @@ async fn main() -> Result<()> {
         version: env!("CARGO_PKG_VERSION"),
         bot_login: bot_login.clone(),
         bot_name: bot_name.clone(),
-        sandbox: if read_non_empty_env("AR_SANDBOX_IMAGE").is_some() {
-            "podman"
-        } else {
-            "direct"
-        },
+        sandbox: "not-used",
         learnings: learnings_info.clone(),
         history: history_info.clone(),
         vector: vector_info.clone(),
@@ -556,14 +548,6 @@ async fn shutdown_signal() {
     }
 }
 
-/// Choose a sandbox based on env vars. Setting `AR_SANDBOX_IMAGE`
-/// switches the gateway from the unsafe direct-spawn path to a
-/// hardened [`PodmanSandbox`] that wraps every linter invocation
-/// in `podman run --network=none --read-only ...`.
-///
-/// Without `AR_SANDBOX_IMAGE`, linter binaries spawn directly on the
-/// host. That's fine for local dev but exposes the operator to the
-/// Kudelski-class RCE risk for any internet-facing deploy.
 /// Read an env var, treating both "unset" and "empty / whitespace-only"
 /// as `None`. Most operator-facing env vars take a meaningful default
 /// when unset; an explicit empty assignment (`FOO=`) is almost always
@@ -642,69 +626,6 @@ where
             None
         }
     }
-}
-
-fn build_sandbox() -> Result<Arc<dyn Sandbox>> {
-    if let Some(image) = read_non_empty_env("AR_SANDBOX_IMAGE") {
-        let memory_mib = parse_env::<u64>("AR_SANDBOX_MEMORY_MIB").unwrap_or(512);
-        let cpus = parse_env::<f64>("AR_SANDBOX_CPUS").unwrap_or(1.0);
-        let pids_limit = parse_env::<u32>("AR_SANDBOX_PIDS_LIMIT").unwrap_or(128);
-        let wall_clock_secs = parse_env::<u64>("AR_SANDBOX_TIMEOUT_SECS").unwrap_or(60);
-        // Operator override: AR_SANDBOX_RUNTIME (preferred, neutral name)
-        // or AR_SANDBOX_PODMAN_BIN (legacy alias). When neither is set,
-        // auto-detect — prefer `podman` (rootless, no daemon) and fall
-        // back to `docker` if podman isn't on PATH. Either binary
-        // accepts our hardening flag set unchanged.
-        let podman_bin = env::var("AR_SANDBOX_RUNTIME")
-            .or_else(|_| env::var("AR_SANDBOX_PODMAN_BIN"))
-            .unwrap_or_else(|_| autodetect_oci_runtime());
-        let cfg = PodmanSandboxConfig {
-            image: image.clone(),
-            memory_mib,
-            cpus,
-            pids_limit,
-            wall_clock: Duration::from_secs(wall_clock_secs),
-            podman_bin: podman_bin.clone(),
-        };
-        tracing::info!(
-            image,
-            memory_mib,
-            cpus,
-            pids_limit,
-            wall_clock_secs,
-            runtime = %podman_bin,
-            "sandbox: oci hardened"
-        );
-        Ok(Arc::new(PodmanSandbox::new(cfg)))
-    } else {
-        tracing::warn!(
-            "sandbox: direct (NO ISOLATION). Set AR_SANDBOX_IMAGE for production deploys."
-        );
-        Ok(Arc::new(DirectSandbox::new()))
-    }
-}
-
-/// Probe PATH at startup for an OCI runtime. Synchronous because
-/// build_sandbox runs before the tokio runtime is built. Default
-/// preference: podman (rootless, no daemon dependency), then
-/// docker (needs daemon + group membership). When neither is
-/// installed, returns "podman" so the eventual SandboxError on
-/// the first review surfaces a clear "podman binary not found"
-/// message rather than a misleading docker error.
-fn autodetect_oci_runtime() -> String {
-    for bin in ["podman", "docker"] {
-        if std::process::Command::new(bin)
-            .arg("--version")
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .status()
-            .map(|s| s.success())
-            .unwrap_or(false)
-        {
-            return bin.to_string();
-        }
-    }
-    "podman".to_string()
 }
 
 #[cfg(test)]

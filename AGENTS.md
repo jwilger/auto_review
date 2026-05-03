@@ -42,7 +42,6 @@ A Forgejo webhook lands at `ar-gateway`, which HMAC-verifies the payload and enq
 ```text
 clone (workspace.rs)
   -> triage (triage.rs, llm_triage.rs)
-  -> static-analysis fan-out (routing.rs)
   -> context curation (context_builder.rs)
   -> review generation (pipeline.rs)
   -> self-heal validation (heal.rs)
@@ -53,7 +52,7 @@ clone (workspace.rs)
 
 The `@auto_review` chat handler in `ar-chat` runs a poller plus webhook path and supports `help`, `remember <text>`, `forget <id>`, `re-review`, `autofix`, `docstring`, `tests`, and free-form questions. Polling exists because Forgejo does not reliably fire inline-thread reply webhooks.
 
-Every linter spawn and LLM-issued workspace tool goes through `ar-sandbox`. `AR_SANDBOX_IMAGE` selects `PodmanSandbox`; otherwise production logs `sandbox: direct (NO ISOLATION)`.
+Deterministic linters/tests/builds run in CI before semantic review. Runtime workspace tools are read-only and constrained to the clone root; `ar-sandbox` remains for the issue #46 rescope.
 
 `ar-llm::Router` maps `ModelTier::{Reasoning, Cheap, Embedding}` to provider implementations. `OpenAiProvider` speaks OpenAI-compatible backends and tier-specific env vars select models, base URLs, and API keys.
 
@@ -61,13 +60,13 @@ Every linter spawn and LLM-issued workspace tool goes through `ar-sandbox`. `AR_
 
 | Crate | Purpose |
 |---|---|
-| `ar-gateway` | HTTP server, HMAC verification, webhook intake, sandbox selection, chat poller |
+| `ar-gateway` | HTTP server, HMAC verification, webhook intake, chat poller |
 | `ar-orchestrator` | `JobDispatcher`, `SpawningDispatcher`, per-PR state machine, review history |
 | `ar-forgejo` | REST client and HTTP-Basic bootstrap client |
 | `ar-llm` | provider trait and tier-based router |
 | `ar-prompts` | prompt templates and JSON schemas |
-| `ar-review` | clone, lint, review, verify, self-heal, RAG context, repo config |
-| `ar-tools` | static-analysis runners and result normalization |
+| `ar-review` | review, verify, self-heal, RAG context, repo config |
+| `ar-tools` | legacy static-analysis runners retained outside normal runtime |
 | `ar-cli` | operator subcommands |
 | `ar-sandbox` | sandbox trait plus direct and Podman backends |
 | `ar-chat` | chat command handling |

@@ -51,10 +51,6 @@ spec:
             - name: AR_HISTORY_DB
               value: {{ .Values.config.historyDb | quote }}
             {{- end }}
-            {{- if .Values.config.sandboxImage }}
-            - name: AR_SANDBOX_IMAGE
-              value: {{ .Values.config.sandboxImage | quote }}
-            {{- end }}
             {{- if .Values.config.botLogin }}
             - name: AR_BOT_LOGIN
               value: {{ .Values.config.botLogin | quote }}

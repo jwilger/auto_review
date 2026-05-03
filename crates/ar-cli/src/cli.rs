@@ -55,20 +55,6 @@ pub enum Command {
     /// or CI step.
     ValidateConfig(ValidateConfigArgs),
 
-    /// List bundled linters with their canonical names, descriptions,
-    /// and homepages. The `name` column is what operators put under
-    /// `disabled_tools:` in `.auto_review.yaml`. Filter by language
-    /// tag (e.g. `--language python`) to see only what runs on a
-    /// specific stack; pass `--json` for machine-readable output.
-    ListLinters(ListLintersArgs),
-
-    /// Show which linters would run for a given set of changed
-    /// files. Useful for tuning `disabled_tools:` in
-    /// `.auto_review.yaml` or understanding why a particular
-    /// linter fires on a PR. Accepts one or more `--file` paths
-    /// and prints the routed-runner set.
-    ExplainRouting(ExplainRoutingArgs),
-
     /// Send an HMAC-signed `ping` webhook to a running gateway and
     /// print the response. Smoke-tests the intake path (network
     /// reachability + signature secret + header forwarding through
@@ -339,35 +325,6 @@ pub struct TestWebhookArgs {
     /// network egress problem.
     #[arg(long, default_value_t = 10)]
     pub timeout_secs: u64,
-}
-
-#[derive(clap::Args, Debug)]
-pub struct ExplainRoutingArgs {
-    /// One or more changed-file paths to route. Repeat the
-    /// flag for additional files. Paths are relative to the
-    /// repo root; the routing logic doesn't actually read them.
-    #[arg(long, required = true)]
-    pub file: Vec<String>,
-
-    /// Emit the result as JSON for piping into `jq`. Shape:
-    /// `{"runners": ["gitleaks", "ruff", ...]}`.
-    #[arg(long)]
-    pub json: bool,
-}
-
-#[derive(clap::Args, Debug)]
-pub struct ListLintersArgs {
-    /// Restrict output to linters tagged with this language
-    /// (e.g. `python`, `shell`, `terraform`, `security`). Tags come
-    /// from `LinterInfo::languages` and are descriptive — the file
-    /// routing in `ar_review::routing` is the authoritative source.
-    #[arg(long)]
-    pub language: Option<String>,
-
-    /// Emit the catalogue as one JSON line per linter for piping
-    /// into `jq` or another tracker.
-    #[arg(long)]
-    pub json: bool,
 }
 
 #[derive(clap::Args, Debug)]
@@ -932,63 +889,6 @@ mod tests {
                 assert_eq!(a.timeout_secs, 30);
             }
             _ => panic!("expected TestWebhook"),
-        }
-    }
-
-    #[test]
-    fn explain_routing_required_args() {
-        let cli = Cli::try_parse_from([
-            "auto_review",
-            "explain-routing",
-            "--file",
-            "src/main.py",
-            "--file",
-            "Dockerfile",
-        ])
-        .expect("parse");
-        match cli.command {
-            Command::ExplainRouting(a) => {
-                assert_eq!(a.file, vec!["src/main.py", "Dockerfile"]);
-                assert!(!a.json);
-            }
-            _ => panic!("expected ExplainRouting"),
-        }
-    }
-
-    #[test]
-    fn explain_routing_requires_at_least_one_file() {
-        let res = Cli::try_parse_from(["auto_review", "explain-routing"]);
-        assert!(res.is_err());
-    }
-
-    #[test]
-    fn list_linters_default_args() {
-        let cli = Cli::try_parse_from(["auto_review", "list-linters"]).expect("parse");
-        match cli.command {
-            Command::ListLinters(a) => {
-                assert!(a.language.is_none());
-                assert!(!a.json);
-            }
-            _ => panic!("expected ListLinters"),
-        }
-    }
-
-    #[test]
-    fn list_linters_with_filter_and_json() {
-        let cli = Cli::try_parse_from([
-            "auto_review",
-            "list-linters",
-            "--language",
-            "python",
-            "--json",
-        ])
-        .expect("parse");
-        match cli.command {
-            Command::ListLinters(a) => {
-                assert_eq!(a.language.as_deref(), Some("python"));
-                assert!(a.json);
-            }
-            _ => panic!("expected ListLinters"),
         }
     }
 

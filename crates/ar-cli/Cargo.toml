@@ -30,8 +30,6 @@ ar-llm = { path = "../ar-llm" }
 ar-orchestrator = { path = "../ar-orchestrator" }
 ar-prompts = { path = "../ar-prompts" }
 ar-review = { path = "../ar-review" }
-ar-sandbox = { path = "../ar-sandbox" }
-ar-tools = { path = "../ar-tools" }
 
 [dev-dependencies]
 tempfile = "3"

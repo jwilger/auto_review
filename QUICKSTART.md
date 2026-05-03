@@ -11,13 +11,11 @@ Get `auto_review` reviewing PRs on a Forgejo instance you control.
   - **Cloud**: an OpenAI-compatible API (OpenAI, OpenRouter,
     Together.ai, Groq, etc.) and an API key.
 - To build from source: [Nix](https://nixos.org/download.html)
-  with flakes enabled (recommended — pins the toolchain) **or**
-  Docker (for the pre-built sandbox image).
+  with flakes enabled (recommended — pins the toolchain).
 - `git` on the host the gateway runs on (the orchestrator clones
-  repositories at the PR's head SHA before running linters).
-- The optional linters that match your codebases: `ruff`, `eslint`,
-  `shellcheck`, `hadolint`, `markdownlint`. Missing binaries are
-  silently skipped — install only what's relevant.
+  repositories at the PR's head SHA for RAG and agentic verification).
+- CI that runs deterministic linters, tests, and builds before triggering
+  `auto_review`'s semantic review.
 
 ## 1. Create a bot user in Forgejo
 
@@ -139,7 +137,7 @@ one specific PR. No webhook required:
     --llm-model $LLM_REASONING_MODEL
 ```
 
-This clones the repo at the PR's head SHA, runs the linters, calls the
+This clones the repo at the PR's head SHA, prepares semantic context, calls the
 LLM, and posts the review — exactly what the webhook flow would do —
 but synchronously, with all logs streaming to your terminal. Useful for
 onboarding and for reproducing reported review issues.
@@ -151,12 +149,10 @@ The gateway will:
 1. Verify the webhook's HMAC-SHA256 signature.
 2. Skip the review if every changed file is trivial (lockfile bumps,
    vendored code, generated files); post a "skipped" commit status.
-3. Otherwise: shallow-clone the repo at the head SHA, run
-   language-appropriate linters (ruff for Python, eslint for JS/TS,
-   shellcheck for bash, hadolint for Dockerfiles, markdownlint for
-   markdown), feed the diff + linter findings to the configured LLM,
-   self-heal any malformed JSON output, and post inline review
-   comments + a top-level summary.
+3. Otherwise: shallow-clone the repo at the head SHA, prepare RAG context,
+   feed the diff to the configured LLM, self-heal any malformed JSON output,
+   and post inline review comments + a top-level summary. Deterministic
+   linters/tests/builds belong in CI before the review trigger.
 
 Latency is dominated by the LLM. Local 32B-class models on CPU can
 take a couple of minutes per PR; small cloud models are much faster.
@@ -202,11 +198,9 @@ If those pass and reviews still don't appear:
   bounded at 3 attempts. Smaller local models (≤7B) may struggle
   with strict JSON schemas; try a larger model or switch
   `LLM_REASONING_MODEL` to a cloud option.
-- **Linter findings missing**: the linter's binary may not be on
-  `$PATH`. Use `auto_review explain-routing --file <path>` to
-  see which linters would run for a given file. Install the
-  missing binary, or accept that the bot reviews without it (the
-  LLM still works).
+- **Deterministic checks missing**: configure Forgejo Actions (or another CI)
+  to run linters/tests/builds and call `POST /reviews/ci` only after the checks
+  you require have completed.
 
 For Prometheus operators, drop in
 `deploy/prometheus/auto_review.rules.yaml` and
@@ -242,7 +236,6 @@ Common optional env vars:
 | `AR_LEARNINGS_DB` | — | path → SQLite-backed learnings; unset → in-memory |
 | `AR_HISTORY_DB` | — | path → SQLite-backed review history; unset → in-memory |
 | `AR_POLL_INTERVAL_SECS` | `60` | inline-thread mention poll cadence; `0` disables |
-| `AR_SANDBOX_IMAGE` | — | OCI image for the linter sandbox; unset → unsafe direct mode |
 | `AR_SEVERITY_FLOOR` | `warning` | drop findings below this severity (`note` to post everything, `error` to only post Error-severity) |
 | `AR_WEBHOOK_RATE_PER_SEC` | — | enable webhook rate limiting (paired with `AR_WEBHOOK_BURST`) |
 | `AR_DEDUP_CAPACITY` | `256` | LRU size for `X-Forgejo-Delivery` retry dedup; `0` disables |

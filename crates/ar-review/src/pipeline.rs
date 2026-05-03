@@ -1,10 +1,8 @@
 use crate::agentic_verify::verify_findings_agentic;
-use crate::config::ReviewMode;
 use crate::diff::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 use crate::error::ReviewError;
 use crate::heal::{generate_with_self_heal, HealConfig};
 use crate::ignored::{filter_changed_files, filter_diff_paths};
-use crate::linter_only::build_linter_only_output;
 use crate::mapping::output_to_review_request;
 use crate::pre_merge::{
     evaluate as evaluate_pre_merge_checks, render_combined_section, CheckResult, CheckStatus,
@@ -16,7 +14,6 @@ use ar_llm::Router as LlmRouter;
 use ar_prompts::{
     render_review_prompt, system_prompt, PreMergeCustomStatus, ReviewPromptInputs, ReviewSeverity,
 };
-use ar_tools::Finding;
 use globset::GlobSet;
 use std::path::Path;
 
@@ -46,8 +43,7 @@ pub struct ReviewOutcome {
     /// Findings the verifier corrected away. Reasoning model
     /// emitted N findings; verifier kept (N - verifier_dropped).
     /// Surfaces as a counter so operators can chart their
-    /// hallucination rate over time. Always 0 in LinterOnly mode
-    /// (no verifier runs).
+    /// hallucination rate over time.
     pub verifier_dropped: usize,
 }
 
@@ -127,8 +123,6 @@ pub struct ReviewArgs<'a> {
     pub head_sha: &'a str,
     pub pr_title: &'a str,
     pub pr_body: &'a str,
-    pub linter_findings: &'a [Finding],
-    pub linter_runs: &'a [LinterRunSummary],
     pub ignored_paths: &'a GlobSet,
     pub guidelines: &'a str,
     /// Repo-author free-form pre-merge checks (from
@@ -153,11 +147,6 @@ pub struct ReviewArgs<'a> {
     /// Path to the cloned PR workspace. Required for the agentic
     /// verifier; ignored by the simple one.
     pub workspace_path: Option<&'a Path>,
-    /// Review behaviour. `Full` runs the LLM pipeline (default).
-    /// `LinterOnly` posts linter findings as-is, no LLM call —
-    /// zero token cost, no semantic review. Selected per-repo via
-    /// `.auto_review.yaml`'s `mode:` field.
-    pub review_mode: ReviewMode,
     /// Drop findings below this severity before posting. `Note`
     /// (default) posts everything. `Warning` suppresses Note-only
     /// nits. `Error` suppresses everything below high-confidence
@@ -166,27 +155,12 @@ pub struct ReviewArgs<'a> {
     pub min_severity: ReviewSeverity,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LinterRunSummary {
-    pub name: String,
-    pub status: LinterRunStatus,
-    pub findings: usize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum LinterRunStatus {
-    Ok,
-    Skipped(String),
-    Failed(String),
-}
-
 /// End-to-end review activity for one PR.
 ///
 /// Fetches the diff and changed-file list, calls the reasoning LLM with
 /// self-heal validation, maps the structured output to a Forgejo review
 /// request, and posts it. The orchestrator is responsible for cloning the
-/// repo and running linters; their findings are passed in via
-/// `linter_findings` and surfaced to the LLM as supplementary context.
+/// repo and preparing optional workspace context for RAG/agentic verification.
 pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, ReviewError> {
     let raw_diff = match args.diff_override {
         Some(d) => d.to_string(),
@@ -221,59 +195,29 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         pr_body: args.pr_body,
         diff: &diff,
         changed_files: &changed_filenames,
-        linter_findings: args.linter_findings,
         guidelines: args.guidelines,
         repo_context: args.repo_context,
     });
 
-    // Track the post-floor / pre-verifier count so we can report
-    // how many findings the verifier dropped. Linter-only mode
-    // doesn't run a verifier, so it stays at 0.
-    let mut pre_verify_count: usize = 0;
-    let mut output = match args.review_mode {
-        ReviewMode::LinterOnly => {
-            // Skip the LLM entirely. The orchestrator already ran the
-            // linters; map their findings straight to the review
-            // output and continue. No verifier — there's nothing
-            // hallucinated to drop.
-            build_linter_only_output(args.linter_findings)
+    // Track the post-floor / pre-verifier count so we can report how many
+    // findings the verifier dropped.
+    let mut output =
+        generate_with_self_heal(args.llm, system_prompt(), &prompt, HealConfig::default()).await?;
+    apply_severity_floor(&mut output, args.min_severity);
+    let pre_verify_count = output.findings.len();
+    output = match (args.verify_mode, args.workspace_path) {
+        (VerifyMode::Agentic, Some(workspace)) => {
+            verify_findings_agentic(args.llm, output, workspace, &diff).await?
         }
-        ReviewMode::Full => {
-            let mut output =
-                generate_with_self_heal(args.llm, system_prompt(), &prompt, HealConfig::default())
-                    .await?;
-            // Severity-floor filter runs BEFORE the verifier so we
-            // don't burn cheap-tier LLM calls verifying findings
-            // we'll drop anyway. Operators who set
-            // AR_SEVERITY_FLOOR=warning routinely save the
-            // verifier-cost on every Note-level finding the
-            // reasoning model emits.
-            apply_severity_floor(&mut output, args.min_severity);
-            pre_verify_count = output.findings.len();
-            // Optional second pass: when a Cheap tier is configured,
-            // verify each finding against the diff and drop the ones
-            // the verifier doesn't corroborate. Fails open — verifier
-            // issues never drop real findings.
-            match (args.verify_mode, args.workspace_path) {
-                (VerifyMode::Agentic, Some(workspace)) => {
-                    verify_findings_agentic(args.llm, output, workspace, &diff).await?
-                }
-                // Agentic was requested but the orchestrator didn't
-                // supply a workspace; downgrade to the simple verifier
-                // silently rather than failing the review.
-                _ => verify_findings(args.llm, output, &diff).await?,
-            }
-        }
+        _ => verify_findings(args.llm, output, &diff).await?,
     };
     // Snapshot the post-verifier count BEFORE the severity-floor /
     // path-guard passes. `verifier_dropped` reports specifically
     // what the verifier removed, not what later filters did, or the
     // metric drifts every time we add a new post-verifier filter.
     let post_verify_count = output.findings.len();
-    // Apply the severity floor again for the LinterOnly path
-    // (which doesn't run a verifier, so the pre-verifier
-    // application above wouldn't run). Idempotent for Full mode:
-    // findings are already at-or-above the floor; this is a no-op.
+    // Idempotent second pass after verification in case verifier rewrites
+    // severity in future implementations.
     apply_severity_floor(&mut output, args.min_severity);
 
     // Last-mile path guard: the LLM may have emitted a finding
@@ -309,14 +253,6 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         }
         req.body.push_str(&section);
     }
-    let linter_section = render_linter_section(args.linter_runs);
-    if !linter_section.is_empty() {
-        if !req.body.is_empty() {
-            req.body.push_str("\n\n");
-        }
-        req.body.push_str(&linter_section);
-    }
-
     let created = args
         .forgejo
         .create_review(args.owner, args.repo, args.pr_number, &req)
@@ -352,59 +288,15 @@ fn pre_merge_has_failure(built_in: &[CheckResult], custom: &[CustomCheckResult])
             .any(|check| matches!(check.status, PreMergeCustomStatus::Fail))
 }
 
-fn render_linter_section(runs: &[LinterRunSummary]) -> String {
-    if runs.is_empty() {
-        return String::new();
-    }
-    let mut out = String::from("<details>\n<summary>Linters</summary>\n\n");
-    for run in runs {
-        let status = match &run.status {
-            LinterRunStatus::Ok => format!(
-                "ok, {} finding{}",
-                run.findings,
-                if run.findings == 1 { "" } else { "s" }
-            ),
-            LinterRunStatus::Skipped(reason) => format!(
-                "skipped: {reason}, {} finding{}",
-                run.findings,
-                if run.findings == 1 { "" } else { "s" }
-            ),
-            LinterRunStatus::Failed(reason) => format!(
-                "failed: {}, {} finding{}",
-                cap_linter_reason(reason),
-                run.findings,
-                if run.findings == 1 { "" } else { "s" }
-            ),
-        };
-        out.push_str(&format!("- {} — {status}\n", run.name));
-    }
-    out.push_str("\n</details>");
-    out
-}
-
-fn cap_linter_reason(reason: &str) -> String {
-    const MAX_BYTES: usize = 200;
-    let normalized = reason.replace(['\r', '\n'], " ");
-    if normalized.len() <= MAX_BYTES {
-        return normalized;
-    }
-    let mut cut = MAX_BYTES;
-    while cut > 0 && !normalized.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}… [truncated]", &normalized[..cut])
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use ar_llm::{
         CompleteRequest, CompleteResponse, Error as LlmError, LlmProvider, ModelTier, Router,
     };
-    use ar_tools::Severity;
     use async_trait::async_trait;
     use std::sync::{Arc, Mutex};
-    use wiremock::matchers::{body_partial_json, body_string_contains, method, path};
+    use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     /// Provider that records each request it receives and returns canned
@@ -576,8 +468,6 @@ mod tests {
             head_sha: "deadbeef",
             pr_title: "t",
             pr_body: "b",
-            linter_findings: &[],
-            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",
@@ -585,7 +475,6 @@ mod tests {
             diff_override: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
-            review_mode: ReviewMode::Full,
             min_severity: ReviewSeverity::Warning,
         })
         .await
@@ -658,8 +547,6 @@ mod tests {
             head_sha: "x",
             pr_title: "t",
             pr_body: "b",
-            linter_findings: &[],
-            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",
@@ -667,7 +554,6 @@ mod tests {
             diff_override: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
-            review_mode: ReviewMode::Full,
             min_severity: ReviewSeverity::Warning,
         })
         .await
@@ -735,8 +621,6 @@ mod tests {
             head_sha: "x",
             pr_title: "t",
             pr_body: "b",
-            linter_findings: &[],
-            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",
@@ -744,7 +628,6 @@ mod tests {
             diff_override: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
-            review_mode: ReviewMode::Full,
             min_severity: ReviewSeverity::Error,
         })
         .await
@@ -803,8 +686,6 @@ mod tests {
             head_sha: "deadbeef",
             pr_title: "title",
             pr_body: "body",
-            linter_findings: &[],
-            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",
@@ -812,7 +693,6 @@ mod tests {
             diff_override: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
-            review_mode: ReviewMode::Full,
             min_severity: ReviewSeverity::Note,
         })
         .await
@@ -844,8 +724,6 @@ mod tests {
             head_sha: "x",
             pr_title: "t",
             pr_body: "b",
-            linter_findings: &[],
-            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",
@@ -853,7 +731,6 @@ mod tests {
             diff_override: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
-            review_mode: ReviewMode::Full,
             min_severity: ReviewSeverity::Note,
         })
         .await
@@ -902,8 +779,6 @@ mod tests {
             head_sha: "sha",
             pr_title: "t",
             pr_body: "b",
-            linter_findings: &[],
-            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",
@@ -911,7 +786,6 @@ mod tests {
             diff_override: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
-            review_mode: ReviewMode::Full,
             min_severity: ReviewSeverity::Note,
         })
         .await
@@ -964,8 +838,6 @@ mod tests {
             head_sha: "sha",
             pr_title: "t",
             pr_body: "b",
-            linter_findings: &[],
-            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",
@@ -973,7 +845,6 @@ mod tests {
             diff_override: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
-            review_mode: ReviewMode::Full,
             min_severity: ReviewSeverity::Note,
         })
         .await
@@ -995,7 +866,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_body_includes_linter_summary_section() {
+    async fn semantic_review_omits_linter_context_from_prompt_and_posted_body() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/repos/o/r/pulls/7.diff"))
@@ -1009,16 +880,6 @@ mod tests {
             .await;
         Mock::given(method("POST"))
             .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
-            .and(body_string_contains("<details>"))
-            .and(body_string_contains("<summary>Linters</summary>"))
-            .and(body_string_contains("ruff — ok, 0 findings"))
-            .and(body_string_contains("shellcheck — ok, 2 findings"))
-            .and(body_string_contains(
-                "eslint — skipped: disabled by repo config, 0 findings",
-            ))
-            .and(body_string_contains(
-                "markdownlint — failed: parse failed, 0 findings",
-            ))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "id": 101,
                 "state": "COMMENT"
@@ -1030,111 +891,7 @@ mod tests {
         let provider = Arc::new(CannedProvider::new(vec![
             r#"{"summary":"lint summary","findings":[]}"#,
         ]));
-        let llm = router_with(provider);
-        let linter_runs = vec![
-            LinterRunSummary {
-                name: "ruff".into(),
-                status: LinterRunStatus::Ok,
-                findings: 0,
-            },
-            LinterRunSummary {
-                name: "shellcheck".into(),
-                status: LinterRunStatus::Ok,
-                findings: 2,
-            },
-            LinterRunSummary {
-                name: "eslint".into(),
-                status: LinterRunStatus::Skipped("disabled by repo config".into()),
-                findings: 0,
-            },
-            LinterRunSummary {
-                name: "markdownlint".into(),
-                status: LinterRunStatus::Failed("parse failed".into()),
-                findings: 0,
-            },
-        ];
-
-        review_pull_request(ReviewArgs {
-            forgejo: &forgejo,
-            llm: &llm,
-            owner: "o",
-            repo: "r",
-            pr_number: 7,
-            head_sha: "sha",
-            pr_title: "t",
-            pr_body: "b",
-            linter_findings: &[],
-            linter_runs: &linter_runs,
-            ignored_paths: &GlobSet::empty(),
-            custom_pre_merge_checks: &[],
-            guidelines: "",
-            repo_context: "",
-            diff_override: None,
-            verify_mode: VerifyMode::Simple,
-            workspace_path: None,
-            review_mode: ReviewMode::Full,
-            min_severity: ReviewSeverity::Note,
-        })
-        .await
-        .expect("review should include linter section");
-    }
-
-    #[test]
-    fn failed_linter_reason_is_single_line_and_capped() {
-        let noisy_reason = format!("first line\n{}\nlast line", "x".repeat(260));
-        let section = render_linter_section(&[LinterRunSummary {
-            name: "markdownlint".into(),
-            status: LinterRunStatus::Failed(noisy_reason),
-            findings: 0,
-        }]);
-
-        let entry = section
-            .lines()
-            .find(|line| line.starts_with("- markdownlint"))
-            .expect("linter entry rendered");
-        assert!(!entry.contains('\n'));
-        assert!(entry.contains("0 findings"));
-        assert!(entry.contains("[truncated]"));
-        assert!(!entry.contains("last line"));
-    }
-
-    #[tokio::test]
-    async fn review_pull_request_threads_linter_findings_into_llm_prompt() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
-            .respond_with(ResponseTemplate::new(200).set_body_string("d"))
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/repos/o/r/pulls/7/files"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "id": 1, "state": "COMMENT"
-            })))
-            .mount(&server)
-            .await;
-
-        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
-        let provider = Arc::new(CannedProvider::new(vec![
-            r#"{"summary":"x","findings":[]}"#,
-        ]));
         let llm = router_with(provider.clone());
-
-        let findings = vec![Finding {
-            source_tool: "shellcheck".into(),
-            rule_id: Some("SC2034".into()),
-            path: "build.sh".into(),
-            line_start: 3,
-            line_end: 3,
-            severity: Severity::Warning,
-            message: "var unused".into(),
-        }];
-
         review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
@@ -1144,8 +901,6 @@ mod tests {
             head_sha: "sha",
             pr_title: "t",
             pr_body: "b",
-            linter_findings: &findings,
-            linter_runs: &[],
             ignored_paths: &GlobSet::empty(),
             custom_pre_merge_checks: &[],
             guidelines: "",
@@ -1153,7 +908,6 @@ mod tests {
             diff_override: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
-            review_mode: ReviewMode::Full,
             min_severity: ReviewSeverity::Note,
         })
         .await
@@ -1162,9 +916,36 @@ mod tests {
         let prompt = provider
             .last_user_prompt()
             .expect("LLM should have been called");
-        assert!(prompt.to_lowercase().contains("static-analysis findings"));
-        assert!(prompt.contains("shellcheck"));
-        assert!(prompt.contains("SC2034"));
-        assert!(prompt.contains("build.sh:3"));
+        assert!(
+            !prompt.to_lowercase().contains("static-analysis findings"),
+            "full semantic review prompt should not include linter context; prompt was:\n{prompt}",
+        );
+        assert!(
+            !prompt.contains("shellcheck")
+                && !prompt.contains("SC2034")
+                && !prompt.contains("build.sh:3")
+                && !prompt.contains("var unused"),
+            "full semantic review prompt leaked linter finding details; prompt was:\n{prompt}",
+        );
+
+        let received = server.received_requests().await.expect("requests");
+        let posted_review = received
+            .iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("posted review");
+        let body: serde_json::Value =
+            serde_json::from_slice(&posted_review.body).expect("review body json");
+        let review_body = body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review body");
+        assert!(
+            !review_body.contains("<summary>Linters</summary>")
+                && !review_body.contains("ruff — ok")
+                && !review_body.contains("shellcheck — ok")
+                && !review_body.contains("eslint — skipped")
+                && !review_body.contains("markdownlint — failed"),
+            "full semantic review body should not include linter summary section; body was:\n{review_body}",
+        );
     }
 }

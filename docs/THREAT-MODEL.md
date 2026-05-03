@@ -1,14 +1,14 @@
 # auto_review Threat Model
 
 Status: **Living document**
-Last reviewed: 2026-04-30
+Last reviewed: 2026-05-03
 
 ## Scope
 
 This document covers `auto_review` deployed as a single-tenant
 self-hosted bot next to a Forgejo (or Gitea-compatible) instance.
-The bot reads pull requests from one or more repositories, runs
-linters and an LLM review pipeline against the diff, and posts
+The bot reads pull requests from one or more repositories, performs
+semantic LLM review against the diff after CI, and posts
 inline comments back via the Forgejo API.
 
 Out of scope: the security of Forgejo itself, the host operating
@@ -29,18 +29,17 @@ PR author┤ Forgejo (HTTPS)   │───────────────�
           │ commit status              ┌─────────────────────────┐
           ◀──────────────────────────  │ ar-orchestrator         │
                                        │  ↳ ar-review pipeline   │
-                                       │  ↳ ar-tools (linters)   │──┐
-                                       │  ↳ ar-llm router        │  │ sandboxed
-                                       └─┬───────────────────────┘  │ run
-                                         │ Workspace clone           │
-                                         ▼                           ▼
-                                       ┌────────┐              ┌──────────┐
-                                       │ tmpfs  │              │ Sandbox  │
-                                       │ clone  │              │ (podman) │
-                                       └────────┘              └──────────┘
-                                         │                           │
-                                         │  HTTPS (cloud LLM)        │
-                                         ▼                           ▼
+                                       │  ↳ ar-llm router        │
+                                       └─┬───────────────────────┘
+                                         │ Workspace clone
+                                         ▼
+                                       ┌────────┐
+                                       │ tmpfs  │
+                                       │ clone  │
+                                       └────────┘
+                                         │
+                                         │  HTTPS (cloud LLM)
+                                         ▼
                                        ┌────────────────────────────────┐
                                        │ LLM provider (cloud or local)  │
                                        └────────────────────────────────┘
@@ -53,8 +52,7 @@ PR author┤ Forgejo (HTTPS)   │───────────────�
 | External PR author → Forgejo      | Untrusted. PR body, file contents, file paths, branch names |
 | Forgejo → `ar-gateway` webhook    | Trusted iff HMAC verifies. Otherwise hard-rejected (401)    |
 | Forgejo Actions → `ar-gateway` CI review endpoint | Trusted iff bearer token matches and PR head is re-verified with Forgejo |
-| Workspace clone → linter binaries | **Untrusted**: the clone is attacker-controlled by construction |
-| Linter → host filesystem          | Forbidden. Sandboxed; no host paths mounted                  |
+| Workspace clone → review tooling   | **Untrusted**: the clone is attacker-controlled by construction |
 | LLM output → review pipeline      | Untrusted: schema-validated, then verifier-cross-checked     |
 | LLM tool calls → workspace        | Read-only; whitelisted operations only                       |
 | Operator config (.env) → process  | Trusted (operator owns the host)                             |
@@ -66,11 +64,11 @@ What an attacker would target, and what protects each:
 
 | Asset                                  | Why it matters                                  | Primary defence                              |
 |----------------------------------------|-------------------------------------------------|----------------------------------------------|
-| `FORGEJO_TOKEN` (PAT)                  | Write access to bot's accessible repos          | Process env only; never logged; sandbox can't read host env |
+| `FORGEJO_TOKEN` (PAT)                  | Write access to bot's accessible repos          | Process env only; never logged; runtime does not execute repo-supplied linter/tool configs |
 | `LLM_API_KEY` (if cloud profile)        | Billable resource                               | Same: process env, no log redaction needed if never logged   |
 | `WEBHOOK_SECRET`                       | Authenticates webhook source                    | HMAC verify, constant-time compare           |
 | `AR_CI_REVIEW_TOKEN`                   | Authenticates CI-triggered review requests      | Bearer token, constant-time compare; gateway re-fetches PR head before dispatch |
-| Reviewer host (root filesystem, host PATs of other tools) | Lateral movement | Sandbox prevents linter escape; gateway runs as non-root |
+| Reviewer host (root filesystem, host PATs of other tools) | Lateral movement | Runtime does not execute repo-supplied linter/tool configs; gateway runs as non-root |
 | Other repos the bot can write to       | Cross-repo blast radius                         | Bot PAT scoping; per-repo `enabled: false`   |
 | Learnings store (SQLite)               | LLM-prompt injection vector if poisoned         | Append-only; chat command surface gated to repo collaborators |
 
@@ -97,22 +95,19 @@ intercept LLM traffic.
 
 ## Threat Catalogue
 
-### T1. Sandbox escape via malicious lint config (Kudelski-class)
+### T1. Malicious lint/tool config execution (Kudelski-class)
 
 *Attacker:* A1.
-*Path:* PR adds `.rubocop.yml` (or eslint plugin, etc.) that loads
-arbitrary code at lint time. CodeRabbit's May-2024 RCE was exactly
-this.
-*Mitigation:* `ar-sandbox`'s podman implementation runs every linter
-in `--network=none --read-only` with a writable scratch volume only
-for the working tree. CPU/wall-clock/memory caps. The linter image
-(`Dockerfile.sandbox`) bundles only the required binaries; no
-package manager in the runtime layer. Host env vars (`FORGEJO_TOKEN`,
-`LLM_API_KEY`) are not passed into the sandbox container.
-*Residual risk:* podman daemon itself, kernel exploits in the
-container runtime. Mitigated operationally by keeping podman
-patched. The pure-Rust youki backend (planned) further removes
-attack surface.
+*Path:* PR adds `.rubocop.yml` (or eslint plugin, etc.) that would load
+arbitrary code if the reviewer executed repo-controlled deterministic tools.
+CodeRabbit's May-2024 RCE was exactly this class.
+*Mitigation:* The normal gateway/orchestrator pipeline no longer executes
+bundled linters or repo-supplied linter configs. Deterministic linters, tests,
+and builds run in CI under the operator's CI isolation policy before CI calls
+the semantic-review endpoint. The reviewer runtime only clones for read-only
+context and LLM verification.
+*Residual risk:* CI isolation is out of scope for this document; operators must
+harden Forgejo Actions or their chosen CI separately.
 
 ### T2. Webhook forgery / replay
 
@@ -197,15 +192,13 @@ allows operators to purge entries.
 malicious code; learnings poisoning is a strictly weaker capability
 for them.
 
-### T7. Resource exhaustion (fork bomb, infinite-loop linter)
+### T7. Resource exhaustion (large workspace, webhook flood, slow LLM)
 
 *Attacker:* A1.
-*Path:* PR includes a linter config that triggers exponential or
-unbounded behaviour.
-*Mitigation:* Sandbox enforces wall-clock (60s default per linter),
-CPU, and memory limits. Diff is capped (`DEFAULT_MAX_DIFF_BYTES`)
-before reaching the LLM. The orchestrator has a per-PR wall-clock
-budget; on timeout it posts a degraded review. **In addition**, an
+*Path:* PR includes a huge diff/workspace or attackers flood webhook intake.
+*Mitigation:* Diff is capped (`DEFAULT_MAX_DIFF_BYTES`)
+before reaching the LLM. The orchestrator supports a review concurrency cap.
+**In addition**, an
 optional global token-bucket rate limiter on the
 `/webhooks/forgejo` route (`AR_WEBHOOK_RATE_PER_SEC` +
 `AR_WEBHOOK_BURST`, off by default) caps the per-second webhook
@@ -213,10 +206,9 @@ intake. The throttle runs **before** HMAC verification so a flood
 of unsigned junk can't burn CPU on signature math. Rejected
 requests get a `429` and increment
 `auto_review_webhook_rate_limited_total`.
-*Residual risk:* operators who don't set the rate-limit env vars
-remain in the previous v1 regime (sandbox-level limits only,
-gateway-level intake unbounded). Documented as opt-in to avoid
-accidentally throttling existing deployments.
+*Residual risk:* operators who don't set concurrency/rate-limit env vars can
+still exhaust disk or LLM budget under bursty load. Documented as opt-in to
+avoid accidentally throttling existing deployments.
 
 ### T8. Token-cost amplification (cloud LLM profile)
 
@@ -249,9 +241,8 @@ not auto-merge, auto-approve, or auto-close.
   membership inference). The bot does not protect against these and
   operators sending sensitive code to a cloud LLM accept that
   exposure.
-- **Supply-chain attacks on linter binaries.** The Dockerfile pins
-  versions and we trust the upstream distribution. A malicious
-  ruff/clippy/eslint release would bypass our defences.
+- **Supply-chain attacks on CI-owned linter/test/build tooling.** CI now owns
+  deterministic execution; harden and pin those tools in the CI environment.
 - **Endpoint security on the operator's workstation.** If the
   operator's `.env` leaks, the bot is compromised. Use a secret
   manager.
@@ -276,14 +267,14 @@ threat-model claims fail CI when a regression slips in:
 - `crates/ar-review/src/workspace.rs` token-redactor tests —
   cover T5 (PAT compromise: tokens never appear in URL logs).
 
-T1 (Kudelski-class sandbox escape) needs a live container
-runtime; coverage there is operational (the
-`crates/ar-sandbox` Podman integration tests when run against a
-real `podman` binary).
+T1 is now primarily an architectural guardrail: normal review jobs must not
+reintroduce repo-controlled deterministic tool execution. The remaining
+`crates/ar-sandbox` Podman integration tests cover sandbox behavior while
+issue #46 decides its future scope.
 
 ## How to update this document
 
-When adding a new component (linter runner, chat command, LLM tool,
+When adding a new component (chat command, LLM tool,
 API endpoint), enumerate which trust boundary it crosses and what
 adversary capability it grants. If a new mitigation is added, link
 its commit. If a Threat (T#) becomes obsolete because of an

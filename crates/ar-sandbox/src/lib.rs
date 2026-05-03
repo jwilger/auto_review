@@ -1,9 +1,9 @@
-//! Sandbox launcher for untrusted code execution.
+//! Sandbox launcher retained for workspace-isolation rescope work.
 //!
-//! Linters and LLM-issued shell commands run user-controlled binaries
-//! against attacker-controlled inputs (the contents of an open PR). The
-//! Kudelski writeup against CodeRabbit confirmed: failure to jail these
-//! is a direct path to RCE on the reviewer host. So this crate exists.
+//! Normal review/orchestrator jobs no longer execute bundled linters or
+//! LLM-issued shell commands. The linter-era design remains in this crate so
+//! issue #46 can decide which, if any, future runtime execution paths need a
+//! sandbox boundary.
 //!
 //! Two implementations:
 //! - [`DirectSandbox`] just shells out with `tokio::process::Command`.
@@ -12,17 +12,14 @@
 //! - [`PodmanSandbox`] wraps `podman run` with hardening flags
 //!   (no network, read-only rootfs, dropped caps, no-new-privileges,
 //!   memory/cpu/pid limits, non-root uid). Needs `podman` on PATH and
-//!   a pre-pulled sandbox image with the linter binaries baked in.
+//!   a caller-provided image.
 //!
 //! A future `YoukiSandbox` will drive the OCI runtime directly without
 //! shelling out to podman; the trait surface is shaped so that swap is
 //! a one-line change at the call site.
 //!
-//! Note: this crate ships the trait + command construction. Wiring
-//! existing linter runners through it is a separate refactor — runners
-//! still spawn `tokio::process::Command` directly today. The unit tests
-//! here cover the argv shape; an end-to-end integration test (against a
-//! real podman daemon) belongs in the deploy harness, not here.
+//! The unit tests here cover the argv shape; an end-to-end integration test
+//! (against a real podman daemon) belongs in the deploy harness, not here.
 
 pub mod direct;
 pub mod podman;

@@ -12,23 +12,26 @@ Gill, the Kudelski Security RCE post-mortem) plus reverse-engineering by
 third parties indicate a **hybrid pipeline + agentic** design with these
 load-bearing properties:
 
-1. Multi-stage pipeline (triage → summarize → static analysis → context
-   curation → review → verify) rather than a single ReAct loop.
+1. Multi-stage pipeline (triage → context curation → review → verify)
+   rather than a single ReAct loop. Deterministic static analysis runs in CI
+   before `auto_review` performs semantic review.
 2. Two-tier model routing (cheap model for triage/summarize, reasoning
    model for review). ~50% cost win.
 3. Repo-wide context via tree-sitter symbol extraction + LanceDB vector
    embeddings + co-change graph + persistent "learnings" memory.
-4. All untrusted execution in a sandbox. Failure to do so was
-   exploitable: Kudelski achieved RCE via Rubocop running outside the jail.
+4. Avoid executing repo-controlled deterministic tooling in the reviewer
+   runtime. Failure to isolate that class was exploitable: Kudelski achieved
+   RCE via Rubocop running outside the jail.
 5. Durable per-PR workflow with self-healing JSON-schema validation.
 
 ## Decision
 
 Adopt the same hybrid pipeline shape, implemented in Rust as a Cargo
 workspace of single-purpose crates (see `crates/`). Persist workflow
-state in Postgres via `sqlx`. Use LanceDB embedded for both code
-embeddings and learnings. Run all linters and LLM-issued shell commands
-in an OCI sandbox via `youki` (with a `podman --runtime=crun` fallback).
+state via `sqlx`. Use the `VectorStore` abstraction for code embeddings and
+persist learnings separately. CI owns deterministic linters/tests/builds;
+`auto_review` clones workspaces for RAG and agentic verification, then runs the
+semantic review pipeline after the CI trigger.
 Provide an LLM provider abstraction that defaults to local Ollama and
 supports OpenAI / Anthropic / vLLM / OpenRouter via the same trait.
 
@@ -40,8 +43,9 @@ supports OpenAI / Anthropic / vLLM / OpenRouter via the same trait.
 - LanceDB embedded means one fewer service to operate, at the cost of
   having to swap if we later need horizontally-scaled retrieval. The
   `VectorStore` abstraction in `ar-index` keeps this swap cheap.
-- Sandboxing adds operational complexity (OCI tooling on the host) but
-  is mandatory; this is documented in the threat model.
+- Removing bundled linter execution reduces reviewer-host attack surface and
+  shifts deterministic tool hardening to CI; remaining sandbox needs are tracked
+  separately in issue #46.
 - The plug-in LLM provider trait means we can ship a "local-only"
   profile that works offline — a key differentiator for the Forgejo
   audience.

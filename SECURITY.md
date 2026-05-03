@@ -1,9 +1,10 @@
 # Security policy
 
 `auto_review` is a Forgejo PR-review bot that deliberately accepts
-attacker-controlled input (every PR), runs untrusted code-adjacent
-tooling against it (linters), and holds a Forgejo PAT with write
-access to its watched repos. The threat surface is real. We take
+attacker-controlled input (every PR), clones PR workspaces for semantic
+context, calls LLM providers, and holds a Forgejo PAT with write access
+to its watched repos. Deterministic linters/tests/builds run in CI, not
+inside the gateway review runtime. The threat surface is real. We take
 disclosures seriously and want vulnerability researchers to feel
 welcome.
 
@@ -55,15 +56,10 @@ In scope:
 Out of scope (these are upstream / operator concerns):
 - Forgejo, Gitea, or any other Git forge the bot talks to.
 - Specific LLM providers (OpenAI, Anthropic, Ollama, vLLM).
-- The bundled linters' own security posture — report those to
-  their respective upstreams. See the
-  [linter catalogue](crates/ar-tools/src/catalog.rs) for
-  homepages.
+- CI-owned linters/tests/build tools — report those to their respective
+  upstreams or to the operator's CI environment owner.
 - Operator-controlled configuration: an operator who sets
   `WEBHOOK_SECRET=hunter2` is responsible for that decision.
-- An operator who runs without `AR_SANDBOX_IMAGE` is operating in
-  the documented Kudelski-class threat regime; that's a deploy
-  choice, not a vulnerability.
 
 ## What's already documented
 
