@@ -53,6 +53,14 @@ since the start of the project.
   repo-config skips or runner failures. Operators and PR authors can see
   when a review had zero findings because tools ran cleanly rather than
   inferring coverage from inline comments alone. Closes #11.
+- Reviews that request changes due only to failed pre-merge checks now
+  include a prominent **Changes requested** section naming the blocking
+  check reasons, so authors do not have to infer the rejection from the
+  checklist state.
+- The built-in **Tests touched** check now recognizes Rust tests added
+  inline from the PR diff even when Forgejo's changed-file metadata omits
+  per-file patches, avoiding false failures for normal adjacent Rust
+  `#[cfg(test)]` / `#[test]` additions.
 
 #### Default-on persistence for runtime state
 

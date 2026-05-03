@@ -30,6 +30,10 @@
 FROM debian:bookworm-slim
 
 ARG TARGETARCH=amd64
+ARG ACTIONLINT_VERSION=1.7.12
+ARG GITLEAKS_VERSION=8.30.1
+ARG GOLANGCI_LINT_VERSION=2.12.1
+ARG GOSEC_VERSION=2.26.1
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ca-certificates curl git unzip \
@@ -40,7 +44,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
         # interpreters used by linters that ship as scripts
         nodejs npm \
         python3 python3-pip \
-        ruby \
+        ruby ruby-dev build-essential \
         php-cli composer \
         default-jre \
     && rm -rf /var/lib/apt/lists/*
@@ -79,14 +83,14 @@ RUN npm install -g \
 RUN set -eux; \
     curl -fsSL "https://github.com/hadolint/hadolint/releases/latest/download/hadolint-Linux-x86_64" \
         -o /usr/local/bin/hadolint && chmod +x /usr/local/bin/hadolint; \
-    curl -fsSL "https://github.com/rhysd/actionlint/releases/latest/download/actionlint_linux_${TARGETARCH}.tar.gz" \
+    curl -fsSL "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_${TARGETARCH}.tar.gz" \
         | tar -xz -C /usr/local/bin actionlint; \
-    curl -fsSL "https://github.com/zricethezav/gitleaks/releases/latest/download/gitleaks_8.22.1_linux_x64.tar.gz" \
+    curl -fsSL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
         | tar -xz -C /usr/local/bin gitleaks; \
-    curl -fsSL "https://github.com/golangci/golangci-lint/releases/latest/download/golangci-lint-1.64.5-linux-${TARGETARCH}.tar.gz" \
+    curl -fsSL "https://github.com/golangci/golangci-lint/releases/download/v${GOLANGCI_LINT_VERSION}/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${TARGETARCH}.tar.gz" \
         | tar -xz -C /tmp \
-        && mv /tmp/golangci-lint-1.64.5-linux-${TARGETARCH}/golangci-lint /usr/local/bin/; \
-    curl -fsSL "https://github.com/securego/gosec/releases/latest/download/gosec_2.21.4_linux_amd64.tar.gz" \
+        && mv /tmp/golangci-lint-${GOLANGCI_LINT_VERSION}-linux-${TARGETARCH}/golangci-lint /usr/local/bin/; \
+    curl -fsSL "https://github.com/securego/gosec/releases/download/v${GOSEC_VERSION}/gosec_${GOSEC_VERSION}_linux_amd64.tar.gz" \
         | tar -xz -C /usr/local/bin gosec; \
     curl -fsSL "https://github.com/dominikh/go-tools/releases/latest/download/staticcheck_linux_amd64.tar.gz" \
         | tar -xz -C /tmp \
@@ -101,7 +105,7 @@ RUN set -eux; \
         && unzip -q /tmp/tflint.zip -d /tmp/tflint \
         && mv /tmp/tflint/tflint /usr/local/bin/ \
         && rm -rf /tmp/tflint /tmp/tflint.zip; \
-    curl -fsSL "https://github.com/aquasecurity/trivy/releases/latest/download/trivy_0.59.0_Linux-64bit.tar.gz" \
+    curl -fsSL "https://github.com/aquasecurity/trivy/releases/download/v0.70.0/trivy_0.70.0_Linux-64bit.tar.gz" \
         | tar -xz -C /usr/local/bin trivy; \
     curl -fsSL "https://github.com/google/osv-scanner/releases/latest/download/osv-scanner_linux_${TARGETARCH}" \
         -o /usr/local/bin/osv-scanner; \
@@ -110,22 +114,22 @@ RUN set -eux; \
         && unzip -q /tmp/ast-grep.zip -d /tmp/ast-grep \
         && mv /tmp/ast-grep/ast-grep /usr/local/bin/ \
         && rm -rf /tmp/ast-grep /tmp/ast-grep.zip; \
-    curl -fsSL "https://github.com/tamasfe/taplo/releases/latest/download/taplo-full-linux-x86_64.gz" \
+    curl -fsSL "https://github.com/tamasfe/taplo/releases/latest/download/taplo-linux-x86_64.gz" \
         | gunzip > /usr/local/bin/taplo; \
     curl -fsSL "https://github.com/dotenv-linter/dotenv-linter/releases/latest/download/dotenv-linter-linux-x86_64.tar.gz" \
         | tar -xz -C /usr/local/bin dotenv-linter; \
     curl -fsSL "https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz" \
         | tar -xz -C /usr/local/bin kubeconform; \
-    curl -fsSL "https://github.com/errata-ai/vale/releases/latest/download/vale_3.7.1_Linux_64-bit.tar.gz" \
+    curl -fsSL "https://github.com/errata-ai/vale/releases/download/v3.7.1/vale_3.7.1_Linux_64-bit.tar.gz" \
         | tar -xz -C /usr/local/bin vale; \
-    curl -fsSL "https://github.com/realm/SwiftLint/releases/latest/download/swiftlint_linux.zip" \
+    curl -fsSL "https://github.com/realm/SwiftLint/releases/latest/download/swiftlint_linux_amd64.zip" \
         -o /tmp/swiftlint.zip \
         && unzip -q /tmp/swiftlint.zip -d /tmp/swiftlint \
         && mv /tmp/swiftlint/swiftlint /usr/local/bin/ \
         && rm -rf /tmp/swiftlint /tmp/swiftlint.zip; \
     curl -fsSL "https://github.com/bufbuild/buf/releases/latest/download/buf-Linux-x86_64" \
         -o /usr/local/bin/buf; \
-    curl -fsSL "https://github.com/crate-ci/typos/releases/latest/download/typos-v1.27.0-x86_64-unknown-linux-musl.tar.gz" \
+    curl -fsSL "https://github.com/crate-ci/typos/releases/download/v1.27.0/typos-v1.27.0-x86_64-unknown-linux-musl.tar.gz" \
         | tar -xz -C /usr/local/bin ./typos; \
     curl -fsSL "https://github.com/pmd/pmd/releases/download/pmd_releases%2F7.0.0/pmd-dist-7.0.0-bin.zip" \
         -o /tmp/pmd.zip \
@@ -138,7 +142,7 @@ RUN set -eux; \
         | tar -xz -C /tmp \
         && mv /tmp/linux-amd64/helm /usr/local/bin/ \
         && rm -rf /tmp/linux-amd64; \
-    curl -fsSL "https://github.com/mvdan/sh/releases/latest/download/shfmt_v3.10.0_linux_amd64" \
+    curl -fsSL "https://github.com/mvdan/sh/releases/latest/download/shfmt_v3.13.1_linux_amd64" \
         -o /usr/local/bin/shfmt; \
     chmod +x /usr/local/bin/*
 

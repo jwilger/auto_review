@@ -74,7 +74,7 @@ pub fn evaluate(
 ) -> Vec<CheckResult> {
     vec![
         check_changelog(changed_files, workspace_path),
-        check_tests(changed_files),
+        check_tests_with_diff(diff, changed_files),
         check_no_new_todos(diff),
     ]
 }
@@ -116,7 +116,12 @@ fn check_changelog(files: &[ChangedFile], workspace: Option<&Path>) -> CheckResu
     }
 }
 
+#[cfg(test)]
 fn check_tests(files: &[ChangedFile]) -> CheckResult {
+    check_tests_with_diff("", files)
+}
+
+fn check_tests_with_diff(diff: &str, files: &[ChangedFile]) -> CheckResult {
     let any_source_change = files
         .iter()
         .any(|f| f.status != "removed" && is_source_file(&f.filename));
@@ -130,7 +135,7 @@ fn check_tests(files: &[ChangedFile]) -> CheckResult {
     let any_test_change = files.iter().any(|f| {
         f.status != "removed"
             && (is_test_file(&f.filename) || adds_rust_test(&f.filename, f.patch.as_deref()))
-    });
+    }) || diff_adds_rust_test(diff);
     if any_test_change {
         CheckResult {
             name: CheckName::Tests,
@@ -244,13 +249,22 @@ fn adds_rust_test(filename: &str, patch: Option<&str>) -> bool {
         .flat_map(str::lines)
         .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
         .map(|line| line[1..].trim_start())
-        .any(|line| {
-            line.starts_with("#[test]")
-                || line.starts_with("#[cfg(test)]")
-                || line.starts_with("#[tokio::test")
-                || line.starts_with("#[rstest")
-                || line.starts_with("#[test_case")
-        })
+        .any(is_rust_test_marker)
+}
+
+fn diff_adds_rust_test(diff: &str) -> bool {
+    diff.lines()
+        .filter(|line| line.starts_with('+') && !line.starts_with("+++"))
+        .map(|line| line[1..].trim_start())
+        .any(is_rust_test_marker)
+}
+
+fn is_rust_test_marker(line: &str) -> bool {
+    line.starts_with("#[test]")
+        || line.starts_with("#[cfg(test)]")
+        || line.starts_with("#[tokio::test")
+        || line.starts_with("#[rstest")
+        || line.starts_with("#[test_case")
 }
 
 /// Render a checklist suitable for appending to a review body.
@@ -396,6 +410,20 @@ mod tests {
         let result = check_tests(&files);
 
         assert_eq!(result.status, CheckStatus::Pass);
+    }
+
+    #[test]
+    fn tests_touched_accepts_inline_rust_test_from_pr_diff() {
+        let files = vec![cf("src/x.rs", "modified")];
+        let diff = "diff --git a/src/x.rs b/src/x.rs\n@@ -10,0 +11,4 @@ mod tests {\n+    #[test]\n+    fn parses_empty_input() {\n+        assert!(parse(\"\").is_none());\n+    }\n";
+
+        let results = evaluate(diff, &files, None);
+
+        let tests = results
+            .iter()
+            .find(|result| result.name == CheckName::Tests)
+            .unwrap();
+        assert_eq!(tests.status, CheckStatus::Pass);
     }
 
     #[test]

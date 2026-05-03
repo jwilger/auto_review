@@ -301,6 +301,13 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
     };
     if pre_merge_has_failure(&pre_merge_results, &custom_results) {
         req.event = ReviewEvent::RequestChanges;
+        let blocking = render_blocking_pre_merge_reasons(&pre_merge_results, &custom_results);
+        if !blocking.is_empty() {
+            if !req.body.is_empty() {
+                req.body.push_str("\n\n");
+            }
+            req.body.push_str(&blocking);
+        }
     }
     let section = render_combined_section(&pre_merge_results, &custom_results);
     if !section.is_empty() {
@@ -350,6 +357,32 @@ fn pre_merge_has_failure(built_in: &[CheckResult], custom: &[CustomCheckResult])
         || custom
             .iter()
             .any(|check| matches!(check.status, PreMergeCustomStatus::Fail))
+}
+
+fn render_blocking_pre_merge_reasons(
+    built_in: &[CheckResult],
+    custom: &[CustomCheckResult],
+) -> String {
+    let mut out = String::new();
+    for check in built_in
+        .iter()
+        .filter(|check| matches!(check.status, CheckStatus::Fail))
+    {
+        if out.is_empty() {
+            out.push_str("## Changes requested\n\n");
+        }
+        out.push_str(&format!("- {} — {}\n", check.name.label(), check.detail));
+    }
+    for check in custom
+        .iter()
+        .filter(|check| matches!(check.status, PreMergeCustomStatus::Fail))
+    {
+        if out.is_empty() {
+            out.push_str("## Changes requested\n\n");
+        }
+        out.push_str(&format!("- {} — {}\n", check.check, check.rationale));
+    }
+    out
 }
 
 fn render_linter_section(runs: &[LinterRunSummary]) -> String {
@@ -942,6 +975,10 @@ mod tests {
             .and(body_partial_json(serde_json::json!({
                 "event": "REQUEST_CHANGES"
             })))
+            .and(body_string_contains("## Changes requested"))
+            .and(body_string_contains(
+                "Tests touched — source changed but no test file appears in the diff",
+            ))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "id": 100,
                 "state": "REQUEST_CHANGES"
