@@ -106,6 +106,7 @@
             cargo-deny
             cargo-nextest
             git
+            forgejo-mcp
             jq
             pkg-config
             openssl
