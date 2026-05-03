@@ -57,8 +57,11 @@ The cargo path produces:
 # Prompts for the bot's password.
 ```
 
-The CLI prints a one-time PAT secret. Save it as `FORGEJO_TOKEN` in
-your environment — Forgejo will not show it again.
+The CLI prints a one-time PAT secret. Save it as `AR_FORGEJO_TOKEN` in
+the gateway environment — Forgejo will not show it again.
+The operator CLI still accepts `--token` (or `FORGEJO_TOKEN`) for
+one-off commands; prefer `--token "$AR_FORGEJO_TOKEN"` when your
+developer shell reserves `FORGEJO_TOKEN` for your personal Forgejo identity.
 
 ## 4. Run the gateway
 
@@ -67,7 +70,7 @@ config:
 
 ```sh
 export FORGEJO_BASE_URL=https://forgejo.example.com
-export FORGEJO_TOKEN=<the PAT from step 3>
+export AR_FORGEJO_TOKEN=<the PAT from step 3>
 export WEBHOOK_SECRET=<a random string, e.g. openssl rand -hex 32>
 
 # Local LLM via Ollama
@@ -91,6 +94,8 @@ directly inside your private network).
 
 ```sh
 ./target/release/auto_review register-webhook \
+    --forgejo-url $FORGEJO_BASE_URL \
+    --token "$AR_FORGEJO_TOKEN" \
     --owner alice --repo widgets \
     --gateway-url https://reviewer.example.com
 ```
@@ -131,7 +136,7 @@ one specific PR. No webhook required:
 ```sh
 ./target/release/auto_review review-once \
     --forgejo-url $FORGEJO_BASE_URL \
-    --token $FORGEJO_TOKEN \
+    --token $AR_FORGEJO_TOKEN \
     --owner alice --repo widgets --pr 42 \
     --llm-base-url $LLM_BASE_URL \
     --llm-model $LLM_REASONING_MODEL
@@ -193,7 +198,7 @@ If those pass and reviews still don't appear:
 - **Reviews never appear**: check the gateway logs (`RUST_LOG=debug`).
   Common causes: bot user lacks repo access (run
   `auto_review doctor`), LLM endpoint unreachable, invalid
-  `FORGEJO_TOKEN`.
+  `AR_FORGEJO_TOKEN`.
 - **LLM returns malformed JSON repeatedly**: the self-heal loop is
   bounded at 3 attempts. Smaller local models (≤7B) may struggle
   with strict JSON schemas; try a larger model or switch
@@ -214,7 +219,7 @@ Required:
 | Env var | Notes |
 |---|---|
 | `FORGEJO_BASE_URL` | e.g. `https://forgejo.example.com` |
-| `FORGEJO_TOKEN` | bot user's PAT (`auto_review init`) |
+| `AR_FORGEJO_TOKEN` | gateway bot user's PAT (`auto_review init`) |
 | `WEBHOOK_SECRET` | HMAC secret; matches Forgejo's webhook config |
 | `LLM_BASE_URL` | OpenAI-compatible endpoint root |
 

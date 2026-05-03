@@ -12,6 +12,12 @@ since the start of the project.
 
 ### Changed
 
+#### Gateway Forgejo token env
+
+- `ar-gateway` now reads its Forgejo API PAT from `AR_FORGEJO_TOKEN`, leaving
+  `FORGEJO_TOKEN` available for developer-local Forgejo tooling such as Kilo's
+  MCP configuration.
+
 #### Runtime linter execution retired
 
 - The normal review/orchestrator pipeline no longer runs bundled linters or

@@ -11,7 +11,7 @@ helm install auto-review ./deploy/helm \
   --set config.forgejoBaseUrl=https://forgejo.example.com \
   --set config.llmBaseUrl=https://api.openai.com \
   --set config.llmReasoningModel=gpt-4o-mini \
-  --set secrets.forgejoToken=$FORGEJO_TOKEN \
+  --set secrets.forgejoToken=$AR_FORGEJO_TOKEN \
   --set secrets.webhookSecret=$WEBHOOK_SECRET \
   --set secrets.llmApiKey=$LLM_API_KEY \
   --set ingress.enabled=true \
@@ -26,7 +26,7 @@ pre-existing Secret managed by your secret-injection tool of choice
 
 ```sh
 kubectl create secret generic auto-review-creds \
-  --from-literal=FORGEJO_TOKEN=... \
+  --from-literal=AR_FORGEJO_TOKEN=... \
   --from-literal=WEBHOOK_SECRET=... \
   --from-literal=LLM_API_KEY=...
 

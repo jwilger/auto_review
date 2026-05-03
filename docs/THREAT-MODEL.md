@@ -64,7 +64,7 @@ What an attacker would target, and what protects each:
 
 | Asset                                  | Why it matters                                  | Primary defence                              |
 |----------------------------------------|-------------------------------------------------|----------------------------------------------|
-| `FORGEJO_TOKEN` (PAT)                  | Write access to bot's accessible repos          | Process env only; never logged; runtime does not execute repo-supplied linter/tool configs |
+| `AR_FORGEJO_TOKEN` (gateway bot PAT)   | Write access to bot's accessible repos          | Process env only; never logged; runtime does not execute repo-supplied linter/tool configs |
 | `LLM_API_KEY` (if cloud profile)        | Billable resource                               | Same: process env, no log redaction needed if never logged   |
 | `WEBHOOK_SECRET`                       | Authenticates webhook source                    | HMAC verify, constant-time compare           |
 | `AR_CI_REVIEW_TOKEN`                   | Authenticates CI-triggered review requests      | Bearer token, constant-time compare; gateway re-fetches PR head before dispatch |

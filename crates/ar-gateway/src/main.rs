@@ -77,7 +77,7 @@ async fn main() -> Result<()> {
         );
     }
     let forgejo_base = env::var("FORGEJO_BASE_URL").context("FORGEJO_BASE_URL is required")?;
-    let forgejo_token = env::var("FORGEJO_TOKEN").context("FORGEJO_TOKEN is required")?;
+    let forgejo_token = forgejo_api_token_from_env_values(read_non_empty_env("AR_FORGEJO_TOKEN"))?;
     let llm_base = env::var("LLM_BASE_URL").context("LLM_BASE_URL is required")?;
     let llm_api_key = env::var("LLM_API_KEY").ok();
     let reasoning_model =
@@ -587,6 +587,10 @@ fn read_non_empty_env(name: &str) -> Option<String> {
     }
 }
 
+fn forgejo_api_token_from_env_values(ar_forgejo_token: Option<String>) -> Result<String> {
+    ar_forgejo_token.context("AR_FORGEJO_TOKEN is required")
+}
+
 fn validate_ci_review_token(raw: Option<String>) -> Result<Option<String>> {
     let Some(token) = raw else {
         return Ok(None);
@@ -670,6 +674,25 @@ mod tests {
         assert!(
             !message.contains(rejected_token),
             "error must not echo the rejected token value, got: {message}"
+        );
+    }
+
+    #[test]
+    fn forgejo_api_token_accepts_gateway_bot_env() {
+        let gateway_bot_token = "gateway-bot-pat".to_string();
+
+        let token = forgejo_api_token_from_env_values(Some(gateway_bot_token.clone())).unwrap();
+
+        assert_eq!(token, gateway_bot_token);
+    }
+
+    #[test]
+    fn forgejo_api_token_requires_gateway_bot_env() {
+        let err = forgejo_api_token_from_env_values(None).unwrap_err();
+
+        assert!(
+            err.to_string().contains("AR_FORGEJO_TOKEN"),
+            "missing gateway bot token error should name AR_FORGEJO_TOKEN, got: {err}"
         );
     }
 }
