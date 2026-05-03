@@ -61,6 +61,8 @@ pub struct PullRequest {
     pub user: User,
     #[serde(default)]
     pub draft: bool,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -68,6 +70,8 @@ pub struct PullRequestEvent {
     pub action: PullRequestAction,
     pub number: u64,
     pub pull_request: PullRequest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub requested_reviewer: Option<User>,
     pub repository: Repository,
     pub sender: User,
 }

@@ -35,7 +35,7 @@ for the design rationale.
 ## Tests
 
 Webhook intake is fully covered: HMAC verify, dedup retry, rate-limit
-429, payload decode, chat-command dispatch. Run with
+429, payload decode, review-request dispatch, chat-command dispatch. Run with
 `cargo test -p ar-gateway`. See `webhook.rs` and the per-module
 `tests` blocks (`metrics.rs`, `ratelimit.rs`, `dedup.rs`,
 `poller.rs`).

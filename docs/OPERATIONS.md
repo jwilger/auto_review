@@ -139,6 +139,13 @@ The gateway fetches the PR from Forgejo and rejects stale requests with
 Duplicate reviews for the same SHA still rely on the orchestrator's review
 history unless the request explicitly sets `"force": true`.
 
+If branch protection requests an official review from the configured bot user
+(`AR_BOT_LOGIN`, default `auto_review`), the `pull_request.review_requested`
+webhook also queues a semantic review for open, non-draft PRs. Requests for
+other reviewers, draft PRs, and closed PRs are ignored. This keeps Forgejo's
+`block_on_official_review_requests` protection from waiting indefinitely on the
+bot after a human or rule explicitly requests it.
+
 ## 1. Daily / weekly checks
 
 If you run Prometheus, drop in [`deploy/prometheus/auto_review.rules.yaml`](../deploy/prometheus/auto_review.rules.yaml)
@@ -374,7 +381,7 @@ own. If reviews start taking minutes, check:
 
 ## 6. Rotation
 
-### 6.1 Bot PAT (`FORGEJO_TOKEN`)
+### 6.1 Gateway bot PAT (`AR_FORGEJO_TOKEN`)
 
 ```bash
 auto_review init \
@@ -383,7 +390,7 @@ auto_review init \
     --token-name auto_review-$(date -I)
 ```
 
-Save the new token, update the gateway env, restart, then revoke
+Save the new token, update `AR_FORGEJO_TOKEN` in the gateway env, restart, then revoke
 the old token in Forgejo's user settings. Rotate at least every
 180 days; sooner if you suspect compromise (cf. T5 in the
 [threat model](./THREAT-MODEL.md)).
@@ -612,5 +619,5 @@ Before filing, capture:
   text)
 - Forgejo version (`GET /api/v1/version`)
 
-Attach those to the issue. Do **not** include `FORGEJO_TOKEN`,
+Attach those to the issue. Do **not** include `AR_FORGEJO_TOKEN`,
 `LLM_API_KEY`, or `WEBHOOK_SECRET` in any field.

@@ -282,7 +282,7 @@ async fn handle_pull_request(state: &AppState, body: &[u8]) -> Response {
             return reject(StatusCode::BAD_REQUEST, &format!("payload decode: {e}"));
         }
     };
-    if !is_actionable(evt.action) {
+    if !is_actionable(&evt, &state.bot_login) {
         tracing::debug!(action = ?evt.action, "ignoring non-review-triggering action");
         return (StatusCode::ACCEPTED, "").into_response();
     }
@@ -302,14 +302,19 @@ async fn handle_pull_request(state: &AppState, body: &[u8]) -> Response {
     (StatusCode::ACCEPTED, "").into_response()
 }
 
-fn is_actionable(action: PullRequestAction) -> bool {
+fn is_actionable(evt: &PullRequestEvent, bot_login: &str) -> bool {
     matches!(
-        action,
+        evt.action,
         PullRequestAction::Opened
             | PullRequestAction::Synchronized
             | PullRequestAction::Reopened
             | PullRequestAction::ReadyForReview,
-    )
+    ) || (evt.action == PullRequestAction::ReviewRequested
+        && evt.pull_request.state.as_deref() == Some("open")
+        && evt
+            .requested_reviewer
+            .as_ref()
+            .is_some_and(|reviewer| reviewer.login.eq_ignore_ascii_case(bot_login)))
 }
 
 fn reject(status: StatusCode, msg: &str) -> Response {
@@ -383,6 +388,30 @@ mod tests {
         .unwrap()
     }
 
+    fn review_requested_pr_payload(requested_reviewer: &str, draft: bool, state: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "action": "review_requested",
+            "number": 7,
+            "requested_reviewer": {"login": requested_reviewer, "id": 42},
+            "pull_request": {
+                "number": 7,
+                "title": "x",
+                "body": "review the current head",
+                "draft": draft,
+                "state": state,
+                "user": {"login": "u", "id": 1},
+                "head": {"ref": "t", "sha": "deadbeef"},
+                "base": {"ref": "main", "sha": "cafef00d"}
+            },
+            "repository": {
+                "name": "r", "full_name": "o/r", "default_branch": "main",
+                "owner": {"login": "o", "id": 99}
+            },
+            "sender": {"login": "alice", "id": 1}
+        }))
+        .unwrap()
+    }
+
     async fn send(
         secret: &str,
         event: &str,
@@ -442,6 +471,60 @@ mod tests {
         assert_eq!(jobs[0].owner, "o");
         assert_eq!(jobs[0].repo, "r");
         assert_eq!(jobs[0].head_sha, "deadbeef");
+    }
+
+    #[tokio::test]
+    async fn review_requested_for_configured_bot_dispatches_current_pr_head() {
+        let secret = "s";
+        let body = review_requested_pr_payload("pr-bot", false, "open");
+        let sig = sign(secret, &body);
+        let recorder = RecordingDispatcher::new();
+        let app = build_router(
+            AppState::new(secret, recorder.clone() as Arc<dyn JobDispatcher>)
+                .with_bot_identity("pr-bot", "pr-bot"),
+        );
+
+        let req = Request::post("/webhooks/forgejo")
+            .header(EVENT_HEADER, "pull_request")
+            .header(SIG_HEADER, &sig)
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let jobs = recorder.jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].pr_number, 7);
+        assert_eq!(jobs[0].owner, "o");
+        assert_eq!(jobs[0].repo, "r");
+        assert_eq!(jobs[0].head_sha, "deadbeef");
+    }
+
+    #[tokio::test]
+    async fn review_requested_for_non_bot_is_not_dispatched() {
+        let body = review_requested_pr_payload("human-reviewer", false, "open");
+        let sig = sign("s", &body);
+        let recorder = RecordingDispatcher::new();
+        let (status, _) = send("s", "pull_request", body, Some(&sig), recorder.clone()).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(recorder.jobs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn review_requested_for_draft_or_closed_pr_is_not_dispatched() {
+        for (draft, state) in [(true, "open"), (false, "closed")] {
+            let body = review_requested_pr_payload("auto_review", draft, state);
+            let sig = sign("s", &body);
+            let recorder = RecordingDispatcher::new();
+            let (status, _) = send("s", "pull_request", body, Some(&sig), recorder.clone()).await;
+
+            assert_eq!(status, StatusCode::ACCEPTED, "draft={draft} state={state}");
+            assert!(
+                recorder.jobs().is_empty(),
+                "draft={draft} state={state} must not dispatch"
+            );
+        }
     }
 
     #[tokio::test]

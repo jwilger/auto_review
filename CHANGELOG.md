@@ -12,6 +12,13 @@ since the start of the project.
 
 ### Changed
 
+#### Forgejo review-request webhooks
+
+- `ar-gateway` now handles Forgejo `pull_request.review_requested` webhooks for
+  the configured bot login, queuing a semantic review for open, non-draft PRs so
+  branch protection does not remain blocked on an outstanding bot review
+  request. Closes #49.
+
 #### Gateway Forgejo token env
 
 - `ar-gateway` now reads its Forgejo API PAT from `AR_FORGEJO_TOKEN`, leaving
