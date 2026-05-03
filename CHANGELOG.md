@@ -642,6 +642,10 @@ default in-memory store to the SQLite-backed one.
 
 ### Fixed
 
+- Clean Auto Review runs with no inline findings now post an official
+  Forgejo **Approved** review, allowing newer clean re-reviews to supersede
+  stale Auto Review **Request changes** records under protected-branch review
+  gates. Closes #52.
 - Failed built-in or repo-authored pre-merge checks now post the
   Forgejo review as **Request changes** even when inline findings are
   only warnings/notes or absent. The checklist remains advisory to

@@ -8,13 +8,18 @@ use ar_prompts::{ReviewFinding, ReviewOutput, ReviewSeverity};
 ///   sections, each on its own paragraph. Keeps the top-level review
 ///   readable on its own.
 /// - `event` is `RequestChanges` if any finding has severity `Error`,
-///   otherwise `Comment`. Drafts can't be approved by a bot.
+///   `Approved` if there are no findings, otherwise `Comment`. A clean
+///   `Approved` review is intentional: Forgejo branch protection treats it
+///   as superseding this bot's stale `RequestChanges` reviews after a clean
+///   re-review.
 /// - Each finding becomes one inline `ReviewComment` anchored at
 ///   `new_position = line_start`. Multi-line ranges are rendered as a
 ///   `**Lines N–M:**` prefix in the body since Forgejo's per-line position
 ///   schema doesn't carry an end line.
 pub fn output_to_review_request(out: &ReviewOutput, head_sha: &str) -> CreateReviewRequest {
-    let event = if out
+    let event = if out.findings.is_empty() {
+        ReviewEvent::Approved
+    } else if out
         .findings
         .iter()
         .any(|f| matches!(f.severity, ReviewSeverity::Error))
@@ -148,9 +153,9 @@ mod tests {
     }
 
     #[test]
-    fn empty_findings_are_a_comment_event_with_no_comments() {
+    fn clean_output_is_an_approved_review_to_supersede_stale_request_changes() {
         let req = output_to_review_request(&output("lgtm", vec![]), "deadbeef");
-        assert_eq!(req.event, ReviewEvent::Comment);
+        assert_eq!(req.event, ReviewEvent::Approved);
         assert!(req.comments.is_empty());
         assert_eq!(req.body, "lgtm");
         assert_eq!(req.commit_id, "deadbeef");
