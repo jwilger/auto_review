@@ -26,6 +26,13 @@ since the start of the project.
   unhooked sandbox selection from gateway/orchestrator review jobs. `ar-sandbox`
   remains in the workspace pending the issue #46 rescope.
 
+#### Advisory review approval
+
+- `auto_review` now posts an approved Forgejo review when all remaining findings
+  are warning or note severity, while preserving the inline advisory comments.
+  Error findings and pre-merge check failures continue to request changes. Closes
+  #55.
+
 ### Added
 
 #### CI-triggered semantic reviews

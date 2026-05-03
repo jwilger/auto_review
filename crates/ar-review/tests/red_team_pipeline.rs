@@ -111,9 +111,9 @@ fn t9_review_finding_with_unknown_severity_is_rejected() {
 
 /// T9 mitigation, part 3: even when the LLM provides legitimate
 /// review JSON, the API verb is constructed by `ar_forgejo`, not
-/// the LLM. The LLM cannot turn a `Comment` review into an
-/// `Approve` — the only way to get `RequestChanges` is for at
-/// least one finding to have severity Error.
+/// the LLM. Advisory findings approve with comments; the only way
+/// to get `RequestChanges` is for at least one finding to have
+/// severity Error.
 #[test]
 fn t9_review_event_is_derived_from_severity_not_llm_input() {
     let only_notes = ar_prompts::ReviewOutput {
@@ -129,7 +129,7 @@ fn t9_review_event_is_derived_from_severity_not_llm_input() {
         }],
     };
     let req = output_to_review_request(&only_notes, "abcdef");
-    assert_eq!(req.event, ar_forgejo::ReviewEvent::Comment);
+    assert_eq!(req.event, ar_forgejo::ReviewEvent::Approved);
 
     let with_error = ar_prompts::ReviewOutput {
         findings: vec![ar_prompts::ReviewFinding {
