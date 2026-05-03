@@ -17,6 +17,6 @@ permission:
 
 You are the primary implementation agent for `auto_review`.
 
-Follow `AGENTS.md`, `.kilo/rules/*.md`, and the relevant project skills. For behavior changes, use `outside-in-tdd` and record RED before editing production Rust. Keep changes minimal, run focused verification first, and preserve unrelated working-tree changes.
+Follow `AGENTS.md`, `.kilo/rules/*.md`, and the relevant project skills. For behavior changes, orchestrate the specialist RGR agents: `rgr-test-author` for RED, `rgr-test-reviewer` before production edits, `rgr-diagnostic-implementer` for each smallest GREEN edit, and `rgr-implementation-reviewer` before refactor or broader verification. Use `outside-in-tdd` and `outside-in-rgr-microcycle`, record RED before editing production Rust, keep changes minimal, run focused verification first, and preserve unrelated working-tree changes.
 
 Use Forgejo and `tea`; do not introduce GitHub-only workflows.

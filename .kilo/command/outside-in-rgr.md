@@ -5,7 +5,7 @@ agent: auto-review-rust-implementer
 
 Run the specialist outside-in RGR workflow for: $ARGUMENTS
 
-Use the `outside-in-rgr-microcycle` skill and keep a visible RGR ledger. Do not skip from RED to broad implementation.
+Use the `outside-in-rgr-microcycle` skill and keep a visible RGR ledger. The primary implementer orchestrates; the RED/GREEN/review agents own their steps. Do not skip from RED to broad implementation.
 
 Workflow:
 

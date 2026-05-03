@@ -77,7 +77,7 @@ Each crate has its own `README.md`; open the crate docs before changing public b
 
 ## Development Discipline
 
-- TDD is mandatory. For behavior changes, record RED before production edits, implement the minimum GREEN change, then REFACTOR with tests green.
+- TDD is mandatory. For behavior changes, use the specialist RGR agents: `rgr-test-author` for RED, `rgr-test-reviewer` before production edits, `rgr-diagnostic-implementer` for each minimum GREEN change, and `rgr-implementation-reviewer` before REFACTOR or broader verification.
 - Plans and todo lists for behavior work must be RGR-shaped, not component waterfalls.
 - Pure parsing and formatting helpers get adjacent `#[cfg(test)] mod tests`; HTTP integration tests use `wiremock`; LLM tests use `CannedProvider` or `ScriptedProvider` fakes.
 - Commits must stay green and use `feat(scope):`, `fix(scope):`, `docs:`, `chore:`, `refactor:`, or `test:`. Bodies explain why.
