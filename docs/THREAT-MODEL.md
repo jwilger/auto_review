@@ -22,6 +22,8 @@ have hardened those independently.
         ┌────────────────────┐    PR webhook     ┌──────────────────┐
 PR author┤ Forgejo (HTTPS)   │──────────────────▶│ ar-gateway       │
         └─┬──────────────────┘                   └─┬────────────────┘
+          │     ▲                CI review trigger  │
+          │     └──────────── Forgejo Actions ─────▶│
           │                                        │ enqueue
           │ Reviews API,                           ▼
           │ commit status              ┌─────────────────────────┐
@@ -50,6 +52,7 @@ PR author┤ Forgejo (HTTPS)   │───────────────�
 |----------------------------------|-------------------------------------------------------------|
 | External PR author → Forgejo      | Untrusted. PR body, file contents, file paths, branch names |
 | Forgejo → `ar-gateway` webhook    | Trusted iff HMAC verifies. Otherwise hard-rejected (401)    |
+| Forgejo Actions → `ar-gateway` CI review endpoint | Trusted iff bearer token matches and PR head is re-verified with Forgejo |
 | Workspace clone → linter binaries | **Untrusted**: the clone is attacker-controlled by construction |
 | Linter → host filesystem          | Forbidden. Sandboxed; no host paths mounted                  |
 | LLM output → review pipeline      | Untrusted: schema-validated, then verifier-cross-checked     |
@@ -66,6 +69,7 @@ What an attacker would target, and what protects each:
 | `FORGEJO_TOKEN` (PAT)                  | Write access to bot's accessible repos          | Process env only; never logged; sandbox can't read host env |
 | `LLM_API_KEY` (if cloud profile)        | Billable resource                               | Same: process env, no log redaction needed if never logged   |
 | `WEBHOOK_SECRET`                       | Authenticates webhook source                    | HMAC verify, constant-time compare           |
+| `AR_CI_REVIEW_TOKEN`                   | Authenticates CI-triggered review requests      | Bearer token, constant-time compare; gateway re-fetches PR head before dispatch |
 | Reviewer host (root filesystem, host PATs of other tools) | Lateral movement | Sandbox prevents linter escape; gateway runs as non-root |
 | Other repos the bot can write to       | Cross-repo blast radius                         | Bot PAT scoping; per-repo `enabled: false`   |
 | Learnings store (SQLite)               | LLM-prompt injection vector if poisoned         | Append-only; chat command surface gated to repo collaborators |
@@ -114,15 +118,20 @@ attack surface.
 
 *Attacker:* A4.
 *Path:* Send a crafted `pull_request` event to `/webhooks/forgejo`
-without HMAC, or replay an old one.
+without HMAC, replay an old one, or call `/reviews/ci` with a stale
+or forged PR head.
 *Mitigation:* Constant-time HMAC-SHA256 verify against
 `X-Forgejo-Signature`. Unsigned/invalid → 401, no further work.
 Replays are accepted (Forgejo doesn't sign nonces); deduped by
 `(repo, pr_number, head_sha)` in the orchestrator's history table.
 Effect of replay: re-runs a review the operator already paid for
-once; bounded spend.
+once; bounded spend. CI-triggered review requests require a separate
+strong bearer action token (`AR_CI_REVIEW_TOKEN`, 32+ bytes/chars at
+startup) compared in constant time; before dispatch the gateway fetches
+the PR from Forgejo and rejects the request if the supplied head SHA no
+longer matches.
 *Residual risk:* secret leakage from the operator's env file or
-Forgejo's webhook configuration.
+Forgejo's webhook / Actions secret configuration.
 
 ### T3. Prompt injection in PR body / diff / commit message
 

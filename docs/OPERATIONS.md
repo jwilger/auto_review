@@ -70,6 +70,75 @@ deploy script and your "did the upgrade break anything?"
 runbook. `doctor` exits non-zero when any check fails;
 `test-webhook` exits non-zero when the gateway returns non-2xx.
 
+## 0b. CI-triggered semantic reviews
+
+The normal semantic-review trigger can be driven by Forgejo Actions after
+your deterministic checks pass. Enable the gateway endpoint by setting a
+strong `AR_CI_REVIEW_TOKEN` (generate it independently from
+`WEBHOOK_SECRET`) and storing the same value as an Actions secret, for
+example `AUTO_REVIEW_ACTION_TOKEN`.
+
+Projects choose their own prerequisites in workflow YAML. A review job should
+depend on required checks and then call `POST /reviews/ci`:
+
+```yaml
+name: auto_review
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+jobs:
+  fmt:
+    runs-on: docker
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+      - run: nix develop -c cargo fmt --all -- --check
+
+  clippy:
+    runs-on: docker
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+      - run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    runs-on: docker
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+      - run: nix develop -c cargo nextest run --workspace --no-tests=pass
+
+  semantic-review:
+    runs-on: docker
+    needs: [fmt, clippy, test]
+    if: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - name: Request auto_review
+        env:
+          GATEWAY_URL: https://reviewer.example.com
+          ACTION_TOKEN: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
+          OWNER: ${{ github.repository_owner }}
+          REPO: ${{ github.event.repository.name }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          curl --fail-with-body -X POST "$GATEWAY_URL/reviews/ci" \
+            -H "Authorization: Bearer $ACTION_TOKEN" \
+            -H 'Content-Type: application/json' \
+            --data "{\"owner\":\"$OWNER\",\"repo\":\"$REPO\",\"pr_number\":$PR_NUMBER,\"head_sha\":\"$HEAD_SHA\",\"trigger\":{\"source\":\"forgejo-actions\",\"run_id\":\"$RUN_ID\"}}"
+```
+
+Forgejo Actions intentionally exposes GitHub-compatible context and
+environment names (`github.*`, `GITHUB_*`) for workflow compatibility; the
+example above still runs on a Forgejo runner. Because Actions secrets are not
+available to forked pull requests, this direct `pull_request` pattern is for
+same-repository PRs. Do not switch to a privileged target-style workflow that
+checks out or executes untrusted fork code with secrets.
+
+The gateway fetches the PR from Forgejo and rejects stale requests with
+`409 Conflict` if the supplied `head_sha` no longer matches the PR head.
+Duplicate reviews for the same SHA still rely on the orchestrator's review
+history unless the request explicitly sets `"force": true`.
+
 ## 1. Daily / weekly checks
 
 If you run Prometheus, drop in [`deploy/prometheus/auto_review.rules.yaml`](../deploy/prometheus/auto_review.rules.yaml)

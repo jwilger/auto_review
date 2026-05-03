@@ -12,6 +12,15 @@ since the start of the project.
 
 ### Added
 
+#### CI-triggered semantic reviews
+
+- `ar-gateway` now exposes an optional `POST /reviews/ci` endpoint, enabled
+  with `AR_CI_REVIEW_TOKEN`, so Forgejo Actions can request semantic review
+  after project-selected deterministic CI jobs pass. The endpoint requires a
+  bearer action token, fetches the current PR from Forgejo, rejects stale head
+  SHAs with `409 Conflict`, and leaves same-SHA dedup/`force` handling at the
+  orchestrator boundary. Closes #42.
+
 #### Local bacon gateway port
 
 - The default `bacon` run job now binds `ar-gateway` to the dev-only

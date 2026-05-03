@@ -7,6 +7,8 @@ use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
+use serde::Deserialize;
+use subtle::ConstantTimeEq;
 
 const SIG_HEADER: &str = "x-forgejo-signature";
 const FALLBACK_SIG_HEADER: &str = "x-gitea-signature";
@@ -191,6 +193,85 @@ async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
 
 fn is_bot_self(sender_login: &str, bot_login: &str) -> bool {
     sender_login.eq_ignore_ascii_case(bot_login)
+}
+
+pub async fn handle_ci_review(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    body: Bytes,
+) -> Response {
+    let Some(deps) = state.ci_review_endpoint.as_ref() else {
+        return reject(StatusCode::NOT_FOUND, "ci review endpoint not configured");
+    };
+
+    let authorized = headers
+        .get("authorization")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.strip_prefix("Bearer "))
+        .is_some_and(|token| {
+            let expected = deps.action_token.as_bytes();
+            let provided = token.as_bytes();
+            expected.len() == provided.len() && expected.ct_eq(provided).into()
+        });
+    if !authorized {
+        return reject(StatusCode::UNAUTHORIZED, "unauthorized");
+    }
+
+    let req: CiReviewRequest = match serde_json::from_slice(&body) {
+        Ok(req) => req,
+        Err(e) => return reject(StatusCode::BAD_REQUEST, &format!("payload decode: {e}")),
+    };
+    if !is_safe_repo_path_segment(&req.owner) || !is_safe_repo_path_segment(&req.repo) {
+        return reject(StatusCode::BAD_REQUEST, "unsafe owner/repo path segment");
+    }
+
+    let pr = match deps
+        .forgejo
+        .get_pull_request(&req.owner, &req.repo, req.pr_number)
+        .await
+    {
+        Ok(pr) => pr,
+        Err(_) => return reject(StatusCode::BAD_GATEWAY, "fetch pull request failed"),
+    };
+
+    if pr.head.sha != req.head_sha {
+        return reject(StatusCode::CONFLICT, "stale head_sha");
+    }
+    if pr.draft || !pr.state.eq_ignore_ascii_case("open") {
+        return reject(StatusCode::CONFLICT, "pull request is not reviewable");
+    }
+
+    state
+        .dispatcher
+        .dispatch(ReviewJob {
+            owner: req.owner,
+            repo: req.repo,
+            pr_number: req.pr_number,
+            head_sha: req.head_sha,
+            pr_title: pr.title,
+            pr_body: pr.body,
+            force: req.force,
+        })
+        .await;
+    state.metrics.record_job_dispatched();
+    (StatusCode::ACCEPTED, "").into_response()
+}
+
+#[derive(Deserialize)]
+struct CiReviewRequest {
+    owner: String,
+    repo: String,
+    pr_number: u64,
+    head_sha: String,
+    #[serde(default)]
+    force: bool,
+}
+
+fn is_safe_repo_path_segment(segment: &str) -> bool {
+    !matches!(segment, "" | "." | "..")
+        && segment
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
 async fn handle_pull_request(state: &AppState, body: &[u8]) -> Response {
@@ -490,6 +571,402 @@ mod tests {
         assert_eq!(json["history"], "sqlite:/var/lib/auto_review/history.db");
         assert_eq!(json["vector"], "sqlite:/var/lib/auto_review/vector.db");
         assert_eq!(json["dedup"], "sqlite:/var/lib/auto_review/dedup.db");
+    }
+
+    #[tokio::test]
+    async fn ci_review_endpoint_fetches_matching_pr_and_dispatches_review_job() {
+        use ar_forgejo::Client as ForgejoClient;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let forgejo = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/42"))
+            .and(header("Authorization", "token forgejo-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "fix: ci-triggered review",
+                "body": "review this exact actions head",
+                "head": {"ref": "topic", "sha": "deadbeef"},
+                "base": {"ref": "main", "sha": "cafef00d"}
+            })))
+            .expect(1)
+            .mount(&forgejo)
+            .await;
+
+        let recorder = RecordingDispatcher::new();
+        let client = Arc::new(ForgejoClient::new(&forgejo.uri(), "forgejo-token").unwrap());
+        let app = build_router(
+            AppState::new("webhook-secret", recorder.clone() as Arc<dyn JobDispatcher>)
+                .with_ci_review_endpoint("action-token", client),
+        );
+
+        let req = Request::post("/reviews/ci")
+            .header("authorization", "Bearer action-token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "owner": "o",
+                    "repo": "r",
+                    "pr_number": 42,
+                    "head_sha": "deadbeef",
+                    "force": true,
+                    "trigger": {"source": "forgejo-actions", "run_id": "123"}
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let jobs = recorder.jobs();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].owner, "o");
+        assert_eq!(jobs[0].repo, "r");
+        assert_eq!(jobs[0].pr_number, 42);
+        assert_eq!(jobs[0].head_sha, "deadbeef");
+        assert_eq!(jobs[0].pr_title, "fix: ci-triggered review");
+        assert_eq!(jobs[0].pr_body, "review this exact actions head");
+        assert!(jobs[0].force);
+    }
+
+    #[tokio::test]
+    async fn ci_review_endpoint_defaults_omitted_force_to_false_with_trigger_metadata() {
+        use ar_forgejo::Client as ForgejoClient;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let forgejo = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/42"))
+            .and(header("Authorization", "token forgejo-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "fix: ci-triggered review",
+                "body": "review this exact actions head",
+                "head": {"ref": "topic", "sha": "deadbeef"},
+                "base": {"ref": "main", "sha": "cafef00d"}
+            })))
+            .expect(1)
+            .mount(&forgejo)
+            .await;
+
+        let recorder = RecordingDispatcher::new();
+        let client = Arc::new(ForgejoClient::new(&forgejo.uri(), "forgejo-token").unwrap());
+        let app = build_router(
+            AppState::new("webhook-secret", recorder.clone() as Arc<dyn JobDispatcher>)
+                .with_ci_review_endpoint("action-token", client),
+        );
+
+        let req = Request::post("/reviews/ci")
+            .header("authorization", "Bearer action-token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "owner": "o",
+                    "repo": "r",
+                    "pr_number": 42,
+                    "head_sha": "deadbeef",
+                    "trigger": {"source": "forgejo-actions", "run_id": "123"}
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        let jobs = recorder.jobs();
+        assert_eq!(jobs.len(), 1);
+        assert!(!jobs[0].force);
+    }
+
+    #[tokio::test]
+    async fn ci_review_endpoint_rejects_stale_head_sha_without_dispatching() {
+        use ar_forgejo::Client as ForgejoClient;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let forgejo = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/42"))
+            .and(header("Authorization", "token forgejo-token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 42,
+                "title": "fix: ci-triggered review",
+                "body": "review only the current PR head",
+                "head": {"ref": "topic", "sha": "new-head-sha"},
+                "base": {"ref": "main", "sha": "cafef00d"}
+            })))
+            .expect(1)
+            .mount(&forgejo)
+            .await;
+
+        let recorder = RecordingDispatcher::new();
+        let client = Arc::new(ForgejoClient::new(&forgejo.uri(), "forgejo-token").unwrap());
+        let app = build_router(
+            AppState::new("webhook-secret", recorder.clone() as Arc<dyn JobDispatcher>)
+                .with_ci_review_endpoint("action-token", client),
+        );
+
+        let req = Request::post("/reviews/ci")
+            .header("authorization", "Bearer action-token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "owner": "o",
+                    "repo": "r",
+                    "pr_number": 42,
+                    "head_sha": "old-head-sha",
+                    "force": true,
+                    "trigger": {"source": "forgejo-actions", "run_id": "123"}
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+
+        assert_eq!(resp.status(), StatusCode::CONFLICT);
+        assert!(recorder.jobs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ci_review_endpoint_rejects_non_reviewable_pr_after_fetch_without_dispatching() {
+        use ar_forgejo::Client as ForgejoClient;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (draft, state) in [(true, "open"), (false, "closed")] {
+            let forgejo = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/repos/o/r/pulls/42"))
+                .and(header("Authorization", "token forgejo-token"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "number": 42,
+                    "title": "fix: ci-triggered review",
+                    "body": "review this exact actions head only while reviewable",
+                    "draft": draft,
+                    "state": state,
+                    "head": {"ref": "topic", "sha": "deadbeef"},
+                    "base": {"ref": "main", "sha": "cafef00d"}
+                })))
+                .expect(1)
+                .mount(&forgejo)
+                .await;
+
+            let recorder = RecordingDispatcher::new();
+            let client = Arc::new(ForgejoClient::new(&forgejo.uri(), "forgejo-token").unwrap());
+            let app = build_router(
+                AppState::new("webhook-secret", recorder.clone() as Arc<dyn JobDispatcher>)
+                    .with_ci_review_endpoint("action-token", client),
+            );
+
+            let req = Request::post("/reviews/ci")
+                .header("authorization", "Bearer action-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "owner": "o",
+                        "repo": "r",
+                        "pr_number": 42,
+                        "head_sha": "deadbeef",
+                        "force": true,
+                        "trigger": {"source": "forgejo-actions", "run_id": "123"}
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+
+            assert_eq!(
+                resp.status(),
+                StatusCode::CONFLICT,
+                "draft={draft} state={state}"
+            );
+            assert!(recorder.jobs().is_empty(), "draft={draft} state={state}");
+        }
+    }
+
+    #[tokio::test]
+    async fn ci_review_endpoint_hides_upstream_forgejo_body_when_pr_fetch_fails() {
+        use ar_forgejo::Client as ForgejoClient;
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let forgejo = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/42"))
+            .and(header("Authorization", "token forgejo-token"))
+            .respond_with(
+                ResponseTemplate::new(500).set_body_string("sensitive forgejo body token=secret"),
+            )
+            .expect(1)
+            .mount(&forgejo)
+            .await;
+
+        let recorder = RecordingDispatcher::new();
+        let client = Arc::new(ForgejoClient::new(&forgejo.uri(), "forgejo-token").unwrap());
+        let app = build_router(
+            AppState::new("webhook-secret", recorder.clone() as Arc<dyn JobDispatcher>)
+                .with_ci_review_endpoint("action-token", client),
+        );
+
+        let req = Request::post("/reviews/ci")
+            .header("authorization", "Bearer action-token")
+            .header("content-type", "application/json")
+            .body(Body::from(
+                serde_json::to_vec(&serde_json::json!({
+                    "owner": "o",
+                    "repo": "r",
+                    "pr_number": 42,
+                    "head_sha": "deadbeef",
+                    "force": true,
+                    "trigger": {"source": "forgejo-actions", "run_id": "123"}
+                }))
+                .unwrap(),
+            ))
+            .unwrap();
+
+        let resp = app.oneshot(req).await.unwrap();
+        let status = resp.status();
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8_lossy(&bytes);
+
+        assert_eq!(status, StatusCode::BAD_GATEWAY);
+        assert!(!body.contains("sensitive"), "response body was {body:?}");
+        assert!(!body.contains("token=secret"), "response body was {body:?}");
+        assert!(
+            !body.contains("sensitive forgejo body token=secret"),
+            "response body was {body:?}"
+        );
+        assert!(recorder.jobs().is_empty());
+    }
+
+    #[tokio::test]
+    async fn ci_review_endpoint_rejects_missing_or_wrong_authorization_before_side_effects() {
+        use ar_forgejo::Client as ForgejoClient;
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let expected_token = "expected-action-token";
+        let provided_token = "provided-action-token";
+        let wrong_authorization = format!("Bearer {provided_token}");
+        for authorization in [None, Some(wrong_authorization.as_str())] {
+            let forgejo = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path("/api/v1/repos/o/r/pulls/42"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "number": 42,
+                    "title": "must not be fetched",
+                    "body": "unauthorized requests should stop at the gateway",
+                    "head": {"ref": "topic", "sha": "deadbeef"},
+                    "base": {"ref": "main", "sha": "cafef00d"}
+                })))
+                .expect(0)
+                .mount(&forgejo)
+                .await;
+
+            let recorder = RecordingDispatcher::new();
+            let client = Arc::new(ForgejoClient::new(&forgejo.uri(), "forgejo-token").unwrap());
+            let app = build_router(
+                AppState::new("webhook-secret", recorder.clone() as Arc<dyn JobDispatcher>)
+                    .with_ci_review_endpoint(expected_token, client),
+            );
+
+            let mut req = Request::post("/reviews/ci").header("content-type", "application/json");
+            if let Some(value) = authorization {
+                req = req.header("authorization", value);
+            }
+            let req = req
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "owner": "o",
+                        "repo": "r",
+                        "pr_number": 42,
+                        "head_sha": "deadbeef",
+                        "force": true,
+                        "trigger": {"source": "forgejo-actions", "run_id": "123"}
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+
+            assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+            let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+            let body = String::from_utf8_lossy(&bytes);
+            assert!(!body.contains(expected_token), "response body was {body:?}");
+            assert!(!body.contains(provided_token), "response body was {body:?}");
+            assert!(recorder.jobs().is_empty());
+        }
+    }
+
+    #[tokio::test]
+    async fn ci_review_endpoint_rejects_unsafe_owner_or_repo_segments_before_side_effects() {
+        use ar_forgejo::Client as ForgejoClient;
+        use wiremock::matchers::{method, path_regex};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        for (owner, repo) in [
+            ("o/r", "r"),
+            ("..", "r"),
+            ("o?admin=true", "r"),
+            ("o#frag", "r"),
+            ("o", "r/name"),
+            ("o", ".."),
+            ("o", "r?admin=true"),
+            ("o", "r#frag"),
+        ] {
+            let forgejo = MockServer::start().await;
+            Mock::given(method("GET"))
+                .and(path_regex(r"^/api/v1/repos/.*"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "number": 42,
+                    "title": "must not be fetched",
+                    "body": "unsafe owner/repo path segments must stop at the gateway",
+                    "head": {"ref": "topic", "sha": "deadbeef"},
+                    "base": {"ref": "main", "sha": "cafef00d"}
+                })))
+                .expect(0)
+                .mount(&forgejo)
+                .await;
+
+            let recorder = RecordingDispatcher::new();
+            let client = Arc::new(ForgejoClient::new(&forgejo.uri(), "forgejo-token").unwrap());
+            let app = build_router(
+                AppState::new("webhook-secret", recorder.clone() as Arc<dyn JobDispatcher>)
+                    .with_ci_review_endpoint("action-token", client),
+            );
+
+            let req = Request::post("/reviews/ci")
+                .header("authorization", "Bearer action-token")
+                .header("content-type", "application/json")
+                .body(Body::from(
+                    serde_json::to_vec(&serde_json::json!({
+                        "owner": owner,
+                        "repo": repo,
+                        "pr_number": 42,
+                        "head_sha": "deadbeef",
+                        "force": true,
+                        "trigger": {"source": "forgejo-actions", "run_id": "123"}
+                    }))
+                    .unwrap(),
+                ))
+                .unwrap();
+
+            let resp = app.oneshot(req).await.unwrap();
+
+            assert_eq!(
+                resp.status(),
+                StatusCode::BAD_REQUEST,
+                "owner={owner:?} repo={repo:?}"
+            );
+            assert!(recorder.jobs().is_empty(), "owner={owner:?} repo={repo:?}");
+        }
     }
 
     #[tokio::test]

@@ -64,6 +64,13 @@ pub struct AppState {
     /// webhook even on Forgejo retry). Backed by either the in-memory
     /// LRU or the SQLite table — `main.rs` picks based on env.
     pub webhook_dedup: Option<Arc<dyn crate::dedup::DeliveryDedup>>,
+    pub ci_review_endpoint: Option<CiReviewEndpointDeps>,
+}
+
+#[derive(Clone)]
+pub struct CiReviewEndpointDeps {
+    pub action_token: Arc<String>,
+    pub forgejo: Arc<ForgejoClient>,
 }
 
 /// Runtime-config snapshot returned from `GET /info`. Captured once
@@ -185,6 +192,7 @@ impl AppState {
             info: None,
             webhook_rate_limit: None,
             webhook_dedup: None,
+            ci_review_endpoint: None,
         }
     }
 
@@ -201,6 +209,18 @@ impl AppState {
     /// without re-dispatching to the orchestrator.
     pub fn with_webhook_dedup(mut self, dedup: Arc<dyn crate::dedup::DeliveryDedup>) -> Self {
         self.webhook_dedup = Some(dedup);
+        self
+    }
+
+    pub fn with_ci_review_endpoint(
+        mut self,
+        action_token: impl Into<String>,
+        forgejo: Arc<ForgejoClient>,
+    ) -> Self {
+        self.ci_review_endpoint = Some(CiReviewEndpointDeps {
+            action_token: Arc::new(action_token.into()),
+            forgejo,
+        });
         self
     }
 
@@ -252,6 +272,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/version", get(version_handler))
         .route("/info", get(info_handler))
         .route("/metrics", get(metrics_handler))
+        .route("/reviews/ci", post(webhook::handle_ci_review))
         .route("/webhooks/forgejo", post(webhook::handle))
         .with_state(state)
 }

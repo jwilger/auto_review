@@ -238,6 +238,7 @@ Common optional env vars:
 | `AR_GATEWAY_BIND` | `0.0.0.0:8080` | listen address |
 | `AR_BOT_LOGIN` | `auto_review` | bot's Forgejo username (self-loop detection) |
 | `AR_BOT_NAME` | `=AR_BOT_LOGIN` | mention handle (`@<bot_name>`) |
+| `AR_CI_REVIEW_TOKEN` | — | enables `POST /reviews/ci` for Forgejo Actions jobs that trigger semantic review after required CI checks pass; generate independently from `WEBHOOK_SECRET` with at least 32 random bytes/chars |
 | `AR_LEARNINGS_DB` | — | path → SQLite-backed learnings; unset → in-memory |
 | `AR_HISTORY_DB` | — | path → SQLite-backed review history; unset → in-memory |
 | `AR_POLL_INTERVAL_SECS` | `60` | inline-thread mention poll cadence; `0` disables |

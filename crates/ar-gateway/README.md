@@ -22,6 +22,11 @@ HMAC, dispatches review jobs, and exposes operational endpoints.
 - `GET /version` — `{name, version}`
 - `GET /info` — runtime-config snapshot
 - `GET /metrics` — Prometheus text-format counters
+- `POST /reviews/ci` — optional CI-triggered review dispatch. Enable with
+  `AR_CI_REVIEW_TOKEN` generated independently from `WEBHOOK_SECRET` with at
+  least 32 random bytes/chars; callers authenticate with `Authorization: Bearer
+  ...` and provide owner, repo, PR number, head SHA, and trigger metadata. The
+  gateway verifies the current Forgejo PR head still matches before dispatch.
 - `POST /webhooks/forgejo` — webhook intake
 
 See [`docs/ADR-0003-observability.md`](../../docs/ADR-0003-observability.md)

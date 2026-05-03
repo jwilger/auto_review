@@ -33,7 +33,8 @@ to make the bot observable.
 
 ### 1. HTTP endpoints for runtime visibility
 
-The gateway exposes five HTTP routes for ops use:
+The gateway exposes five HTTP routes for ops use plus one optional CI intake
+route:
 
 | Endpoint | Purpose | Example use |
 |----------|---------|-------------|
@@ -42,6 +43,7 @@ The gateway exposes five HTTP routes for ops use:
 | `GET /version` | Static `{name, version}`. Useful for confirming a deploy. | Smoke test after `systemctl restart` |
 | `GET /info` | Runtime-config snapshot — sandbox kind, learnings store kind, LLM tiers configured, poller status. Captured once at startup. | Issue-report attachment |
 | `GET /metrics` | Prometheus text-format counters. | Scrape config |
+| `POST /reviews/ci` | Optional authenticated CI-triggered semantic-review dispatch. Enabled only when `AR_CI_REVIEW_TOKEN` is configured; callers send owner, repo, PR number, head SHA, and trigger metadata after deterministic CI checks pass. | Forgejo Actions job with `needs: [fmt, clippy, test]` |
 
 Distinct routes (rather than one mega-endpoint) so each can be
 bound to its k8s/probe semantics independently. `/healthz` and
@@ -143,6 +145,15 @@ request:
 Each rejected request increments a distinct counter so
 operators can distinguish active probing from secret drift
 from version mismatch.
+
+`POST /reviews/ci` is intentionally outside the webhook anomaly counters:
+Forgejo Actions already treats a non-2xx response as a failed CI job, and
+operators see unauthorized, malformed, stale-head, or PR-fetch failures in the
+workflow log for the job that requested review. Successful CI-triggered
+dispatches still increment the shared `auto_review_jobs_dispatched_total`
+counter because they enter the same orchestrator queue as webhook and chat
+triggers. If CI-trigger failures need Prometheus alerting later, add dedicated
+`auto_review_ci_review_*` counters rather than overloading webhook metrics.
 
 ## Consequences
 

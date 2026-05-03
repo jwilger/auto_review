@@ -436,6 +436,14 @@ async fn main() -> Result<()> {
         .with_readiness(readiness)
         .with_info(info);
 
+    if let Some(action_token) = validate_ci_review_token(read_non_empty_env("AR_CI_REVIEW_TOKEN"))?
+    {
+        state = state.with_ci_review_endpoint(action_token, forgejo.clone());
+        tracing::info!("CI review endpoint enabled at POST /reviews/ci");
+    } else {
+        tracing::info!("CI review endpoint disabled (AR_CI_REVIEW_TOKEN unset)");
+    }
+
     if let Some(dedup) = dedup_store {
         state = state.with_webhook_dedup(dedup);
     }
@@ -595,6 +603,22 @@ fn read_non_empty_env(name: &str) -> Option<String> {
     }
 }
 
+fn validate_ci_review_token(raw: Option<String>) -> Result<Option<String>> {
+    let Some(token) = raw else {
+        return Ok(None);
+    };
+    let token = token.trim().to_string();
+    if token.is_empty() {
+        return Ok(None);
+    }
+    if token.len() < 32 {
+        anyhow::bail!(
+            "AR_CI_REVIEW_TOKEN is too short; configure a strong token of at least 32 characters"
+        );
+    }
+    Ok(Some(token))
+}
+
 /// Parse an env var as an integer, distinguishing "unset" from
 /// "set but unparseable". The previous `.parse::<X>().ok()` pattern
 /// silently swallowed garbage values like `AR_REVIEW_CONCURRENCY=ten`,
@@ -681,4 +705,50 @@ fn autodetect_oci_runtime() -> String {
         }
     }
     "podman".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn ci_review_token_unset_empty_or_whitespace_disables_endpoint() {
+        for raw in [None, Some(""), Some("   \t\n  ")] {
+            let validated = validate_ci_review_token(raw.map(str::to_string));
+
+            assert!(
+                matches!(validated, Ok(None)),
+                "expected {raw:?} to disable the CI review endpoint, got {validated:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn ci_review_token_accepts_strong_random_value() {
+        let token = "0123456789abcdef0123456789abcdef".to_string();
+
+        let validated = validate_ci_review_token(Some(token.clone()));
+
+        assert_eq!(validated.unwrap(), Some(token));
+    }
+
+    #[test]
+    fn ci_review_token_rejects_short_non_empty_value() {
+        let rejected_token = "abc123-token-value";
+        let err = validate_ci_review_token(Some(rejected_token.to_string())).unwrap_err();
+        let message = err.to_string();
+
+        assert!(
+            message.contains("AR_CI_REVIEW_TOKEN"),
+            "error should name AR_CI_REVIEW_TOKEN, got: {message}"
+        );
+        assert!(
+            message.contains("too short") || message.contains("strong token"),
+            "error should explain the token is too short or needs a strong token, got: {message}"
+        );
+        assert!(
+            !message.contains(rejected_token),
+            "error must not echo the rejected token value, got: {message}"
+        );
+    }
 }
