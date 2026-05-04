@@ -1,25 +1,15 @@
 # auto_review Forgejo Action
 
-Runs `auto_review` as a Forgejo Action triggered by `pull_request`
-events, instead of as a long-running webhook server.
-
-## When to use this vs the gateway
-
-| | Forgejo Action | Webhook gateway |
-|---|---|---|
-| Setup effort | One workflow file | Run + expose `ar-gateway` |
-| Latency | Action runner cold-start (~10–30s) | None |
-| Cost | Burns runner minutes per PR | Always-on container |
-| Network | Outbound from runner only | Inbound HTTPS from Forgejo |
-| Multi-repo | One workflow per repo | Single gateway, many repos |
-
-The Action mode is the easier on-ramp for a single repo. The gateway
-is the right shape once you're reviewing across multiple repos or
-care about latency.
+Requests a semantic review from a running `ar-gateway` after a Forgejo
+Actions workflow's prerequisite jobs have passed. The action does not run the
+review locally, build `ar-cli`, call LLM providers, or execute linters; it only
+authenticates to the gateway's `POST /reviews/ci` endpoint.
 
 ## Usage
 
-Add `.forgejo/workflows/auto-review.yml` to the repo:
+Configure `ar-gateway` with `AR_CI_REVIEW_TOKEN` and store the same value as an
+Actions secret, for example `AUTO_REVIEW_ACTION_TOKEN`. Then add a gated review
+job to `.forgejo/workflows/auto-review.yml`:
 
 ```yaml
 name: auto-review
@@ -28,24 +18,44 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
 
 jobs:
-  review:
+  fmt:
     runs-on: docker
     steps:
-      - uses: actions/checkout@v4
-      - uses: https://codeberg.org/jwilger/auto_review/deploy/forgejo-action@main
+      - uses: https://code.forgejo.org/actions/checkout@v4
+      - run: nix develop -c cargo fmt --all -- --check
+
+  clippy:
+    runs-on: docker
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+      - run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
+
+  test:
+    runs-on: docker
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+      - run: nix develop -c cargo nextest run --workspace --no-tests=pass
+
+  semantic-review:
+    runs-on: docker
+    needs: [fmt, clippy, test]
+    if: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: https://git.johnwilger.com/jwilger/auto_review/deploy/forgejo-action@main
         with:
-          forgejo-token: ${{ secrets.GITHUB_TOKEN }}
-          llm-base-url: ${{ vars.LLM_BASE_URL }}
-          llm-api-key: ${{ secrets.LLM_API_KEY }}
-          llm-reasoning-model: gpt-4o-mini
-          # Optional: enable RAG by setting an embedding model.
-          llm-embedding-model: text-embedding-3-small
-          # Optional: enable LLM triage + verifier second-pass.
-          llm-cheap-model: gpt-4o-mini
+          gateway-url: https://reviewer.example.com
+          action-token: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
+          # Optional overrides; omitted values default from the PR context.
+          owner: ${{ github.repository_owner }}
+          repo: ${{ github.event.repository.name }}
+          pr-number: ${{ github.event.pull_request.number }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
 ```
 
-The action builds `auto_review` from source on first run. Subsequent
-runs benefit from cargo's cache if the runner reuses the workspace.
+Forgejo Actions exposes GitHub-compatible `github.*` context values; the
+workflow above still runs on a Forgejo runner. If `pr-number` is empty after
+the input override and context default are evaluated, the action exits with a
+clear pull request context error before contacting the gateway.
 
 ## Caveats
 
@@ -53,9 +63,8 @@ runs benefit from cargo's cache if the runner reuses the workspace.
   upstream repo, so the bot can't post reviews on them. Configure
   `pull_request_target` if you want fork PRs reviewed (and accept
   the additional security considerations).
-- **Cargo build per run** is slow (~2 min on a cold runner). For
-  high-throughput repos, prefer the gateway server which builds
-  once.
-- **Webhook mode is recommended for production**; Action mode is
-  intended as a friction-free way to try the bot without standing
-  up infrastructure.
+- **Gateway required**: this action is only a thin dispatcher. Run and expose
+  `ar-gateway` before adding the workflow job.
+- **Gateway rejection**: stale PR heads, draft PRs, closed PRs, or bad tokens
+  cause the action to fail because `curl -f` treats non-2xx responses as
+  workflow failures.

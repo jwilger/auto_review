@@ -93,6 +93,10 @@ since the start of the project.
   bearer action token, fetches the current PR from Forgejo, rejects stale head
   SHAs with `409 Conflict`, and leaves same-SHA dedup/`force` handling at the
   orchestrator boundary. Closes #42.
+- `deploy/forgejo-action` now provides the workflow-facing wrapper for the CI
+  review endpoint, so Forgejo workflows can dispatch semantic review after
+  `needs:`-gated deterministic checks without building or running the reviewer
+  locally. Closes #43.
 
 #### Local bacon gateway port
 

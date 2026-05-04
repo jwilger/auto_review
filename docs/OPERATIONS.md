@@ -79,7 +79,8 @@ strong `AR_CI_REVIEW_TOKEN` (generate it independently from
 example `AUTO_REVIEW_ACTION_TOKEN`.
 
 Projects choose their own prerequisites in workflow YAML. A review job should
-depend on required checks and then call `POST /reviews/ci`:
+depend on required checks and then use the project action wrapper, which calls
+`POST /reviews/ci` without running linters or local review work in the runner:
 
 ```yaml
 name: auto_review
@@ -111,20 +112,14 @@ jobs:
     needs: [fmt, clippy, test]
     if: ${{ github.event_name == 'pull_request' }}
     steps:
-      - name: Request auto_review
-        env:
-          GATEWAY_URL: https://reviewer.example.com
-          ACTION_TOKEN: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
-          OWNER: ${{ github.repository_owner }}
-          REPO: ${{ github.event.repository.name }}
-          PR_NUMBER: ${{ github.event.pull_request.number }}
-          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
-          RUN_ID: ${{ github.run_id }}
-        run: |
-          curl --fail-with-body -X POST "$GATEWAY_URL/reviews/ci" \
-            -H "Authorization: Bearer $ACTION_TOKEN" \
-            -H 'Content-Type: application/json' \
-            --data "{\"owner\":\"$OWNER\",\"repo\":\"$REPO\",\"pr_number\":$PR_NUMBER,\"head_sha\":\"$HEAD_SHA\",\"trigger\":{\"source\":\"forgejo-actions\",\"run_id\":\"$RUN_ID\"}}"
+      - uses: https://git.johnwilger.com/jwilger/auto_review/deploy/forgejo-action@main
+        with:
+          gateway-url: https://reviewer.example.com
+          action-token: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
+          owner: ${{ github.repository_owner }}
+          repo: ${{ github.event.repository.name }}
+          pr-number: ${{ github.event.pull_request.number }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
 ```
 
 Forgejo Actions intentionally exposes GitHub-compatible context and
@@ -133,6 +128,10 @@ example above still runs on a Forgejo runner. Because Actions secrets are not
 available to forked pull requests, this direct `pull_request` pattern is for
 same-repository PRs. Do not switch to a privileged target-style workflow that
 checks out or executes untrusted fork code with secrets.
+
+The action is a thin gateway client. It fails before making a request when PR
+context is missing, and `curl -f` makes gateway rejections fail the workflow
+instead of publishing a release-blocking false success.
 
 The gateway fetches the PR from Forgejo and rejects stale requests with
 `409 Conflict` if the supplied `head_sha` no longer matches the PR head.
