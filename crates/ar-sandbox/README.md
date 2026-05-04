@@ -1,10 +1,10 @@
 # ar-sandbox
 
-Sandbox abstraction retained for issue #46's workspace-isolation
-rescope. Normal review/orchestrator jobs no longer execute bundled
-linters and no longer wire this crate through the gateway. The original
-linter-execution use case is preserved as historical context in
-ADR-0002.
+Sandbox abstraction retained for future features that explicitly need an
+execution boundary and for sandbox tests. Normal review/orchestrator jobs no
+longer execute bundled linters and no longer wire this crate through the
+gateway. Issue #46's workspace-isolation rescope is recorded in ADR-0002; the
+original linter-execution use case is preserved there as historical context.
 
 ## Public surface
 
@@ -15,13 +15,14 @@ ADR-0002.
 | `SandboxOutput` | Status + stdout + stderr. |
 | `DirectSandbox` | The "no isolation" path. Spawns directly via `tokio::process::Command`. Suitable only for tests or trusted local experiments. |
 | `PodmanSandbox` | Hardened container path. Wraps commands in `podman run --network=none --read-only ...` with CPU / memory / pids / wall-clock limits. |
-| `PodmanSandboxConfig` | Image + memory + cpus + pids + timeout + binary path. Not built by the gateway in the normal review runtime after issue #45. |
+| `PodmanSandboxConfig` | Image + memory + cpus + pids + timeout + binary path. Not built by the gateway in the normal review runtime after issues #45 and #46. |
 
 ## Threat coverage
 
 See [`docs/THREAT-MODEL.md`](../../docs/THREAT-MODEL.md) and
 [`docs/ADR-0002-sandbox.md`](../../docs/ADR-0002-sandbox.md). The Podman
-backend implements the linter-era mitigations that may inform issue #46:
+backend implements the linter-era mitigations that future execution features
+must re-evaluate before use:
 - `--network=none` — no egress
 - `--read-only` — no host filesystem writes outside the writable
   workspace volume
@@ -31,7 +32,8 @@ backend implements the linter-era mitigations that may inform issue #46:
   `LLM_API_KEY` aren't visible to the sandboxed process
 
 [`docs/ADR-0002-sandbox.md`](../../docs/ADR-0002-sandbox.md)
-documents the superseded linter-sandbox decision.
+documents the superseded linter-sandbox decision and the completed issue #46
+normal-runtime rescope.
 
 ## Tests
 

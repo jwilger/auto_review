@@ -247,5 +247,9 @@ Common optional env vars:
 | `AR_READINESS_TTL_SECS` | `10` | cache TTL for `/readyz` Forgejo probe |
 | `RUST_LOG` | `info,ar_gateway=debug` | tracing-subscriber filter |
 
+No sandbox image env var is required for the normal gateway/orchestrator review
+runtime. Deterministic linters, tests, and builds run in CI before the semantic
+review trigger; `GET /info` reports `sandbox: "not-used"`.
+
 Full reference (every env var with rationale): see
 `deploy/systemd/auto_review.env.example`.

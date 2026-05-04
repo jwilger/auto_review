@@ -345,6 +345,11 @@ preparation, semantic LLM review, verification, and posting. Host CPU/memory
 pressure now usually means too many concurrent reviews, large workspaces, or
 slow LLM calls rather than runaway linter execution.
 
+The normal review runtime also no longer requires a sandbox image at startup.
+`GET /info` reports `sandbox: "not-used"`; any legacy `AR_SANDBOX_IMAGE` value is
+ignored unless a future feature explicitly wires a feature-specific execution
+sandbox.
+
 ### 5.1.5 Cap concurrent in-flight reviews
 
 Without `AR_REVIEW_CONCURRENCY` set, a burst of N PRs spawns N

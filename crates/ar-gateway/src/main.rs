@@ -405,7 +405,7 @@ async fn main() -> Result<()> {
         version: env!("CARGO_PKG_VERSION"),
         bot_login: bot_login.clone(),
         bot_name: bot_name.clone(),
-        sandbox: "not-used",
+        sandbox: normal_review_sandbox_label_from_env_value(read_non_empty_env("AR_SANDBOX_IMAGE")),
         learnings: learnings_info.clone(),
         history: history_info.clone(),
         vector: vector_info.clone(),
@@ -596,6 +596,17 @@ fn forgejo_api_token_from_env_values(ar_forgejo_token: Option<String>) -> Result
     ar_forgejo_token.context("AR_FORGEJO_TOKEN is required")
 }
 
+fn normal_review_sandbox_label_from_env_value(
+    _legacy_sandbox_image: Option<String>,
+) -> &'static str {
+    // Issue #46 rescope: the normal gateway/orchestrator review path clones and
+    // reads PR workspaces, but it does not execute repo-controlled linters,
+    // tests, builds, or LLM-issued shell commands. A legacy AR_SANDBOX_IMAGE
+    // value is therefore intentionally ignored for runtime introspection instead
+    // of selecting a global sandbox implementation at startup.
+    "not-used"
+}
+
 fn validate_ci_review_token(raw: Option<String>) -> Result<Option<String>> {
     let Some(token) = raw else {
         return Ok(None);
@@ -699,5 +710,19 @@ mod tests {
             err.to_string().contains("AR_FORGEJO_TOKEN"),
             "missing gateway bot token error should name AR_FORGEJO_TOKEN, got: {err}"
         );
+    }
+
+    #[test]
+    fn normal_review_runtime_info_does_not_require_sandbox_image() {
+        let sandbox = normal_review_sandbox_label_from_env_value(None);
+
+        assert_eq!(sandbox, "not-used");
+    }
+
+    #[test]
+    fn normal_review_runtime_ignores_legacy_sandbox_image() {
+        let sandbox = normal_review_sandbox_label_from_env_value(Some("old-image".to_string()));
+
+        assert_eq!(sandbox, "not-used");
     }
 }

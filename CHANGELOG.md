@@ -51,7 +51,20 @@ since the start of the project.
   keys, and posted reviews no longer render linter summary sections.
 - Removed the runtime linter sandbox image (`deploy/Dockerfile.sandbox`) and
   unhooked sandbox selection from gateway/orchestrator review jobs. `ar-sandbox`
-  remains in the workspace pending the issue #46 rescope.
+  remains in the workspace for future execution features and tests.
+
+#### Normal runtime sandbox rescope
+
+- Re-scoped the remaining gateway/orchestrator workspace paths after linter
+  removal: normal semantic review clones and reads PR workspaces but does not
+  execute repo-controlled linters, tests, builds, or LLM-issued shell commands.
+  `AR_SANDBOX_IMAGE` is no longer a gateway startup requirement; `/info` reports
+  `sandbox: "not-used"` for the normal runtime, and future execution features
+  must add feature-specific fail-closed sandbox configuration. Closes #46.
+- Hardened workspace Git subprocesses so clone/fetch/checkout ignore ambient
+  host Git config, env-injected config, templates/hooks, worktree/index/object
+  overrides, askpass helpers, terminal prompts, and SSH command overrides while
+  preparing PR workspaces.
 
 #### Advisory review approval
 
