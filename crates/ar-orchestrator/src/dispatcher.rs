@@ -406,9 +406,14 @@ pub async fn run_review_job(
                 .await
             {
                 Ok(d) => incremental_diff = Some(d),
-                Err(e) => {
-                    tracing::warn!(error = %e, "compare_diff failed; falling back to full diff");
-                }
+                Err(e) => match compare_diff_fallback_level(&e) {
+                    tracing::Level::INFO => {
+                        tracing::info!(error = %e, "compare_diff failed; falling back to full diff");
+                    }
+                    _ => {
+                        tracing::warn!(error = %e, "compare_diff failed; falling back to full diff");
+                    }
+                },
             }
         }
     }
@@ -795,6 +800,19 @@ fn review_summary(outcome: &ar_review::ReviewOutcome) -> String {
     format!("auto_review: {}", parts.join(", "))
 }
 
+fn compare_diff_fallback_level(err: &ar_forgejo::Error) -> tracing::Level {
+    match err {
+        ar_forgejo::Error::Api { status: 404, body }
+            if body.contains("The target couldn't be found.")
+                && body.contains("could not find '")
+                && body.contains(".diff' to be a commit, branch or tag in the head repository") =>
+        {
+            tracing::Level::INFO
+        }
+        _ => tracing::Level::WARN,
+    }
+}
+
 /// Read `AR_SEVERITY_FLOOR` from the environment. See
 /// [`parse_severity_floor`] for the value grammar and defaulting
 /// behaviour.
@@ -1059,6 +1077,27 @@ mod tests {
             review_summary(&outcome(1, 0, 1)),
             "auto_review: 1 error, 1 note"
         );
+    }
+
+    #[test]
+    fn compare_diff_404_missing_target_is_unremarkable_fallback() {
+        let err = ar_forgejo::Error::Api {
+            status: 404,
+            body: r#"{"message":"The target couldn't be found.","url":"https://git.johnwilger.com/api/swagger","errors":"could not find 'd34db33f.diff' to be a commit, branch or tag in the head repository jwilger/auto_review"}"#
+                .into(),
+        };
+
+        assert_eq!(compare_diff_fallback_level(&err), tracing::Level::INFO);
+    }
+
+    #[test]
+    fn compare_diff_other_404_remains_warning() {
+        let err = ar_forgejo::Error::Api {
+            status: 404,
+            body: r#"{"message":"Not found"}"#.into(),
+        };
+
+        assert_eq!(compare_diff_fallback_level(&err), tracing::Level::WARN);
     }
 
     #[test]
