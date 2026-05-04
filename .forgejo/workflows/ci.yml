@@ -80,15 +80,15 @@ jobs:
       AUTO_REVIEW_ACTION_TOKEN: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
     steps:
       - name: Skip when auto_review secrets are not configured
-        if: ${{ env.AUTO_REVIEW_GATEWAY_URL == '' || env.AUTO_REVIEW_ACTION_TOKEN == '' }}
+        if: ${{ env.AUTO_REVIEW_GATEWAY_URL == '' || env.AUTO_REVIEW_ACTION_TOKEN == '' || env.AUTO_REVIEW_GATEWAY_URL == github.server_url }}
         run: |
-          echo "auto_review semantic review skipped: AUTO_REVIEW_GATEWAY_URL and AUTO_REVIEW_ACTION_TOKEN secrets must both be configured"
+          echo "auto_review semantic review skipped: AUTO_REVIEW_GATEWAY_URL must point at ar-gateway, AUTO_REVIEW_ACTION_TOKEN must be configured, and the gateway URL must not be the Forgejo server URL"
 
       - uses: actions/checkout@v4
-        if: ${{ env.AUTO_REVIEW_GATEWAY_URL != '' && env.AUTO_REVIEW_ACTION_TOKEN != '' }}
+        if: ${{ env.AUTO_REVIEW_GATEWAY_URL != '' && env.AUTO_REVIEW_ACTION_TOKEN != '' && env.AUTO_REVIEW_GATEWAY_URL != github.server_url }}
 
       - name: Request auto_review review
-        if: ${{ env.AUTO_REVIEW_GATEWAY_URL != '' && env.AUTO_REVIEW_ACTION_TOKEN != '' }}
+        if: ${{ env.AUTO_REVIEW_GATEWAY_URL != '' && env.AUTO_REVIEW_ACTION_TOKEN != '' && env.AUTO_REVIEW_GATEWAY_URL != github.server_url }}
         uses: ./deploy/forgejo-action
         with:
           gateway-url: ${{ env.AUTO_REVIEW_GATEWAY_URL }}
