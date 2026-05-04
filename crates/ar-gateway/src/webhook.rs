@@ -2,6 +2,7 @@ use crate::hmac::{verify, HmacError};
 use crate::AppState;
 use ar_chat::{parse_chat_command, ChatCommand, ChatContext, ChatHandler};
 use ar_forgejo::{IssueCommentEvent, PullRequestAction, PullRequestEvent};
+use ar_orchestrator::review_history::PrKey;
 use ar_orchestrator::ReviewJob;
 use axum::body::Bytes;
 use axum::extract::State;
@@ -149,6 +150,17 @@ async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
         return (StatusCode::ACCEPTED, "").into_response();
     }
     state.metrics.record_chat_command();
+
+    if let Some(cursors) = state.chat_comment_cursors.as_ref() {
+        let key = PrKey {
+            owner: evt.repository.owner.login.clone(),
+            repo: evt.repository.name.clone(),
+            pr_number: evt.issue.number,
+        };
+        if !crate::poller::claim_chat_comment(cursors, key, evt.comment.id).await {
+            return (StatusCode::ACCEPTED, "").into_response();
+        }
+    }
 
     // Hand off to the chat handler if it's wired up. Spawn the work so
     // the webhook ack stays fast — chat replies typically involve at

@@ -3,7 +3,7 @@ use ar_forgejo::Client as ForgejoClient;
 use ar_gateway::config::{compose_state_path, resolve_db_backing, DbBacking};
 use ar_gateway::dedup::{DeliveryDedup, RecentDeliveries, SqliteDeliveries};
 use ar_gateway::metrics::{Metrics, MetricsObserver};
-use ar_gateway::poller::{ChatPoller, DEFAULT_POLL_INTERVAL};
+use ar_gateway::poller::{ChatPoller, SharedCommentCursors, DEFAULT_POLL_INTERVAL};
 use ar_gateway::ratelimit::TokenBucket;
 use ar_gateway::{build_router, AppState, ChatDeps, GatewayInfo, ReadinessProbe};
 use ar_index::{
@@ -14,11 +14,13 @@ use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::review_history::{InMemoryReviewHistory, ReviewHistory};
 use ar_orchestrator::sqlite_history::SqliteReviewHistory;
 use ar_orchestrator::SpawningDispatcher;
+use std::collections::HashMap;
 use std::env;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
+use tokio::sync::Mutex;
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -354,6 +356,7 @@ async fn main() -> Result<()> {
     // poll. Disabled when AR_POLL_INTERVAL_SECS=0.
     let poll_interval_secs =
         parse_env::<u64>("AR_POLL_INTERVAL_SECS").unwrap_or(DEFAULT_POLL_INTERVAL.as_secs());
+    let chat_comment_cursors: SharedCommentCursors = Arc::new(Mutex::new(HashMap::new()));
     if poll_interval_secs > 0 {
         let dispatcher_dyn: Arc<dyn ar_orchestrator::JobDispatcher> = dispatcher.clone();
         ChatPoller::new(
@@ -365,6 +368,7 @@ async fn main() -> Result<()> {
             bot_login.clone(),
             bot_name.clone(),
         )
+        .with_cursors(chat_comment_cursors.clone())
         .with_metrics(metrics.clone())
         .spawn(Duration::from_secs(poll_interval_secs));
         tracing::info!(
@@ -426,6 +430,7 @@ async fn main() -> Result<()> {
         .with_bot_identity(bot_login, bot_name)
         .with_metrics(metrics)
         .with_readiness(readiness)
+        .with_chat_comment_cursors(chat_comment_cursors)
         .with_info(info);
 
     if let Some(action_token) = validate_ci_review_token(read_non_empty_env("AR_CI_REVIEW_TOKEN"))?

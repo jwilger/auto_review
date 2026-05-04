@@ -31,6 +31,36 @@ use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::Mutex;
 
+pub type SharedCommentCursors = Arc<Mutex<HashMap<PrKey, u64>>>;
+
+/// Atomically claim a Forgejo chat comment id for one PR.
+///
+/// Returns `true` only for the first caller that advances the shared
+/// per-PR cursor past `comment_id`. Webhook handling and the poller use this
+/// same operation so a comment observed through both paths is dispatched at
+/// most once.
+pub async fn claim_chat_comment(
+    cursors: &SharedCommentCursors,
+    key: PrKey,
+    comment_id: u64,
+) -> bool {
+    let mut guard = cursors.lock().await;
+    let cursor = guard.entry(key).or_insert(0);
+    if comment_id <= *cursor {
+        return false;
+    }
+    *cursor = comment_id;
+    true
+}
+
+async fn seed_chat_cursor_monotonic(cursors: &SharedCommentCursors, key: PrKey, max_seen: u64) {
+    let mut guard = cursors.lock().await;
+    let cursor = guard.entry(key).or_insert(0);
+    if max_seen > *cursor {
+        *cursor = max_seen;
+    }
+}
+
 /// Default interval between polling runs. Operators can override
 /// via `AR_POLL_INTERVAL_SECS`.
 pub const DEFAULT_POLL_INTERVAL: Duration = Duration::from_secs(60);
@@ -46,7 +76,7 @@ pub struct ChatPoller {
     dispatcher: Arc<dyn JobDispatcher>,
     bot_login: Arc<String>,
     bot_name: Arc<String>,
-    cursors: Arc<Mutex<HashMap<PrKey, u64>>>,
+    cursors: SharedCommentCursors,
     /// Optional. When wired, the poller increments cycle / failure /
     /// dispatch counters that the gateway exposes on `/metrics`.
     metrics: Option<Arc<Metrics>>,
@@ -81,6 +111,11 @@ impl ChatPoller {
     /// progress is invisible to Prometheus.
     pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
         self.metrics = Some(metrics);
+        self
+    }
+
+    pub fn with_cursors(mut self, cursors: SharedCommentCursors) -> Self {
+        self.cursors = cursors;
         self
     }
 
@@ -202,6 +237,7 @@ impl ChatPoller {
             // would risk treating "Auto_review" comments from our
             // own bot as user comments and reply-looping.
             if c.user.login.eq_ignore_ascii_case(&self.bot_login) {
+                let _ = claim_chat_comment(&self.cursors, key.clone(), c.id).await;
                 continue; // never reply to ourselves
             }
             // Cheap pre-filter: only dispatch comments that even
@@ -219,12 +255,20 @@ impl ChatPoller {
                 .windows(needle_bytes.len())
                 .any(|w| w.eq_ignore_ascii_case(needle_bytes))
             {
-                to_dispatch.push(c.id);
+                if claim_chat_comment(&self.cursors, key.clone(), c.id).await {
+                    to_dispatch.push(c.id);
+                }
+            } else {
+                let _ = claim_chat_comment(&self.cursors, key.clone(), c.id).await;
             }
         }
-        // Update cursor first; even if dispatch fails we don't want
-        // to retry endlessly on the same comment.
-        self.cursors.lock().await.insert(key.clone(), max_seen);
+        if first_sight {
+            // First-sight seeding: record the highest historical id without
+            // dispatching any historical mentions. Keep the update monotonic:
+            // a webhook may have claimed a newer comment while this poll was
+            // fetching/listing, and seeding must not lower that shared cursor.
+            seed_chat_cursor_monotonic(&self.cursors, key.clone(), max_seen).await;
+        }
 
         for id in &to_dispatch {
             let body = comments
@@ -299,14 +343,22 @@ impl From<ChatError> for PollerError {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{build_router, AppState, ChatDeps};
+    use ::hmac::{Hmac, Mac};
     use ar_index::InMemoryLearningsStore;
     use ar_llm::Router;
     use ar_orchestrator::review_history::InMemoryReviewHistory;
     use ar_orchestrator::{NoOpDispatcher, ReviewJob};
     use async_trait::async_trait;
+    use axum::body::Body;
+    use axum::http::{Request, StatusCode};
+    use sha2::Sha256;
     use std::sync::Mutex as StdMutex;
+    use tower::ServiceExt;
     use wiremock::matchers::{method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    type HmacSha256 = Hmac<Sha256>;
 
     /// Records every job dispatched via the `JobDispatcher` trait.
     /// Used by the re-review test to confirm a poll-driven `@... re-review`
@@ -328,6 +380,30 @@ mod tests {
             repo: repo.into(),
             pr_number: pr,
         }
+    }
+
+    fn sign(secret: &str, body: &[u8]) -> String {
+        let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
+        mac.update(body);
+        hex::encode(mac.finalize().into_bytes())
+    }
+
+    fn issue_comment_payload(id: u64, action: &str, body: &str, sender: &str) -> Vec<u8> {
+        serde_json::to_vec(&serde_json::json!({
+            "action": action,
+            "comment": {"id": id, "body": body, "user": {"login": sender, "id": 1}},
+            "issue": {
+                "number": 1,
+                "title": "x",
+                "pull_request": {"html_url": "https://forge/alice/widgets/pulls/1"}
+            },
+            "repository": {
+                "name": "widgets", "full_name": "alice/widgets", "default_branch": "main",
+                "owner": {"login": "alice", "id": 99}
+            },
+            "sender": {"login": sender, "id": 1}
+        }))
+        .unwrap()
     }
 
     async fn poller_for(
@@ -428,6 +504,17 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn first_sight_seeding_never_lowers_already_claimed_cursor() {
+        let cursors: SharedCommentCursors = Arc::new(Mutex::new(HashMap::new()));
+        let k = key("alice", "widgets", 1);
+
+        assert!(claim_chat_comment(&cursors, k.clone(), 9).await);
+        seed_chat_cursor_monotonic(&cursors, k.clone(), 5).await;
+
+        assert_eq!(cursors.lock().await.get(&k).copied(), Some(9));
+    }
+
+    #[tokio::test]
     async fn second_poll_dispatches_new_mentions_only() {
         let server = MockServer::start().await;
         let history = Arc::new(InMemoryReviewHistory::new());
@@ -488,6 +575,227 @@ mod tests {
         assert_eq!(poller.cursor_for(&k).await, Some(9));
         let seen = dispatcher.seen.lock().unwrap();
         assert_eq!(seen.len(), 1);
+        assert_eq!(seen[0].pr_number, 1);
+        assert_eq!(seen[0].head_sha, "newsha");
+        assert!(seen[0].force);
+    }
+
+    #[tokio::test]
+    async fn top_level_re_review_seen_by_webhook_and_poller_dispatches_once() {
+        let server = MockServer::start().await;
+        let history = Arc::new(InMemoryReviewHistory::new());
+        let k = key("alice", "widgets", 1);
+        history.record(&k, "deadbeef").await.unwrap();
+
+        // Seed the poller cursor before the new top-level PR comment exists.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        // The next poll sees the same top-level comment that Forgejo already
+        // delivered through the issue_comment webhook.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": 9, "body": "@auto_review re-review", "user": {"login": "bob"}}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 1,
+                "title": "x",
+                "body": "review this",
+                "draft": false,
+                "state": "open",
+                "head": {"ref": "t", "sha": "newsha"},
+                "base": {"ref": "main", "sha": "ms"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 99})))
+            .mount(&server)
+            .await;
+
+        let forgejo = Arc::new(ForgejoClient::new(&server.uri(), "tok").expect("client"));
+        let llm = Arc::new(Router::new());
+        let learnings: Arc<dyn LearningsStore> = Arc::new(InMemoryLearningsStore::new());
+        let dispatcher = Arc::new(RecordingDispatcher {
+            seen: StdMutex::new(Vec::new()),
+        });
+        let dispatcher_dyn: Arc<dyn JobDispatcher> = dispatcher.clone();
+        let poller = ChatPoller::new(
+            forgejo.clone(),
+            llm.clone(),
+            learnings.clone(),
+            history,
+            dispatcher_dyn.clone(),
+            "auto_review",
+            "auto_review",
+        );
+
+        poller.run_once_for_tests().await.expect("seed cursor");
+        assert_eq!(poller.cursor_for(&k).await, Some(0));
+
+        let app = build_router(
+            AppState::new("s", dispatcher_dyn)
+                .with_chat(ChatDeps {
+                    forgejo,
+                    llm,
+                    learnings,
+                })
+                .with_chat_comment_cursors(poller.cursors.clone()),
+        );
+        let body = issue_comment_payload(9, "created", "@auto_review re-review", "bob");
+        let sig = sign("s", &body);
+        let req = Request::post("/webhooks/forgejo")
+            .header("x-forgejo-event", "issue_comment")
+            .header("x-forgejo-signature", sig)
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        for _ in 0..20 {
+            if dispatcher.seen.lock().unwrap().len() == 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            dispatcher.seen.lock().unwrap().len(),
+            1,
+            "issue_comment webhook should dispatch the re-review once before polling"
+        );
+
+        poller
+            .run_once_for_tests()
+            .await
+            .expect("poll fallback pass");
+
+        {
+            let seen = dispatcher.seen.lock().unwrap();
+            assert_eq!(
+                seen.len(),
+                1,
+                "the same top-level re-review comment must not dispatch through both webhook and poller"
+            );
+            assert_eq!(seen[0].pr_number, 1);
+            assert_eq!(seen[0].head_sha, "newsha");
+            assert!(seen[0].force);
+        }
+        assert_eq!(poller.cursor_for(&k).await, Some(9));
+    }
+
+    #[tokio::test]
+    async fn top_level_re_review_seen_by_poller_then_delayed_webhook_dispatches_once() {
+        let server = MockServer::start().await;
+        let history = Arc::new(InMemoryReviewHistory::new());
+        let k = key("alice", "widgets", 1);
+        history.record(&k, "deadbeef").await.unwrap();
+
+        // First poll seeds an empty cursor; second poll sees the new
+        // top-level PR comment before Forgejo delivers its delayed
+        // issue_comment webhook.
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": 9, "body": "@auto_review re-review", "user": {"login": "bob"}}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 1,
+                "title": "x",
+                "body": "review this",
+                "draft": false,
+                "state": "open",
+                "head": {"ref": "t", "sha": "newsha"},
+                "base": {"ref": "main", "sha": "ms"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 99})))
+            .mount(&server)
+            .await;
+
+        let forgejo = Arc::new(ForgejoClient::new(&server.uri(), "tok").expect("client"));
+        let llm = Arc::new(Router::new());
+        let learnings: Arc<dyn LearningsStore> = Arc::new(InMemoryLearningsStore::new());
+        let dispatcher = Arc::new(RecordingDispatcher {
+            seen: StdMutex::new(Vec::new()),
+        });
+        let dispatcher_dyn: Arc<dyn JobDispatcher> = dispatcher.clone();
+        let poller = ChatPoller::new(
+            forgejo.clone(),
+            llm.clone(),
+            learnings.clone(),
+            history,
+            dispatcher_dyn.clone(),
+            "auto_review",
+            "auto_review",
+        );
+
+        poller.run_once_for_tests().await.expect("seed cursor");
+        assert_eq!(poller.cursor_for(&k).await, Some(0));
+        poller
+            .run_once_for_tests()
+            .await
+            .expect("poller dispatches new top-level comment");
+        assert_eq!(poller.cursor_for(&k).await, Some(9));
+        assert_eq!(
+            dispatcher.seen.lock().unwrap().len(),
+            1,
+            "poller should dispatch the re-review once before the delayed webhook"
+        );
+
+        let app = build_router(
+            AppState::new("s", dispatcher_dyn)
+                .with_chat(ChatDeps {
+                    forgejo,
+                    llm,
+                    learnings,
+                })
+                .with_chat_comment_cursors(poller.cursors.clone()),
+        );
+        let body = issue_comment_payload(9, "created", "@auto_review re-review", "bob");
+        let sig = sign("s", &body);
+        let req = Request::post("/webhooks/forgejo")
+            .header("x-forgejo-event", "issue_comment")
+            .header("x-forgejo-signature", sig)
+            .body(Body::from(body))
+            .unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+
+        for _ in 0..20 {
+            if dispatcher.seen.lock().unwrap().len() > 1 {
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+
+        let seen = dispatcher.seen.lock().unwrap();
+        assert_eq!(
+            seen.len(),
+            1,
+            "a delayed issue_comment webhook for a comment already dispatched by the poller must not queue a second forced review"
+        );
         assert_eq!(seen[0].pr_number, 1);
         assert_eq!(seen[0].head_sha, "newsha");
         assert!(seen[0].force);

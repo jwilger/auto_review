@@ -23,6 +23,7 @@ use axum::response::IntoResponse;
 use axum::routing::{get, post};
 use axum::Router;
 use metrics::Metrics;
+use poller::SharedCommentCursors;
 use serde::Serialize;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
@@ -64,6 +65,7 @@ pub struct AppState {
     /// webhook even on Forgejo retry). Backed by either the in-memory
     /// LRU or the SQLite table — `main.rs` picks based on env.
     pub webhook_dedup: Option<Arc<dyn crate::dedup::DeliveryDedup>>,
+    pub chat_comment_cursors: Option<SharedCommentCursors>,
     pub ci_review_endpoint: Option<CiReviewEndpointDeps>,
 }
 
@@ -192,6 +194,7 @@ impl AppState {
             info: None,
             webhook_rate_limit: None,
             webhook_dedup: None,
+            chat_comment_cursors: None,
             ci_review_endpoint: None,
         }
     }
@@ -209,6 +212,11 @@ impl AppState {
     /// without re-dispatching to the orchestrator.
     pub fn with_webhook_dedup(mut self, dedup: Arc<dyn crate::dedup::DeliveryDedup>) -> Self {
         self.webhook_dedup = Some(dedup);
+        self
+    }
+
+    pub fn with_chat_comment_cursors(mut self, cursors: SharedCommentCursors) -> Self {
+        self.chat_comment_cursors = Some(cursors);
         self
     }
 

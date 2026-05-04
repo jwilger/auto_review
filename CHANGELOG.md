@@ -12,6 +12,13 @@ since the start of the project.
 
 ### Changed
 
+#### Chat mention dispatch
+
+- `ar-gateway` now deduplicates top-level PR chat mentions shared by the
+  `issue_comment` webhook path and background poller, so a single
+  `@auto_review re-review` comment queues at most one forced review while the
+  poller still covers missed inline-thread mentions. Closes #50.
+
 #### Forgejo review-request webhooks
 
 - `ar-gateway` now handles Forgejo `pull_request.review_requested` webhooks for
