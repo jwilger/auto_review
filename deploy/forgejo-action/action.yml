@@ -54,11 +54,11 @@ runs:
         fi
 
         JSON_PAYLOAD=$(cat <<JSON
-        {"owner":"$OWNER","repo":"$REPO","pr_number":"$PR_NUMBER","head_sha":"$HEAD_SHA"}
+        {"owner":"$OWNER","repo":"$REPO","pr_number":$PR_NUMBER,"head_sha":"$HEAD_SHA"}
         JSON
         )
 
-        curl -fsS -X POST \
+        curl -fsS --connect-timeout 5 --max-time 30 -X POST \
           -H "Authorization: Bearer $ACTION_TOKEN" \
           -H "Content-Type: application/json" \
           --data "$JSON_PAYLOAD" \
