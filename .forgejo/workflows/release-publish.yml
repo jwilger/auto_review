@@ -1,0 +1,76 @@
+name: Publish release
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  release-publish:
+    runs-on: docker
+    if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && startsWith(github.event.pull_request.head.ref, 'release/v') }}
+    environment: release-publish
+    steps:
+      - name: Install or reuse Nix
+        run: |
+          set -euo pipefail
+          NIX_BIN_DIR="/nix/var/nix/profiles/default/bin"
+          if [ ! -x "$NIX_BIN_DIR/nix" ]; then
+            curl --proto '=https' --tlsv1.2 -sSf -L \
+              https://install.determinate.systems/nix \
+              | sh -s -- install linux \
+                --init none \
+                --no-confirm \
+                --extra-conf "experimental-features = nix-command flakes" \
+                --extra-conf "accept-flake-config = true"
+          fi
+          if ! getent group nixbld > /dev/null; then
+            groupadd -r nixbld
+          fi
+          for i in $(seq 1 32); do
+            if ! id -u "nixbld$i" > /dev/null 2>&1; then
+              useradd -r -g nixbld -G nixbld -d /var/empty \
+                -s /usr/sbin/nologin -c "Nix build user $i" "nixbld$i"
+            fi
+          done
+          echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          persist-credentials: false
+      - name: Validate release provenance and changed files
+        env:
+          FORGEJO_PULL_REQUEST_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          RELEASE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          RELEASE_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          [[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]
+          RELEASE_VERSION="${FORGEJO_PULL_REQUEST_HEAD_BRANCH#release/v}"
+          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA" | while IFS= read -r changed_file; do
+            case "$changed_file" in
+              Cargo.toml|CHANGELOG.md)
+                ;;
+              .forgejo/workflows/*|scripts/*)
+                printf 'refusing token-bearing publish for release PR file: %s\n' "$changed_file" >&2
+                exit 1
+                ;;
+              *)
+                printf 'refusing token-bearing publish for release PR file: %s\n' "$changed_file" >&2
+                exit 1
+                ;;
+            esac
+          done
+          printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
+      - name: Publish Forgejo release
+        env:
+          FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}
+          TEA_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}
+          FORGEJO_EVENT_NAME: pull_request
+          FORGEJO_EVENT_ACTION: closed
+          FORGEJO_PULL_REQUEST_MERGED: ${{ github.event.pull_request.merged }}
+          FORGEJO_PULL_REQUEST_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
+          FORGEJO_PULL_REQUEST_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+        run: |
+          set -euo pipefail
+          nix develop --command scripts/release publish --workspace . --version "$RELEASE_VERSION"

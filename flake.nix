@@ -47,8 +47,10 @@
               strPath = builtins.toString path;
             in
             (craneLib.filterCargoSources path type)
-            || baseName == "deny.toml"
-            || pkgs.lib.hasInfix "/.cargo/" strPath
+             || baseName == "deny.toml"
+             || baseName == "CHANGELOG.md"
+             || baseName == "flake.nix"
+             || pkgs.lib.hasInfix "/.cargo/" strPath
             || (pkgs.lib.hasInfix "/ar-prompts/schemas/" strPath
                 && pkgs.lib.hasSuffix ".json" path)
             || (pkgs.lib.hasInfix "/crates/" strPath && baseName == "README.md")
@@ -62,9 +64,27 @@
             || (pkgs.lib.hasInfix "/deploy/prometheus/" strPath
                 && pkgs.lib.hasSuffix ".yaml" path)
             || strPath == "${toString ./.}/deploy/forgejo-action/action.yml"
-            # ar-review's config tests verify the example YAML
-            # documents every known key.
-            || baseName == ".auto_review.example.yaml";
+             # ar-review's config tests verify the example YAML
+             # documents every known key.
+             || baseName == ".auto_review.example.yaml"
+             # Release automation contract tests and the project-local
+             # release script they exercise.
+             || (type == "directory"
+                 && (strPath == "${toString ./.}/tests"
+                     || strPath == "${toString ./.}/scripts"
+                     || strPath == "${toString ./.}/.forgejo"
+                     || strPath == "${toString ./.}/.forgejo/workflows"
+                     || strPath == "${toString ./.}/docs"
+                     || strPath == "${toString ./.}/deploy"
+                     || strPath == "${toString ./.}/deploy/systemd"))
+             || (pkgs.lib.hasInfix "/tests/" strPath
+                 && pkgs.lib.hasSuffix ".sh" path)
+             || (pkgs.lib.hasInfix "/scripts/" strPath)
+             || (pkgs.lib.hasInfix "/.forgejo/workflows/" strPath
+                 && pkgs.lib.hasSuffix ".yml" path)
+             || strPath == "${toString ./.}/docs/OPERATIONS.md"
+             || strPath == "${toString ./.}/docs/THREAT-MODEL.md"
+             || strPath == "${toString ./.}/deploy/systemd/auto_review.env.example";
         };
 
         commonArgs = {
@@ -108,6 +128,8 @@
             cargo-nextest
             git
             forgejo-mcp
+            tea
+            python3
             jq
             kubernetes-helm
             pkg-config
@@ -327,6 +349,23 @@
               buildPhaseCargoCommand = "cargo deny check licenses bans sources";
             }
           );
+          release-tooling = pkgs.runCommand "auto-review-release-tooling" {
+            inherit src;
+            nativeBuildInputs = with pkgs; [
+              bash
+              coreutils
+              git
+              python3
+              tea
+            ];
+          } ''
+            cp -R "$src" source
+            chmod -R u+w source
+            cd source
+            patchShebangs scripts/release
+            bash tests/release_tooling_test.sh
+            touch "$out"
+          '';
           ar-gateway-image = self.packages.${system}.ar-gateway-image;
         };
       }
