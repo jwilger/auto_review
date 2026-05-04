@@ -499,8 +499,9 @@ PY
   assert_file_contains "$prepare_workflow" 'scripts/release prepare' "release PR preparation workflow calls the prepare command"
   assert_file_not_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not map tea token from unsupported forgejo.token expression"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not map git push token from unsupported forgejo.token expression"
-  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow derives tea token from the auto-injected shell FORGEJO_TOKEN" 'GITEA_SERVER_TOKEN' 'FORGEJO_TOKEN'
-  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow derives git push token from the auto-injected shell FORGEJO_TOKEN" 'FORGEJO_ACTIONS_TOKEN' 'FORGEJO_TOKEN'
+  assert_file_contains "$prepare_workflow" 'repo_token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"' "release PR preparation workflow derives repo token from Forgejo token with GitHub-compatible fallback"
+  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN="$repo_token"' "release PR preparation workflow assigns tea token from derived repo token"
+  assert_file_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN="$repo_token"' "release PR preparation workflow assigns git push token from derived repo token"
   assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow derives tea server URL from shell FORGEJO_SERVER_URL with production fallback" 'GITEA_SERVER_URL' 'FORGEJO_SERVER_URL' 'https://git.johnwilger.com'
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow does not override auto FORGEJO_TOKEN from a missing prepare secret"
   assert_file_contains "$prepare_workflow" 'git fetch origin' "release PR preparation workflow checks remote branch state"
@@ -611,8 +612,9 @@ test_release_workflows_use_forgejo_builtin_prepare_token_and_protected_publish_t
 
   assert_file_not_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not use unsupported forgejo.token expression for tea"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not use unsupported forgejo.token expression for git push"
-  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow gives tea the auto-injected shell Forgejo token" 'GITEA_SERVER_TOKEN' 'FORGEJO_TOKEN'
-  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow gives git push the auto-injected shell Forgejo token" 'FORGEJO_ACTIONS_TOKEN' 'FORGEJO_TOKEN'
+  assert_file_contains "$prepare_workflow" 'repo_token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"' "release PR preparation workflow derives built-in repo token with GitHub-compatible fallback"
+  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN="$repo_token"' "release PR preparation workflow gives tea the derived repo token"
+  assert_file_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN="$repo_token"' "release PR preparation workflow gives git push the derived repo token"
   assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow gives tea the Forgejo server URL with fallback" 'GITEA_SERVER_URL' 'FORGEJO_SERVER_URL' 'https://git.johnwilger.com'
   assert_file_not_contains "$prepare_workflow" 'TEA_TOKEN:' "release PR preparation workflow does not use tea's legacy token env var"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_TOKEN: ${{ secrets.' "release PR preparation workflow does not override auto FORGEJO_TOKEN from custom secrets"
@@ -626,6 +628,17 @@ test_release_workflows_use_forgejo_builtin_prepare_token_and_protected_publish_t
   assert_file_not_contains "$publish_workflow" 'TEA_TOKEN:' "publish workflow does not use tea's legacy token env var"
   assert_file_not_contains "$publish_workflow" 'secrets.FORGEJO_TOKEN' "publish workflow does not use the legacy shared Actions secret"
   assert_file_not_contains "$publish_workflow" 'FORGEJO_RELEASE_PREPARE_TOKEN' "publish workflow does not expose the prepare-scoped Actions secret"
+}
+
+test_prepare_workflow_falls_back_to_github_compatible_runtime_env() {
+  local prepare_workflow
+  prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
+
+  assert_file_contains "$prepare_workflow" 'repo_token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"' "release PR preparation workflow derives one repo token from Forgejo or GitHub-compatible env"
+  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN="$repo_token"' "release PR preparation workflow assigns tea token from derived repo token"
+  assert_file_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN="$repo_token"' "release PR preparation workflow assigns git push token from derived repo token"
+  assert_file_contains "$prepare_workflow" 'missing FORGEJO_TOKEN or GITHUB_TOKEN' "release PR preparation workflow explains missing repo token aliases"
+  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_URL="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-https://git.johnwilger.com}}"' "release PR preparation workflow derives tea server URL from Forgejo or GitHub-compatible env"
 }
 
 test_publish_workflow_validates_provenance_and_changed_files_before_publish_token() {
@@ -818,7 +831,7 @@ test_prepare_workflow_pushes_release_branch_with_forgejo_builtin_repo_token_help
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
 
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not map git push token from unsupported forgejo.token expression"
-  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow exposes the auto-injected shell Forgejo token for git push" 'FORGEJO_ACTIONS_TOKEN' 'FORGEJO_TOKEN'
+  assert_file_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN="$repo_token"' "release PR preparation workflow exposes the derived repo token for git push"
   assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow pushes the branch with the built-in repo token credential helper" 'git -c credential.helper=' 'FORGEJO_ACTIONS_TOKEN' 'push --force-with-lease origin "$branch"'
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_TOKEN: ${{ secrets.' "release PR preparation workflow branch push does not override auto FORGEJO_TOKEN from custom secrets"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_RELEASE_PREPARE_TOKEN' "release PR preparation workflow branch push does not require an operator-created prepare secret"
@@ -926,6 +939,7 @@ test_release_workflows_install_or_reuse_nix_like_ci_before_nix_develop
 test_prepare_workflow_validates_dispatch_inputs_before_token_bearing_steps
 test_publish_workflow_requires_release_pr_base_branch_main
 test_release_workflows_use_forgejo_builtin_prepare_token_and_protected_publish_token
+test_prepare_workflow_falls_back_to_github_compatible_runtime_env
 test_publish_workflow_validates_provenance_and_changed_files_before_publish_token
 test_publish_workflow_semver_validates_version_before_publish_token
 test_publish_workflow_executes_from_merge_commit_sha_before_publish_token

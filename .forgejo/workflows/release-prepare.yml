@@ -59,9 +59,14 @@ jobs:
           RELEASE_DATE: ${{ inputs.date }}
         run: |
           set -euo pipefail
-          export GITEA_SERVER_TOKEN="$FORGEJO_TOKEN"
-          export FORGEJO_ACTIONS_TOKEN="$FORGEJO_TOKEN"
-          export GITEA_SERVER_URL="${FORGEJO_SERVER_URL:-https://git.johnwilger.com}"
+          repo_token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
+          if [ -z "$repo_token" ]; then
+            printf 'missing FORGEJO_TOKEN or GITHUB_TOKEN\n' >&2
+            exit 1
+          fi
+          export GITEA_SERVER_TOKEN="$repo_token"
+          export FORGEJO_ACTIONS_TOKEN="$repo_token"
+          export GITEA_SERVER_URL="${FORGEJO_SERVER_URL:-${GITHUB_SERVER_URL:-https://git.johnwilger.com}}"
           version="${RELEASE_VERSION:-$(python3 -c 'import pathlib,re; m=re.search(r"(?m)^version\s*=\s*\"(?P<version>[^\"]+)\"", pathlib.Path("Cargo.toml").read_text()); major,minor,patch=(int(part) for part in m.group("version").split(".")); print("0.1.0" if (major, minor, patch) == (0, 0, 1) else f"{major}.{minor}.{patch + 1}")')}"
           date="${RELEASE_DATE:-$(date +%F)}"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
