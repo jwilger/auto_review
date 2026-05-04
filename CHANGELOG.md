@@ -17,6 +17,8 @@ since the start of the project.
 - Added Forgejo Actions release automation that prepares reviewable release PRs
   from `main`, publishes tags/releases only after those PRs merge, and documents
   split release credentials and blast-radius guardrails. Closes #66.
+- Fixed release PR preparation so merges to `main` automatically trigger the
+  prepare/update workflow with default release version and date values.
 
 #### CI-gated semantic review dispatch
 

@@ -426,11 +426,76 @@ FAKE_GH
 }
 
 test_release_workflows_exist_for_prepare_pr_and_publish_on_merge() {
-  local prepare_workflow publish_workflow
+  local prepare_workflow publish_workflow output status
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
   assert_file_exists "$prepare_workflow" "release PR preparation workflow exists"
+  output="$(python3 - "$prepare_workflow" <<'PY'
+import pathlib
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text().splitlines()
+on_line = None
+for index, line in enumerate(workflow):
+    if line == "on:":
+        on_line = index
+        break
+if on_line is None:
+    print("workflow is missing top-level on mapping")
+    sys.exit(1)
+
+push_line = None
+for index in range(on_line + 1, len(workflow)):
+    line = workflow[index]
+    if not line.strip():
+        continue
+    indent = len(line) - len(line.lstrip())
+    if indent == 0:
+        break
+    if indent == 2 and line.strip() == "push:":
+        push_line = index
+        break
+if push_line is None:
+    print("on mapping is missing push trigger")
+    sys.exit(1)
+
+branches_line = None
+for index in range(push_line + 1, len(workflow)):
+    line = workflow[index]
+    if not line.strip():
+        continue
+    indent = len(line) - len(line.lstrip())
+    if indent <= 2:
+        break
+    if indent == 4 and line.strip() == "branches:":
+        branches_line = index
+        break
+if branches_line is None:
+    print("on.push is missing branches list")
+    sys.exit(1)
+
+branches = []
+for line in workflow[branches_line + 1:]:
+    if not line.strip():
+        continue
+    indent = len(line) - len(line.lstrip())
+    if indent <= 4:
+        break
+    if indent == 6 and line.strip().startswith("- "):
+        branches.append(line.strip()[2:])
+if branches != ["main"]:
+    print(f"on.push.branches must contain only main, got: {branches}")
+    sys.exit(1)
+sys.exit(0)
+PY
+  )"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "release PR preparation workflow runs automatically after pushes and merges to main"
+  else
+    fail "release PR preparation workflow runs automatically after pushes and merges to main ($output)"
+  fi
   assert_file_contains "$prepare_workflow" 'scripts/release prepare' "release PR preparation workflow calls the prepare command"
   assert_file_contains "$prepare_workflow" 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow authenticates tea with the prepare-scoped token"
   assert_file_contains "$prepare_workflow" 'git fetch origin' "release PR preparation workflow checks remote branch state"
@@ -470,15 +535,60 @@ test_release_workflows_install_or_reuse_nix_like_ci_before_nix_develop() {
 }
 
 test_prepare_workflow_validates_dispatch_inputs_before_token_bearing_steps() {
-  local prepare_workflow
+  local prepare_workflow output status
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
 
   assert_file_contains "$prepare_workflow" 'RELEASE_VERSION: ${{ inputs.version }}' "release PR preparation workflow moves dispatch version through env"
   assert_file_contains "$prepare_workflow" 'RELEASE_DATE: ${{ inputs.date }}' "release PR preparation workflow moves dispatch date through env"
-  assert_file_contains "$prepare_workflow" '[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]' "release PR preparation workflow validates semantic release version before use"
-  assert_file_contains "$prepare_workflow" '[[ "$RELEASE_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]' "release PR preparation workflow validates release date before use"
-  assert_file_contains_before "$prepare_workflow" '[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]' 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow validates version before token-bearing steps"
-  assert_file_contains_before "$prepare_workflow" '[[ "$RELEASE_DATE" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]' 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow validates date before token-bearing steps"
+  output="$(python3 - "$prepare_workflow" <<'PY'
+import pathlib
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+token_marker = 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}'
+if token_marker not in workflow:
+    print('missing token-bearing prepare step marker')
+    sys.exit(1)
+
+validation_section, token_section = workflow.split(token_marker, 1)
+
+def require_ordered(section, markers, label):
+    cursor = 0
+    for marker in markers:
+        found = section.find(marker, cursor)
+        if found == -1:
+            print(f'{label} missing ordered marker: {marker}')
+            sys.exit(1)
+        cursor = found + len(marker)
+
+require_ordered(
+    validation_section,
+    [
+        'version="${RELEASE_VERSION:-',
+        'date="${RELEASE_DATE:-',
+        '[[ "$version" =~ ^[0-9]+\\.[0-9]+\\.[0-9]+$ ]]',
+        '[[ "$date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]',
+    ],
+    'no-token validation step',
+)
+require_ordered(
+    token_section,
+    [
+        'version="${RELEASE_VERSION:-',
+        'date="${RELEASE_DATE:-',
+        'branch="release/v${version}"',
+        'scripts/release prepare --workspace . --version "$version" --date "$date"',
+    ],
+    'token-bearing prepare step',
+)
+PY
+  )"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "release PR preparation workflow derives and uses defaulted version/date in both validation and prepare steps"
+  else
+    fail "release PR preparation workflow derives and uses defaulted version/date in both validation and prepare steps ($output)"
+  fi
 }
 
 test_publish_workflow_requires_release_pr_base_branch_main() {
