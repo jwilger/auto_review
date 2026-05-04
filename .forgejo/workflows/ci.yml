@@ -79,7 +79,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Request auto_review review
-        uses: https://git.johnwilger.com/jwilger/auto_review/deploy/forgejo-action@main
+        uses: ./deploy/forgejo-action
         with:
           gateway-url: ${{ secrets.AUTO_REVIEW_GATEWAY_URL }}
           action-token: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
