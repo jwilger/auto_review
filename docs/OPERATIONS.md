@@ -345,10 +345,22 @@ preparation, semantic LLM review, verification, and posting. Host CPU/memory
 pressure now usually means too many concurrent reviews, large workspaces, or
 slow LLM calls rather than runaway linter execution.
 
-The normal review runtime also no longer requires a sandbox image at startup.
-`GET /info` reports `sandbox: "not-used"`; any legacy `AR_SANDBOX_IMAGE` value is
-ignored unless a future feature explicitly wires a feature-specific execution
-sandbox.
+Run the gateway inside your deployment isolation boundary (for example a
+container, VM, or service manager sandbox). The project exposes a Nix-built OCI
+image as `.#ar-gateway-image`; the image runs as uid/gid 65532 and binds
+`0.0.0.0:8080` inside the container.
+
+For local development against the same image shape:
+
+```bash
+nix run .#dev-gateway-container
+```
+
+The watcher rebuilds `.#ar-gateway-image`, loads it into Podman or Docker,
+removes the prior `auto-review-dev` container, and relaunches it on
+`127.0.0.1:8090`. It reads `.env` by default when present; override with
+`AR_DEV_ENV_FILE`, `AR_DEV_CONTAINER_RUNTIME`, `AR_DEV_CONTAINER_NAME`,
+`AR_DEV_IMAGE_TAG`, or `AR_DEV_GATEWAY_PORT`.
 
 ### 5.1.5 Cap concurrent in-flight reviews
 
@@ -615,8 +627,8 @@ against a test PR before depending on it.
 
 Before filing, capture:
 - `GET /version` JSON
-- `GET /info` JSON (runtime configuration: sandbox kind,
-  learnings store kind, LLM tiers, poller status)
+- `GET /info` JSON (runtime configuration: persistence backing,
+  LLM tiers, poller status)
 - `GET /metrics` snapshot
 - `journalctl -u auto-review --since "1h ago" --no-pager > logs.txt`
 - The exact commit-status `description` text from the failing PR

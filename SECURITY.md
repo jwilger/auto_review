@@ -47,8 +47,8 @@ unilaterally.
 
 In scope:
 - Anything in this repository's `crates/` source tree.
-- The shipped deploy artefacts under `deploy/` (Dockerfile,
-  Helm chart, systemd unit, Forgejo Action template).
+- The shipped deploy artefacts under `deploy/`, the Nix-built OCI
+  image, Helm chart, systemd unit, and Forgejo Action template.
 - Default configurations and example env files.
 - The bundled prompts and JSON schemas under
   `crates/ar-prompts/`.

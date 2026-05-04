@@ -247,9 +247,18 @@ Common optional env vars:
 | `AR_READINESS_TTL_SECS` | `10` | cache TTL for `/readyz` Forgejo probe |
 | `RUST_LOG` | `info,ar_gateway=debug` | tracing-subscriber filter |
 
-No sandbox image env var is required for the normal gateway/orchestrator review
-runtime. Deterministic linters, tests, and builds run in CI before the semantic
-review trigger; `GET /info` reports `sandbox: "not-used"`.
+Deterministic linters, tests, and builds run in CI before the semantic review
+trigger. The gateway clones and reads PR workspaces for review context, but it
+does not run repo-controlled tools.
+
+For local containerized gateway development, run:
+
+```bash
+nix run .#dev-gateway-container
+```
+
+The watcher rebuilds the Nix image, loads it into Podman or Docker, and
+relaunches the gateway on `127.0.0.1:8090` after Rust/Nix source changes.
 
 Full reference (every env var with rationale): see
 `deploy/systemd/auto_review.env.example`.

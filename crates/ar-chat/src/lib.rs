@@ -1,8 +1,9 @@
 //! Agentic chat handler.
 //!
 //! Triggered by `@auto_review` mentions in PR comments. Maintains
-//! per-thread conversation state and uses sandboxed tools (grep, cat,
-//! ast-grep, optional test/build) to investigate and respond.
+//! per-thread conversation state, dispatches review actions, and uses
+//! LLM-generated text for human-applied suggestions. It does not expose
+//! shell, test, or build execution from chat.
 //!
 //! Currently shipping the command parser and the data types. The
 //! webhook routing and per-command handlers (remember/forget against

@@ -106,7 +106,7 @@ bundled linters or repo-supplied linter configs. Deterministic linters, tests,
 and builds run in CI under the operator's CI isolation policy before CI calls
 the semantic-review endpoint. The reviewer runtime only clones for read-only
 context and LLM verification; `AR_SANDBOX_IMAGE` is not required for normal
-gateway startup and `/info` reports `sandbox: "not-used"`.
+gateway startup and `/info` does not expose a sandbox field.
 Git clone/fetch/checkout remain host subprocesses, so they run through a
 hermetic command wrapper that disables system/global Git config, clears
 env-injected Git config, isolates home config paths, and removes ambient Git
@@ -276,13 +276,12 @@ threat-model claims fail CI when a regression slips in:
 
 T1 is now primarily an architectural guardrail: normal review jobs must not
 reintroduce repo-controlled deterministic tool execution. Issue #46's rescope
-enumerates remaining workspace paths in `docs/ADR-0002-sandbox.md`; the
-gateway startup test pins that legacy `AR_SANDBOX_IMAGE` is ignored for normal
-runtime `/info`. `crates/ar-review/src/workspace.rs` red-team tests pin that
-Git workspace preparation ignores host global aliases, env-injected Git config,
-ambient repo/template/object/SSH variables, and askpass helpers. The remaining
-`crates/ar-sandbox` Podman tests preserve the isolation behavior for any future
-feature that explicitly needs process execution.
+enumerates remaining workspace paths in `docs/ADR-0002-sandbox.md`;
+`crates/ar-review/src/workspace.rs` red-team tests pin that Git workspace
+preparation ignores host global aliases, env-injected Git config, ambient
+repo/template/object/SSH variables, and askpass helpers. Any future feature that
+explicitly needs process execution must add a new threat-model entry and tests
+for its specific isolation boundary.
 
 ## How to update this document
 

@@ -108,9 +108,7 @@ the navigation aid. The summary table:
 | `ar-llm` | Provider trait + tier-based Router |
 | `ar-prompts` | Prompt templates + JSON schemas + validation |
 | `ar-review` | Pipeline activities (review, verify, self-heal, RAG context, repo config) |
-| `ar-tools` | Legacy static-analysis runners retained outside normal runtime |
 | `ar-cli` | Operator CLI (init / register-webhook / review-once / bench / doctor / status / 16 more — see crate README) |
-| `ar-sandbox` | Sandbox trait + DirectSandbox + PodmanSandbox (see ADR-0002) |
 | `ar-chat` | Agentic `@auto_review` chat handler (7 specific commands + freeform fallback) |
 | `ar-index` | Tree-sitter symbols, embeddings, co-change graph, learnings store |
 

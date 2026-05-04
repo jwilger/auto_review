@@ -502,7 +502,6 @@ pub async fn status(args: StatusArgs) -> Result<()> {
 pub(crate) struct StatusSummary {
     pub version: String,
     pub bot_login: String,
-    pub sandbox: String,
     pub learnings: String,
     pub history: String,
     pub poller_enabled: bool,
@@ -572,7 +571,6 @@ impl StatusSummary {
         Self {
             version: version["version"].as_str().unwrap_or("unknown").to_string(),
             bot_login: info["bot_login"].as_str().unwrap_or("unknown").to_string(),
-            sandbox: info["sandbox"].as_str().unwrap_or("unknown").to_string(),
             learnings: info["learnings"].as_str().unwrap_or("unknown").to_string(),
             history: info["history"].as_str().unwrap_or("unknown").to_string(),
             poller_enabled: info["poller_enabled"].as_bool().unwrap_or(false),
@@ -609,14 +607,6 @@ impl StatusSummary {
         println!("auto_review status — {base}");
         println!("  version          {}", self.version);
         println!("  bot login        {}", self.bot_login);
-        println!(
-            "  sandbox          {}",
-            match self.sandbox.as_str() {
-                "podman" => "podman (hardened)",
-                "direct" => "direct (NO ISOLATION — Kudelski-class RCE risk)",
-                other => other,
-            }
-        );
         println!("  learnings        {}", self.learnings);
         println!("  history          {}", self.history);
         println!(
@@ -1838,7 +1828,6 @@ auto_review_reviews_completed_count 2
         let version = serde_json::json!({"name": "auto_review", "version": "0.1.0"});
         let info = serde_json::json!({
             "bot_login": "auto_review",
-            "sandbox": "podman",
             "learnings": "sqlite",
             "poller_enabled": true,
             "readiness_enabled": true
@@ -1846,6 +1835,11 @@ auto_review_reviews_completed_count 2
         let summary = StatusSummary::compute(&version, &info, "");
         assert_eq!(summary.jobs_dispatched_total, 0);
         assert!(summary.success_rate.is_none());
+        let json = serde_json::to_value(&summary).unwrap();
+        assert!(
+            json.get("sandbox").is_none(),
+            "status JSON should not preserve the removed gateway sandbox surface: {json}"
+        );
     }
 
     #[test]
@@ -1881,7 +1875,6 @@ auto_review_reviews_completed_count 10
             version: env!("CARGO_PKG_VERSION"),
             bot_login: "pr-bot".into(),
             bot_name: "pr-bot".into(),
-            sandbox: "podman",
             learnings: "sqlite".into(),
             history: "sqlite".into(),
             vector: "sqlite".into(),

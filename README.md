@@ -40,7 +40,7 @@ plan; [ADR-0001](./docs/ADR-0001-architecture.md) captures the
 architecture decision; the [threat model](./docs/THREAT-MODEL.md)
 enumerates attacker profiles, trust boundaries, and per-class
 mitigations (read this before exposing the bot to drive-by PRs).
-[ADR-0002](./docs/ADR-0002-sandbox.md) records the superseded linter
+[ADR-0002](./docs/ADR-0002-sandbox.md) records the retired linter
 sandbox decision and completed issue #46 rescope; [ADR-0003](./docs/ADR-0003-observability.md)
 documents the metrics / readiness / runtime-introspection design;
 [ADR-0004](./docs/ADR-0004-vector-store.md) explains why
@@ -79,8 +79,6 @@ OpenAI, Ollama, vLLM, OpenRouter, Together, Groq, etc.).
 | `ar-forgejo` | Forgejo REST client |
 | `ar-llm` | LLM provider trait + implementations |
 | `ar-index` | Tree-sitter parsers + embeddings + co-change graph + learnings store |
-| `ar-tools` | Legacy static-analysis runners retained outside normal review runtime |
-| `ar-sandbox` | Sandbox abstraction retained for future execution features and tests |
 | `ar-prompts` | Prompt templates and JSON schemas |
 | `ar-review` | Review pipeline activities |
 | `ar-chat` | Agentic `@auto_review` chat handler |

@@ -1,7 +1,6 @@
 # ADR-0002: Linter Sandbox
 
-Status: **Superseded for normal review runtime** (issue #46 rescope complete;
-`ar-sandbox` is retained only for future execution features and tests)
+Status: **Retired for normal review runtime** (issue #46 rescope complete)
 Date: 2026-04-30 (revised 2026-05-03 to note runtime linter execution removal
 and issue #46 sandbox rescope; 2026-04-30 to clarify the OCI-runtime position:
 podman OR docker was the historical production sandbox; youki was explicitly
@@ -10,9 +9,9 @@ future work)
 > As of issues #45 and #46, normal review/orchestrator jobs no longer execute
 > bundled linters or route linter findings into semantic review. Deterministic
 > linters/tests/builds are owned by CI before it triggers `auto_review`.
-> Historical rationale below remains useful background for any future sandboxed
-> execution feature, but `AR_SANDBOX_IMAGE` and `deploy/Dockerfile.sandbox` are
-> retired for the normal gateway runtime.
+> Historical rationale below remains useful background, but the linter sandbox
+> implementation, `AR_SANDBOX_IMAGE`, and `deploy/Dockerfile.sandbox` are retired
+> for the normal gateway runtime.
 
 ## Historical context (superseded)
 
@@ -41,16 +40,12 @@ and orchestrator runtime:
 
 - Normal review jobs do **not** execute bundled linters.
 - Normal review prompts do **not** receive linter findings.
-- Gateway startup no longer selects `AR_SANDBOX_IMAGE`, and
-  `deploy/Dockerfile.sandbox` is retired.
+- Gateway startup no longer selects `AR_SANDBOX_IMAGE`, and the old linter
+  sandbox implementation is retired.
 - Deterministic linters, tests, and builds belong in project CI before the
   CI-triggered `auto_review` request.
-- `/info` reports `sandbox: "not-used"` for the normal review runtime even if a
-  legacy `AR_SANDBOX_IMAGE` value is present.
-
-The old sandbox design below is retained as historical threat-model context for
-future features that would execute untrusted workspace contents. It is no
-longer normative for normal semantic review.
+The old sandbox design below is retained only as historical threat-model context.
+It is no longer normative for normal semantic review.
 
 ## Issue #46 workspace-path rescope
 
@@ -65,9 +60,10 @@ split by capability:
 | Agentic verifier `read_file` / `search` | Read-only LLM-issued file reads and regex search under the clone root | Pure path confinement via canonicalization, symlink escape rejection, recursion/result caps; no shell tool is exposed. |
 | Chat `re-review` | Dispatches a forced review for the current Forgejo head SHA | Same as normal review; no direct workspace execution in the chat handler. |
 | Chat free-form / `autofix` / `docstring` / `tests` | Fetches Forgejo diffs and asks the cheap-tier LLM for text, suggestions, or scaffolds | Forgejo-side diff only; generated text is posted for humans to apply, not executed by the bot. |
-| Legacy `ar-tools` linter runners | Can execute deterministic tools through `ar_sandbox::Sandbox` when called directly by tests or experiments | Not wired into gateway/orchestrator runtime. Any supported future caller must introduce feature-specific fail-closed config and threat-model tests. |
+| Historical linter runners | Removed from the active workspace with the sandbox abstraction | Deterministic tool execution belongs in CI. Any future bot-side execution feature must introduce a new, feature-specific design, fail-closed config, and threat-model tests. |
 
-Consequently, there is no global sandbox image requirement for gateway startup.
+Consequently, there is no global sandbox image requirement for gateway startup
+and no sandbox field in `/info`.
 If a future feature adds repo-controlled command execution (for example, running
 tests for an `@auto_review tests` command instead of only proposing scaffolds),
 that feature must be gated explicitly with its own required sandbox/runtime
@@ -86,7 +82,9 @@ boundary with host global aliases, env-injected aliases, explicit env-removal
 assertions, and askpass/prompt assertions.
 
 Historically, every linter spawn went through an `ar_sandbox::Sandbox` trait with
-two implementations:
+two implementations. Those crates are now removed from the active workspace;
+this section records the retired design so future work does not accidentally
+inherit it:
 
 - `DirectSandbox` — a thin pass-through that spawns the binary with
   `tokio::process::Command`. **No isolation.** Suitable only for tests
@@ -108,10 +106,10 @@ two implementations:
   back to docker.
 
 Historically, the gateway selected an implementation at startup based on
-`AR_SANDBOX_IMAGE`. That gateway wiring was removed with issue #45 and issue
-#46 confirms no remaining default path needs it. Any future runtime execution
-path must be re-evaluated explicitly rather than inheriting this linter-era
-decision.
+`AR_SANDBOX_IMAGE`. That gateway wiring was removed with issue #45, and issue
+#46 removed the leftover linter/sandbox crates from the active workspace. Any
+future runtime execution path must be re-evaluated explicitly rather than
+inheriting this linter-era decision.
 
 ## Historical trade-offs (superseded)
 
@@ -120,38 +118,16 @@ decision.
   onboarding step. The issue #45 design removes this linter-driven startup
   requirement from normal review runtime.
 
-- **No youki yet — and that's fine for v1.** youki is a Rust-
-  native OCI runtime that would let us skip the shell-out
-  altogether (linker against `libcontainer` instead of forking
-  `podman` / `docker`). The win is purely operational: lower
-  per-spawn overhead, no external binary on PATH, pure-Rust build
-  artefact. The threat-model coverage is *identical* — the
-  hardening flags (`--network=none`, `--read-only`,
-  `--cap-drop=ALL`, etc.) get translated into the same kernel-
-  level controls regardless of which OCI runtime applies them.
-  youki integration is therefore explicitly **future-work, not a
-  gate on shipping**. The trait surface (`Sandbox::run(...)
-  -> SandboxOutput`) is shaped so a `YoukiSandbox` impl drops
-  in alongside `PodmanSandbox` without touching callers. Until
-  then podman/docker is the production answer: same threat
-  model, dramatically less integration cost.
+- **No youki / reusable sandbox abstraction.** A future bot-side execution
+  feature may still choose an OCI runtime, gVisor, WASM, or another isolation
+  boundary, but it must do so with a fresh design and tests for that exact
+  feature. Keeping a generic `Sandbox::run(...)` surface without a current
+  caller encouraged speculative reuse, so issue #46 removed it.
 
-- **No precision/recall benchmark for sandbox escapes** — *until
-  the v0.1 ship, that is.* The escape harness in
-  `crates/ar-sandbox/tests/escape.rs` covers seven attack classes
-  against the production flag set: network egress denial, fork-
-  bomb containment, wall-clock termination, repo-mount read-only
-  enforcement, unprivileged-uid execution, no-new-privileges,
-  and dropped capabilities. Run with `cargo test -p ar-sandbox
-  --test escape -- --ignored`. Tests skip cleanly when no OCI
-  runtime is on PATH; in CI they run against whichever runtime
-  the runner provides.
-
-- **DirectSandbox ships in the workspace**: it's tempting to make
-  it test-only. We chose to ship it because (a) tests need it,
-  (b) local-dev needs it, and (c) the warning banner makes the
-  production gap loud. Removing it would push test code into a
-  dev-only crate without making operators safer.
+- **No retained escape harness.** The linter-era escape tests validated a
+  retired flag set for a retired runtime path. CI runner isolation is now an
+  operator concern, and any future bot-side execution path must add targeted
+  red-team tests with its implementation.
 
 - **Wall-clock timeout enforced host-side**: tokio's `timeout`
   wrapper kills the parent process; podman's `--rm` cleans up the
@@ -164,19 +140,15 @@ decision.
 
 - Normal review/orchestrator jobs no longer own or receive a sandbox handle.
 - `ar-review` no longer exposes linter routing or linter-only review APIs.
-- `ar_sandbox::PodmanSandbox` is exercised today by argv-shape unit tests and
-  retained live escape tests, but not by normal gateway/orchestrator jobs. That's
-  a deliberate boundary: the crate remains available for a future feature that
-  explicitly needs untrusted process execution, not as a startup dependency for
-  semantic review.
+- The linter runner and sandbox crates are removed from the active workspace.
+  Future untrusted process execution must reintroduce only the feature-specific
+  code, configuration, docs, and red-team tests it needs.
 
 ## Alternatives considered
 
 - **gVisor + runsc**: stronger isolation than vanilla namespaces,
-  but adds another runtime dependency on the gateway host. Podman
-  configured to use runsc would slot in via `AR_SANDBOX_PODMAN_BIN`
-  or by adding a `--runtime=runsc` flag in `PodmanSandboxConfig`.
-  Deferred.
+  but adds another runtime dependency on the gateway host. Deferred with the
+  rest of the linter-era sandbox implementation.
 - **Cloud Run-style sidecar containers**: would require the gateway
   to be deployed on a runtime that can spin up sibling containers
   on demand. Doesn't fit the "single-tenant `docker compose up`"
