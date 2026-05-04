@@ -58,7 +58,7 @@ runs:
         JSON
         )
 
-        curl -fsS -X POST \
+        curl -fsS --connect-timeout 5 --max-time 30 -X POST \
           -H "Authorization: Bearer $ACTION_TOKEN" \
           -H "Content-Type: application/json" \
           --data "$JSON_PAYLOAD" \
