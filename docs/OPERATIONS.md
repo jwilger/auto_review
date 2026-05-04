@@ -358,9 +358,10 @@ nix run .#dev-gateway-container
 
 The watcher rebuilds `.#ar-gateway-image`, loads it into Podman or Docker,
 removes the prior `auto-review-dev` container, and relaunches it on
-`127.0.0.1:8090`. It reads `.env` by default when present; override with
-`AR_DEV_ENV_FILE`, `AR_DEV_CONTAINER_RUNTIME`, `AR_DEV_CONTAINER_NAME`,
-`AR_DEV_IMAGE_TAG`, or `AR_DEV_GATEWAY_PORT`.
+`127.0.0.1:8090`. It passes common gateway/LLM environment variables through
+from the host and reads `.env` by default when present; override with
+`AR_DEV_ENV_FILE`, `AR_DEV_ENV_PASSTHROUGH`, `AR_DEV_CONTAINER_RUNTIME`,
+`AR_DEV_CONTAINER_NAME`, `AR_DEV_IMAGE_TAG`, or `AR_DEV_GATEWAY_PORT`.
 
 ### 5.1.5 Cap concurrent in-flight reviews
 

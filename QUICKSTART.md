@@ -258,7 +258,9 @@ nix run .#dev-gateway-container
 ```
 
 The watcher rebuilds the Nix image, loads it into Podman or Docker, and
-relaunches the gateway on `127.0.0.1:8090` after Rust/Nix source changes.
+relaunches the gateway on `127.0.0.1:8090` after Rust/Nix source changes. It
+passes common gateway/LLM environment variables through from the host and also
+loads `.env` when present.
 
 Full reference (every env var with rationale): see
 `deploy/systemd/auto_review.env.example`.

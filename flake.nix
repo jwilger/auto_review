@@ -215,6 +215,7 @@
                 tag="''${AR_DEV_IMAGE_TAG:-git.johnwilger.com/jwilger/auto_review/ar-gateway:dev}"
                 port="''${AR_DEV_GATEWAY_PORT:-8090}"
                 env_file="''${AR_DEV_ENV_FILE:-.env}"
+                env_passthrough="''${AR_DEV_ENV_PASSTHROUGH:-WEBHOOK_SECRET FORGEJO_BASE_URL AR_FORGEJO_TOKEN LLM_BASE_URL LLM_API_KEY LLM_REASONING_MODEL LLM_CHEAP_MODEL LLM_CHEAP_BASE_URL LLM_CHEAP_API_KEY LLM_EMBEDDING_MODEL LLM_EMBEDDING_BASE_URL LLM_EMBEDDING_API_KEY AR_CI_REVIEW_TOKEN}"
 
                 load_image() {
                   if [ "$runtime" = "podman" ]; then
@@ -240,13 +241,18 @@
                   if [ -f "$env_file" ]; then
                     args+=(--env-file "$env_file")
                   fi
+                  for env_name in $env_passthrough; do
+                    if [ -n "''${!env_name:-}" ]; then
+                      args+=(--env "$env_name")
+                    fi
+                  done
                   args+=(-v "auto-review-dev-state:/var/lib/auto_review" "$tag")
                   "$runtime" "''${args[@]}"
                 }
 
                 export -f rebuild_and_restart
                 export -f load_image
-                export runtime name tag port env_file
+                export runtime name tag port env_file env_passthrough
 
                 watchexec \
                   --restart \
