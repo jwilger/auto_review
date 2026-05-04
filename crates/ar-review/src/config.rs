@@ -29,18 +29,6 @@ pub struct RepoConfig {
     /// rendering.
     #[serde(default)]
     pub ignored_paths: Vec<String>,
-
-    /// Repo-author-supplied natural-language pre-merge checks. Each
-    /// entry is evaluated against the diff by the cheap LLM tier and
-    /// surfaces in the review body's "Pre-merge checks" section
-    /// alongside the built-in deterministic checks.
-    /// Example:
-    ///   pre_merge_checks:
-    ///     - "All new public APIs have rustdoc comments"
-    ///     - "No raw SQL queries; everything goes through QueryBuilder"
-    /// Skipped silently when the cheap tier is unconfigured.
-    #[serde(default)]
-    pub pre_merge_checks: Vec<String>,
 }
 
 fn default_true() -> bool {
@@ -53,7 +41,6 @@ impl Default for RepoConfig {
             enabled: true,
             guidelines: String::new(),
             ignored_paths: Vec::new(),
-            pre_merge_checks: Vec::new(),
         }
     }
 }
@@ -71,7 +58,7 @@ pub fn parse_repo_config(yaml: &str) -> Result<RepoConfig, serde_yaml::Error> {
 /// in sync with [`RepoConfig`] manually — the contract test
 /// `strict_allowlist_matches_struct_fields` in `config.rs` pins
 /// the relationship.
-const KNOWN_KEYS: &[&str] = &["enabled", "guidelines", "ignored_paths", "pre_merge_checks"];
+const KNOWN_KEYS: &[&str] = &["enabled", "guidelines", "ignored_paths"];
 
 /// Strict parser: surfaces unknown top-level keys as errors so a
 /// typo like `enabld: true` (missing `e`) is caught at validation
@@ -335,11 +322,12 @@ ignored_paths:
 
     #[test]
     fn strict_rejects_retired_linter_keys() {
-        let yaml = "mode: linter_only\ndisabled_tools:\n  - ruff\n";
+        let yaml = "mode: linter_only\ndisabled_tools:\n  - ruff\npre_merge_checks:\n  - old\n";
         let err = parse_repo_config_strict(yaml).expect_err("retired keys should fail");
         let msg = format!("{err}");
         assert!(msg.contains("disabled_tools"), "{msg}");
         assert!(msg.contains("mode"), "{msg}");
+        assert!(msg.contains("pre_merge_checks"), "{msg}");
     }
 
     #[test]

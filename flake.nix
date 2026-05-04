@@ -33,7 +33,7 @@
         # Crane source filter. We need cargo sources plus:
         # - workspace-root configuration files cargo-deny needs
         # - JSON schemas referenced via `include_str!` from
-        #   ar-prompts (review/triage/verification/pre_merge_custom)
+        #   ar-prompts (review/triage/verification)
         # - per-crate README.md files (ar-cli's contract test reads
         #   its own README to verify every subcommand is documented)
         # - bench/fixtures/*.json (ar-cli's bench parser fixtures

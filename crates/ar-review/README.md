@@ -2,8 +2,8 @@
 
 Review-pipeline activities: clone the PR workspace,
 build RAG context, render the LLM prompt, validate output via
-self-heal, optionally verify findings, evaluate pre-merge checks,
-and map the result to a Forgejo review request.
+self-heal, optionally verify findings, and map the result to a
+Forgejo review request.
 
 ## Public surface
 
@@ -12,8 +12,6 @@ and map the result to a Forgejo review request.
 | `pipeline::review_pull_request` | Top-level semantic review activity. Inputs via `ReviewArgs`; outputs a `ReviewOutcome`. Branches on `VerifyMode::{Simple, Agentic}`. |
 | `config::RepoConfig` | `.auto_review.yaml` parser. `parse_repo_config` (permissive runtime loader) and `parse_repo_config_strict` (typo-rejecting validator) cover the two use cases. |
 | `workspace::prepare_workspace` | Shallow `git clone` of the PR's head SHA into a tmpfs workdir. Token-redacting URL builder. |
-| `pre_merge::evaluate` | Three deterministic built-in checks (CHANGELOG / tests / TODOs). |
-| `pre_merge_llm::evaluate_custom_checks` | LLM-backed evaluation of repo-author-supplied free-form checks from `.auto_review.yaml`. |
 | `verify::verify_findings`, `agentic_verify::verify_findings_agentic` | Two verifier modes; the agentic one uses the workspace tools. |
 | `workspace_tools::{read_file, search}` | Read-only LLM-callable tools, sandboxed under the workspace root. |
 | `heal::generate_with_self_heal` | LLM-call wrapper that retries on schema-validation failure with the validator's error appended to the prompt. |
@@ -24,7 +22,7 @@ and map the result to a Forgejo review request.
 ```
 prepare_workspace
    ↓
-load_repo_config (ignored_paths, guidelines, pre_merge_checks, …)
+load_repo_config (ignored_paths, guidelines, …)
    ↓
 list_changed_files → filter (ignored_paths)
    ↓
@@ -39,8 +37,6 @@ verify_findings / verify_findings_agentic
 filter by min_severity (AR_SEVERITY_FLOOR)
    ↓
 output_to_review_request → forgejo.create_review
-   ↓
-evaluate built-in + custom pre-merge checks → append to body
 ```
 
 ## Tests

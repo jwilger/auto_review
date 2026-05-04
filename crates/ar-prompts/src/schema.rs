@@ -56,10 +56,6 @@ mod tests {
             ("review", crate::schema::review_schema()),
             ("triage", crate::triage::triage_schema()),
             ("verification", crate::verification::verification_schema()),
-            (
-                "pre_merge_custom",
-                crate::pre_merge_custom::pre_merge_custom_schema(),
-            ),
         ] {
             assert_strict_mode_compatible(schema, name);
         }

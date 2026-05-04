@@ -34,8 +34,8 @@ Delete the comment block once you've filled the rest in.
 
 ## Pre-merge checklist
 
-<!-- The bot will run its own pre-merge checks and append them to
-the review. These are the human-side ones. -->
+<!-- Human-side release/readiness checklist. Project-enforced checks
+belong in CI/static analysis jobs. -->
 
 - [ ] CHANGELOG.md updated (under `[Unreleased]`)
 - [ ] Public surface changes have rustdoc on the new items

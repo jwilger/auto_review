@@ -17,15 +17,15 @@ When you open or update a pull request, the bot:
 4. Verifies the model's findings against the actual code, dropping
    the ones the diff doesn't corroborate.
 5. Posts a single review with inline comments and an overall
-   summary, plus a [pre-merge checklist](#pre-merge-checks).
+   summary.
 
 The status badge `auto_review` on the commit reflects the result:
 **success** = review posted (zero or more findings), **failure** =
 the bot couldn't complete the review (LLM unhealable, etc.),
 **error** = transport-level failure (Forgejo / workspace).
 
-The bot **does not auto-merge, auto-approve, or auto-close**. Every
-suggestion is advisory.
+The bot **does not auto-merge or auto-close**. Every suggestion is
+advisory.
 
 ## Reading inline comments
 
@@ -39,25 +39,6 @@ Each finding renders with a severity icon and label:
 
 Multi-line ranges render as `**Lines N–M:**` because Forgejo's
 inline-comment schema doesn't carry an end line.
-
-## Pre-merge checks
-
-The review body ends with a `## Pre-merge checks` checklist:
-
-- `[x]` — passed
-- `[ ]` — failed (advisory; doesn't block merging)
-- `[~]` — skipped (didn't apply to this diff)
-
-Three deterministic built-ins always run: **CHANGELOG updated**,
-**Tests touched**, **No new TODO/FIXME comments**. Repos can add
-custom natural-language checks via
-[`pre_merge_checks:`](#repo-config) and the bot evaluates each
-against the diff.
-
-Failing a check asks for changes in the posted review, but it is still
-a **nudge, not a merge gate**. auto_review does not enforce branch
-protection; your Forgejo repository settings decide whether a
-Request-changes review blocks merging.
 
 ## Talking to the bot
 
@@ -136,13 +117,6 @@ ignored_paths:
   - "vendor/**"
   - "src/generated/**"
 
-# Free-form English checks evaluated by the cheap LLM tier. Each
-# one renders as a checklist item under the "Pre-merge checks"
-# section of the review body. Skipped when no cheap-tier model
-# is configured.
-pre_merge_checks:
-  - "All new public APIs have rustdoc comments"
-  - "No raw SQL queries; everything goes through QueryBuilder"
 ```
 
 Validate locally before committing:

@@ -23,8 +23,8 @@ numbers, "today") before posting.
 >   guidance to a reasoning LLM.
 > - Verifies the model's findings against the actual code,
 >   dropping anything the diff doesn't corroborate.
-> - Posts a single review with inline comments and a pre-merge
->   checklist.
+> - Posts a single review with inline comments and an overall
+>   summary.
 >
 > **What it deliberately doesn't do:** auto-merge, auto-approve,
 > or auto-close. Every suggestion is advisory; humans stay in
@@ -91,7 +91,7 @@ numbers, "today") before posting.
 >   `@auto_review remember "do X"` in any PR comment to add a
 >   guideline.
 > - Per-repo `.auto_review.yaml` for ignored paths and custom
->   pre-merge checks.
+>   review guidelines.
 > - `/metrics` endpoint with Prometheus counters; Grafana
 >   dashboard + Helm chart in `deploy/`.
 >

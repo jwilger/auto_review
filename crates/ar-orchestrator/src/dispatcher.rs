@@ -479,63 +479,53 @@ pub async fn run_review_job(
         &job,
     )
     .await;
-    let (ignored_paths, guidelines, repo_context, raw_diff, pre_merge_checks, workspace) =
-        match prep_outcome {
-            Ok(WorkspacePrepOutput {
-                skipped_by_config: true,
-                ..
-            }) => {
-                tracing::info!(
-                    repo = format!("{}/{}", job.owner, job.repo),
-                    pr = job.pr_number,
-                    "skipping review: disabled by .auto_review.yaml"
-                );
-                let _ = forgejo
-                    .post_commit_status(
-                        &job.owner,
-                        &job.repo,
-                        &job.head_sha,
-                        &CommitStatus {
-                            state: CommitStatusState::Success,
-                            target_url: String::new(),
-                            description: "auto_review: disabled by repo config".into(),
-                            context: STATUS_CONTEXT.into(),
-                        },
-                    )
-                    .await;
-                observe(ReviewObservation::Skipped {
-                    reason: "disabled_by_config",
-                });
-                return;
-            }
-            Ok(WorkspacePrepOutput {
-                ignored_paths,
-                guidelines,
-                repo_context,
-                raw_diff,
-                pre_merge_checks,
-                workspace,
-                ..
-            }) => (
-                ignored_paths,
-                guidelines,
-                repo_context,
-                raw_diff,
-                pre_merge_checks,
-                workspace,
-            ),
-            Err(e) => {
-                tracing::warn!(error = %e, "workspace/context prep failed; continuing without workspace context");
-                (
-                    GlobSet::empty(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    Vec::new(),
-                    None,
+    let (ignored_paths, guidelines, repo_context, raw_diff, workspace) = match prep_outcome {
+        Ok(WorkspacePrepOutput {
+            skipped_by_config: true,
+            ..
+        }) => {
+            tracing::info!(
+                repo = format!("{}/{}", job.owner, job.repo),
+                pr = job.pr_number,
+                "skipping review: disabled by .auto_review.yaml"
+            );
+            let _ = forgejo
+                .post_commit_status(
+                    &job.owner,
+                    &job.repo,
+                    &job.head_sha,
+                    &CommitStatus {
+                        state: CommitStatusState::Success,
+                        target_url: String::new(),
+                        description: "auto_review: disabled by repo config".into(),
+                        context: STATUS_CONTEXT.into(),
+                    },
                 )
-            }
-        };
+                .await;
+            observe(ReviewObservation::Skipped {
+                reason: "disabled_by_config",
+            });
+            return;
+        }
+        Ok(WorkspacePrepOutput {
+            ignored_paths,
+            guidelines,
+            repo_context,
+            raw_diff,
+            workspace,
+            ..
+        }) => (ignored_paths, guidelines, repo_context, raw_diff, workspace),
+        Err(e) => {
+            tracing::warn!(error = %e, "workspace/context prep failed; continuing without workspace context");
+            (
+                GlobSet::empty(),
+                String::new(),
+                String::new(),
+                String::new(),
+                None,
+            )
+        }
+    };
 
     // The agentic verifier needs the cloned workspace to inspect.
     // Operators opt in by setting AR_AGENTIC_VERIFIER=1; without it,
@@ -580,7 +570,6 @@ pub async fn run_review_job(
         pr_title: &job.pr_title,
         pr_body: &job.pr_body,
         ignored_paths: &ignored_paths,
-        custom_pre_merge_checks: &pre_merge_checks,
         min_severity: severity_floor_from_env(),
         guidelines: &guidelines,
         repo_context: &repo_context,
@@ -690,9 +679,6 @@ struct WorkspacePrepOutput {
     /// failed during workspace/context prep (we degrade-but-continue;
     /// the pipeline will refetch and likely also fail consistently).
     raw_diff: String,
-    /// From `.auto_review.yaml`'s `pre_merge_checks:` — passed through
-    /// to the review pipeline so the LLM can evaluate them.
-    pre_merge_checks: Vec<String>,
     /// Held by the orchestrator until the review pipeline finishes
     /// so the agentic verifier (when enabled) can inspect the
     /// cloned working tree. `None` when workspace prep exited
@@ -721,7 +707,6 @@ async fn prepare_workspace_context(
             guidelines,
             repo_context: String::new(),
             raw_diff: String::new(),
-            pre_merge_checks: Vec::new(),
             workspace: None,
         });
     }
@@ -766,7 +751,6 @@ async fn prepare_workspace_context(
         guidelines,
         repo_context,
         raw_diff,
-        pre_merge_checks: config.pre_merge_checks.clone(),
         workspace: Some(workspace),
     })
 }

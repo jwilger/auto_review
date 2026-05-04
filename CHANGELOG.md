@@ -50,8 +50,16 @@ since the start of the project.
 
 - `auto_review` now posts an approved Forgejo review when all remaining findings
   are warning or note severity, while preserving the inline advisory comments.
-  Error findings and pre-merge check failures continue to request changes. Closes
-  #55.
+  Error findings continue to request changes. Closes #55.
+
+#### Review-time pre-merge checks retired
+
+- Automated reviews no longer run or render built-in pre-merge checks for
+  CHANGELOG updates, test presence, or new TODO/FIXME markers. Those concerns
+  should live in CI or static-analysis jobs when a repository wants them.
+- Removed `.auto_review.yaml` `pre_merge_checks` support and its cheap-tier
+  custom pre-merge evaluation path. Strict config validation now treats the key
+  as retired/unknown. Closes #63.
 
 ### Added
 
@@ -279,8 +287,6 @@ since the start of the project.
   - `ignored_paths`: gitignore-style glob patterns (via `globset`).
     Matching files are stripped from both the diff (per-file sections
     dropped) and the changed-files list before prompt rendering.
-  - `pre_merge_checks`: repo-author natural-language checks evaluated against
-    the diff by the cheap tier.
 
 #### Walkthrough output
 
@@ -1763,7 +1769,7 @@ default in-memory store to the SQLite-backed one.
   key named and the valid-key list shown:
   ```
   ✗ .auto_review.yaml: unknown top-level key(s): enabld;
-    valid keys are: enabled, guidelines, ignored_paths, pre_merge_checks
+    valid keys are: enabled, guidelines, ignored_paths
   ```
 - New `parse_repo_config_strict` + `RepoConfigStrictError`
   in `ar-review`. A contract test
@@ -1786,6 +1792,6 @@ default in-memory store to the SQLite-backed one.
   line per failure with line/column when serde_yaml provides
   it. Exits non-zero on any failure or when no files are
   found, so the subcommand fits cleanly in a pre-commit hook
-  or CI step. Repo authors can iterate on `ignored_paths`,
-  `pre_merge_checks`, and free-form `guidelines` locally
+  or CI step. Repo authors can iterate on `ignored_paths`
+  and free-form `guidelines` locally
   without firing a real PR through the bot.

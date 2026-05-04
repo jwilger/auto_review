@@ -15,7 +15,7 @@
 pub const DEFAULT_MAX_DIFF_BYTES: usize = 100_000;
 
 /// Shared cap for cheap-tier prompts (triage, verifier, agentic
-/// verifier, pre-merge custom checks). Cheap-tier models often have
+/// verifier). Cheap-tier models often have
 /// 32K-token windows; 40 KiB stays comfortably inside.
 pub const CHEAP_TIER_DIFF_CAP: usize = 40 * 1024;
 

@@ -11,7 +11,6 @@ Rust modules expose the validator + system prompt + DTO triple.
 | `schemas/review.json` | `prompt`, `schema`, `types`, `validate` | Reasoning-tier review output (summary, walkthrough, findings). |
 | `schemas/triage.json` | `triage` | Cheap-tier per-file triage classification. |
 | `schemas/verification.json` | `verification` | Cheap-tier finding-by-finding verifier. |
-| `schemas/pre_merge_custom.json` | `pre_merge_custom` | Cheap-tier evaluation of repo-author-supplied free-form pre-merge checks. |
 
 Every schema sets `additionalProperties: false` and uses
 `serde(deny_unknown_fields)` on its DTO so prompt-injection
@@ -26,7 +25,7 @@ load-bearing T3 mitigations — see the
 | `prompt::ReviewPromptInputs`, `render_review_prompt` | User-prompt rendering for the reasoning model. |
 | `prompt::system_prompt` | Static system prompt for the review pipeline. |
 | `validate::validate_review_output` | Schema-validation entry point used by the self-heal loop in `ar-review`. |
-| `triage::*`, `verification::*`, `pre_merge_custom::*` | Same triple pattern (system prompt, schema, validator) for the other LLM calls. |
+| `triage::*`, `verification::*` | Same triple pattern (system prompt, schema, validator) for the other LLM calls. |
 
 ## Tests
 

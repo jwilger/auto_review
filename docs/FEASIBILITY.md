@@ -29,7 +29,7 @@ Synthesized from CodeRabbit's own engineering blog, Google Cloud case study, Lan
 5. **Context curation**: NOT pure RAG. Vector retrieval (LanceDB) over repo embeddings + ast-grep symbol queries + agent-issued shell commands (`grep`, `cat`, `curl`, etc., sandboxed) seed an exploration agent. Plus retrieval from the **Learnings** vector store (per-repo memory).
 6. **Review generation**: reasoning model (o3 / o4-mini) emits line comments against a strict JSON schema.
 7. **Verification agent**: separate LLM pass validates each finding (does the cited code actually do what we said?); failures fed back through a self-healing regenerate loop until JSON-schema-valid and verification-passing or N retries exhausted.
-8. **Specialized parallel agents**: Walkthrough/Mermaid-diagram, Pre-merge checks, Slop detection, CI-failure analyzer, Finishing-touches autofix.
+8. **Specialized parallel agents**: Walkthrough/Mermaid-diagram, Slop detection, CI-failure analyzer, Finishing-touches autofix.
 9. **Incremental reviews**: subsequent commits diff against prior summaries; only new hunks re-process.
 10. **Post results** as a PR review with inline comments + commit status + edited PR description.
 11. **Agentic chat**: `@coderabbitai` mentions invoke a chat agent with full PR context + Learnings store + sandboxed shell tools.
@@ -253,7 +253,7 @@ The user has greenlit the full-clone scope; phasing keeps each milestone shippab
 - `ar-chat`: `@auto_review` mention handler, per-thread conversation state, sandboxed tool use.
 - Polling fallback for missing review-comment webhook events.
 - Finishing-touches: docstring gen, autofix patches, unit-test scaffolding (all behind explicit user opt-in commands).
-- Pre-merge checks (custom natural-language checks + built-ins).
+- Optional CI/static-analysis integrations for project-specific merge checks.
 - **Verification**: dogfood on `auto_review`'s own PRs.
 
 ### Milestone 5 — Polish, docs, release (2–4 weeks)

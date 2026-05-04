@@ -4,16 +4,10 @@ use crate::error::ReviewError;
 use crate::heal::{generate_with_self_heal, HealConfig};
 use crate::ignored::{filter_changed_files, filter_diff_paths};
 use crate::mapping::output_to_review_request;
-use crate::pre_merge::{
-    evaluate as evaluate_pre_merge_checks, render_combined_section, CheckResult, CheckStatus,
-};
-use crate::pre_merge_llm::{evaluate_custom_checks, CustomCheckResult};
 use crate::verify::verify_findings;
-use ar_forgejo::{Client as ForgejoClient, ReviewEvent};
+use ar_forgejo::Client as ForgejoClient;
 use ar_llm::Router as LlmRouter;
-use ar_prompts::{
-    render_review_prompt, system_prompt, PreMergeCustomStatus, ReviewPromptInputs, ReviewSeverity,
-};
+use ar_prompts::{render_review_prompt, system_prompt, ReviewPromptInputs, ReviewSeverity};
 use globset::GlobSet;
 use std::path::Path;
 
@@ -125,12 +119,6 @@ pub struct ReviewArgs<'a> {
     pub pr_body: &'a str,
     pub ignored_paths: &'a GlobSet,
     pub guidelines: &'a str,
-    /// Repo-author free-form pre-merge checks (from
-    /// `.auto_review.yaml`'s `pre_merge_checks:`). Each entry is
-    /// evaluated against the diff by the cheap LLM tier and added
-    /// to the review body's checklist. Empty slice = no custom
-    /// checks; the built-in deterministic checks still run.
-    pub custom_pre_merge_checks: &'a [String],
     /// RAG-retrieved markdown context (similar code, learnings,
     /// co-change neighbors). Empty string when the index hasn't
     /// been built or returned no matches.
@@ -229,30 +217,8 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
 
     let findings_count = output.findings.len();
 
-    let mut req = output_to_review_request(&output, args.head_sha);
+    let req = output_to_review_request(&output, args.head_sha);
 
-    // Pre-merge checks: deterministic gates (CHANGELOG / tests /
-    // TODOs) plus repo-author-supplied natural-language checks
-    // evaluated by the cheap LLM tier. Both surface as a single
-    // markdown checklist appended to the review body. Any failed
-    // check requests changes even when inline findings are below
-    // Error severity.
-    let pre_merge_results = evaluate_pre_merge_checks(&diff, &files, args.workspace_path);
-    let custom_results = if args.custom_pre_merge_checks.is_empty() {
-        Vec::new()
-    } else {
-        evaluate_custom_checks(args.llm, args.custom_pre_merge_checks, &diff).await
-    };
-    if pre_merge_has_failure(&pre_merge_results, &custom_results) {
-        req.event = ReviewEvent::RequestChanges;
-    }
-    let section = render_combined_section(&pre_merge_results, &custom_results);
-    if !section.is_empty() {
-        if !req.body.is_empty() {
-            req.body.push_str("\n\n");
-        }
-        req.body.push_str(&section);
-    }
     let created = args
         .forgejo
         .create_review(args.owner, args.repo, args.pr_number, &req)
@@ -277,15 +243,6 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         notes,
         verifier_dropped,
     })
-}
-
-fn pre_merge_has_failure(built_in: &[CheckResult], custom: &[CustomCheckResult]) -> bool {
-    built_in
-        .iter()
-        .any(|check| matches!(check.status, CheckStatus::Fail))
-        || custom
-            .iter()
-            .any(|check| matches!(check.status, PreMergeCustomStatus::Fail))
 }
 
 #[cfg(test)]
@@ -323,6 +280,10 @@ mod tests {
                     .find(|m| matches!(m.role, ar_llm::Role::User))
                     .map(|m| m.content.clone())
             })
+        }
+
+        fn seen_count(&self) -> usize {
+            self.seen.lock().unwrap().len()
         }
     }
 
@@ -469,7 +430,6 @@ mod tests {
             pr_title: "t",
             pr_body: "b",
             ignored_paths: &GlobSet::empty(),
-            custom_pre_merge_checks: &[],
             guidelines: "",
             repo_context: "",
             diff_override: None,
@@ -548,7 +508,6 @@ mod tests {
             pr_title: "t",
             pr_body: "b",
             ignored_paths: &GlobSet::empty(),
-            custom_pre_merge_checks: &[],
             guidelines: "",
             repo_context: "",
             diff_override: None,
@@ -622,7 +581,6 @@ mod tests {
             pr_title: "t",
             pr_body: "b",
             ignored_paths: &GlobSet::empty(),
-            custom_pre_merge_checks: &[],
             guidelines: "",
             repo_context: "",
             diff_override: None,
@@ -637,7 +595,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn review_pull_request_end_to_end_happy_path() {
+    async fn source_only_diff_with_no_findings_omits_pre_merge_checks_without_request_changes() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/repos/o/r/pulls/7.diff"))
@@ -651,22 +609,11 @@ mod tests {
             ])))
             .mount(&server)
             .await;
-        // Body now ends in `## Pre-merge checks` because the
-        // pipeline appends the deterministic check section. This
-        // source-only fixture has no test change, so the pre-merge
-        // checklist asks for changes. The body field stays excluded
-        // from the matcher so this test focuses on the integration
-        // contract (event + commit_id) — body composition is covered
-        // by mapping/pre_merge tests.
         Mock::given(method("POST"))
             .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
-            .and(body_partial_json(serde_json::json!({
-                "commit_id": "deadbeef",
-                "event": "REQUEST_CHANGES"
-            })))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
                 "id": 1234,
-                "state": "REQUEST_CHANGES"
+                "state": "APPROVED"
             })))
             .mount(&server)
             .await;
@@ -687,7 +634,6 @@ mod tests {
             pr_title: "title",
             pr_body: "body",
             ignored_paths: &GlobSet::empty(),
-            custom_pre_merge_checks: &[],
             guidelines: "",
             repo_context: "",
             diff_override: None,
@@ -700,6 +646,218 @@ mod tests {
 
         assert_eq!(outcome.review_id, 1234);
         assert_eq!(outcome.findings_count, 0);
+
+        let received = server.received_requests().await.expect("requests");
+        let posted_review = received
+            .iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("posted review");
+        let body: serde_json::Value =
+            serde_json::from_slice(&posted_review.body).expect("review body json");
+        let event = body
+            .get("event")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review event");
+        let review_body = body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review body");
+        assert!(
+            event != "REQUEST_CHANGES" && !review_body.contains("## Pre-merge checks"),
+            "source-only diff with no inline findings should not request changes or include pre-merge checks; \
+             event was {event:?}, body was:\n{review_body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn full_source_only_git_diff_with_no_findings_omits_pre_merge_checks_without_request_changes(
+    ) {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/x.rs b/src/x.rs\n\
+                 index 1111111..2222222 100644\n\
+                 --- a/src/x.rs\n\
+                 +++ b/src/x.rs\n\
+                 @@ -1 +1 @@\n\
+                 -pub fn old_name() {}\n\
+                 +pub fn new_name() {}\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1235,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let llm = router_with(provider);
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "deadbeef",
+            pr_title: "title",
+            pr_body: "body",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+        })
+        .await
+        .expect("review ok");
+
+        assert_eq!(outcome.review_id, 1235);
+        assert_eq!(outcome.findings_count, 0);
+
+        let received = server.received_requests().await.expect("requests");
+        let posted_review = received
+            .iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("posted review");
+        let body: serde_json::Value =
+            serde_json::from_slice(&posted_review.body).expect("review body json");
+        let event = body
+            .get("event")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review event");
+        let review_body = body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review body");
+        assert!(
+            event != "REQUEST_CHANGES" && !review_body.contains("## Pre-merge checks"),
+            "full source-only git diff with no inline findings should not request changes or include pre-merge checks; \
+             event was {event:?}, body was:\n{review_body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn custom_pre_merge_checks_are_not_evaluated_or_emitted_for_no_finding_reviews() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/x.rs b/src/x.rs\n\
+                 index 1111111..2222222 100644\n\
+                 --- a/src/x.rs\n\
+                 +++ b/src/x.rs\n\
+                 @@ -1 +1 @@\n\
+                 -pub fn old_name() {}\n\
+                 +pub fn new_name() {}\n\
+                 diff --git a/tests/x_test.rs b/tests/x_test.rs\n\
+                 new file mode 100644\n\
+                 index 0000000..3333333\n\
+                 --- /dev/null\n\
+                 +++ b/tests/x_test.rs\n\
+                 @@ -0,0 +1,3 @@\n\
+                 +#[test]\n\
+                 +fn covers_new_name() {}\n\
+                 diff --git a/CHANGELOG.md b/CHANGELOG.md\n\
+                 index 4444444..5555555 100644\n\
+                 --- a/CHANGELOG.md\n\
+                 +++ b/CHANGELOG.md\n\
+                 @@ -1 +1,2 @@\n\
+                 +documented\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"},
+                {"filename": "tests/x_test.rs", "status": "added"},
+                {"filename": "CHANGELOG.md", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1236,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let reasoning = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let cheap = Arc::new(CannedProvider::new(vec![
+            r#"{"checks":[{"status":"fail","rationale":"custom check failed"}]}"#,
+        ]));
+        let llm = Router::new()
+            .with(ModelTier::Reasoning, reasoning)
+            .with(ModelTier::Cheap, cheap.clone());
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "deadbeef",
+            pr_title: "title",
+            pr_body: "body",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+        })
+        .await
+        .expect("review ok");
+
+        assert_eq!(outcome.review_id, 1236);
+        assert_eq!(outcome.findings_count, 0);
+
+        let received = server.received_requests().await.expect("requests");
+        let posted_review = received
+            .iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("posted review");
+        let body: serde_json::Value =
+            serde_json::from_slice(&posted_review.body).expect("review body json");
+        let event = body
+            .get("event")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review event");
+        let review_body = body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review body");
+        let cheap_calls = cheap.seen_count();
+        assert!(
+            cheap_calls == 0
+                && event != "REQUEST_CHANGES"
+                && !review_body.contains("## Pre-merge checks")
+                && !review_body.contains("Run the bespoke release checklist"),
+            "custom pre-merge checks should not be evaluated or emitted for no-finding reviews; \
+             cheap calls: {cheap_calls}, event was {event:?}, body was:\n{review_body}",
+        );
     }
 
     #[tokio::test]
@@ -725,7 +883,6 @@ mod tests {
             pr_title: "t",
             pr_body: "b",
             ignored_paths: &GlobSet::empty(),
-            custom_pre_merge_checks: &[],
             guidelines: "",
             repo_context: "",
             diff_override: None,
@@ -780,7 +937,6 @@ mod tests {
             pr_title: "t",
             pr_body: "b",
             ignored_paths: &GlobSet::empty(),
-            custom_pre_merge_checks: &[],
             guidelines: "",
             repo_context: "",
             diff_override: None,
@@ -791,78 +947,6 @@ mod tests {
         .await
         .expect("ok");
         assert_eq!(outcome.findings_count, 1);
-    }
-
-    #[tokio::test]
-    async fn review_pull_request_request_changes_when_pre_merge_check_fails() {
-        let server = MockServer::start().await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
-            .respond_with(
-                ResponseTemplate::new(200)
-                    .set_body_string("diff --git a/src/x.rs b/src/x.rs\n@@ -1 +1 @@\n-old\n+new\n"),
-            )
-            .mount(&server)
-            .await;
-        Mock::given(method("GET"))
-            .and(path("/api/v1/repos/o/r/pulls/7/files"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
-                {"filename": "src/x.rs", "status": "modified"}
-            ])))
-            .mount(&server)
-            .await;
-        Mock::given(method("POST"))
-            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
-            .and(body_partial_json(serde_json::json!({
-                "event": "REQUEST_CHANGES"
-            })))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
-                "id": 100,
-                "state": "REQUEST_CHANGES"
-            })))
-            .mount(&server)
-            .await;
-
-        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
-        let provider = Arc::new(CannedProvider::new(vec![
-            r#"{"summary":"no inline findings","findings":[]}"#,
-        ]));
-        let llm = router_with(provider);
-
-        let outcome = review_pull_request(ReviewArgs {
-            forgejo: &forgejo,
-            llm: &llm,
-            owner: "o",
-            repo: "r",
-            pr_number: 7,
-            head_sha: "sha",
-            pr_title: "t",
-            pr_body: "b",
-            ignored_paths: &GlobSet::empty(),
-            custom_pre_merge_checks: &[],
-            guidelines: "",
-            repo_context: "",
-            diff_override: None,
-            verify_mode: VerifyMode::Simple,
-            workspace_path: None,
-            min_severity: ReviewSeverity::Note,
-        })
-        .await
-        .expect("pre-merge failure should still post review");
-
-        assert_eq!(outcome.review_id, 100);
-        assert_eq!(outcome.findings_count, 0);
-    }
-
-    #[test]
-    fn pre_merge_has_failure_includes_custom_checks() {
-        let custom = vec![CustomCheckResult {
-            check: "PR title explains why".into(),
-            status: PreMergeCustomStatus::Fail,
-            rationale: "title is too vague".into(),
-        }];
-
-        assert!(pre_merge_has_failure(&[], &custom));
     }
 
     #[tokio::test]
@@ -902,7 +986,6 @@ mod tests {
             pr_title: "t",
             pr_body: "b",
             ignored_paths: &GlobSet::empty(),
-            custom_pre_merge_checks: &[],
             guidelines: "",
             repo_context: "",
             diff_override: None,
