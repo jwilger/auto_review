@@ -1,74 +1,68 @@
 name: auto_review
-description: AI code review for Forgejo pull requests, run as a Forgejo Action.
+description: Submit Forgejo pull request CI reviews to an auto_review gateway.
 author: auto_review contributors
 
 inputs:
-  forgejo-token:
-    description: |
-      Token used to fetch the diff and post the review. The default
-      injected `${{ secrets.GITHUB_TOKEN }}` (Forgejo aliases this) has
-      enough permission for read+write on the repo's PRs.
+  gateway-url:
+    description: auto_review gateway base URL.
     required: true
-  llm-base-url:
-    description: |
-      OpenAI-compatible LLM endpoint root, e.g. https://api.openai.com
-      or http://ollama-host:11434.
+  action-token:
+    description: Bearer token authorized to submit CI review requests to the gateway.
     required: true
-  llm-api-key:
-    description: |
-      API key for the LLM endpoint. Omit for local Ollama / self-hosted
-      vLLM.
+  owner:
+    description: Optional override for the Forgejo repository owner. Defaults to the pull request context.
     required: false
     default: ""
-  llm-reasoning-model:
-    description: Model name passed to the LLM endpoint as the chat model.
-    required: false
-    default: "qwen2.5-coder:32b"
-  llm-embedding-model:
-    description: |
-      Optional embedding model name. When set, RAG context retrieval is
-      enabled and the LLM prompt receives a "Repository context"
-      section. Leave empty to disable RAG.
+  repo:
+    description: Optional override for the Forgejo repository name. Defaults to the pull request context.
     required: false
     default: ""
-  llm-cheap-model:
-    description: |
-      Optional cheap-tier model name. When set, LLM-driven file triage
-      and the verifier second-pass run before posting. Leave empty to
-      disable.
+  pr-number:
+    description: Optional override for the Forgejo pull request number. Defaults to the pull request context.
+    required: false
+    default: ""
+  head-sha:
+    description: Optional override for the pull request head commit SHA to review. Defaults to the pull request context.
     required: false
     default: ""
 
 runs:
   using: composite
   steps:
-    - name: Build auto_review CLI
-      shell: bash
-      run: |
-        cargo build --release -p ar-cli
-
-    - name: Run review
+    - name: Request CI review
       shell: bash
       env:
-        FORGEJO_BASE_URL: ${{ env.GITHUB_SERVER_URL }}
-        FORGEJO_TOKEN: ${{ inputs.forgejo-token }}
-        LLM_BASE_URL: ${{ inputs.llm-base-url }}
-        LLM_API_KEY: ${{ inputs.llm-api-key }}
-        LLM_REASONING_MODEL: ${{ inputs.llm-reasoning-model }}
-        LLM_EMBEDDING_MODEL: ${{ inputs.llm-embedding-model }}
-        LLM_CHEAP_MODEL: ${{ inputs.llm-cheap-model }}
+        GATEWAY_URL: ${{ inputs.gateway-url }}
+        ACTION_TOKEN: ${{ inputs.action-token }}
       run: |
-        # GITHUB_REPOSITORY is "owner/repo" — split on the slash.
-        OWNER="${GITHUB_REPOSITORY%%/*}"
-        REPO="${GITHUB_REPOSITORY##*/}"
-        # On pull_request events, GITHUB_REF is "refs/pull/<n>/merge".
-        PR_NUMBER=$(echo "$GITHUB_REF" | sed -E 's|refs/pull/([0-9]+)/.*|\1|')
-        ./target/release/auto_review review-once \
-          --forgejo-url "$FORGEJO_BASE_URL" \
-          --token "$FORGEJO_TOKEN" \
-          --owner "$OWNER" --repo "$REPO" --pr "$PR_NUMBER" \
-          --llm-base-url "$LLM_BASE_URL" \
-          --llm-model "$LLM_REASONING_MODEL"
+        OWNER=${{ inputs.owner }}
+        OWNER="${OWNER:-${{ github.repository_owner }}}"
+        REPO=${{ inputs.repo }}
+        REPO="${REPO:-${{ github.event.repository.name }}}"
+        PR_NUMBER=${{ inputs.pr-number }}
+        PR_NUMBER="${PR_NUMBER:-${{ github.event.pull_request.number }}}"
+        HEAD_SHA=${{ inputs.head-sha }}
+        HEAD_SHA="${HEAD_SHA:-${{ github.event.pull_request.head.sha }}}"
+
+        if [ -z "$PR_NUMBER" ]; then
+          echo "auto_review requires pull request context; inputs.pr-number and github.event.pull_request.number are missing" >&2
+          exit 1
+        fi
+        if [ -z "$OWNER" ] || [ -z "$REPO" ] || [ -z "$HEAD_SHA" ]; then
+          echo "auto_review requires pull request context; owner, repo, and head SHA must be available" >&2
+          exit 1
+        fi
+
+        JSON_PAYLOAD=$(cat <<JSON
+        {"owner":"$OWNER","repo":"$REPO","pr_number":"$PR_NUMBER","head_sha":"$HEAD_SHA"}
+        JSON
+        )
+
+        curl -fsS -X POST \
+          -H "Authorization: Bearer $ACTION_TOKEN" \
+          -H "Content-Type: application/json" \
+          --data "$JSON_PAYLOAD" \
+          "$GATEWAY_URL/reviews/ci"
 
 branding:
   icon: book-open

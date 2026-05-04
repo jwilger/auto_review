@@ -55,11 +55,13 @@
             || (pkgs.lib.hasInfix "/bench/fixtures/" strPath
                 && pkgs.lib.hasSuffix ".json" path)
             # Deploy assets the gateway's contract tests cross-check
-            # against the live /metrics surface.
+            # against the live /metrics surface and workflow action
+            # contract.
             || (pkgs.lib.hasInfix "/deploy/grafana/" strPath
                 && pkgs.lib.hasSuffix ".json" path)
             || (pkgs.lib.hasInfix "/deploy/prometheus/" strPath
                 && pkgs.lib.hasSuffix ".yaml" path)
+            || strPath == "${toString ./.}/deploy/forgejo-action/action.yml"
             # ar-review's config tests verify the example YAML
             # documents every known key.
             || baseName == ".auto_review.example.yaml";
