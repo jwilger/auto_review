@@ -237,7 +237,7 @@
                   nix build .#ar-gateway-image
                   load_image
                   "$runtime" rm -f "$name" >/dev/null 2>&1 || true
-                  args=(run --name "$name" --rm -p "127.0.0.1:$port:$port" --env "AR_GATEWAY_BIND=0.0.0.0:$port")
+                  args=(run --name "$name" --rm -p "127.0.0.1:$port:8080")
                   if [ -f "$env_file" ]; then
                     args+=(--env-file "$env_file")
                   fi
