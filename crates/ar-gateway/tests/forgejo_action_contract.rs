@@ -78,10 +78,16 @@ fn forgejo_action_posts_ci_review_to_gateway() {
         ("pr_number", "PR_NUMBER"),
         ("head_sha", "HEAD_SHA"),
     ] {
+        let expected_payload_field = if field == "pr_number" {
+            compact_action.contains(&format!("\"{field}\":${variable}"))
+                || compact_action.contains(&format!("\"{field}\":${{{variable}}}"))
+        } else {
+            compact_action.contains(&format!("\"{field}\":\"${variable}\""))
+                || compact_action.contains(&format!("\"{field}\":\"${{{variable}}}\""))
+        };
         require(
             &mut contract_errors,
-            compact_action.contains(&format!("\"{field}\":\"${variable}\""))
-                || compact_action.contains(&format!("\"{field}\":\"${{{variable}}}\"")),
+            expected_payload_field,
             format!("action.yml should send JSON payload field `{field}` sourced from ${variable}"),
         );
     }

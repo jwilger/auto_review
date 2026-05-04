@@ -54,7 +54,7 @@ runs:
         fi
 
         JSON_PAYLOAD=$(cat <<JSON
-        {"owner":"$OWNER","repo":"$REPO","pr_number":"$PR_NUMBER","head_sha":"$HEAD_SHA"}
+        {"owner":"$OWNER","repo":"$REPO","pr_number":$PR_NUMBER,"head_sha":"$HEAD_SHA"}
         JSON
         )
 
