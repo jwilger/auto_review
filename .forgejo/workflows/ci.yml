@@ -75,14 +75,24 @@ jobs:
     runs-on: docker
     needs: flake-check
     if: ${{ github.event_name == 'pull_request' }}
+    env:
+      AUTO_REVIEW_GATEWAY_URL: ${{ secrets.AUTO_REVIEW_GATEWAY_URL }}
+      AUTO_REVIEW_ACTION_TOKEN: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
     steps:
+      - name: Skip when auto_review secrets are not configured
+        if: ${{ env.AUTO_REVIEW_GATEWAY_URL == '' || env.AUTO_REVIEW_ACTION_TOKEN == '' }}
+        run: |
+          echo "auto_review semantic review skipped: AUTO_REVIEW_GATEWAY_URL and AUTO_REVIEW_ACTION_TOKEN secrets must both be configured"
+
       - uses: actions/checkout@v4
+        if: ${{ env.AUTO_REVIEW_GATEWAY_URL != '' && env.AUTO_REVIEW_ACTION_TOKEN != '' }}
 
       - name: Request auto_review review
+        if: ${{ env.AUTO_REVIEW_GATEWAY_URL != '' && env.AUTO_REVIEW_ACTION_TOKEN != '' }}
         uses: ./deploy/forgejo-action
         with:
-          gateway-url: ${{ secrets.AUTO_REVIEW_GATEWAY_URL }}
-          action-token: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
+          gateway-url: ${{ env.AUTO_REVIEW_GATEWAY_URL }}
+          action-token: ${{ env.AUTO_REVIEW_ACTION_TOKEN }}
           owner: ${{ github.repository_owner }}
           repo: ${{ github.event.repository.name }}
           pr-number: ${{ github.event.pull_request.number }}
