@@ -1,33 +1,12 @@
-# bacon — local dev loop for ar-gateway.
+# bacon — focused Rust checks only.
 #
-# `bacon` (no args) launches the `run` job: cargo-builds ar-gateway,
-# starts it, and on any source change kills the running process and
-# restarts the new binary. Replaces the previous zellij-watcher skill
-# (.claude/skills/run-ar-gateway, removed).
+# Runtime development now uses the same Nix-built container image as deploy:
 #
-# Other useful jobs ship as bacon defaults: `bacon clippy`, `bacon test`,
-# `bacon check`. See `bacon --help` or https://dystroy.org/bacon.
+#   nix run .#dev-gateway-container
 #
-# The run job deliberately uses a dev-only port so it can coexist with a
-# systemd-managed gateway on the production default (127.0.0.1:8080). When
-# registering a local Forgejo webhook for bacon-driven testing, point it at
-# http://127.0.0.1:8090/webhooks/forgejo (or your tunnel/reverse-proxy URL
-# forwarding to that port).
-#
-# The run job waits for an in-flight cargo invocation to finish and applies a
-# short grace period before restarting. That coalesces multi-file/atomic editor
-# saves, so a transient compile error from a half-written change is followed by
-# a fresh rebuild when the fixing save lands instead of wedging until manual
-# refresh.
+# That watcher rebuilds .#ar-gateway-image, loads it into podman/docker, and
+# relaunches the gateway on 127.0.0.1:8090. Bacon remains useful for quick
+# foreground `bacon check`, `bacon clippy`, and `bacon test` loops, but it no
+# longer owns process restart.
 
-default_job = "run"
-
-[jobs.run]
-command = ["cargo", "run", "-p", "ar-gateway", "--bin", "ar-gateway"]
-env.AR_GATEWAY_BIND = "127.0.0.1:8090"
-need_stdout = true
-allow_warnings = true
-background = false
-grace_period = "500ms"
-on_change_strategy = "wait_then_restart"
-show_command_error_code = true
+default_job = "check"

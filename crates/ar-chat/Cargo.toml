@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 repository.workspace = true
 publish.workspace = true
-description = "Agentic @-mention chat handler with sandboxed tool use"
+description = "Agentic @-mention chat handler for Forgejo PR discussions"
 
 [dependencies]
 anyhow.workspace = true

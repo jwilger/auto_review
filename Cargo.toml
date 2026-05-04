@@ -6,8 +6,6 @@ members = [
     "crates/ar-forgejo",
     "crates/ar-llm",
     "crates/ar-index",
-    "crates/ar-tools",
-    "crates/ar-sandbox",
     "crates/ar-prompts",
     "crates/ar-review",
     "crates/ar-chat",

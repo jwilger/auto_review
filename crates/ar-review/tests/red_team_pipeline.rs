@@ -6,9 +6,10 @@
 //! a security audit lens: a reviewer reading just this file sees
 //! concretely what we defend against.
 //!
-//! T1 (Kudelski-class sandbox escape): not exercised here — that
-//!   one needs a live container runtime; the
-//!   `crates/ar-sandbox` integration tests cover it.
+//! T1 (Kudelski-class tool-config execution): not exercised here —
+//!   the mitigation is architectural. Normal review jobs do not run
+//!   repo-controlled deterministic tools; workspace Git hardening is
+//!   tested in `crates/ar-review/src/workspace.rs`.
 //! T2 (webhook forgery): exercised in
 //!   `crates/ar-gateway/src/webhook.rs` HMAC unit tests.
 //! T3 (prompt injection in PR body): tested below.

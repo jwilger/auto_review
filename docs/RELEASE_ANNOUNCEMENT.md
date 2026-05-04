@@ -165,10 +165,9 @@ Before hitting publish:
       and signed.
 - [ ] Confirm `docker compose up` works against a clean checkout
       via the manual e2e runbook.
-- [ ] Confirm the escape harness passes against your CI's docker.
 - [ ] If submitting to lobste.rs, expect tough comments on the
-      AGPL choice and the hardening claims — be ready to point
-      at `tests/escape.rs` and `crates/ar-sandbox/src/podman.rs`.
+      AGPL choice and the hardening claims — be ready to point at
+      `docs/THREAT-MODEL.md` and the Git/workspace red-team tests.
 - [ ] Don't pre-emptively address future Greptile/CodeRabbit
       feature parity — keep the focus on what's shipped today
       and the threat-model differences (sandboxing, sovereignty,

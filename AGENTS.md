@@ -22,7 +22,7 @@ cargo deny check licenses bans sources
 
 `cargo deny check advisories` requires network and is excluded from `nix flake check`'s sandbox; run it manually when bumping dependencies.
 
-Use `bacon`, `bacon clippy`, or `bacon test` for watch loops. Job definitions live in `bacon.toml`.
+Use `nix run .#dev-gateway-container` for the containerized gateway development watcher. Use `bacon`, `bacon clippy`, or `bacon test` for focused Rust check loops.
 
 ## Forgejo, Not GitHub
 
@@ -54,7 +54,7 @@ clone (workspace.rs)
 
 The `@auto_review` chat handler in `ar-chat` runs a poller plus webhook path and supports `help`, `remember <text>`, `forget <id>`, `re-review`, `autofix`, `docstring`, `tests`, and free-form questions. Polling exists because Forgejo does not reliably fire inline-thread reply webhooks.
 
-Deterministic linters/tests/builds run in CI before semantic review. Runtime workspace tools are read-only and constrained to the clone root; `ar-sandbox` remains for the issue #46 rescope.
+Deterministic linters/tests/builds run in CI before semantic review. Runtime workspace tools are read-only and constrained to the clone root; the retired linter sandbox/runtime-tool execution code was removed in the issue #46 rescope.
 
 `ar-llm::Router` maps `ModelTier::{Reasoning, Cheap, Embedding}` to provider implementations. `OpenAiProvider` speaks OpenAI-compatible backends and tier-specific env vars select models, base URLs, and API keys.
 
@@ -68,9 +68,7 @@ Deterministic linters/tests/builds run in CI before semantic review. Runtime wor
 | `ar-llm` | provider trait and tier-based router |
 | `ar-prompts` | prompt templates and JSON schemas |
 | `ar-review` | review, verify, self-heal, RAG context, repo config |
-| `ar-tools` | legacy static-analysis runners retained outside normal runtime |
 | `ar-cli` | operator subcommands |
-| `ar-sandbox` | sandbox trait plus direct and Podman backends |
 | `ar-chat` | chat command handling |
 | `ar-index` | tree-sitter symbols, embeddings, co-change graph, learnings store |
 

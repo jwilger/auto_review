@@ -247,5 +247,21 @@ Common optional env vars:
 | `AR_READINESS_TTL_SECS` | `10` | cache TTL for `/readyz` Forgejo probe |
 | `RUST_LOG` | `info,ar_gateway=debug` | tracing-subscriber filter |
 
+Deterministic linters, tests, and builds run in CI before the semantic review
+trigger. The gateway clones and reads PR workspaces for review context, but it
+does not run repo-controlled tools.
+
+For local containerized gateway development, run:
+
+```bash
+nix run .#dev-gateway-container
+```
+
+The watcher rebuilds the Nix image, loads it into Podman or Docker, and
+relaunches the gateway on `127.0.0.1:8090` after Rust/Nix source changes. It
+passes common gateway/LLM environment variables through from the host and also
+loads `.env` when present. Override the host dev port with
+`AR_DEV_GATEWAY_PORT`.
+
 Full reference (every env var with rationale): see
 `deploy/systemd/auto_review.env.example`.

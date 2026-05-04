@@ -6,7 +6,7 @@
 //! tempdir when dropped.
 
 use crate::error::ReviewError;
-use std::path::Path;
+use std::{env, path::Path};
 use tempfile::TempDir;
 use tokio::process::Command;
 use url::Url;
@@ -119,7 +119,7 @@ fn is_valid_git_sha(s: &str) -> bool {
 }
 
 async fn git(args: &[&str]) -> Result<(), WorkspaceError> {
-    let output = Command::new("git").args(args).output().await?;
+    let output = hermetic_git_command().args(args).output().await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         return Err(WorkspaceError::Git(redact_token(&stderr)));
@@ -128,7 +128,7 @@ async fn git(args: &[&str]) -> Result<(), WorkspaceError> {
 }
 
 async fn git_in(dir: &Path, args: &[&str]) -> Result<(), WorkspaceError> {
-    let output = Command::new("git")
+    let output = hermetic_git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
@@ -139,6 +139,39 @@ async fn git_in(dir: &Path, args: &[&str]) -> Result<(), WorkspaceError> {
         return Err(WorkspaceError::Git(redact_token(&stderr)));
     }
     Ok(())
+}
+
+fn hermetic_git_command() -> Command {
+    let mut command = Command::new("git");
+    command
+        .env("GIT_CONFIG_NOSYSTEM", "true")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("HOME", "/dev/null")
+        .env("XDG_CONFIG_HOME", "/dev/null")
+        .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+        .env_remove("GIT_ASKPASS")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_EXEC_PATH")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_OBJECT_DIRECTORY")
+        .env_remove("GIT_SSH")
+        .env_remove("GIT_SSH_COMMAND")
+        .env_remove("GIT_TEMPLATE_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("SSH_ASKPASS");
+    for (key, _) in env::vars_os() {
+        if key == "GIT_CONFIG_COUNT"
+            || key == "GIT_CONFIG_PARAMETERS"
+            || key == "GIT_CONFIG_SYSTEM"
+            || key.to_string_lossy().starts_with("GIT_CONFIG_KEY_")
+            || key.to_string_lossy().starts_with("GIT_CONFIG_VALUE_")
+        {
+            command.env_remove(key);
+        }
+    }
+    command
 }
 
 /// Strip any `oauth2:<token>@` userinfo from git error output so logs don't
@@ -165,6 +198,10 @@ fn redact_token(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::env;
+    use std::fs;
+
+    static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
     #[test]
     fn clone_url_uses_oauth2_userinfo() {
@@ -277,5 +314,191 @@ mod tests {
             }
             other => panic!("unexpected error class: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn git_helper_ignores_ambient_global_git_aliases() {
+        let _guard = ENV_LOCK.lock().await;
+
+        let temp = TempDir::new().unwrap();
+        let sentinel = temp.path().join("ambient-git-alias-ran");
+        let global_config = temp.path().join("host.gitconfig");
+        let quoted_sentinel = shell_single_quote(&sentinel.display().to_string());
+        fs::write(
+            &global_config,
+            format!("[alias]\n\towned = !touch {quoted_sentinel}\n"),
+        )
+        .unwrap();
+
+        let previous_global_config = env::var_os("GIT_CONFIG_GLOBAL");
+        env::set_var("GIT_CONFIG_GLOBAL", &global_config);
+
+        let result = git(&["owned"]).await;
+
+        match previous_global_config {
+            Some(value) => env::set_var("GIT_CONFIG_GLOBAL", value),
+            None => env::remove_var("GIT_CONFIG_GLOBAL"),
+        }
+
+        assert!(
+            !sentinel.exists(),
+            "ambient global Git alias executed and created {}",
+            sentinel.display()
+        );
+        assert!(
+            result.is_err(),
+            "hermetic git should ignore the ambient alias and fail unknown subcommand; got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn git_helper_ignores_env_injected_git_aliases() {
+        let _guard = ENV_LOCK.lock().await;
+
+        let temp = TempDir::new().unwrap();
+        let sentinel = temp.path().join("env-git-alias-ran");
+        let quoted_sentinel = shell_single_quote(&sentinel.display().to_string());
+        let previous_count = env::var_os("GIT_CONFIG_COUNT");
+        let previous_key = env::var_os("GIT_CONFIG_KEY_0");
+        let previous_value = env::var_os("GIT_CONFIG_VALUE_0");
+
+        env::set_var("GIT_CONFIG_COUNT", "1");
+        env::set_var("GIT_CONFIG_KEY_0", "alias.owned");
+        env::set_var("GIT_CONFIG_VALUE_0", format!("!touch {quoted_sentinel}"));
+
+        let result = git(&["owned"]).await;
+
+        restore_env_var("GIT_CONFIG_VALUE_0", previous_value);
+        restore_env_var("GIT_CONFIG_KEY_0", previous_key);
+        restore_env_var("GIT_CONFIG_COUNT", previous_count);
+
+        assert!(
+            !sentinel.exists(),
+            "env-injected Git alias executed and created {}",
+            sentinel.display()
+        );
+        assert!(
+            result.is_err(),
+            "hermetic git should ignore the env-injected alias and fail unknown subcommand; got {result:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn hermetic_git_command_removes_repo_template_hook_and_ssh_environment() {
+        let _guard = ENV_LOCK.lock().await;
+
+        let dangerous_git_env = [
+            "GIT_ALTERNATE_OBJECT_DIRECTORIES",
+            "GIT_COMMON_DIR",
+            "GIT_DIR",
+            "GIT_EXEC_PATH",
+            "GIT_INDEX_FILE",
+            "GIT_OBJECT_DIRECTORY",
+            "GIT_SSH",
+            "GIT_SSH_COMMAND",
+            "GIT_TEMPLATE_DIR",
+            "GIT_WORK_TREE",
+        ];
+        let previous_values = dangerous_git_env
+            .iter()
+            .map(|name| (*name, env::var_os(name)))
+            .collect::<Vec<_>>();
+
+        for name in dangerous_git_env {
+            env::set_var(name, "/tmp/ambient-git-value");
+        }
+
+        let mut command = hermetic_git_command();
+        let removed_env = command
+            .as_std_mut()
+            .get_envs()
+            .filter_map(|(key, value)| value.is_none().then_some(key.to_owned()))
+            .collect::<Vec<_>>();
+
+        for (name, previous) in previous_values {
+            restore_env_var(name, previous);
+        }
+
+        for name in dangerous_git_env {
+            assert!(
+                removed_env
+                    .iter()
+                    .any(|key| key == std::ffi::OsStr::new(name)),
+                "hermetic git command must explicitly remove ambient {name}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn hermetic_git_command_removes_askpass_helpers_and_disables_terminal_prompts() {
+        let _guard = ENV_LOCK.lock().await;
+
+        let temp = TempDir::new().unwrap();
+        let sentinel = temp.path().join("ambient-askpass-ran");
+        let askpass = temp.path().join("askpass-helper");
+        fs::write(
+            &askpass,
+            format!(
+                "#!/bin/sh\ntouch {}\n",
+                shell_single_quote(&sentinel.display().to_string())
+            ),
+        )
+        .unwrap();
+
+        let askpass_env = ["GIT_ASKPASS", "SSH_ASKPASS"];
+        let previous_values = askpass_env
+            .iter()
+            .map(|name| (*name, env::var_os(name)))
+            .collect::<Vec<_>>();
+        let previous_terminal_prompt = env::var_os("GIT_TERMINAL_PROMPT");
+
+        for name in askpass_env {
+            env::set_var(name, &askpass);
+        }
+        env::set_var("GIT_TERMINAL_PROMPT", "1");
+
+        let mut command = hermetic_git_command();
+        let env_overrides = command
+            .as_std_mut()
+            .get_envs()
+            .map(|(key, value)| (key.to_owned(), value.map(|value| value.to_owned())))
+            .collect::<Vec<_>>();
+
+        restore_env_var("GIT_TERMINAL_PROMPT", previous_terminal_prompt);
+        for (name, previous) in previous_values {
+            restore_env_var(name, previous);
+        }
+
+        for name in askpass_env {
+            assert!(
+                env_overrides
+                    .iter()
+                    .any(|(key, value)| key == std::ffi::OsStr::new(name) && value.is_none()),
+                "hermetic git command must explicitly remove ambient {name}"
+            );
+        }
+        assert!(
+            env_overrides.iter().any(|(key, value)| {
+                key == std::ffi::OsStr::new("GIT_TERMINAL_PROMPT")
+                    && value.as_deref() == Some(std::ffi::OsStr::new("0"))
+            }),
+            "hermetic git command must disable interactive credential prompts"
+        );
+        assert!(
+            !sentinel.exists(),
+            "ambient askpass helper executed and created {}",
+            sentinel.display()
+        );
+    }
+
+    fn restore_env_var(name: &str, previous: Option<std::ffi::OsString>) {
+        match previous {
+            Some(value) => env::set_var(name, value),
+            None => env::remove_var(name),
+        }
+    }
+
+    fn shell_single_quote(value: &str) -> String {
+        format!("'{}'", value.replace('\'', "'\\''"))
     }
 }

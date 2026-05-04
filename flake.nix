@@ -75,9 +75,8 @@
             # `git --version`; without git on PATH the related tests
             # fail with a clear-but-irrelevant "install git" report.
             git
-            # ar-sandbox's DirectSandbox tests spawn `echo`, `sh`,
-            # etc. via Command::new; coreutils + bash provide them
-            # on PATH for the test runtime.
+            # Some CLI and gateway tests spawn shell/coreutils helpers;
+            # provide them from Nix rather than the host.
             coreutils
             bash
           ];
@@ -110,10 +109,9 @@
             jq
             pkg-config
             openssl
-            # Local dev loop: `bacon` watches workspace sources and
-            # re-runs the configured job (see bacon.toml). The default
-            # `run` job builds + restarts ar-gateway on every change,
-            # replacing the older zellij-tab watcher script.
+            # Quick foreground Rust check loops. Runtime development
+            # uses `nix run .#dev-gateway-container` so it exercises
+            # the same Nix image shape as deploy.
             bacon
           ];
 
@@ -133,7 +131,7 @@
         # The gateway is the single binary operators run; expose it
         # as the default package so `nix build` produces a
         # deployable artefact.
-        packages = {
+        packages = rec {
           ar-gateway = craneLib.buildPackage (
             commonArgs
             // {
@@ -150,7 +148,125 @@
               cargoExtraArgs = "-p ar-cli";
             }
           );
+          ar-gateway-image = pkgs.dockerTools.buildLayeredImage {
+            name = "git.johnwilger.com/jwilger/auto_review/ar-gateway";
+            tag = "dev";
+            fakeRootCommands = ''
+              mkdir -p tmp var/lib/auto_review
+              chmod 01777 tmp
+              chown 65532:65532 var/lib/auto_review
+              chmod 0700 var/lib/auto_review
+            '';
+            contents = [
+              ar-gateway
+              pkgs.cacert
+              # Workspace preparation shells out to git for clone/fetch/checkout.
+              # Keep it in the deploy-shaped image so reviews do not fail after
+              # webhook intake.
+              pkgs.git
+            ];
+            config = {
+              Cmd = [ "${ar-gateway}/bin/ar-gateway" ];
+              Env = [
+                "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
+                "PATH=/bin"
+                "AR_GATEWAY_BIND=0.0.0.0:8080"
+                "RUST_LOG=info,ar_gateway=debug"
+              ];
+              ExposedPorts = {
+                "8080/tcp" = { };
+              };
+              WorkingDir = "/var/lib/auto_review";
+              User = "65532:65532";
+            };
+          };
           default = self.packages.${system}.ar-gateway;
+        };
+
+        apps = {
+          dev-gateway-container = {
+            type = "app";
+            program = "${pkgs.writeShellApplication {
+              name = "auto-review-dev-gateway-container";
+              runtimeInputs = with pkgs; [
+                coreutils
+                docker-client
+                gnugrep
+                nix
+                podman
+                watchexec
+              ];
+              text = ''
+                set -euo pipefail
+
+                runtime="''${AR_DEV_CONTAINER_RUNTIME:-}"
+                if [ -z "$runtime" ]; then
+                  if command -v podman >/dev/null 2>&1 && podman info >/dev/null 2>&1; then
+                    runtime=podman
+                  elif command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1; then
+                    runtime=docker
+                  else
+                    printf 'No working podman or docker runtime found. Set AR_DEV_CONTAINER_RUNTIME.\n' >&2
+                    exit 1
+                  fi
+                fi
+
+                name="''${AR_DEV_CONTAINER_NAME:-auto-review-dev}"
+                tag="''${AR_DEV_IMAGE_TAG:-git.johnwilger.com/jwilger/auto_review/ar-gateway:dev}"
+                port="''${AR_DEV_GATEWAY_PORT:-8090}"
+                env_file="''${AR_DEV_ENV_FILE:-.env}"
+                env_passthrough="''${AR_DEV_ENV_PASSTHROUGH:-WEBHOOK_SECRET FORGEJO_BASE_URL AR_FORGEJO_TOKEN LLM_BASE_URL LLM_API_KEY LLM_REASONING_MODEL LLM_CHEAP_MODEL LLM_CHEAP_BASE_URL LLM_CHEAP_API_KEY LLM_EMBEDDING_MODEL LLM_EMBEDDING_BASE_URL LLM_EMBEDDING_API_KEY AR_CI_REVIEW_TOKEN}"
+
+                load_image() {
+                  if [ "$runtime" = "podman" ]; then
+                    policy_file="$(mktemp)"
+                    printf '%s\n' '{"default":[{"type":"insecureAcceptAnything"}]}' >"$policy_file"
+                    if "$runtime" load --signature-policy "$policy_file" --input ./result; then
+                      rm -f "$policy_file"
+                    else
+                      status=$?
+                      rm -f "$policy_file"
+                      return "$status"
+                    fi
+                  else
+                    "$runtime" load --input ./result
+                  fi
+                }
+
+                rebuild_and_restart() {
+                  nix build .#ar-gateway-image
+                  load_image
+                  "$runtime" rm -f "$name" >/dev/null 2>&1 || true
+                  args=(run --name "$name" --rm -p "127.0.0.1:$port:8080")
+                  if [ -f "$env_file" ]; then
+                    args+=(--env-file "$env_file")
+                  fi
+                  for env_name in $env_passthrough; do
+                    if [ -n "''${!env_name:-}" ]; then
+                      args+=(--env "$env_name")
+                    fi
+                  done
+                  args+=(-v "auto-review-dev-state:/var/lib/auto_review" "$tag")
+                  "$runtime" "''${args[@]}"
+                }
+
+                export -f rebuild_and_restart
+                export -f load_image
+                export runtime name tag port env_file env_passthrough
+
+                watchexec \
+                  --restart \
+                  --watch crates \
+                  --watch Cargo.toml \
+                  --watch Cargo.lock \
+                  --watch flake.nix \
+                  --watch flake.lock \
+                  --exts rs,toml,nix,lock \
+                  --shell bash \
+                  'rebuild_and_restart'
+              '';
+            }}/bin/auto-review-dev-gateway-container";
+          };
         };
 
         # ----- CI checks ---------------------------------------------
@@ -208,6 +324,7 @@
               buildPhaseCargoCommand = "cargo deny check licenses bans sources";
             }
           );
+          ar-gateway-image = self.packages.${system}.ar-gateway-image;
         };
       }
     );

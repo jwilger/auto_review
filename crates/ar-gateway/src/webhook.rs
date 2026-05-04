@@ -599,7 +599,6 @@ mod tests {
             version: "0.0.1",
             bot_login: "pr-bot".into(),
             bot_name: "pr-bot".into(),
-            sandbox: "podman",
             learnings: "sqlite".into(),
             history: "sqlite".into(),
             vector: "sqlite".into(),
@@ -616,7 +615,10 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let json: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
         assert_eq!(json["bot_login"], "pr-bot");
-        assert_eq!(json["sandbox"], "podman");
+        assert!(
+            json.get("sandbox").is_none(),
+            "normal review runtime no longer exposes a sandbox status: {json}"
+        );
         assert_eq!(json["learnings"], "sqlite");
         assert_eq!(json["reasoning_model"], "qwen2.5-coder:32b");
         assert_eq!(json["poller_enabled"], true);
@@ -643,7 +645,6 @@ mod tests {
             version: "0.0.1",
             bot_login: "pr-bot".into(),
             bot_name: "pr-bot".into(),
-            sandbox: "podman",
             learnings: "sqlite:/var/lib/auto_review/learnings.db".into(),
             history: "sqlite:/var/lib/auto_review/history.db".into(),
             vector: "sqlite:/var/lib/auto_review/vector.db".into(),

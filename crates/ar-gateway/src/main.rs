@@ -405,7 +405,6 @@ async fn main() -> Result<()> {
         version: env!("CARGO_PKG_VERSION"),
         bot_login: bot_login.clone(),
         bot_name: bot_name.clone(),
-        sandbox: "not-used",
         learnings: learnings_info.clone(),
         history: history_info.clone(),
         vector: vector_info.clone(),

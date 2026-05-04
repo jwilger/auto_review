@@ -215,7 +215,7 @@ docker volume rm forgejo-e2e
 - **Multi-tenant SaaS auth.** Out of scope per ADR-0001.
 - **GitLab / Bitbucket.** Different webhook formats; not
   implemented.
-- **The container-escape harness.** That's `cargo test -p
-  ar-sandbox --test escape -- --ignored` against your sandbox
-  image.
+- **CI runner isolation validation.** Deterministic tool execution belongs in
+  your CI runner; validate that environment with the runner's own hardening
+  tests before allowing untrusted PRs.
 - **Performance benchmarks.** A separate corpus replay (TODO).

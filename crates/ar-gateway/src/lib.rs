@@ -87,10 +87,6 @@ pub struct GatewayInfo {
     pub version: &'static str,
     pub bot_login: String,
     pub bot_name: String,
-    /// Runtime sandbox state. `"not-used"` means the normal review runtime does
-    /// not execute bundled linters or wire a sandbox implementation. Older
-    /// pre-#45 values were `"direct"` and `"podman"`.
-    pub sandbox: &'static str,
     /// Concrete `LearningsStore` backing — either `"in-memory"` or
     /// `"sqlite:<path>"`. The path lets operators verify the bot
     /// opened the file they intended.

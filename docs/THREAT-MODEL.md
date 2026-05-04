@@ -105,7 +105,14 @@ CodeRabbit's May-2024 RCE was exactly this class.
 bundled linters or repo-supplied linter configs. Deterministic linters, tests,
 and builds run in CI under the operator's CI isolation policy before CI calls
 the semantic-review endpoint. The reviewer runtime only clones for read-only
-context and LLM verification.
+context and LLM verification; `AR_SANDBOX_IMAGE` is not required for normal
+gateway startup and `/info` does not expose a sandbox field.
+Git clone/fetch/checkout remain host subprocesses, so they run through a
+hermetic command wrapper that disables system/global Git config, clears
+env-injected Git config, isolates home config paths, and removes ambient Git
+repo/template/object/askpass/SSH variables before touching attacker-controlled
+refs or trees. Git terminal prompts are disabled so credential failures fail
+closed instead of invoking host prompt helpers.
 *Residual risk:* CI isolation is out of scope for this document; operators must
 harden Forgejo Actions or their chosen CI separately.
 
@@ -158,9 +165,9 @@ root using `std::path::PathBuf::canonicalize`. Symlinks pointing
 outside the root are rejected. There is no LLM-callable tool that
 runs arbitrary shell — the verifier reads files and greps; it
 does not run subprocesses. The chat agent's `autofix`/`tests`/
-`docstring` commands write into the workspace clone, not the host,
-and the output is posted as a patch (the operator merges, not the
-bot).
+`docstring` commands fetch Forgejo diffs and post suggested text,
+inline suggestions, or test scaffolds for humans to apply; the bot
+does not execute those suggestions or run tests locally.
 *Residual risk:* a future tool that spawns untrusted subprocesses
 would re-open T1; new tools must go through this threat-model
 review.
@@ -268,9 +275,13 @@ threat-model claims fail CI when a regression slips in:
   cover T5 (PAT compromise: tokens never appear in URL logs).
 
 T1 is now primarily an architectural guardrail: normal review jobs must not
-reintroduce repo-controlled deterministic tool execution. The remaining
-`crates/ar-sandbox` Podman integration tests cover sandbox behavior while
-issue #46 decides its future scope.
+reintroduce repo-controlled deterministic tool execution. Issue #46's rescope
+enumerates remaining workspace paths in `docs/ADR-0002-sandbox.md`;
+`crates/ar-review/src/workspace.rs` red-team tests pin that Git workspace
+preparation ignores host global aliases, env-injected Git config, ambient
+repo/template/object/SSH variables, and askpass helpers. Any future feature that
+explicitly needs process execution must add a new threat-model entry and tests
+for its specific isolation boundary.
 
 ## How to update this document
 
