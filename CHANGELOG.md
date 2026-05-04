@@ -12,6 +12,13 @@ since the start of the project.
 
 ### Changed
 
+#### CI coverage review guidance
+
+- Default AI reviews now ask for warning-level findings when repository context
+  shows a relevant linter or static check missing from CI, while suppressing
+  repeated warning-level recommendations for checks project memory says
+  maintainers declined. Closes #51.
+
 #### Chat mention dispatch
 
 - `ar-gateway` now deduplicates top-level PR chat mentions shared by the

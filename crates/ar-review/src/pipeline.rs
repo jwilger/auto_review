@@ -861,6 +861,143 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn default_review_prompt_requests_missing_ci_linter_recommendations() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/lib.rs b/src/lib.rs\n\
+                 index 1111111..2222222 100644\n\
+                 --- a/src/lib.rs\n\
+                 +++ b/src/lib.rs\n\
+                 @@ -1 +1,2 @@\n\
+                 +pub fn added() {}\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/lib.rs", "status": "modified"},
+                {"filename": ".forgejo/workflows/ci.yml", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1237,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let llm = router_with(provider.clone());
+        review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "deadbeef",
+            pr_title: "title",
+            pr_body: "body",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "CI gates observed: .forgejo/workflows/ci.yml runs cargo test but does not run cargo clippy.",
+            diff_override: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+        })
+        .await
+        .expect("review ok");
+
+        let prompt = provider
+            .last_user_prompt()
+            .expect("LLM should have been called");
+        assert!(
+            prompt.contains("missing CI linter/check")
+                && prompt.contains("cargo clippy")
+                && prompt.contains(".forgejo/workflows/ci.yml")
+                && prompt.contains("warning"),
+            "default review prompt should ask for warning-level missing-CI-linter recommendations that name the absent check and CI gate; prompt was:\n{prompt}",
+        );
+    }
+
+    #[tokio::test]
+    async fn project_memory_declines_suppress_warning_level_missing_ci_linter_recommendations() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/lib.rs b/src/lib.rs\n\
+                 index 1111111..2222222 100644\n\
+                 --- a/src/lib.rs\n\
+                 +++ b/src/lib.rs\n\
+                 @@ -1 +1,2 @@\n\
+                 +pub fn added() {}\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/lib.rs", "status": "modified"},
+                {"filename": ".forgejo/workflows/ci.yml", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1238,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let llm = router_with(provider.clone());
+        review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "deadbeef",
+            pr_title: "title",
+            pr_body: "body",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "CI gates observed: .forgejo/workflows/ci.yml runs cargo test but does not run cargo clippy.\nProject memory: maintainers explicitly declined adding cargo clippy to the .forgejo/workflows/ci.yml gate.",
+            diff_override: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+        })
+        .await
+        .expect("review ok");
+
+        let prompt = provider
+            .last_user_prompt()
+            .expect("LLM should have been called");
+        assert!(
+            prompt.contains("do not emit warning-level missing-CI-linter recommendations")
+                && prompt.contains("declined")
+                && prompt.contains("cargo clippy"),
+            "prompt should instruct the reviewer to suppress repeated warning-level recommendations for explicitly declined CI checks; prompt was:\n{prompt}",
+        );
+    }
+
+    #[tokio::test]
     async fn review_pull_request_propagates_forgejo_404_on_diff() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))

@@ -135,6 +135,14 @@ pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
         }
     }
 
+    out.push_str(
+        "\nCI coverage advisory:\n\
+         - When repository context or changed CI files show a relevant missing CI linter/check, emit a finding recommending the specific check and naming the CI gate where it appears absent.\n\
+         - Default missing CI linter/check findings to warning severity.\n\
+         - If project memory says maintainers declined a check, do not emit warning-level missing-CI-linter recommendations for that declined check; at most mention it as a note when the diff makes it newly relevant.\n\
+         - Keep this advisory about CI coverage only; do not claim Auto Review ran the linter/check itself.\n",
+    );
+
     out.push_str("\nUnified diff:\n```diff\n");
     out.push_str(inputs.diff);
     if !inputs.diff.ends_with('\n') {
