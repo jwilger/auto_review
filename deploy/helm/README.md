@@ -13,6 +13,7 @@ helm install auto-review ./deploy/helm \
   --set config.llmReasoningModel=gpt-4o-mini \
   --set secrets.forgejoToken=$AR_FORGEJO_TOKEN \
   --set secrets.webhookSecret=$WEBHOOK_SECRET \
+  --set secrets.ciReviewToken=$AR_CI_REVIEW_TOKEN \
   --set secrets.llmApiKey=$LLM_API_KEY \
   --set ingress.enabled=true \
   --set ingress.hosts[0].host=reviewer.example.com \
@@ -28,6 +29,7 @@ pre-existing Secret managed by your secret-injection tool of choice
 kubectl create secret generic auto-review-creds \
   --from-literal=AR_FORGEJO_TOKEN=... \
   --from-literal=WEBHOOK_SECRET=... \
+  --from-literal=AR_CI_REVIEW_TOKEN=... \
   --from-literal=LLM_API_KEY=...
 
 helm install auto-review ./deploy/helm \
@@ -42,7 +44,7 @@ helm install auto-review ./deploy/helm \
 - `config.forgejoBaseUrl`
 - `config.llmBaseUrl`
 - One of `secrets.secretRef` OR (`secrets.forgejoToken` +
-  `secrets.webhookSecret`)
+  `secrets.webhookSecret` + `secrets.ciReviewToken`)
 
 ## Optional values
 
@@ -67,8 +69,9 @@ container.
 
 ## What's missing
 
-- A LanceDB-backed vector store sidecar / volume — current build is
-  in-memory only, so RAG state is lost on pod restart.
+- A LanceDB-backed vector store sidecar / volume — the chart can persist the
+  current SQLite stores when paths and volumes are configured, but it does not
+  yet package a larger vector-store service.
 - A NetworkPolicy template — recommended for production but
   organization-specific so left for the operator to add.
 - HorizontalPodAutoscaler — the gateway is mostly idle between

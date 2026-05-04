@@ -6,7 +6,9 @@ on a Forgejo instance. If you're operating the bot, see
 
 ## What the bot does
 
-When you open or update a pull request, the bot:
+When you open or update a pull request, the bot accepts the Forgejo webhook but
+waits for your project's CI workflow to trigger semantic review after its
+configured prerequisites pass. Once review is triggered, the bot:
 
 1. Clones your branch at the head SHA into an isolated workspace.
 2. Gathers review context from the diff, changed-file list, repo
@@ -86,9 +88,10 @@ for you; that action remains manual for a signed-in Forgejo user.
 
 ## Skipping the bot
 
-For a single PR: open it as a **draft**. The bot's webhook handler
-filters drafts. Convert to ready-for-review when you want the
-review to fire.
+For a single PR: open it as a **draft**. Draft PRs are not reviewable. Convert to
+ready-for-review when you want the PR to become eligible; your project's CI
+workflow still triggers the normal semantic review after its configured
+prerequisites pass.
 
 For specific files: the repo's `.auto_review.yaml` `ignored_paths:`
 list filters them out of the review entirely.

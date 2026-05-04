@@ -39,7 +39,7 @@ Branch protection requires a PR for every merge to `main`. CI in `.forgejo/workf
 
 ## Architecture
 
-A Forgejo webhook lands at `ar-gateway`, which HMAC-verifies the payload and enqueues a job for `ar-orchestrator`. The review pipeline is:
+A Forgejo webhook lands at `ar-gateway`, which HMAC-verifies the payload and handles low-cost PR intake plus chat commands. Normal semantic review dispatch comes from the CI action path after repository-selected prerequisites pass; explicit chat commands such as `@auto_review re-review` can force a review. The review pipeline is:
 
 ```text
 clone (workspace.rs)

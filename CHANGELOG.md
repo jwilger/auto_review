@@ -12,6 +12,15 @@ since the start of the project.
 
 ### Changed
 
+#### CI-gated semantic review dispatch
+
+- `ar-gateway` no longer dispatches semantic reviews from ordinary
+  `pull_request` webhooks, including opened, synchronized, and bot
+  `review_requested` events. PR webhooks are still accepted for low-cost intake,
+  while normal review dispatch comes from the CI action path after repository
+  workflow prerequisites pass; `@auto_review re-review` remains an explicit
+  forced bypass and now says so in its status reply. Closes #44.
+
 #### CI coverage review guidance
 
 - Default AI reviews now ask for warning-level findings when repository context
@@ -29,9 +38,9 @@ since the start of the project.
 #### Forgejo review-request webhooks
 
 - `ar-gateway` now handles Forgejo `pull_request.review_requested` webhooks for
-  the configured bot login, queuing a semantic review for open, non-draft PRs so
-  branch protection does not remain blocked on an outstanding bot review
-  request. Closes #49.
+  the configured bot login. Issue #44 later moved semantic review dispatch behind
+  CI gating, so these webhook events are now accepted without queuing review work.
+  Closes #49.
 
 #### Gateway Forgejo token env
 
@@ -242,8 +251,8 @@ since the start of the project.
   real Forgejo container (install bootstrap, bot user, PAT,
   webhook, gateway boot, PR open, success verification).
 - **`crates/ar-orchestrator/tests/synthetic_e2e.rs`** — single
-  in-process Rust test driving webhook → dispatcher → mocked
-  Forgejo+LLM → posted review.
+  in-process Rust test driving dispatch → mocked Forgejo+LLM → posted review;
+  issue #44 later moved ordinary PR webhook intake out of the dispatch path.
 
 #### End-to-end review pipeline
 
@@ -604,8 +613,8 @@ on the same axum server as PR webhooks.
   `ar-orchestrator`. Set `AR_HISTORY_DB` to a filesystem
   path and the orchestrator's per-PR "last reviewed SHA"
   tracking survives `systemctl restart`. Without this
-  (the previous default), every restart triggers a fresh
-  full review on the next webhook for any open PR — wasted
+  (the previous default), every restart triggers a fresh full review on the next
+  CI-triggered or explicit forced review for any open PR — wasted
   tokens + duplicated inline comments on lines that
   haven't changed.
 - Schema is one row per PR keyed by
@@ -1604,8 +1613,8 @@ default in-memory store to the SQLite-backed one.
 
 - `auto_review reset-pr --history-db <PATH> --owner X
   --repo Y --pr N` clears the persistent review-history
-  record for one PR. The next webhook on that PR triggers a
-  fresh full review instead of a `compare` diff against a
+  record for one PR. The next CI-triggered or explicit forced review on that PR
+  triggers a fresh full review instead of a `compare` diff against a
   stale baseline SHA. Use cases:
   - After a guideline change in `.auto_review.yaml`
   - After swapping `LLM_REASONING_MODEL`

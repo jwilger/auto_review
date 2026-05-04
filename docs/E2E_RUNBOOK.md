@@ -1,7 +1,8 @@
 # End-to-End Verification Runbook
 
 Bring up auto_review against a real Forgejo instance and verify the
-chain from webhook intake through posted review. Use this when:
+chain from webhook intake, CI-triggered review dispatch, and posted review. Use
+this when:
 
 - Cutting a release.
 - Investigating a "review never posts" report from an operator.
@@ -9,11 +10,11 @@ chain from webhook intake through posted review. Use this when:
   docs/OPERATIONS.md tracks which Forgejo majors we've verified).
 
 The synthetic e2e tests at `crates/ar-orchestrator/tests/synthetic_e2e.rs`
-cover the wiring bugs (HMAC, webhook parsing, dispatcher hand-off,
-review-comment payload shape). This runbook covers what only a real
+cover the review-pipeline wiring bugs (dispatch hand-off and review-comment
+payload shape). This runbook covers what only a real
 Forgejo can validate: API-shape drift across versions, multi-line
 comment quirks (gitea#36231), the actual webhook payload schema,
-and the install / PAT / hook-registration flow.
+the CI review endpoint, and the install / PAT / hook-registration flow.
 
 ## Prerequisites
 
@@ -121,7 +122,7 @@ curl -X POST http://localhost:3000/api/v1/user/repos \
 
 The gateway runs at `http://localhost:8080` by default; adjust if
 you've bound a different port. The secret you set here MUST match
-`AR_WEBHOOK_SECRET` when you boot the gateway.
+`WEBHOOK_SECRET` when you boot the gateway.
 
 ```bash
 curl -X POST http://localhost:3000/api/v1/repos/auto_review_bot/e2e-target/hooks \
@@ -145,12 +146,12 @@ Forgejo container on Docker Desktop. On Linux, use the host LAN IP.)
 ## 7. Boot the gateway
 
 ```bash
-AR_FORGEJO_BASE=http://localhost:3000 \
+FORGEJO_BASE_URL=http://localhost:3000 \
 AR_FORGEJO_TOKEN="$PAT" \
-AR_WEBHOOK_SECRET=shared-secret \
-AR_LLM_REASONING_PROVIDER=ollama \
-AR_LLM_REASONING_MODEL=qwen2.5-coder:7b \
-AR_LLM_OLLAMA_BASE=http://localhost:11434 \
+WEBHOOK_SECRET=shared-secret \
+AR_CI_REVIEW_TOKEN=e2e-action-token \
+LLM_BASE_URL=http://localhost:11434 \
+LLM_REASONING_MODEL=qwen2.5-coder:7b \
 ./target/release/ar-gateway
 ```
 
@@ -168,11 +169,24 @@ curl -X POST http://localhost:3000/api/v1/repos/auto_review_bot/e2e-target/conte
     "message": "feat: hello"
   }'
 
-# Open the PR
-curl -X POST http://localhost:3000/api/v1/repos/auto_review_bot/e2e-target/pulls \
+# Open the PR and capture its current head SHA for the CI-triggered review.
+PR_JSON=$(curl -s -X POST http://localhost:3000/api/v1/repos/auto_review_bot/e2e-target/pulls \
   -u auto_review_bot:botpass1234 \
   -H "Content-Type: application/json" \
-  -d '{"title":"e2e","head":"feature/e2e","base":"main","body":"e2e test"}'
+  -d '{"title":"e2e","head":"feature/e2e","base":"main","body":"e2e test"}')
+PR_NUMBER=$(jq -r .number <<<"$PR_JSON")
+HEAD_SHA=$(jq -r .head.sha <<<"$PR_JSON")
+```
+
+The PR webhook should be accepted, but it does not dispatch semantic review work
+by default. Trigger the normal review path the way a workflow job would after its
+prerequisites pass:
+
+```bash
+curl -f -X POST http://localhost:8080/reviews/ci \
+  -H "Authorization: Bearer e2e-action-token" \
+  -H "Content-Type: application/json" \
+  -d "{\"owner\":\"auto_review_bot\",\"repo\":\"e2e-target\",\"pr_number\":$PR_NUMBER,\"head_sha\":\"$HEAD_SHA\"}"
 ```
 
 ## 9. Verify
@@ -192,11 +206,12 @@ And Forgejo's UI should show:
 
 If any of those don't fire:
 
-1. Check the gateway logs for HMAC mismatches or webhook-parsing
-   errors.
+1. Check the gateway logs for HMAC mismatches, webhook-parsing errors, CI token
+   rejection, or stale `head_sha` conflicts.
 2. Hit `/metrics` on the gateway: counters
-   `auto_review_webhooks_pull_request_total` should be ≥ 1, and
-   one of `reviews_succeeded_total` / `reviews_failed_*_total`
+   `auto_review_webhooks_pull_request_total` should be ≥ 1,
+   `auto_review_jobs_dispatched_total` should be ≥ 1 after the `/reviews/ci`
+   request, and one of `reviews_succeeded_total` / `reviews_failed_*_total`
    should be ≥ 1.
 3. If `reviews_failed_workspace_total` ticked, the clone phase
    failed — check that `host.docker.internal` (or the LAN IP) is

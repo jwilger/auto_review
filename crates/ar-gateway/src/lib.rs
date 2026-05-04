@@ -1,9 +1,10 @@
 //! HTTP webhook intake.
 //!
-//! Validates Forgejo's HMAC-SHA256 signature, decodes the `pull_request`
-//! event, and dispatches a review job. The dispatcher abstraction lets the
-//! gateway return 202 immediately while the actual review runs in the
-//! background.
+//! Validates Forgejo's HMAC-SHA256 signature and accepts low-cost
+//! `pull_request` intake without dispatching semantic review work by default.
+//! CI-triggered `/reviews/ci` requests and explicit chat commands use the
+//! dispatcher abstraction so the gateway can return quickly while reviews run in
+//! the background.
 
 pub mod config;
 pub mod dedup;

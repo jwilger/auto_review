@@ -59,10 +59,10 @@ clear pull request context error before contacting the gateway.
 
 ## Caveats
 
-- **PRs from forks** receive a token without write permission to the
-  upstream repo, so the bot can't post reviews on them. Configure
-  `pull_request_target` if you want fork PRs reviewed (and accept
-  the additional security considerations).
+- **PRs from forks** do not receive repository secrets, so this direct
+  `pull_request` workflow cannot call the gateway for them. Do not switch to a
+  privileged target-style workflow that checks out or executes untrusted fork
+  code with secrets; use a trusted maintainer-mediated path instead.
 - **Gateway required**: this action is only a thin dispatcher. Run and expose
   `ar-gateway` before adding the workflow job.
 - **Gateway rejection**: stale PR heads, draft PRs, closed PRs, or bad tokens

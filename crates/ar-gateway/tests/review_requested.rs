@@ -83,19 +83,14 @@ async fn post_pull_request_webhook(
 }
 
 #[tokio::test]
-async fn review_requested_for_configured_bot_dispatches_current_pr_head() {
+async fn review_requested_for_configured_bot_is_accepted_without_dispatching_review() {
     let body = review_requested_pr_payload("pr-bot", false, "open");
     let recorder = RecordingDispatcher::new();
 
     let status = post_pull_request_webhook(recorder.clone(), "pr-bot", body).await;
 
     assert_eq!(status, StatusCode::ACCEPTED);
-    let jobs = recorder.jobs();
-    assert_eq!(jobs.len(), 1);
-    assert_eq!(jobs[0].pr_number, 7);
-    assert_eq!(jobs[0].owner, "o");
-    assert_eq!(jobs[0].repo, "r");
-    assert_eq!(jobs[0].head_sha, "deadbeef");
+    assert!(recorder.jobs().is_empty());
 }
 
 #[tokio::test]

@@ -1,7 +1,8 @@
 # ar-gateway
 
 HTTP intake for `auto_review`. Accepts Forgejo webhooks, verifies
-HMAC, dispatches review jobs, and exposes operational endpoints.
+HMAC, accepts chat commands, dispatches CI-triggered review jobs, and exposes
+operational endpoints.
 
 ## Public surface
 
@@ -27,7 +28,11 @@ HMAC, dispatches review jobs, and exposes operational endpoints.
   least 32 random bytes/chars; callers authenticate with `Authorization: Bearer
   ...` and provide owner, repo, PR number, head SHA, and trigger metadata. The
   gateway verifies the current Forgejo PR head still matches before dispatch.
-- `POST /webhooks/forgejo` — webhook intake
+- `POST /webhooks/forgejo` — webhook intake. `pull_request` events are accepted
+  for low-cost bookkeeping/logging but do not dispatch semantic reviews by
+  default; normal review dispatch comes from `POST /reviews/ci` after the
+  workflow prerequisites chosen by the repository have passed. `issue_comment`
+  chat commands such as `@auto_review re-review` may still queue forced reviews.
 
 See [`docs/ADR-0003-observability.md`](../../docs/ADR-0003-observability.md)
 for the design rationale.
@@ -35,7 +40,8 @@ for the design rationale.
 ## Tests
 
 Webhook intake is fully covered: HMAC verify, dedup retry, rate-limit
-429, payload decode, review-request dispatch, chat-command dispatch. Run with
+429, payload decode, PR-webhook acceptance without review dispatch, CI review
+dispatch, and chat-command dispatch. Run with
 `cargo test -p ar-gateway`. See `webhook.rs` and the per-module
 `tests` blocks (`metrics.rs`, `ratelimit.rs`, `dedup.rs`,
 `poller.rs`).

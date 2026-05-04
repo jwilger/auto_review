@@ -234,7 +234,7 @@ impl ChatHandler<'_> {
         };
         dispatcher.dispatch(job).await;
         let reply = format!(
-            "Queued a fresh review at {}. Watch the commit-status badge for progress.",
+            "Queued a forced review at {}. This intentionally bypasses CI gating; watch the commit-status badge for progress.",
             pr.head.sha
         );
         self.post(ctx, &reply).await
@@ -1098,6 +1098,9 @@ mod tests {
         let (server, forgejo, learnings, llm) = setup().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(serde_json::json!({
+                "body": "Remembered as learning #1. To revoke later: `@auto_review forget 1`."
+            })))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
             .mount(&server)
             .await;
@@ -1292,11 +1295,30 @@ mod tests {
             .handle(ctx(), ChatCommand::ReReview)
             .await
             .expect("ok");
-        let queued = seen.lock().unwrap();
-        assert_eq!(queued.len(), 1);
-        assert_eq!(queued[0].pr_number, 42);
-        assert_eq!(queued[0].head_sha, "deadbeef");
-        assert!(queued[0].force, "ReReview must set force=true");
+        {
+            let queued = seen.lock().unwrap();
+            assert_eq!(queued.len(), 1);
+            assert_eq!(queued[0].pr_number, 42);
+            assert_eq!(queued[0].head_sha, "deadbeef");
+            assert!(queued[0].force, "ReReview must set force=true");
+        }
+
+        let received = server.received_requests().await.expect("requests");
+        let posted_comment: serde_json::Value = serde_json::from_slice(
+            &received
+                .last()
+                .expect("re-review should post an issue comment")
+                .body,
+        )
+        .expect("comment request body should be json");
+        let body = posted_comment
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("comment body should be a string");
+        assert!(
+            body.contains("forced review") && body.contains("intentionally bypasses CI gating"),
+            "expected re-review status to say a forced review was queued and intentionally bypasses CI gating, got: {body}"
+        );
     }
 
     #[tokio::test]

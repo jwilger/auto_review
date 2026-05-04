@@ -109,6 +109,7 @@
             git
             forgejo-mcp
             jq
+            kubernetes-helm
             pkg-config
             openssl
             # Quick foreground Rust check loops. Runtime development

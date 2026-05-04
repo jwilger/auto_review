@@ -22,8 +22,8 @@ const FALLBACK_DELIVERY_HEADER: &str = "x-gitea-delivery";
 ///
 /// 1. HMAC-verifies the body against the configured secret.
 /// 2. Dispatches by `X-Forgejo-Event`.
-/// 3. For `pull_request` opened/synchronized/reopened, decodes the payload
-///    and hands a [`ReviewJob`] to the configured dispatcher.
+/// 3. For `pull_request`, decodes the payload and records acceptance without
+///    dispatching review work; CI-triggered reviews use `/reviews/ci`.
 pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     // Global throttle (T7 mitigation). Checked before HMAC verify so
     // a flood of unsigned junk can't burn CPU on signature math.
@@ -307,10 +307,8 @@ async fn handle_pull_request(state: &AppState, body: &[u8]) -> Response {
         number = evt.number,
         action = ?evt.action,
         head = %evt.pull_request.head.sha,
-        "accepted PR for review",
+        "accepted PR webhook without dispatching review",
     );
-    state.dispatcher.dispatch(ReviewJob::from(&evt)).await;
-    state.metrics.record_job_dispatched();
     (StatusCode::ACCEPTED, "").into_response()
 }
 
@@ -471,22 +469,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn valid_pr_opened_is_accepted_and_dispatched() {
-        let body = pr_payload("opened", false);
-        let sig = sign("s", &body);
-        let recorder = RecordingDispatcher::new();
-        let (status, _) = send("s", "pull_request", body, Some(&sig), recorder.clone()).await;
-        assert_eq!(status, StatusCode::ACCEPTED);
-        let jobs = recorder.jobs();
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].pr_number, 7);
-        assert_eq!(jobs[0].owner, "o");
-        assert_eq!(jobs[0].repo, "r");
-        assert_eq!(jobs[0].head_sha, "deadbeef");
+    async fn valid_pr_opened_and_synchronized_are_accepted_without_dispatching_review() {
+        for action in ["opened", "synchronized"] {
+            let body = pr_payload(action, false);
+            let sig = sign("s", &body);
+            let recorder = RecordingDispatcher::new();
+            let (status, _) = send("s", "pull_request", body, Some(&sig), recorder.clone()).await;
+            assert_eq!(status, StatusCode::ACCEPTED, "action={action}");
+            assert!(recorder.jobs().is_empty(), "action={action}");
+        }
     }
 
     #[tokio::test]
-    async fn review_requested_for_configured_bot_dispatches_current_pr_head() {
+    async fn review_requested_for_configured_bot_is_accepted_without_dispatching_review() {
         let secret = "s";
         let body = review_requested_pr_payload("pr-bot", false, "open");
         let sig = sign(secret, &body);
@@ -504,12 +499,7 @@ mod tests {
         let resp = app.oneshot(req).await.unwrap();
 
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
-        let jobs = recorder.jobs();
-        assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].pr_number, 7);
-        assert_eq!(jobs[0].owner, "o");
-        assert_eq!(jobs[0].repo, "r");
-        assert_eq!(jobs[0].head_sha, "deadbeef");
+        assert!(recorder.jobs().is_empty());
     }
 
     #[tokio::test]
@@ -1180,7 +1170,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn metrics_track_dispatched_pr() {
+    async fn metrics_track_pr_webhook_intake_without_review_dispatch() {
         let body = pr_payload("opened", false);
         let sig = sign("s", &body);
         let recorder = RecordingDispatcher::new();
@@ -1201,7 +1191,7 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let text = String::from_utf8_lossy(&bytes);
         assert!(text.contains("auto_review_webhooks_pull_request_total 1\n"));
-        assert!(text.contains("auto_review_jobs_dispatched_total 1\n"));
+        assert!(text.contains("auto_review_jobs_dispatched_total 0\n"));
     }
 
     #[tokio::test]
@@ -1216,7 +1206,7 @@ mod tests {
         let body = pr_payload("opened", false);
         let sig = sign("s", &body);
 
-        // First delivery: dispatched.
+        // First delivery: accepted/bookkept without semantic review dispatch.
         let req = Request::post("/webhooks/forgejo")
             .header(EVENT_HEADER, "pull_request")
             .header(SIG_HEADER, &sig)
@@ -1225,10 +1215,10 @@ mod tests {
             .unwrap();
         let resp = app.clone().oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
-        assert_eq!(recorder.jobs().len(), 1);
+        assert!(recorder.jobs().is_empty());
 
         // Forgejo retries with the same delivery id: 200 OK,
-        // no second dispatch.
+        // no dispatch.
         let req = Request::post("/webhooks/forgejo")
             .header(EVENT_HEADER, "pull_request")
             .header(SIG_HEADER, &sig)
@@ -1239,8 +1229,8 @@ mod tests {
         assert_eq!(resp.status(), StatusCode::OK);
         assert_eq!(
             recorder.jobs().len(),
-            1,
-            "duplicate must NOT trigger a second dispatch"
+            0,
+            "duplicate must NOT trigger semantic review dispatch"
         );
 
         // The duplicate counter ticks for the rejected request.
@@ -1275,7 +1265,7 @@ mod tests {
             .unwrap();
         let resp = app.oneshot(req).await.unwrap();
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
-        assert_eq!(recorder.jobs().len(), 1);
+        assert!(recorder.jobs().is_empty());
     }
 
     #[tokio::test]

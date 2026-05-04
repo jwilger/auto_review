@@ -72,6 +72,7 @@ config:
 export FORGEJO_BASE_URL=https://forgejo.example.com
 export AR_FORGEJO_TOKEN=<the PAT from step 3>
 export WEBHOOK_SECRET=<a random string, e.g. openssl rand -hex 32>
+export AR_CI_REVIEW_TOKEN=<another random string, e.g. openssl rand -hex 32>
 
 # Local LLM via Ollama
 export LLM_BASE_URL=http://localhost:11434
@@ -89,6 +90,10 @@ The gateway listens on `0.0.0.0:8080` by default; override with
 `AR_GATEWAY_BIND=0.0.0.0:9090`. It needs to be reachable from your
 Forgejo instance — put it behind a reverse proxy (or expose it
 directly inside your private network).
+
+Store the same `AR_CI_REVIEW_TOKEN` value as a CI secret (for example,
+`AUTO_REVIEW_ACTION_TOKEN`) so your workflow can call `POST /reviews/ci` after
+its prerequisite jobs pass.
 
 ## 5. Register the webhook on a repo
 
@@ -143,21 +148,32 @@ one specific PR. No webhook required:
 ```
 
 This clones the repo at the PR's head SHA, prepares semantic context, calls the
-LLM, and posts the review — exactly what the webhook flow would do —
+LLM, and posts the review — the same review pipeline reached by CI-triggered
+gateway dispatch —
 but synchronously, with all logs streaming to your terminal. Useful for
 onboarding and for reproducing reported review issues.
 
 ## 6. Open a PR
 
-The gateway will:
+Opening or updating the PR sends a signed Forgejo webhook to the gateway. The
+gateway verifies and accepts that low-cost intake, but the normal semantic review
+waits for your workflow prerequisites. Configure Forgejo Actions (or another CI)
+to run the deterministic checks you require, then call `POST /reviews/ci` with
+the PR number and current head SHA.
 
-1. Verify the webhook's HMAC-SHA256 signature.
+When CI triggers the review, the gateway will:
+
+1. Authenticate the CI request with `AR_CI_REVIEW_TOKEN` and verify that the
+   supplied head SHA still matches the PR in Forgejo.
 2. Skip the review if every changed file is trivial (lockfile bumps,
    vendored code, generated files); post a "skipped" commit status.
 3. Otherwise: shallow-clone the repo at the head SHA, prepare RAG context,
    feed the diff to the configured LLM, self-heal any malformed JSON output,
-   and post inline review comments + a top-level summary. Deterministic
-   linters/tests/builds belong in CI before the review trigger.
+   and post inline review comments + a top-level summary.
+
+For a deliberate manual bypass, comment `@auto_review re-review` on the PR. The
+bot queues a forced review and replies that the command intentionally bypasses CI
+gating.
 
 Latency is dominated by the LLM. Local 32B-class models on CPU can
 take a couple of minutes per PR; small cloud models are much faster.
@@ -167,16 +183,15 @@ take a couple of minutes per PR; small cloud models are much faster.
 ### docker compose
 
 ```sh
-cp .env.example .env  # set the variables above
+# Create a .env file with the variables from §4, including AR_CI_REVIEW_TOKEN.
 docker compose -f deploy/docker-compose.yml up -d
 ```
 
 ### Forgejo Action
 
 `deploy/forgejo-action/` ships a workflow template for users who
-want to run the bot as a Forgejo Actions job (one shot per PR
-event) instead of a long-running gateway. See that directory's
-README for the install steps.
+want Forgejo Actions to call the long-running gateway's CI review endpoint after
+their prerequisite jobs pass. See that directory's README for the install steps.
 
 ### systemd
 
@@ -198,7 +213,8 @@ If those pass and reviews still don't appear:
 - **Reviews never appear**: check the gateway logs (`RUST_LOG=debug`).
   Common causes: bot user lacks repo access (run
   `auto_review doctor`), LLM endpoint unreachable, invalid
-  `AR_FORGEJO_TOKEN`.
+  `AR_FORGEJO_TOKEN`, or a CI workflow that never calls `POST /reviews/ci` after
+  required checks pass.
 - **LLM returns malformed JSON repeatedly**: the self-heal loop is
   bounded at 3 attempts. Smaller local models (≤7B) may struggle
   with strict JSON schemas; try a larger model or switch

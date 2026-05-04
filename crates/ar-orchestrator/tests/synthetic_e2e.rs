@@ -1,19 +1,18 @@
 //! Synthetic end-to-end integration test.
 //!
-//! Drives the full stack — webhook intake (`ar-gateway`) →
-//! `SpawningDispatcher` → review pipeline (`ar-review`) — in a single
-//! in-process tokio test, with wiremock standing in for Forgejo and a
-//! canned LLM provider standing in for the reasoning model. The
-//! assertion target is the posted review on Forgejo: when wiremock
-//! records exactly one `POST /api/v1/repos/o/r/pulls/7/reviews`,
-//! the whole pipeline ran to completion.
+//! Drives the full stack — CI-triggered gateway dispatch (`ar-gateway`) →
+//! `SpawningDispatcher` → review pipeline (`ar-review`) — in a single in-process
+//! tokio test, with wiremock standing in for Forgejo and a canned LLM provider
+//! standing in for the reasoning model. The assertion target is the posted review
+//! on Forgejo: when wiremock records exactly one
+//! `POST /api/v1/repos/o/r/pulls/7/reviews`, the whole pipeline ran to
+//! completion.
 //!
 //! The git-clone phase WILL fail (wiremock is not a git server). The
 //! lint phase swallows that failure and the dispatcher continues with
 //! empty findings — see `dispatcher.rs::run_review_job`. So this test
 //! does not need to provide a working clone.
 
-use ::hmac::{Hmac, Mac};
 use ar_forgejo::Client as ForgejoClient;
 use ar_gateway::{build_router, AppState};
 use ar_llm::{
@@ -24,15 +23,13 @@ use ar_orchestrator::{InMemoryReviewHistory, JobDispatcher, ReviewHistory, Spawn
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use sha2::Sha256;
 use std::sync::{Arc, Mutex};
 use tower::ServiceExt;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
-type HmacSha256 = Hmac<Sha256>;
-
 const WEBHOOK_SECRET: &str = "synthetic-e2e-secret";
+const CI_REVIEW_TOKEN: &str = "synthetic-action-token";
 
 /// Replicated from `ar-review`'s test module so this integration test
 /// stays self-contained. Pops responses LIFO; defaults to "no
@@ -67,39 +64,23 @@ impl LlmProvider for CannedProvider {
     }
 }
 
-fn sign(secret: &str, body: &[u8]) -> String {
-    let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
-    mac.update(body);
-    hex::encode(mac.finalize().into_bytes())
-}
+#[tokio::test]
+async fn ci_endpoint_through_dispatcher_through_pipeline_posts_review() {
+    let server = MockServer::start().await;
 
-fn pr_payload() -> Vec<u8> {
-    serde_json::to_vec(&serde_json::json!({
-        "action": "opened",
-        "number": 7,
-        "pull_request": {
+    Mock::given(method("GET"))
+        .and(path("/api/v1/repos/o/r/pulls/7"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
             "number": 7,
             "title": "synthetic e2e",
             "body": "",
             "draft": false,
-            "user": {"login": "u", "id": 1},
+            "state": "open",
             "head": {"ref": "topic", "sha": "deadbeef"},
             "base": {"ref": "main", "sha": "cafef00d"}
-        },
-        "repository": {
-            "name": "r",
-            "full_name": "o/r",
-            "default_branch": "main",
-            "owner": {"login": "o", "id": 99}
-        },
-        "sender": {"login": "u", "id": 1}
-    }))
-    .unwrap()
-}
-
-#[tokio::test]
-async fn webhook_through_dispatcher_through_pipeline_posts_review() {
-    let server = MockServer::start().await;
+        })))
+        .mount(&server)
+        .await;
 
     Mock::given(method("GET"))
         .and(path("/api/v1/repos/o/r/pulls/7/files"))
@@ -148,18 +129,27 @@ async fn webhook_through_dispatcher_through_pipeline_posts_review() {
 
     let history: Arc<dyn ReviewHistory> = Arc::new(InMemoryReviewHistory::new());
     let dispatcher = Arc::new(
-        SpawningDispatcher::new(forgejo_client, llm_router, server.uri(), "tok")
+        SpawningDispatcher::new(forgejo_client.clone(), llm_router, server.uri(), "tok")
             .with_history(history),
     ) as Arc<dyn JobDispatcher>;
 
-    let app = build_router(AppState::new(WEBHOOK_SECRET, dispatcher));
+    let app = build_router(
+        AppState::new(WEBHOOK_SECRET, dispatcher)
+            .with_ci_review_endpoint(CI_REVIEW_TOKEN, forgejo_client),
+    );
 
-    let body = pr_payload();
-    let sig = sign(WEBHOOK_SECRET, &body);
-    let req = Request::post("/webhooks/forgejo")
-        .header("x-forgejo-event", "pull_request")
-        .header("x-forgejo-signature", sig)
-        .body(Body::from(body))
+    let req = Request::post("/reviews/ci")
+        .header("authorization", format!("Bearer {CI_REVIEW_TOKEN}"))
+        .header("content-type", "application/json")
+        .body(Body::from(
+            serde_json::to_vec(&serde_json::json!({
+                "owner": "o",
+                "repo": "r",
+                "pr_number": 7,
+                "head_sha": "deadbeef"
+            }))
+            .unwrap(),
+        ))
         .unwrap();
 
     let resp = app.oneshot(req).await.unwrap();

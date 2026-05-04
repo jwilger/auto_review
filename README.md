@@ -8,8 +8,8 @@ you control, with optional support for fully local LLMs.
 
 ## Status
 
-**Alpha.** End-to-end review pipeline works: webhook intake → LLM
-triage (skip lockfile-only PRs, route trivial files away from the
+**Alpha.** End-to-end review pipeline works: webhook intake plus CI-gated
+review dispatch → LLM triage (skip lockfile-only PRs, route trivial files away from the
 reasoning model) → shallow-clone → tree-sitter + embedding
 RAG context + persistent learnings memory → reasoning-tier LLM
 with strict-JSON-schema output and self-heal validation → cheap-
@@ -59,8 +59,11 @@ semantic review after required checks pass.
 
 ## Architecture (one-paragraph)
 
-A Forgejo webhook lands at the **gateway**, which enqueues a job for the
-**orchestrator**. The orchestrator runs a per-PR review pipeline:
+A Forgejo webhook lands at the **gateway**, which HMAC-verifies low-cost PR
+intake and chat commands. Normal semantic review dispatch comes from the
+CI-triggered `/reviews/ci` endpoint after required checks pass; explicit
+`@auto_review re-review` commands can force a review. The **orchestrator** then
+runs a per-PR review pipeline:
 clone → triage → context curation
 (tree-sitter symbols + in-memory cosine-similarity over the
 learnings store) → review generation → verification (drop unfounded
@@ -74,7 +77,7 @@ OpenAI, Ollama, vLLM, OpenRouter, Together, Groq, etc.).
 
 | Crate | Purpose |
 |---|---|
-| `ar-gateway` | HTTP webhook intake; HMAC verification; job enqueue |
+| `ar-gateway` | HTTP webhook intake; HMAC verification; CI/chat-triggered job dispatch |
 | `ar-orchestrator` | Per-PR state machine; activity dispatch |
 | `ar-forgejo` | Forgejo REST client |
 | `ar-llm` | LLM provider trait + implementations |

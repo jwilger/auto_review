@@ -86,7 +86,7 @@ depend on required checks and then use the project action wrapper, which calls
 name: auto_review
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 jobs:
   fmt:
@@ -138,12 +138,16 @@ The gateway fetches the PR from Forgejo and rejects stale requests with
 Duplicate reviews for the same SHA still rely on the orchestrator's review
 history unless the request explicitly sets `"force": true`.
 
-If branch protection requests an official review from the configured bot user
-(`AR_BOT_LOGIN`, default `auto_review`), the `pull_request.review_requested`
-webhook also queues a semantic review for open, non-draft PRs. Requests for
-other reviewers, draft PRs, and closed PRs are ignored. This keeps Forgejo's
-`block_on_official_review_requests` protection from waiting indefinitely on the
-bot after a human or rule explicitly requests it.
+`pull_request` webhooks are still accepted for low-cost intake, deduplication,
+chat support, logging, and future bookkeeping, but they do not queue semantic
+reviews by default. That includes ordinary lifecycle events such as `opened` and
+`synchronize` as well as `review_requested`; use the CI workflow to decide which
+deterministic checks must pass before calling `POST /reviews/ci`.
+
+Explicit chat commands are the intentional bypass. `@auto_review re-review`
+queues a forced review at the current PR head and replies that it intentionally
+bypasses CI gating, so authors can distinguish it from the normal
+waiting-for-CI/action-triggered lifecycle.
 
 ## 1. Daily / weekly checks
 
@@ -166,7 +170,8 @@ import steps.
 **Scrape metrics** at `GET /metrics` from your Prometheus and dashboard:
 
 *Webhook layer:*
-- `auto_review_jobs_dispatched_total` — should track PR opens.
+- `auto_review_jobs_dispatched_total` — should track CI-triggered reviews and
+  explicit forced reviews, not ordinary PR webhook opens.
 - `auto_review_webhook_signature_failures_total` — should be zero or
   near-zero.
 - `auto_review_webhook_payload_failures_total` — should be zero.
@@ -231,8 +236,8 @@ import steps.
 journalctl -u auto-review -f --since "1 hour ago" | grep -E 'WARN|ERROR'
 ```
 The orchestrator logs each review's repo, PR number, and final
-finding count at INFO; warnings during the lint/RAG/verify phases are
-non-fatal but worth scanning if findings drop noticeably.
+finding count at INFO; warnings during the context, LLM, self-heal, or verify
+phases are non-fatal but worth scanning if findings drop noticeably.
 
 ---
 
@@ -275,8 +280,8 @@ File an issue with the failing payload (redact the `secret` field
 from the webhook envelope first).
 
 **Workaround until fix:** revert Forgejo to the last working
-version, or accept the missed reviews on PRs that webhook in this
-window.
+version, or accept missed webhook intake/chat/bookkeeping in this window. Normal
+semantic review requests sent to `/reviews/ci` use a separate payload contract.
 
 ---
 
@@ -376,9 +381,9 @@ or exhaust workspace disk.
 AR_REVIEW_CONCURRENCY=4
 ```
 
-The webhook handler still acks immediately (returns 202). The
-excess spawned tasks wait on the semaphore — they don't get
-dropped, just queued. Pick a value matching your worker
+Gateway-triggered review requests still ack quickly after validation. Excess
+spawned review tasks wait on the semaphore — they don't get dropped, just queued.
+Pick a value matching your worker
 capacity (CPU cores × something; rule of thumb: start at the
 number of CPU cores, raise if LLM I/O dominates).
 
@@ -455,8 +460,9 @@ Add to the repo root:
 enabled: false
 ```
 
-The bot still receives the webhook but skips the review and posts a
-"disabled by repo config" success status.
+The bot still accepts PR webhooks, but repository config is enforced when a
+CI-triggered or explicit forced review runs; disabled repositories get a
+"disabled by repo config" success status instead of review findings.
 
 ### 7.2 Add custom guidelines
 
@@ -502,8 +508,8 @@ right behaviour for a stale row anyway.
 
 After a guideline / model change, or to recover from a botched
 review, clear the orchestrator's "last reviewed SHA" record so
-the next webhook triggers a full review (not an incremental
-`compare` against a stale baseline):
+the next CI-triggered or explicit forced review runs as a full review (not an
+incremental `compare` against a stale baseline):
 
 ```bash
 auto_review reset-pr \
@@ -514,9 +520,8 @@ auto_review reset-pr \
 `--history-db` reads `AR_HISTORY_DB` by default; if both the
 gateway and the operator's shell share that env var, the flag
 is optional. Safe to run while the gateway is up — SQLite
-handles concurrent access. The next webhook for that PR (a
-push, an `@<bot> re-review`, etc.) will see no recorded SHA and
-do a full review.
+handles concurrent access. The next CI-triggered review or explicit
+`@<bot> re-review` for that PR will see no recorded SHA and do a full review.
 
 ### 7.2.5 Tune signal-to-noise via `AR_SEVERITY_FLOOR`
 
