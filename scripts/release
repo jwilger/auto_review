@@ -1,0 +1,137 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  printf 'usage: scripts/release <prepare|publish> --workspace <path> --version <version> [--date <date>] [--dry-run]\n' >&2
+}
+
+command="${1:-}"
+if [[ -z "$command" ]]; then
+  usage
+  exit 2
+fi
+shift
+
+workspace="."
+version=""
+date=""
+dry_run=false
+
+release_notes_file() {
+  local changelog="$1"
+  local requested_version="$2"
+  local notes_file
+
+  notes_file="$(mktemp)"
+  awk -v heading="## [$requested_version]" '
+    index($0, heading) == 1 { in_notes = 1; next }
+    in_notes && /^## \[/ { exit }
+    in_notes { print }
+  ' "$changelog" >"$notes_file"
+  printf '%s\n' "$notes_file"
+}
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --workspace)
+      workspace="${2:-}"
+      shift 2
+      ;;
+    --version)
+      version="${2:-}"
+      shift 2
+      ;;
+    --date)
+      date="${2:-}"
+      shift 2
+      ;;
+    --dry-run)
+      dry_run=true
+      shift
+      ;;
+    *)
+      usage
+      exit 2
+      ;;
+  esac
+done
+
+if [[ -z "$version" ]]; then
+  usage
+  exit 2
+fi
+
+if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+  printf 'release version must be semantic x.y.z\n' >&2
+  exit 2
+fi
+
+case "$command" in
+  prepare)
+    if [[ -z "$date" ]]; then
+      date="$(date +%F)"
+    fi
+    if [[ "$dry_run" == true ]]; then
+      printf '+version = "%s"\n' "$version"
+      printf '+## [%s] - %s\n' "$version" "$date"
+      exit 0
+    fi
+    python3 - "$workspace/Cargo.toml" "$workspace/CHANGELOG.md" "$version" "$date" <<'PY'
+import pathlib
+import re
+import sys
+
+cargo_toml = pathlib.Path(sys.argv[1])
+changelog = pathlib.Path(sys.argv[2])
+version = sys.argv[3]
+date = sys.argv[4]
+
+cargo_text = cargo_toml.read_text()
+updated_cargo, replacements = re.subn(
+    r'(?m)^(version\s*=\s*")[^"]+("\s*)$',
+    rf'\g<1>{version}\2',
+    cargo_text,
+    count=1,
+)
+if replacements != 1:
+    raise SystemExit('workspace package version not found')
+cargo_toml.write_text(updated_cargo)
+
+changelog_text = changelog.read_text()
+changelog.write_text(changelog_text.replace('## [Unreleased]', f'## [Unreleased]\n\n## [{version}] - {date}', 1))
+PY
+    ;;
+  publish)
+    if [[ "${FORGEJO_EVENT_NAME:-}" != "pull_request" || "${FORGEJO_EVENT_ACTION:-}" != "closed" || "${FORGEJO_PULL_REQUEST_HEAD_BRANCH:-}" != "release/v$version" ]]; then
+      printf 'release publish must run from a closed release PR\n' >&2
+      exit 1
+    fi
+    if [[ "${FORGEJO_PULL_REQUEST_MERGED:-}" != "true" ]]; then
+      printf 'release PR has not been merged\n' >&2
+      exit 1
+    fi
+    if [[ -n "${FORGEJO_PULL_REQUEST_BASE_BRANCH:-}" && "${FORGEJO_PULL_REQUEST_BASE_BRANCH:-}" != "main" ]]; then
+      printf 'release PR was not merged into main\n' >&2
+      exit 1
+    fi
+    if [[ "$dry_run" == true ]]; then
+      printf 'git tag -a v%s\n' "$version"
+      printf 'tea release create --tag v%s\n' "$version"
+      exit 0
+    fi
+    if [[ -z "${FORGEJO_TOKEN:-}" ]]; then
+      printf 'missing FORGEJO_TOKEN\n' >&2
+      exit 1
+    fi
+    notes_file="$(release_notes_file "$workspace/CHANGELOG.md" "$version")"
+    git -C "$workspace" tag -a "v$version" -m "Release v$version"
+    git -C "$workspace" \
+      -c 'credential.helper=!f() { printf "username=release\npassword=%s\n" "$FORGEJO_TOKEN"; }; f' \
+      push origin "v$version"
+    tea release create --repo jwilger/auto_review --tag "v$version" --note-file "$notes_file"
+    ;;
+  *)
+    usage
+    exit 2
+    ;;
+esac

@@ -12,6 +12,12 @@ since the start of the project.
 
 ### Changed
 
+#### Release automation
+
+- Added Forgejo Actions release automation that prepares reviewable release PRs
+  from `main`, publishes tags/releases only after those PRs merge, and documents
+  split release credentials and blast-radius guardrails. Closes #66.
+
 #### CI-gated semantic review dispatch
 
 - `ar-gateway` no longer dispatches semantic reviews from ordinary
