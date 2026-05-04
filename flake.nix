@@ -216,9 +216,25 @@
                 port="''${AR_DEV_GATEWAY_PORT:-8090}"
                 env_file="''${AR_DEV_ENV_FILE:-.env}"
 
+                load_image() {
+                  if [ "$runtime" = "podman" ]; then
+                    policy_file="$(mktemp)"
+                    printf '%s\n' '{"default":[{"type":"insecureAcceptAnything"}]}' >"$policy_file"
+                    if "$runtime" load --signature-policy "$policy_file" --input ./result; then
+                      rm -f "$policy_file"
+                    else
+                      status=$?
+                      rm -f "$policy_file"
+                      return "$status"
+                    fi
+                  else
+                    "$runtime" load --input ./result
+                  fi
+                }
+
                 rebuild_and_restart() {
                   nix build .#ar-gateway-image
-                  "$runtime" load --input ./result
+                  load_image
                   "$runtime" rm -f "$name" >/dev/null 2>&1 || true
                   args=(run --name "$name" --rm -p "127.0.0.1:$port:8080")
                   if [ -f "$env_file" ]; then
@@ -229,6 +245,7 @@
                 }
 
                 export -f rebuild_and_restart
+                export -f load_image
                 export runtime name tag port env_file
 
                 watchexec \
