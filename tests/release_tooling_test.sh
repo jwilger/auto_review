@@ -497,8 +497,11 @@ PY
     fail "release PR preparation workflow runs automatically after pushes and merges to main ($output)"
   fi
   assert_file_contains "$prepare_workflow" 'scripts/release prepare' "release PR preparation workflow calls the prepare command"
-  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow authenticates tea with the Forgejo built-in repo token"
-  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_URL: https://git.johnwilger.com' "release PR preparation workflow configures tea for the Forgejo server"
+  assert_file_not_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not map tea token from unsupported forgejo.token expression"
+  assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not map git push token from unsupported forgejo.token expression"
+  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow derives tea token from the auto-injected shell FORGEJO_TOKEN" 'GITEA_SERVER_TOKEN' 'FORGEJO_TOKEN'
+  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow derives git push token from the auto-injected shell FORGEJO_TOKEN" 'FORGEJO_ACTIONS_TOKEN' 'FORGEJO_TOKEN'
+  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow derives tea server URL from shell FORGEJO_SERVER_URL with production fallback" 'GITEA_SERVER_URL' 'FORGEJO_SERVER_URL' 'https://git.johnwilger.com'
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow does not override auto FORGEJO_TOKEN from a missing prepare secret"
   assert_file_contains "$prepare_workflow" 'git fetch origin' "release PR preparation workflow checks remote branch state"
   assert_file_contains "$prepare_workflow" 'git switch' "release PR preparation workflow switches to a release branch"
@@ -547,9 +550,9 @@ import pathlib
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text()
-token_marker = 'GITEA_SERVER_TOKEN: ${{ forgejo.token }}'
+token_marker = 'GITEA_SERVER_TOKEN'
 if token_marker not in workflow:
-    print('missing token-bearing prepare step marker')
+    print('missing token derivation in token-bearing prepare step')
     sys.exit(1)
 
 validation_section, token_section = workflow.split(token_marker, 1)
@@ -606,8 +609,11 @@ test_release_workflows_use_forgejo_builtin_prepare_token_and_protected_publish_t
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow gives tea the Forgejo built-in repo token"
-  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_URL: https://git.johnwilger.com' "release PR preparation workflow gives tea the Forgejo server URL"
+  assert_file_not_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not use unsupported forgejo.token expression for tea"
+  assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not use unsupported forgejo.token expression for git push"
+  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow gives tea the auto-injected shell Forgejo token" 'GITEA_SERVER_TOKEN' 'FORGEJO_TOKEN'
+  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow gives git push the auto-injected shell Forgejo token" 'FORGEJO_ACTIONS_TOKEN' 'FORGEJO_TOKEN'
+  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow gives tea the Forgejo server URL with fallback" 'GITEA_SERVER_URL' 'FORGEJO_SERVER_URL' 'https://git.johnwilger.com'
   assert_file_not_contains "$prepare_workflow" 'TEA_TOKEN:' "release PR preparation workflow does not use tea's legacy token env var"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_TOKEN: ${{ secrets.' "release PR preparation workflow does not override auto FORGEJO_TOKEN from custom secrets"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_RELEASE_PREPARE_TOKEN' "release PR preparation workflow does not require an operator-created prepare secret"
@@ -811,7 +817,8 @@ test_prepare_workflow_pushes_release_branch_with_forgejo_builtin_repo_token_help
   local prepare_workflow
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
 
-  assert_file_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow exposes the Forgejo built-in repo token for git push"
+  assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not map git push token from unsupported forgejo.token expression"
+  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow exposes the auto-injected shell Forgejo token for git push" 'FORGEJO_ACTIONS_TOKEN' 'FORGEJO_TOKEN'
   assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow pushes the branch with the built-in repo token credential helper" 'git -c credential.helper=' 'FORGEJO_ACTIONS_TOKEN' 'push --force-with-lease origin "$branch"'
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_TOKEN: ${{ secrets.' "release PR preparation workflow branch push does not override auto FORGEJO_TOKEN from custom secrets"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_RELEASE_PREPARE_TOKEN' "release PR preparation workflow branch push does not require an operator-created prepare secret"
