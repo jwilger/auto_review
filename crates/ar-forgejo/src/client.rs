@@ -247,9 +247,9 @@ impl Client {
         base: &str,
         head: &str,
     ) -> Result<String, Error> {
-        let url = self.url(&format!(
-            "repos/{owner}/{repo}/compare/{base}...{head}.diff"
-        ))?;
+        let url = self
+            .base
+            .join(&format!("{owner}/{repo}/compare/{base}...{head}.diff"))?;
         let resp = self
             .http
             .get(url)
@@ -644,7 +644,7 @@ mod tests {
     async fn get_compare_diff_returns_text() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/o/r/compare/abc...def.diff"))
+            .and(path("/o/r/compare/abc...def.diff"))
             .respond_with(ResponseTemplate::new(200).set_body_string("diff --git a/x b/x\n+y\n"))
             .mount(&server)
             .await;
@@ -659,7 +659,7 @@ mod tests {
     async fn get_compare_diff_propagates_404() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
-            .and(path("/api/v1/repos/o/r/compare/abc...def.diff"))
+            .and(path("/o/r/compare/abc...def.diff"))
             .respond_with(ResponseTemplate::new(404).set_body_string("not found"))
             .mount(&server)
             .await;
@@ -668,7 +668,10 @@ mod tests {
             .await
             .expect_err("err");
         match err {
-            Error::Api { status, .. } => assert_eq!(status, 404),
+            Error::Api { status, body } => {
+                assert_eq!(status, 404);
+                assert_eq!(body, "not found");
+            }
             other => panic!("unexpected: {other:?}"),
         }
     }

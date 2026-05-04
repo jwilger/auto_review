@@ -667,6 +667,9 @@ default in-memory store to the SQLite-backed one.
 
 ### Fixed
 
+- Incremental CI-triggered reviews now fetch Forgejo compare diffs from the
+  web compare `.diff` route instead of appending `.diff` to the API compare
+  endpoint, avoiding false 404 fallbacks for valid PR head SHAs. Closes #71.
 - Clean Auto Review runs with no inline findings now post an official
   Forgejo **Approved** review, allowing newer clean re-reviews to supersede
   stale Auto Review **Request changes** records under protected-branch review

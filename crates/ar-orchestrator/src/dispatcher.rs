@@ -805,7 +805,8 @@ fn compare_diff_fallback_level(err: &ar_forgejo::Error) -> tracing::Level {
         ar_forgejo::Error::Api { status: 404, body }
             if body.contains("The target couldn't be found.")
                 && body.contains("could not find '")
-                && body.contains(".diff' to be a commit, branch or tag in the head repository") =>
+                && body.contains("' to be a commit, branch or tag in the head repository")
+                && !body.contains(".diff'") =>
         {
             tracing::Level::INFO
         }
@@ -1083,11 +1084,22 @@ mod tests {
     fn compare_diff_404_missing_target_is_unremarkable_fallback() {
         let err = ar_forgejo::Error::Api {
             status: 404,
-            body: r#"{"message":"The target couldn't be found.","url":"https://git.johnwilger.com/api/swagger","errors":"could not find 'd34db33f.diff' to be a commit, branch or tag in the head repository jwilger/auto_review"}"#
+            body: r#"{"message":"The target couldn't be found.","url":"https://git.johnwilger.com/api/swagger","errors":"could not find 'd34db33f' to be a commit, branch or tag in the head repository jwilger/auto_review"}"#
                 .into(),
         };
 
         assert_eq!(compare_diff_fallback_level(&err), tracing::Level::INFO);
+    }
+
+    #[test]
+    fn compare_diff_old_api_construction_bug_404_is_warning() {
+        let err = ar_forgejo::Error::Api {
+            status: 404,
+            body: r#"{"message":"The target couldn't be found.","url":"https://git.johnwilger.com/api/swagger","errors":"could not find 'd34db33f.diff' to be a commit, branch or tag in the head repository jwilger/auto_review"}"#
+                .into(),
+        };
+
+        assert_eq!(compare_diff_fallback_level(&err), tracing::Level::WARN);
     }
 
     #[test]
