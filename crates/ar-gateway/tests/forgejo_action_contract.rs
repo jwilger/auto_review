@@ -1,4 +1,5 @@
 const ACTION_YAML: &str = include_str!("../../../deploy/forgejo-action/action.yml");
+const CI_YAML: &str = include_str!("../../../.forgejo/workflows/ci.yml");
 
 #[test]
 fn forgejo_action_posts_ci_review_to_gateway() {
@@ -164,6 +165,51 @@ fn forgejo_action_posts_ci_review_to_gateway() {
     assert!(contract_errors.is_empty(), "{}", contract_errors.join("\n"));
 }
 
+#[test]
+fn ci_workflow_runs_semantic_review_through_forgejo_action_after_prerequisites() {
+    let mut contract_errors = Vec::new();
+
+    let Some(review_job) = job_block_containing(CI_YAML, "deploy/forgejo-action") else {
+        panic!("ci.yml should include a semantic review job that uses deploy/forgejo-action");
+    };
+    let compact_review_job = review_job.split_whitespace().collect::<String>();
+
+    require(
+        &mut contract_errors,
+        review_job.contains("needs: flake-check")
+            || compact_review_job.contains("needs:[flake-check"),
+        "semantic review job should need the prerequisite flake-check CI job",
+    );
+    require(
+        &mut contract_errors,
+        review_job.contains("gateway-url:")
+            && (review_job.contains("secrets.") || review_job.contains("env.")),
+        "semantic review job should pass gateway-url from secrets or env",
+    );
+    require(
+        &mut contract_errors,
+        review_job.contains("action-token:")
+            && (review_job.contains("secrets.") || review_job.contains("env.")),
+        "semantic review job should pass action-token from secrets or env",
+    );
+
+    for local_check in [
+        "nix flake check",
+        "cargo fmt",
+        "cargo clippy",
+        "cargo nextest",
+        "cargo deny",
+    ] {
+        require(
+            &mut contract_errors,
+            !review_job.contains(local_check),
+            format!("semantic review job should not run `{local_check}` locally"),
+        );
+    }
+
+    assert!(contract_errors.is_empty(), "{}", contract_errors.join("\n"));
+}
+
 fn input_block(input: &str) -> &str {
     let start_marker = format!("  {input}:");
     let Some(start) = ACTION_YAML.find(&start_marker) else {
@@ -184,6 +230,39 @@ fn input_block(input: &str) -> &str {
         .unwrap_or(rest.len());
 
     &rest[..next_input]
+}
+
+fn job_block_containing<'a>(workflow: &'a str, needle: &str) -> Option<&'a str> {
+    let mut job_start = None;
+
+    for (index, _) in workflow.match_indices('\n') {
+        let line_start = index + 1;
+        let line = workflow[line_start..].lines().next().unwrap_or_default();
+
+        if is_job_header(line) {
+            if let Some(start) = job_start {
+                let block = &workflow[start..index];
+                if block.contains(needle) {
+                    return Some(block);
+                }
+            }
+            job_start = Some(line_start);
+        }
+    }
+
+    job_start.and_then(|start| {
+        let block = &workflow[start..];
+        block.contains(needle).then_some(block)
+    })
+}
+
+fn is_job_header(line: &str) -> bool {
+    let trimmed = line.trim_end();
+    let Some(job_key) = trimmed.strip_prefix("  ") else {
+        return false;
+    };
+
+    !job_key.starts_with(' ') && job_key.ends_with(':') && !job_key.contains(' ')
 }
 
 fn require(errors: &mut Vec<String>, condition: bool, message: impl Into<String>) {

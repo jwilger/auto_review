@@ -69,3 +69,21 @@ jobs:
         run: |
           export PATH="/nix/var/nix/profiles/default/bin:$PATH"
           nix flake check --print-build-logs
+
+  semantic-review:
+    name: auto_review semantic review
+    runs-on: docker
+    needs: flake-check
+    if: ${{ github.event_name == 'pull_request' }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Request auto_review review
+        uses: https://git.johnwilger.com/jwilger/auto_review/deploy/forgejo-action@main
+        with:
+          gateway-url: ${{ secrets.AUTO_REVIEW_GATEWAY_URL }}
+          action-token: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
+          owner: ${{ github.repository_owner }}
+          repo: ${{ github.event.repository.name }}
+          pr-number: ${{ github.event.pull_request.number }}
+          head-sha: ${{ github.event.pull_request.head.sha }}
