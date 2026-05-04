@@ -65,7 +65,8 @@ jobs:
       - name: Publish Forgejo release
         env:
           FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}
-          TEA_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}
+          GITEA_SERVER_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}
+          GITEA_SERVER_URL: https://git.johnwilger.com
           FORGEJO_EVENT_NAME: pull_request
           FORGEJO_EVENT_ACTION: closed
           FORGEJO_PULL_REQUEST_MERGED: ${{ github.event.pull_request.merged }}
