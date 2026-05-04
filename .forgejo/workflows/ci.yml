@@ -72,7 +72,7 @@ jobs:
 
   semantic-review:
     name: auto_review semantic review
-    runs-on: docker
+    runs-on: native
     needs: flake-check
     if: ${{ github.event_name == 'pull_request' }}
     env:
