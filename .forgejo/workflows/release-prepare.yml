@@ -55,9 +55,9 @@ jobs:
           [[ "$date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
       - name: Prepare release branch
         env:
-          FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}
-          TEA_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}
-          FORGEJO_RELEASE_PREPARE_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}
+          GITEA_SERVER_TOKEN: ${{ forgejo.token }}
+          GITEA_SERVER_URL: https://git.johnwilger.com
+          FORGEJO_ACTIONS_TOKEN: ${{ forgejo.token }}
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_DATE: ${{ inputs.date }}
         run: |
@@ -80,7 +80,7 @@ jobs:
           fi
           # The branch update remains a force-with-lease push:
           # git push --force-with-lease origin "$branch"
-          git -c credential.helper='!f() { printf "username=release\npassword=%s\n" "$FORGEJO_RELEASE_PREPARE_TOKEN"; }; f' push --force-with-lease origin "$branch"
+          git -c credential.helper='!f() { printf "username=release\npassword=%s\n" "$FORGEJO_ACTIONS_TOKEN"; }; f' push --force-with-lease origin "$branch"
           pr_index="$(nix develop --command tea pr list --repo jwilger/auto_review --state open --fields index,head --output csv | awk -F, -v branch="$branch" '$2 == branch { print $1; exit }')"
           if [ -n "$pr_index" ]; then
             nix develop --command tea pr edit --repo jwilger/auto_review "$pr_index" --title "chore(release): prepare v${version}" --description "Prepare release v${version}."

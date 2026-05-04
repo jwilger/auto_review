@@ -497,7 +497,9 @@ PY
     fail "release PR preparation workflow runs automatically after pushes and merges to main ($output)"
   fi
   assert_file_contains "$prepare_workflow" 'scripts/release prepare' "release PR preparation workflow calls the prepare command"
-  assert_file_contains "$prepare_workflow" 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow authenticates tea with the prepare-scoped token"
+  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow authenticates tea with the Forgejo built-in repo token"
+  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_URL: https://git.johnwilger.com' "release PR preparation workflow configures tea for the Forgejo server"
+  assert_file_not_contains "$prepare_workflow" 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow does not override auto FORGEJO_TOKEN from a missing prepare secret"
   assert_file_contains "$prepare_workflow" 'git fetch origin' "release PR preparation workflow checks remote branch state"
   assert_file_contains "$prepare_workflow" 'git switch' "release PR preparation workflow switches to a release branch"
   assert_file_contains "$prepare_workflow" 'origin/main' "release PR preparation workflow reruns start from the current main branch"
@@ -545,7 +547,7 @@ import pathlib
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text()
-token_marker = 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}'
+token_marker = 'GITEA_SERVER_TOKEN: ${{ forgejo.token }}'
 if token_marker not in workflow:
     print('missing token-bearing prepare step marker')
     sys.exit(1)
@@ -599,18 +601,23 @@ test_publish_workflow_requires_release_pr_base_branch_main() {
   assert_file_contains "$publish_workflow" 'FORGEJO_PULL_REQUEST_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}' "publish workflow exposes base branch to release tooling"
 }
 
-test_release_workflows_use_split_prepare_and_publish_tokens() {
+test_release_workflows_use_forgejo_builtin_prepare_token_and_protected_publish_token() {
   local prepare_workflow publish_workflow
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  assert_file_contains "$prepare_workflow" 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow uses the prepare-scoped Actions secret"
-  assert_file_contains "$prepare_workflow" 'TEA_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow gives tea the prepare-scoped Actions secret"
+  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow gives tea the Forgejo built-in repo token"
+  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_URL: https://git.johnwilger.com' "release PR preparation workflow gives tea the Forgejo server URL"
+  assert_file_not_contains "$prepare_workflow" 'TEA_TOKEN:' "release PR preparation workflow does not use tea's legacy token env var"
+  assert_file_not_contains "$prepare_workflow" 'FORGEJO_TOKEN: ${{ secrets.' "release PR preparation workflow does not override auto FORGEJO_TOKEN from custom secrets"
+  assert_file_not_contains "$prepare_workflow" 'FORGEJO_RELEASE_PREPARE_TOKEN' "release PR preparation workflow does not require an operator-created prepare secret"
   assert_file_not_contains "$prepare_workflow" 'secrets.FORGEJO_TOKEN' "release PR preparation workflow does not use the legacy shared Actions secret"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_RELEASE_PUBLISH_TOKEN' "release PR preparation workflow does not expose the publish-scoped Actions secret"
 
   assert_file_contains "$publish_workflow" 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}' "publish workflow uses the publish-scoped Actions secret"
-  assert_file_contains "$publish_workflow" 'TEA_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}' "publish workflow gives tea the publish-scoped Actions secret"
+  assert_file_contains "$publish_workflow" 'GITEA_SERVER_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}' "publish workflow gives tea the publish-scoped environment secret"
+  assert_file_contains "$publish_workflow" 'GITEA_SERVER_URL: https://git.johnwilger.com' "publish workflow gives tea the Forgejo server URL"
+  assert_file_not_contains "$publish_workflow" 'TEA_TOKEN:' "publish workflow does not use tea's legacy token env var"
   assert_file_not_contains "$publish_workflow" 'secrets.FORGEJO_TOKEN' "publish workflow does not use the legacy shared Actions secret"
   assert_file_not_contains "$publish_workflow" 'FORGEJO_RELEASE_PREPARE_TOKEN' "publish workflow does not expose the prepare-scoped Actions secret"
 }
@@ -627,8 +634,10 @@ test_publish_workflow_validates_provenance_and_changed_files_before_publish_toke
   assert_file_contains "$publish_workflow" 'Cargo.toml|CHANGELOG.md)' "publish workflow allows only release metadata files before publishing"
   assert_file_contains "$publish_workflow" '.forgejo/workflows/*|scripts/*)' "publish workflow explicitly rejects script and workflow changes before publishing"
   assert_file_contains "$publish_workflow" 'refusing token-bearing publish for release PR file:' "publish workflow fails closed for unexpected release PR files"
-  assert_file_contains_before "$publish_workflow" 'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"' 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}' "publish workflow validates changed files before exposing publish token"
-  assert_file_contains_before "$publish_workflow" '.forgejo/workflows/*|scripts/*)' 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}' "publish workflow rejects script and workflow changes before exposing publish token"
+  assert_file_contains_before "$publish_workflow" 'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"' 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}' "publish workflow validates changed files before exposing publish token to release tooling"
+  assert_file_contains_before "$publish_workflow" 'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"' 'GITEA_SERVER_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}' "publish workflow validates changed files before exposing publish token to tea"
+  assert_file_contains_before "$publish_workflow" '.forgejo/workflows/*|scripts/*)' 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}' "publish workflow rejects script and workflow changes before exposing publish token to release tooling"
+  assert_file_contains_before "$publish_workflow" '.forgejo/workflows/*|scripts/*)' 'GITEA_SERVER_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}' "publish workflow rejects script and workflow changes before exposing publish token to tea"
 }
 
 test_publish_workflow_semver_validates_version_before_publish_token() {
@@ -637,7 +646,8 @@ test_publish_workflow_semver_validates_version_before_publish_token() {
 
   assert_file_contains "$publish_workflow" 'RELEASE_VERSION="${FORGEJO_PULL_REQUEST_HEAD_BRANCH#release/v}"' "publish workflow derives the release version before token-bearing publish"
   assert_file_contains "$publish_workflow" '[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]' "publish workflow semver-validates the publish version"
-  assert_file_contains_before "$publish_workflow" '[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]' 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}' "publish workflow validates publish version before exposing publish token"
+  assert_file_contains_before "$publish_workflow" '[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]' 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}' "publish workflow validates publish version before exposing publish token to release tooling"
+  assert_file_contains_before "$publish_workflow" '[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]' 'GITEA_SERVER_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}' "publish workflow validates publish version before exposing publish token to tea"
 }
 
 test_publish_workflow_executes_from_merge_commit_sha_before_publish_token() {
@@ -684,7 +694,8 @@ PY
     fail "publish workflow checkout with block does not persist checkout credentials ($output)"
   fi
   assert_file_contains "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' "publish workflow asserts HEAD is the merged release PR commit"
-  assert_file_contains_before "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}' "publish workflow verifies checked-out merge commit before exposing publish token"
+  assert_file_contains_before "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' 'FORGEJO_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}' "publish workflow verifies checked-out merge commit before exposing publish token to release tooling"
+  assert_file_contains_before "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' 'GITEA_SERVER_TOKEN: ${{ secrets.FORGEJO_RELEASE_PUBLISH_TOKEN }}' "publish workflow verifies checked-out merge commit before exposing publish token to tea"
 }
 
 test_changelog_mentions_issue_66_release_automation_under_unreleased() {
@@ -796,12 +807,14 @@ PY
   fi
 }
 
-test_prepare_workflow_pushes_release_branch_with_prepare_token_helper() {
+test_prepare_workflow_pushes_release_branch_with_forgejo_builtin_repo_token_helper() {
   local prepare_workflow
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
 
-  assert_file_contains "$prepare_workflow" 'FORGEJO_RELEASE_PREPARE_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow exposes an explicitly named prepare token for git push"
-  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow pushes the branch with an explicit prepare token credential helper" 'git -c credential.helper=' 'FORGEJO_RELEASE_PREPARE_TOKEN' 'push --force-with-lease origin "$branch"'
+  assert_file_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow exposes the Forgejo built-in repo token for git push"
+  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow pushes the branch with the built-in repo token credential helper" 'git -c credential.helper=' 'FORGEJO_ACTIONS_TOKEN' 'push --force-with-lease origin "$branch"'
+  assert_file_not_contains "$prepare_workflow" 'FORGEJO_TOKEN: ${{ secrets.' "release PR preparation workflow branch push does not override auto FORGEJO_TOKEN from custom secrets"
+  assert_file_not_contains "$prepare_workflow" 'FORGEJO_RELEASE_PREPARE_TOKEN' "release PR preparation workflow branch push does not require an operator-created prepare secret"
 }
 
 test_publish_workflow_requires_trusted_release_environment() {
@@ -868,23 +881,25 @@ test_release_tooling_tests_are_wired_into_nix_flake_check() {
   assert_file_contains "$flake" '/scripts/' "nix flake source includes release tooling scripts"
 }
 
-test_release_pat_blast_radius_is_documented() {
-  assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release preparation PAT' "threat model names the release preparation PAT asset"
+test_release_token_blast_radius_is_documented() {
+  assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Forgejo Actions built-in repository token' "threat model names the release preparation built-in repo token asset"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release publishing PAT' "threat model names the release publishing PAT asset"
-  assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release preparation PAT blast radius' "threat model documents the release preparation PAT blast radius"
+  assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release preparation built-in repo token blast radius' "threat model documents the release preparation built-in repo token blast radius"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release publishing PAT blast radius' "threat model documents the release publishing PAT blast radius"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'prepare release PR branches and release PRs only in `jwilger/auto_review`' "threat model documents the release preparation PAT scope"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'push tags and create releases only in `jwilger/auto_review`' "threat model documents the release publishing PAT scope"
-  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release preparation PAT blast radius' "operations docs summarize the release preparation PAT blast radius"
+  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release preparation built-in repo token blast radius' "operations docs summarize the release preparation built-in repo token blast radius"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release publishing PAT blast radius' "operations docs summarize the release publishing PAT blast radius"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'prepare release PR branches and release PRs only in `jwilger/auto_review`' "operations docs constrain the release preparation PAT scope"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'push tags and create releases only in `jwilger/auto_review`' "operations docs constrain the release publishing PAT scope"
+  assert_file_not_contains "$ROOT/docs/THREAT-MODEL.md" 'Release preparation PAT' "threat model does not document an operator-created release preparation PAT"
+  assert_file_not_contains "$ROOT/docs/OPERATIONS.md" 'release preparation PAT' "operations docs do not document an operator-created release preparation PAT"
 }
 
 test_release_secrets_are_documented_for_operators() {
-  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release preparation credential' "operations docs identify the release preparation credential purpose"
+  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release preparation uses the Forgejo Actions built-in repository token' "operations docs identify built-in release preparation credentials"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release publishing credential' "operations docs identify the release publishing credential purpose"
-  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'Forgejo Actions secret `FORGEJO_RELEASE_PREPARE_TOKEN`' "operations docs document release preparation credential as an Actions secret"
+  assert_file_not_contains "$ROOT/docs/OPERATIONS.md" 'Forgejo Actions secret `FORGEJO_RELEASE_PREPARE_TOKEN`' "operations docs do not require an operator-created release preparation Actions secret"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'protected `release-publish` environment secret `FORGEJO_RELEASE_PUBLISH_TOKEN`' "operations docs document release publishing credential as a protected environment secret"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'manual approval gate' "operations docs require a manual approval gate for release publishing credentials"
   assert_file_not_contains "$ROOT/docs/OPERATIONS.md" 'Configure the release publishing credential as Forgejo Actions secret `FORGEJO_RELEASE_PUBLISH_TOKEN`' "operations docs do not describe the publish token as an ordinary repo-wide Actions secret"
@@ -903,18 +918,18 @@ test_release_workflows_exist_for_prepare_pr_and_publish_on_merge
 test_release_workflows_install_or_reuse_nix_like_ci_before_nix_develop
 test_prepare_workflow_validates_dispatch_inputs_before_token_bearing_steps
 test_publish_workflow_requires_release_pr_base_branch_main
-test_release_workflows_use_split_prepare_and_publish_tokens
+test_release_workflows_use_forgejo_builtin_prepare_token_and_protected_publish_token
 test_publish_workflow_validates_provenance_and_changed_files_before_publish_token
 test_publish_workflow_semver_validates_version_before_publish_token
 test_publish_workflow_executes_from_merge_commit_sha_before_publish_token
 test_changelog_mentions_issue_66_release_automation_under_unreleased
 test_prepare_workflow_configures_git_identity_before_commit
 test_prepare_workflow_checkout_does_not_persist_credentials
-test_prepare_workflow_pushes_release_branch_with_prepare_token_helper
+test_prepare_workflow_pushes_release_branch_with_forgejo_builtin_repo_token_helper
 test_publish_workflow_requires_trusted_release_environment
 test_release_tooling_tests_are_wired_into_nix_flake_check
 test_release_secrets_are_documented_for_operators
-test_release_pat_blast_radius_is_documented
+test_release_token_blast_radius_is_documented
 
 if [[ $failures -eq 0 ]]; then
   printf 'release tooling dry-run tests passed\n'

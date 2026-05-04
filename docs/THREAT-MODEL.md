@@ -57,7 +57,7 @@ PR author┤ Forgejo (HTTPS)   │───────────────�
 | LLM tool calls → workspace        | Read-only; whitelisted operations only                       |
 | Operator config (.env) → process  | Trusted (operator owns the host)                             |
 | Forgejo API ← bot PAT             | Scoped: `write:repository`, `write:issue`, `read:user`       |
-| Forgejo API ← Release preparation PAT | Scoped to prepare release PR branches and release PRs only in `jwilger/auto_review` |
+| Forgejo API ← Forgejo Actions built-in repository token | Scoped by Forgejo to the workflow repository for trusted release preparation |
 | Forgejo API ← Release publishing PAT | Scoped to push tags and create releases only in `jwilger/auto_review` |
 
 ## Asset Inventory
@@ -187,20 +187,21 @@ environment only and is never logged. The orchestrator log redactor
 access until rotated. Operators should rotate periodically; the
 `init` flow makes minting a new one cheap.
 
-### T5a. Release preparation and publishing PAT compromise
+### T5a. Release preparation built-in token and publishing PAT compromise
 
 *Attacker:* A2 (via malicious workflow changes), A4 (via Actions secret
 exfiltration if the runner or Forgejo is breached).
-*Mitigation:* The release workflows split credentials by phase. The
-`FORGEJO_RELEASE_PREPARE_TOKEN` credential can prepare release PR branches and
-release PRs only in `jwilger/auto_review`; the `FORGEJO_RELEASE_PUBLISH_TOKEN`
-credential can push tags and create releases only in `jwilger/auto_review`.
-Prepare validates dispatch inputs before any token-bearing step. Publish only
-runs for release PRs merged into `main`, validates the derived semantic version,
-and refuses token-bearing publication when the merged release PR changed files
-outside `Cargo.toml` and `CHANGELOG.md`.
-*Residual risk:* **Release preparation PAT blast radius** is limited to forged
-release branches/PR metadata in the project repository. **Release publishing PAT blast radius** is limited to forged tags/releases in the project repository.
+*Mitigation:* The release workflows split credentials by phase. The Forgejo
+Actions built-in repository token is used for trusted release preparation on
+`main` and can prepare release PR branches and release PRs only in `jwilger/auto_review`; the `FORGEJO_RELEASE_PUBLISH_TOKEN` credential can push
+tags and create releases only in `jwilger/auto_review`. Prepare validates
+dispatch inputs before any token-bearing step. Publish only runs for release PRs
+merged into `main`, validates the derived semantic version, and refuses
+token-bearing publication when the merged release PR changed files outside
+`Cargo.toml` and `CHANGELOG.md`.
+*Residual risk:* **Release preparation built-in repo token blast radius** is
+limited to forged release branches/PR metadata in the project repository.
+**Release publishing PAT blast radius** is limited to forged tags/releases in the project repository.
 Rotate the Actions secret if workflow logs, runner state, or Forgejo secrets are
 suspected of exposure.
 
