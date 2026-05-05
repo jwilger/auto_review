@@ -48,4 +48,4 @@ jobs:
             exit 1
           fi
           git fetch --tags
-          nix develop --command release-plz release-pr --forge gitea --git-token "$RELEASE_PREPARE_TOKEN"
+          nix develop --command release-plz release-pr --forge gitea --git-token "$RELEASE_PREPARE_TOKEN" --repo-url https://git.johnwilger.com/jwilger/auto_review

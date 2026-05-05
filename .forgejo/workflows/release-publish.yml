@@ -72,4 +72,4 @@ jobs:
           FORGEJO_PULL_REQUEST_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
-          nix develop --command release-plz release --forge gitea --git-token "$RELEASE_PUBLISH_TOKEN"
+          nix develop --command release-plz release --forge gitea --git-token "$RELEASE_PUBLISH_TOKEN" --repo-url https://git.johnwilger.com/jwilger/auto_review
