@@ -590,6 +590,7 @@ pub async fn run_review_job(
         } else {
             Some(raw_diff.as_str())
         }),
+        previous_review_sha: incremental_diff.as_ref().and(last_reviewed_sha.as_deref()),
         verify_mode,
         workspace_path,
     })
@@ -901,7 +902,58 @@ fn error_class(err: &ReviewError) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ar_llm::{
+        CompleteRequest, CompleteResponse, Error as LlmError, LlmProvider, ModelTier, Router,
+    };
     use std::sync::Mutex;
+    use wiremock::matchers::{method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    struct CannedProvider {
+        responses: Mutex<Vec<String>>,
+        seen: Mutex<Vec<CompleteRequest>>,
+    }
+
+    impl CannedProvider {
+        fn new(responses: Vec<&str>) -> Self {
+            Self {
+                responses: Mutex::new(responses.into_iter().map(String::from).collect()),
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+
+        fn last_user_prompt(&self) -> Option<String> {
+            let seen = self.seen.lock().unwrap();
+            seen.first().and_then(|req| {
+                req.messages
+                    .iter()
+                    .find(|m| matches!(m.role, ar_llm::Role::User))
+                    .map(|m| m.content.clone())
+            })
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for CannedProvider {
+        async fn complete(&self, req: CompleteRequest) -> Result<CompleteResponse, LlmError> {
+            self.seen.lock().unwrap().push(req);
+            let next = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop()
+                .unwrap_or_else(|| r#"{"summary":"ok","findings":[]}"#.to_string());
+            Ok(CompleteResponse {
+                content: next,
+                input_tokens: 0,
+                output_tokens: 0,
+            })
+        }
+    }
+
+    fn router_with(provider: Arc<CannedProvider>) -> Router {
+        Router::new().with(ModelTier::Reasoning, provider)
+    }
 
     struct RecordingDispatcher {
         seen: Mutex<Vec<ReviewJob>>,
@@ -971,6 +1023,94 @@ mod tests {
     async fn no_op_dispatcher_does_nothing_and_does_not_panic() {
         let d = NoOpDispatcher;
         d.dispatch(ReviewJob::from(&sample_event())).await;
+    }
+
+    #[tokio::test]
+    async fn run_review_job_passes_previous_sha_to_incremental_review_prompt() {
+        let server = MockServer::start().await;
+        let previous_sha = "8f3c2d1e9a0b4c5d6e7f8a9b0c1d2e3f4a5b6c7d";
+        let head_sha = "deadbeef";
+
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/o/r/compare/{previous_sha}...{head_sha}.diff"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1,2 @@\n pub fn old() {}\n+pub fn added() {}\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/lib.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/repos/o/r/statuses/{head_sha}")))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1239,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let llm = router_with(provider.clone());
+        let history = InMemoryReviewHistory::new();
+        history
+            .record(
+                &PrKey {
+                    owner: "o".into(),
+                    repo: "r".into(),
+                    pr_number: 7,
+                },
+                previous_sha,
+            )
+            .await
+            .expect("record previous SHA");
+
+        run_review_job(
+            &forgejo,
+            &llm,
+            &server.uri(),
+            "tok",
+            &history,
+            None,
+            None,
+            None,
+            ReviewJob {
+                owner: "o".into(),
+                repo: "r".into(),
+                pr_number: 7,
+                head_sha: head_sha.into(),
+                pr_title: "title".into(),
+                pr_body: "body".into(),
+                force: false,
+            },
+        )
+        .await;
+
+        let prompt = provider
+            .last_user_prompt()
+            .expect("LLM should have been called");
+        assert!(
+            prompt.contains("incremental review")
+                && prompt.contains("8f3c2d1")
+                && prompt.contains("Δ since 8f3c2d1:")
+                && prompt.contains("+pub fn added() {}")
+                && prompt.contains("leave `walkthrough` empty when nothing material changed"),
+            "orchestrated incremental review should pass previous SHA and compare-diff content into ReviewArgs so the prompt scopes walkthrough guidance to the prior review; prompt was:\n{prompt}",
+        );
     }
 
     #[tokio::test]

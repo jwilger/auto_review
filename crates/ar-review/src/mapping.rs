@@ -51,6 +51,11 @@ const REVIEW_BODY_MAX_BYTES: usize = 32 * 1024;
 
 fn render_body(out: &ReviewOutput) -> String {
     let mut body = out.summary.clone();
+    if body.starts_with("This PR fixes ") || body.starts_with("This PR addresses ") {
+        if let Some((_, rest)) = body.split_once(". ") {
+            body = rest.to_string();
+        }
+    }
     if !out.walkthrough.is_empty() {
         if !body.is_empty() {
             body.push_str("\n\n");
@@ -237,6 +242,29 @@ mod tests {
         assert!(req.body.starts_with("TL;DR"));
         assert!(req.body.contains("## Walkthrough"));
         assert!(req.body.contains("a.rs"));
+    }
+
+    #[test]
+    fn redundant_leading_pr_recap_sentence_is_dropped_from_review_body() {
+        for summary in [
+            "This PR fixes the flaky review summary. It keeps the actionable reviewer context.",
+            "This PR addresses the flaky review summary. It keeps the actionable reviewer context.",
+            "This PR fixes several issues, including the flaky review summary. It keeps the actionable reviewer context.",
+        ] {
+            let out = ReviewOutput {
+                summary: summary.into(),
+                walkthrough: "- File `mapping.rs`: keeps walkthrough rendering".into(),
+                mermaid: String::new(),
+                findings: vec![],
+            };
+
+            let req = output_to_review_request(&out, "x");
+
+            assert_eq!(
+                req.body,
+                "It keeps the actionable reviewer context.\n\n## Walkthrough\n\n- File `mapping.rs`: keeps walkthrough rendering"
+            );
+        }
     }
 
     #[test]

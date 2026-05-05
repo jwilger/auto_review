@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Derive incremental review file context from the compare diff when previous-review SHA context is present.
+- Trim redundant leading PR recap sentences from posted review bodies.
+
 ## [0.1.0](https://git.johnwilger.com/jwilger/auto_review/releases/tag/ar-review-v0.1.0) - 2026-05-05
 
 ### Added

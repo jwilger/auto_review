@@ -72,6 +72,15 @@ pub fn filter_diff_paths(diff: &str, ignored: &GlobSet) -> String {
     out
 }
 
+/// Return the new-side filenames named by each per-file diff section.
+pub fn diff_changed_paths(diff: &str) -> Vec<String> {
+    split_diff_sections(diff)
+        .into_iter()
+        .filter_map(extract_diff_path)
+        .map(String::from)
+        .collect()
+}
+
 fn split_diff_sections(diff: &str) -> Vec<&str> {
     const MARKER: &str = "diff --git ";
     let mut starts: Vec<usize> = Vec::new();

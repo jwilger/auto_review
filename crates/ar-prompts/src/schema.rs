@@ -33,6 +33,23 @@ mod tests {
     }
 
     #[test]
+    fn summary_schema_does_not_tell_model_to_state_what_pr_does() {
+        let description = s_summary_description();
+
+        assert!(
+            !description.contains("state what the pr does"),
+            "summary schema should not ask the model to restate PR contents; description was: {description}"
+        );
+    }
+
+    fn s_summary_description() -> String {
+        review_schema()["properties"]["summary"]["description"]
+            .as_str()
+            .expect("summary.description is string")
+            .to_lowercase()
+    }
+
+    #[test]
     fn schema_constrains_finding_severity_to_three_levels() {
         let s = review_schema();
         let enum_ = &s["properties"]["findings"]["items"]["properties"]["severity"]["enum"];

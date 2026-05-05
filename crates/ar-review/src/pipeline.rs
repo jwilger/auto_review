@@ -2,7 +2,7 @@ use crate::agentic_verify::verify_findings_agentic;
 use crate::diff::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 use crate::error::ReviewError;
 use crate::heal::{generate_with_self_heal, HealConfig};
-use crate::ignored::{filter_changed_files, filter_diff_paths};
+use crate::ignored::{diff_changed_paths, filter_changed_files, filter_diff_paths};
 use crate::mapping::output_to_review_request;
 use crate::verify::verify_findings;
 use ar_forgejo::Client as ForgejoClient;
@@ -128,6 +128,7 @@ pub struct ReviewArgs<'a> {
     /// fetched a `compare_diff(previous_sha..head_sha)`. `None` for
     /// normal full reviews.
     pub diff_override: Option<&'a str>,
+    pub previous_review_sha: Option<&'a str>,
     /// Verifier strategy. `Agentic` requires `workspace_path` to be
     /// `Some`; if it's not, the pipeline silently downgrades to
     /// `Simple` rather than failing the review.
@@ -168,12 +169,17 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
             "diff filtered/capped before sending to LLM"
         );
     }
-    let raw_files = args
-        .forgejo
-        .list_changed_files(args.owner, args.repo, args.pr_number)
-        .await?;
-    let files = filter_changed_files(&raw_files, args.ignored_paths);
-    let changed_filenames: Vec<String> = files.iter().map(|f| f.filename.clone()).collect();
+    let changed_filenames: Vec<String> =
+        if args.diff_override.is_some() && args.previous_review_sha.is_some() {
+            diff_changed_paths(&pruned)
+        } else {
+            let raw_files = args
+                .forgejo
+                .list_changed_files(args.owner, args.repo, args.pr_number)
+                .await?;
+            let files = filter_changed_files(&raw_files, args.ignored_paths);
+            files.iter().map(|f| f.filename.clone()).collect()
+        };
 
     let repo_full = format!("{}/{}", args.owner, args.repo);
     let prompt = render_review_prompt(&ReviewPromptInputs {
@@ -185,6 +191,7 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         changed_files: &changed_filenames,
         guidelines: args.guidelines,
         repo_context: args.repo_context,
+        previous_review_sha: args.previous_review_sha,
     });
 
     // Track the post-floor / pre-verifier count so we can report how many
@@ -433,6 +440,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             diff_override: None,
+            previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Warning,
@@ -511,6 +519,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             diff_override: None,
+            previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Warning,
@@ -584,6 +593,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             diff_override: None,
+            previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Error,
@@ -637,6 +647,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             diff_override: None,
+            previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
@@ -721,6 +732,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             diff_override: None,
+            previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
@@ -824,6 +836,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             diff_override: None,
+            previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
@@ -910,6 +923,7 @@ mod tests {
             guidelines: "",
             repo_context: "CI gates observed: .forgejo/workflows/ci.yml runs cargo test but does not run cargo clippy.",
             diff_override: None,
+            previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
@@ -979,6 +993,7 @@ mod tests {
             guidelines: "",
             repo_context: "CI gates observed: .forgejo/workflows/ci.yml runs cargo test but does not run cargo clippy.\nProject memory: maintainers explicitly declined adding cargo clippy to the .forgejo/workflows/ci.yml gate.",
             diff_override: None,
+            previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
@@ -994,6 +1009,136 @@ mod tests {
                 && prompt.contains("declined")
                 && prompt.contains("cargo clippy"),
             "prompt should instruct the reviewer to suppress repeated warning-level recommendations for explicitly declined CI checks; prompt was:\n{prompt}",
+        );
+    }
+
+    #[tokio::test]
+    async fn incremental_compare_diff_prompt_mentions_previous_review_sha_walkthrough_scope() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/lib.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1239,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let previous_review_sha = "8f3c2d1e9a0b4c5d6e7f8a9b0c1d2e3f4a5b6c7d";
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let llm = router_with(provider.clone());
+
+        review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "deadbeef",
+            pr_title: "title",
+            pr_body: "body",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: Some(
+                "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1,2 @@\n pub fn old() {}\n+pub fn added() {}\n",
+            ),
+            previous_review_sha: Some(previous_review_sha),
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+        })
+        .await
+        .expect("review ok");
+
+        let prompt = provider
+            .last_user_prompt()
+            .expect("LLM should have been called");
+        assert!(
+            prompt.contains("incremental review")
+                && prompt.contains("8f3c2d1")
+                && prompt.contains("Δ since 8f3c2d1:")
+                && prompt.contains("leave `walkthrough` empty when nothing material changed"),
+            "incremental compare-diff prompt should scope walkthrough guidance to the previous review SHA; prompt was:\n{prompt}",
+        );
+    }
+
+    #[tokio::test]
+    async fn incremental_compare_diff_changed_files_context_and_path_guard_ignore_stale_full_pr_files(
+    ) {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/new.rs", "status": "added"},
+                {"filename": "src/old.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1240,
+                "state": "COMMENT"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{
+                "summary": "old path should be ignored",
+                "findings": [
+                    {"path":"src/new.rs","line_start":1,"severity":"warning","message":"new issue"},
+                    {"path":"src/old.rs","line_start":1,"severity":"warning","message":"stale issue"}
+                ]
+            }"#,
+        ]));
+        let llm = router_with(provider.clone());
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "deadbeef",
+            pr_title: "title",
+            pr_body: "body",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: Some(
+                "diff --git a/src/new.rs b/src/new.rs\n@@ -0,0 +1 @@\n+pub fn added() {}\n",
+            ),
+            previous_review_sha: Some("8f3c2d1e9a0b4c5d6e7f8a9b0c1d2e3f4a5b6c7d"),
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+        })
+        .await
+        .expect("review ok");
+
+        let prompt = provider
+            .last_user_prompt()
+            .expect("LLM should have been called");
+        assert!(
+            prompt.contains("- src/new.rs") && !prompt.contains("- src/old.rs"),
+            "incremental compare-diff prompt changed-files context should come from the compare diff, not stale full-PR files; prompt was:\n{prompt}",
+        );
+        assert_eq!(
+            outcome.findings_count, 1,
+            "incremental compare-diff path guard should drop findings on stale full-PR files"
         );
     }
 
@@ -1023,6 +1168,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             diff_override: None,
+            previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
@@ -1077,6 +1223,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             diff_override: None,
+            previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
@@ -1126,6 +1273,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             diff_override: None,
+            previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,

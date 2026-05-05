@@ -7,7 +7,7 @@
   "properties": {
     "summary": {
       "type": "string",
-      "description": "One- to three-sentence overall assessment of the change. State what the PR does and whether it appears safe to merge."
+      "description": "One- to three-sentence overall assessment of the change, including whether it appears safe to merge."
     },
     "walkthrough": {
       "type": "string",
