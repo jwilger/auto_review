@@ -227,7 +227,7 @@ test_prepare_dry_run_plans_release_pr_changes_without_publish() {
   assert_contains "$output" '+## [0.1.0] - 2026-05-04' "prepare dry-run plans changelog finalization"
   assert_not_contains "$output" 'tea release create' "prepare dry-run does not publish a Forgejo release"
   assert_contains "$(<"$workdir/Cargo.toml")" "version = \"$current_version\"" "prepare dry-run leaves Cargo.toml unchanged"
-  assert_contains "$(<"$workdir/CHANGELOG.md")" '## [Unreleased]' "prepare dry-run leaves CHANGELOG.md unchanged"
+  assert_contains "$(<"$workdir/CHANGELOG.md")" '<!-- release-prepare inserts generated release sections below this line -->' "prepare dry-run leaves CHANGELOG.md unchanged"
 }
 
 test_prepare_non_dry_run_updates_release_files() {
@@ -251,7 +251,7 @@ test_prepare_non_dry_run_updates_release_files() {
 
   assert_contains "$(<"$workdir/Cargo.toml")" 'version = "0.1.0"' "prepare non-dry-run updates Cargo.toml workspace version"
   assert_contains "$(<"$workdir/CHANGELOG.md")" '## [0.1.0] - 2026-05-04' "prepare non-dry-run finalizes CHANGELOG release heading"
-  assert_contains "$(<"$workdir/CHANGELOG.md")" '## [Unreleased]' "prepare non-dry-run keeps an Unreleased section for future changes"
+  assert_not_contains "$(<"$workdir/CHANGELOG.md")" '## [Unreleased]' "prepare non-dry-run does not create an Unreleased section"
 }
 
 test_prepare_non_dry_run_updates_arbitrary_current_workspace_version() {
@@ -346,7 +346,7 @@ test_prepare_generates_release_notes_from_conventional_commits_since_previous_ta
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+<!-- release-prepare inserts generated release sections below this line -->
 CHANGELOG
 
   git -C "$workdir" init >/dev/null
@@ -375,8 +375,8 @@ CHANGELOG
   fi
 
   changelog="$(<"$workdir/CHANGELOG.md")"
-  assert_contains "$changelog" '## [Unreleased]' "prepare keeps an Unreleased section before generated release notes"
-  assert_file_contains_before "$workdir/CHANGELOG.md" '## [Unreleased]' '## [0.1.0] - 2026-05-04' "prepare writes generated release notes below Unreleased"
+  assert_not_contains "$changelog" '## [Unreleased]' "prepare does not create an Unreleased section before generated release notes"
+  assert_file_contains_before "$workdir/CHANGELOG.md" '<!-- release-prepare inserts generated release sections below this line -->' '## [0.1.0] - 2026-05-04' "prepare writes generated release notes below the release marker"
   assert_contains "$changelog" '### Added' "prepare groups feat commits under Added"
   assert_contains "$changelog" '- *(cli)* add status output (#101)' "prepare formats scoped feat commit like release-plz"
   assert_contains "$changelog" '### Fixed' "prepare groups fix commits under Fixed"
@@ -500,8 +500,6 @@ test_publish_non_dry_run_pushes_tag_and_sends_changelog_notes() {
   make_workspace "$workdir"
   cat >"$workdir/CHANGELOG.md" <<'CHANGELOG'
 # Changelog
-
-## [Unreleased]
 
 ## [0.1.0] - 2026-05-04
 
@@ -868,43 +866,31 @@ PY
   assert_file_contains_before "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' 'GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow verifies checked-out merge commit before exposing publish token to tea"
 }
 
-test_changelog_mentions_issue_66_release_automation() {
+test_changelog_uses_release_marker_without_unreleased_section() {
   local output status
 
   output="$(python3 - "$ROOT/CHANGELOG.md" <<'PY'
 import pathlib
-import re
 import sys
 
-entries = []
-current = []
-for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
-    if line.startswith("- "):
-        if current:
-            entries.append("\n".join(current))
-        current = [line]
-    elif current and (line.startswith("  ") or not line.strip()):
-        current.append(line)
-    elif current:
-        entries.append("\n".join(current))
-        current = []
-if current:
-    entries.append("\n".join(current))
+text = pathlib.Path(sys.argv[1]).read_text()
+marker = "<!-- release-prepare inserts generated release sections below this line -->"
+if "## [Unreleased]" in text:
+    print("CHANGELOG should not contain an Unreleased section")
+    sys.exit(1)
+if marker not in text:
+    print("missing release-prepare insertion marker")
+    sys.exit(1)
 
-for entry in entries:
-    if "release automation" in entry.lower() and "Closes #66" in entry:
-        sys.exit(0)
-
-print("missing one changelog bullet containing release automation and Closes #66")
-sys.exit(1)
+sys.exit(0)
 PY
 )"
   status=$?
 
   if [[ $status -eq 0 ]]; then
-    pass "CHANGELOG has one release automation entry closing issue 66"
+    pass "CHANGELOG uses release marker without Unreleased section"
   else
-    fail "CHANGELOG has one release automation entry closing issue 66 ($output)"
+    fail "CHANGELOG uses release marker without Unreleased section ($output)"
   fi
 }
 
@@ -1117,7 +1103,7 @@ test_prepare_workflow_requires_explicit_prepare_secret_runtime_env
 test_publish_workflow_validates_provenance_and_changed_files_before_publish_token
 test_publish_workflow_semver_validates_version_before_publish_token
 test_publish_workflow_executes_from_merge_commit_sha_before_publish_token
-test_changelog_mentions_issue_66_release_automation
+test_changelog_uses_release_marker_without_unreleased_section
 test_prepare_workflow_configures_git_identity_before_commit
 test_prepare_workflow_checkout_does_not_persist_credentials
 test_prepare_workflow_pushes_release_branch_with_prepare_secret_helper

@@ -191,7 +191,10 @@ notes = release_notes()
 release_section = f'## [{version}] - {date}'
 if notes:
     release_section = f'{release_section}\n\n{notes}'
-changelog.write_text(changelog_text.replace('## [Unreleased]', f'## [Unreleased]\n\n{release_section}', 1))
+marker = '<!-- release-prepare inserts generated release sections below this line -->'
+if marker not in changelog_text:
+    raise SystemExit('changelog release insertion marker not found')
+changelog.write_text(changelog_text.replace(marker, f'{marker}\n\n{release_section}', 1))
 PY
     ;;
   publish)
