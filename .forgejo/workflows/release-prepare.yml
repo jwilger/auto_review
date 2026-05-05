@@ -55,13 +55,14 @@ jobs:
           [[ "$date" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}$ ]]
       - name: Prepare release branch
         env:
+          FORGEJO_RELEASE_PREPARE_TOKEN: ${{ secrets.FORGEJO_RELEASE_PREPARE_TOKEN }}
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_DATE: ${{ inputs.date }}
         run: |
           set -euo pipefail
-          repo_token="${FORGEJO_TOKEN:-${GITHUB_TOKEN:-}}"
+          repo_token="${FORGEJO_RELEASE_PREPARE_TOKEN:-}"
           if [ -z "$repo_token" ]; then
-            printf 'missing FORGEJO_TOKEN or GITHUB_TOKEN\n' >&2
+            printf 'missing FORGEJO_RELEASE_PREPARE_TOKEN\n' >&2
             exit 1
           fi
           export GITEA_SERVER_TOKEN="$repo_token"
