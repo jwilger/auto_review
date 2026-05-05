@@ -1346,6 +1346,9 @@ release_input = "\n".join(
 if "required: true" not in release_input:
     print("publish workflow release_merge_sha dispatch input must be required")
     sys.exit(1)
+if "type: string" not in release_input:
+    print("publish workflow release_merge_sha dispatch input must render as a Forgejo UI text field")
+    sys.exit(1)
 
 job_header = "  release-publish:"
 if job_header not in workflow:
