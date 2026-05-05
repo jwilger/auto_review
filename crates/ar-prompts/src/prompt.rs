@@ -16,6 +16,9 @@ pub struct ReviewPromptInputs<'a> {
     /// — the orchestrator decides how to format it. Empty when the
     /// index hasn't been built or returned no matches.
     pub repo_context: &'a str,
+    /// Commit SHA that was the head of the last completed review. When
+    /// present, the prompt scopes review guidance to the delta since this SHA.
+    pub previous_review_sha: Option<&'a str>,
 }
 
 const SYSTEM_PROMPT: &str = "\
@@ -26,7 +29,8 @@ Forgejo PR.
 Rules:
 - Output **only** a JSON object that matches the provided schema. Do not \
   emit prose, markdown fences, or any text outside the JSON.
-- `summary`: 1–3 sentences for the top-level review body.
+- `summary`: 1–3 sentences for the top-level review body; do not restate \
+  or paraphrase the PR description.
 - `walkthrough` (optional): a longer markdown walkthrough of what changed \
   and why it matters. Use bullet lists per file or per theme. Leave empty \
   when the PR is small enough that the summary suffices.
@@ -135,6 +139,16 @@ pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
         }
     }
 
+    if let Some(previous_review_sha) = inputs.previous_review_sha {
+        let previous_review_sha = short_sha(previous_review_sha);
+        out.push_str("\nIncremental review context:\n");
+        out.push_str("- This is an incremental review; review only the delta since ");
+        out.push_str(previous_review_sha);
+        out.push_str(".\n- In `walkthrough`, use heading `Δ since ");
+        out.push_str(previous_review_sha);
+        out.push_str(":` and leave `walkthrough` empty when nothing material changed.\n");
+    }
+
     out.push_str(
         "\nCI coverage advisory:\n\
          - When repository context or changed CI files show a relevant missing CI linter/check, emit a finding recommending the specific check and naming the CI gate where it appears absent.\n\
@@ -171,6 +185,10 @@ fn push_capped(out: &mut String, s: &str, max_bytes: usize, marker: &str) {
     out.push_str(marker);
 }
 
+fn short_sha(sha: &str) -> &str {
+    sha.get(..7).unwrap_or(sha)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -185,6 +203,7 @@ mod tests {
             changed_files: files,
             guidelines: "",
             repo_context: "",
+            previous_review_sha: None,
         }
     }
 
@@ -232,6 +251,7 @@ mod tests {
             changed_files: &files,
             guidelines: "",
             repo_context: "",
+            previous_review_sha: None,
         });
         assert!(p.contains("t"));
     }
@@ -248,6 +268,7 @@ mod tests {
             changed_files: &files,
             guidelines: "",
             repo_context: "Function `foo` is called by 14 callers in this repo.",
+            previous_review_sha: None,
         });
         assert!(p.contains("Repository context"));
         assert!(p.contains("14 callers"));
@@ -271,6 +292,7 @@ mod tests {
             changed_files: &files,
             guidelines: "Always prefer total functions over partial.",
             repo_context: "",
+            previous_review_sha: None,
         });
         assert!(p.contains("Repository guidelines"));
         assert!(p.contains("total functions"));
@@ -286,6 +308,22 @@ mod tests {
     fn system_prompt_mentions_json_schema() {
         let s = system_prompt();
         assert!(s.to_lowercase().contains("json"));
+    }
+
+    #[test]
+    fn system_prompt_tells_summary_not_to_restate_pr_description() {
+        let s = system_prompt().to_lowercase();
+
+        assert!(
+            s.contains("do not restate") || s.contains("do not paraphrase"),
+            "system prompt should tell the model not to restate or paraphrase the PR description in `summary`; prompt was:\n{}",
+            system_prompt()
+        );
+        assert!(
+            s.contains("summary") && s.contains("pr description"),
+            "anti-restatement instruction should explicitly connect `summary` with the PR description; prompt was:\n{}",
+            system_prompt()
+        );
     }
 
     #[test]
@@ -312,6 +350,7 @@ mod tests {
             changed_files: &files,
             guidelines: "",
             repo_context: "",
+            previous_review_sha: None,
         };
         let p = render_review_prompt(&inputs);
         assert!(p.contains("[PR description truncated]"));
@@ -337,6 +376,7 @@ mod tests {
             changed_files: &files,
             guidelines: "",
             repo_context: "",
+            previous_review_sha: None,
         };
         let p = render_review_prompt(&inputs);
         assert!(p.contains("[truncated]"));
@@ -357,6 +397,7 @@ mod tests {
             changed_files: &files,
             guidelines: &huge_guidelines,
             repo_context: "",
+            previous_review_sha: None,
         };
         let p = render_review_prompt(&inputs);
         assert!(p.contains("[guidelines truncated]"));
@@ -376,6 +417,7 @@ mod tests {
             changed_files: &files,
             guidelines: "",
             repo_context: &huge_context,
+            previous_review_sha: None,
         };
         let p = render_review_prompt(&inputs);
         assert!(p.contains("[repo context truncated]"));
@@ -394,9 +436,57 @@ mod tests {
             changed_files: &files,
             guidelines: "",
             repo_context: "",
+            previous_review_sha: None,
         };
         let p = render_review_prompt(&inputs);
         assert!(p.contains("Closes #42 — thanks!"));
         assert!(!p.contains("[PR description truncated]"));
+    }
+
+    #[test]
+    fn incremental_review_prompt_scopes_walkthrough_to_previous_sha_delta() {
+        let files = vec!["src/lib.rs".to_string()];
+        let inputs = ReviewPromptInputs {
+            repo_full_name: "o/r",
+            pr_number: 14,
+            pr_title: "update review prompt",
+            pr_body: "",
+            diff: "@@ -1 +1 @@\n-old\n+new\n",
+            changed_files: &files,
+            guidelines: "",
+            repo_context: "",
+            previous_review_sha: Some("8f3c2d1e9a0b4c5d6e7f8a9b0c1d2e3f4a5b6c7d"),
+        };
+
+        let p = render_review_prompt(&inputs);
+
+        assert!(p.contains("incremental review"));
+        assert!(p.contains("8f3c2d1"));
+        assert!(p.contains("walkthrough"));
+        assert!(p.contains("only the delta since 8f3c2d1"));
+        assert!(p.contains("Δ since 8f3c2d1:"));
+        assert!(p.contains("leave `walkthrough` empty when nothing material changed"));
+    }
+
+    #[test]
+    fn full_review_prompt_omits_incremental_walkthrough_guidance() {
+        let files = vec!["src/lib.rs".to_string()];
+        let inputs = ReviewPromptInputs {
+            repo_full_name: "o/r",
+            pr_number: 14,
+            pr_title: "full review",
+            pr_body: "",
+            diff: "@@ -1 +1 @@\n-old\n+new\n",
+            changed_files: &files,
+            guidelines: "",
+            repo_context: "",
+            previous_review_sha: None,
+        };
+
+        let p = render_review_prompt(&inputs);
+
+        assert!(!p.contains("Incremental review context"));
+        assert!(!p.contains("Δ since"));
+        assert!(!p.contains("leave `walkthrough` empty when nothing material changed"));
     }
 }

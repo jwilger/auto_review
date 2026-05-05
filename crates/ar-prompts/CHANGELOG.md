@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Tell the review model to assess review outcome instead of restating the PR description.
+- Scope walkthrough prompt guidance to the compare diff for incremental reviews.
+
 ## [0.1.0](https://git.johnwilger.com/jwilger/auto_review/releases/tag/ar-prompts-v0.1.0) - 2026-05-05
 
 ### Added

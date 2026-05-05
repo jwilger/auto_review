@@ -403,6 +403,7 @@ async fn run_one(path: &Path, llm: &LlmRouter, verifier_enabled: bool) -> Fixtur
         pr_body: &fixture.pr_body,
         diff: &fixture.diff,
         changed_files: &fixture.changed_files,
+        previous_review_sha: None,
         guidelines: &fixture.guidelines,
         repo_context: &fixture.repo_context,
     });

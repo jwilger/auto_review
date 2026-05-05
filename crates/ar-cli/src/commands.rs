@@ -154,6 +154,7 @@ async fn print_dry_run_prompt(
         pr_body,
         diff: &diff,
         changed_files: &changed_files,
+        previous_review_sha: None,
         guidelines: "",
         repo_context: "",
     });

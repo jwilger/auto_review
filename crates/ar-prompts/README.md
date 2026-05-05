@@ -22,7 +22,7 @@ load-bearing T3 mitigations — see the
 
 | Item | Purpose |
 |------|---------|
-| `prompt::ReviewPromptInputs`, `render_review_prompt` | User-prompt rendering for the reasoning model. |
+| `prompt::ReviewPromptInputs`, `render_review_prompt` | User-prompt rendering for the reasoning model, including optional previous-review SHA context for incremental walkthrough guidance. |
 | `prompt::system_prompt` | Static system prompt for the review pipeline. |
 | `validate::validate_review_output` | Schema-validation entry point used by the self-heal loop in `ar-review`. |
 | `triage::*`, `verification::*` | Same triple pattern (system prompt, schema, validator) for the other LLM calls. |

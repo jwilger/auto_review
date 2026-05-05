@@ -9,7 +9,7 @@ Forgejo review request.
 
 | Module | What's in it |
 |--------|-------------|
-| `pipeline::review_pull_request` | Top-level semantic review activity. Inputs via `ReviewArgs`; outputs a `ReviewOutcome`. Branches on `VerifyMode::{Simple, Agentic}`. |
+| `pipeline::review_pull_request` | Top-level semantic review activity. Inputs via `ReviewArgs`; outputs a `ReviewOutcome`. Branches on `VerifyMode::{Simple, Agentic}` and accepts optional previous-review SHA context for incremental compare-diff prompts. |
 | `config::RepoConfig` | `.auto_review.yaml` parser. `parse_repo_config` (permissive runtime loader) and `parse_repo_config_strict` (typo-rejecting validator) cover the two use cases. |
 | `workspace::prepare_workspace` | Shallow `git clone` of the PR's head SHA into a tmpfs workdir. Token-redacting URL builder. |
 | `verify::verify_findings`, `agentic_verify::verify_findings_agentic` | Two verifier modes; the agentic one uses the workspace tools. |
