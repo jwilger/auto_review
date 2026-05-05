@@ -194,6 +194,14 @@ make_workspace() {
   cp "$ROOT/CHANGELOG.md" "$workspace/CHANGELOG.md"
 }
 
+git_commit_all() {
+  local workspace="$1"
+  local message="$2"
+
+  git -C "$workspace" add Cargo.toml Cargo.lock CHANGELOG.md
+  git -C "$workspace" commit --allow-empty -m "$message" >/dev/null
+}
+
 test_prepare_dry_run_plans_release_pr_changes_without_publish() {
   local current_version workdir output status
   workdir="$(mktemp -d)"
@@ -219,7 +227,7 @@ test_prepare_dry_run_plans_release_pr_changes_without_publish() {
   assert_contains "$output" '+## [0.1.0] - 2026-05-04' "prepare dry-run plans changelog finalization"
   assert_not_contains "$output" 'tea release create' "prepare dry-run does not publish a Forgejo release"
   assert_contains "$(<"$workdir/Cargo.toml")" "version = \"$current_version\"" "prepare dry-run leaves Cargo.toml unchanged"
-  assert_contains "$(<"$workdir/CHANGELOG.md")" '## [Unreleased]' "prepare dry-run leaves CHANGELOG.md unchanged"
+  assert_contains "$(<"$workdir/CHANGELOG.md")" '<!-- release-prepare inserts generated release sections below this line -->' "prepare dry-run leaves CHANGELOG.md unchanged"
 }
 
 test_prepare_non_dry_run_updates_release_files() {
@@ -243,7 +251,7 @@ test_prepare_non_dry_run_updates_release_files() {
 
   assert_contains "$(<"$workdir/Cargo.toml")" 'version = "0.1.0"' "prepare non-dry-run updates Cargo.toml workspace version"
   assert_contains "$(<"$workdir/CHANGELOG.md")" '## [0.1.0] - 2026-05-04' "prepare non-dry-run finalizes CHANGELOG release heading"
-  assert_contains "$(<"$workdir/CHANGELOG.md")" '## [Unreleased]' "prepare non-dry-run keeps an Unreleased section for future changes"
+  assert_not_contains "$(<"$workdir/CHANGELOG.md")" '## [Unreleased]' "prepare non-dry-run does not create an Unreleased section"
 }
 
 test_prepare_non_dry_run_updates_arbitrary_current_workspace_version() {
@@ -326,6 +334,76 @@ PY
   else
     fail "prepare non-dry-run updates Cargo.lock workspace package versions ($lock_output)"
   fi
+}
+
+test_prepare_generates_release_notes_from_conventional_commits_since_previous_tag() {
+  local workdir output status changelog
+  workdir="$(mktemp -d)"
+  make_workspace "$workdir"
+  cp "$ROOT/Cargo.lock" "$workdir/Cargo.lock"
+  cat >"$workdir/CHANGELOG.md" <<'CHANGELOG'
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+<!-- release-prepare inserts generated release sections below this line -->
+CHANGELOG
+
+  git -C "$workdir" init >/dev/null
+  git -C "$workdir" config user.name "release tooling test"
+  git -C "$workdir" config user.email "release-tooling-test@example.invalid"
+  git_commit_all "$workdir" "feat(core): pre-tag change must stay out (#100)"
+  git -c tag.gpgSign=false -C "$workdir" tag -a v0.0.1 -m "Release v0.0.1"
+
+  git_commit_all "$workdir" "feat(cli): add status output (#101)"
+  git_commit_all "$workdir" "fix(gateway): reject stale CI review SHAs (#102)"
+  git_commit_all "$workdir" "docs: update operator release notes (#103)"
+  git_commit_all "$workdir" "security!: rotate release publish token (#104)"
+
+  output="$({
+    FORGEJO_TOKEN= "$RELEASE_TOOL" prepare \
+      --workspace "$workdir" \
+      --version 0.1.0 \
+      --date 2026-05-04
+  } 2>&1)"
+  status=$?
+
+  if [[ $status -eq 0 ]]; then
+    pass "prepare non-dry-run exits successfully before generated changelog verification"
+  else
+    fail "prepare non-dry-run exits successfully before generated changelog verification (status $status, output: $output)"
+  fi
+
+  changelog="$(<"$workdir/CHANGELOG.md")"
+  assert_not_contains "$changelog" '## [Unreleased]' "prepare does not create an Unreleased section before generated release notes"
+  assert_file_contains_before "$workdir/CHANGELOG.md" '<!-- release-prepare inserts generated release sections below this line -->' '## [0.1.0] - 2026-05-04' "prepare writes generated release notes below the release marker"
+  assert_contains "$changelog" '### Added' "prepare groups feat commits under Added"
+  assert_contains "$changelog" '- *(cli)* add status output (#101)' "prepare formats scoped feat commit like release-plz"
+  assert_contains "$changelog" '### Fixed' "prepare groups fix commits under Fixed"
+  assert_contains "$changelog" '- *(gateway)* reject stale CI review SHAs (#102)' "prepare formats scoped fix commit like release-plz"
+  assert_contains "$changelog" '### Security' "prepare groups security commits under Security"
+  assert_contains "$changelog" '- [**breaking**] rotate release publish token (#104)' "prepare marks breaking unscoped security commit like release-plz"
+  assert_contains "$changelog" '### Other' "prepare groups non-default conventional commits under Other"
+  assert_contains "$changelog" '- update operator release notes (#103)' "prepare includes docs commit under Other"
+  assert_not_contains "$changelog" 'pre-tag change must stay out (#100)' "prepare excludes commits before previous v tag"
+}
+
+test_pr_guidance_delegates_changelog_notes_to_release_prepare() {
+  local pr_template agents skill prepare_command
+  pr_template="$ROOT/.forgejo/pull_request_template.md"
+  agents="$ROOT/AGENTS.md"
+  skill="$ROOT/.kilo/skills/rust-workspace-engineering/SKILL.md"
+  prepare_command="$ROOT/.kilo/command/prepare-forgejo-pr.md"
+
+  assert_file_not_contains "$pr_template" 'CHANGELOG.md updated (under `[Unreleased]`)' "PR template no longer requires per-PR Unreleased changelog edits"
+  assert_file_not_contains "$agents" 'CHANGELOG.md` under `[Unreleased]`' "AGENTS no longer requires per-PR Unreleased changelog edits"
+  assert_file_not_contains "$skill" 'CHANGELOG.md` under `[Unreleased]`' "Rust workspace skill no longer requires per-PR Unreleased changelog edits"
+  assert_file_not_contains "$prepare_command" 'CHANGELOG.md` needs an `[Unreleased]` entry' "prepare-forgejo-pr command no longer checks for per-PR Unreleased changelog edits"
+
+  assert_file_has_line_containing_all "$pr_template" "PR template says release notes come from conventional commits" 'release PR' 'conventional commits'
+  assert_file_has_line_containing_all "$agents" "AGENTS says release PR generates changelog notes from conventional commits" 'release PR' 'conventional commits'
+  assert_file_has_line_containing_all "$skill" "Rust workspace skill says release PR generates changelog notes from conventional commits" 'release PR' 'conventional commits'
+  assert_file_has_line_containing_all "$prepare_command" "prepare-forgejo-pr command says release PR generates changelog notes from conventional commits" 'release PR' 'conventional commits'
 }
 
 test_publish_dry_run_requires_merged_release_pr_signal() {
@@ -422,8 +500,6 @@ test_publish_non_dry_run_pushes_tag_and_sends_changelog_notes() {
   make_workspace "$workdir"
   cat >"$workdir/CHANGELOG.md" <<'CHANGELOG'
 # Changelog
-
-## [Unreleased]
 
 ## [0.1.0] - 2026-05-04
 
@@ -563,6 +639,8 @@ PY
     fail "release PR preparation workflow runs automatically after pushes and merges to main ($output)"
   fi
   assert_file_contains "$prepare_workflow" 'scripts/release prepare' "release PR preparation workflow calls the prepare command"
+  assert_file_contains "$prepare_workflow" 'fetch-depth: 0' "release PR preparation workflow checks out full history for changelog generation"
+  assert_file_contains "$prepare_workflow" 'git fetch --tags' "release PR preparation workflow fetches tags for changelog generation"
   assert_file_not_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not map tea token from unsupported forgejo.token expression"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not map git push token from unsupported forgejo.token expression"
   assert_file_contains "$prepare_workflow" 'RELEASE_PREPARE_TOKEN: ${{ secrets.RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow exposes the explicit prepare-scoped Actions secret to release tooling"
@@ -788,43 +866,31 @@ PY
   assert_file_contains_before "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' 'GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow verifies checked-out merge commit before exposing publish token to tea"
 }
 
-test_changelog_mentions_issue_66_release_automation() {
+test_changelog_uses_release_marker_without_unreleased_section() {
   local output status
 
   output="$(python3 - "$ROOT/CHANGELOG.md" <<'PY'
 import pathlib
-import re
 import sys
 
-entries = []
-current = []
-for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
-    if line.startswith("- "):
-        if current:
-            entries.append("\n".join(current))
-        current = [line]
-    elif current and (line.startswith("  ") or not line.strip()):
-        current.append(line)
-    elif current:
-        entries.append("\n".join(current))
-        current = []
-if current:
-    entries.append("\n".join(current))
+text = pathlib.Path(sys.argv[1]).read_text()
+marker = "<!-- release-prepare inserts generated release sections below this line -->"
+if "## [Unreleased]" in text:
+    print("CHANGELOG should not contain an Unreleased section")
+    sys.exit(1)
+if marker not in text:
+    print("missing release-prepare insertion marker")
+    sys.exit(1)
 
-for entry in entries:
-    if "release automation" in entry.lower() and "Closes #66" in entry:
-        sys.exit(0)
-
-print("missing one changelog bullet containing release automation and Closes #66")
-sys.exit(1)
+sys.exit(0)
 PY
 )"
   status=$?
 
   if [[ $status -eq 0 ]]; then
-    pass "CHANGELOG has one release automation entry closing issue 66"
+    pass "CHANGELOG uses release marker without Unreleased section"
   else
-    fail "CHANGELOG has one release automation entry closing issue 66 ($output)"
+    fail "CHANGELOG uses release marker without Unreleased section ($output)"
   fi
 }
 
@@ -984,6 +1050,10 @@ test_release_tooling_tests_are_wired_into_nix_flake_check() {
   assert_file_contains "$flake" 'bash tests/release_tooling_test.sh' "nix flake check runs release tooling tests"
   assert_file_contains "$flake" '/tests/' "nix flake source includes release tooling tests"
   assert_file_contains "$flake" '/scripts/' "nix flake source includes release tooling scripts"
+  assert_file_contains "$flake" 'AGENTS.md' "nix flake source includes contributor guidance checked by release tooling tests"
+  assert_file_contains "$flake" '.forgejo/pull_request_template.md' "nix flake source includes PR template checked by release tooling tests"
+  assert_file_contains "$flake" '.kilo/command/prepare-forgejo-pr.md' "nix flake source includes PR command guidance checked by release tooling tests"
+  assert_file_contains "$flake" '.kilo/skills/rust-workspace-engineering/SKILL.md' "nix flake source includes Rust workspace skill checked by release tooling tests"
 }
 
 test_release_token_blast_radius_is_documented() {
@@ -1019,6 +1089,8 @@ test_prepare_dry_run_plans_release_pr_changes_without_publish
 test_prepare_non_dry_run_updates_release_files
 test_prepare_non_dry_run_updates_arbitrary_current_workspace_version
 test_prepare_non_dry_run_updates_cargo_lock_workspace_package_versions
+test_prepare_generates_release_notes_from_conventional_commits_since_previous_tag
+test_pr_guidance_delegates_changelog_notes_to_release_prepare
 test_publish_dry_run_requires_merged_release_pr_signal
 test_publish_non_dry_run_uses_scoped_forgejo_commands_with_fakes
 test_publish_non_dry_run_pushes_tag_and_sends_changelog_notes
@@ -1031,7 +1103,7 @@ test_prepare_workflow_requires_explicit_prepare_secret_runtime_env
 test_publish_workflow_validates_provenance_and_changed_files_before_publish_token
 test_publish_workflow_semver_validates_version_before_publish_token
 test_publish_workflow_executes_from_merge_commit_sha_before_publish_token
-test_changelog_mentions_issue_66_release_automation
+test_changelog_uses_release_marker_without_unreleased_section
 test_prepare_workflow_configures_git_identity_before_commit
 test_prepare_workflow_checkout_does_not_persist_credentials
 test_prepare_workflow_pushes_release_branch_with_prepare_secret_helper

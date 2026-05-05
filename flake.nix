@@ -48,8 +48,9 @@
             in
             (craneLib.filterCargoSources path type)
              || baseName == "deny.toml"
-             || baseName == "CHANGELOG.md"
-             || baseName == "flake.nix"
+              || baseName == "CHANGELOG.md"
+              || baseName == "AGENTS.md"
+              || baseName == "flake.nix"
              || pkgs.lib.hasInfix "/.cargo/" strPath
             || (pkgs.lib.hasInfix "/ar-prompts/schemas/" strPath
                 && pkgs.lib.hasSuffix ".json" path)
@@ -71,18 +72,25 @@
              # release script they exercise.
              || (type == "directory"
                  && (strPath == "${toString ./.}/tests"
-                     || strPath == "${toString ./.}/scripts"
-                     || strPath == "${toString ./.}/.forgejo"
-                     || strPath == "${toString ./.}/.forgejo/workflows"
+                      || strPath == "${toString ./.}/scripts"
+                      || strPath == "${toString ./.}/.kilo"
+                      || strPath == "${toString ./.}/.kilo/command"
+                      || strPath == "${toString ./.}/.kilo/skills"
+                      || strPath == "${toString ./.}/.kilo/skills/rust-workspace-engineering"
+                      || strPath == "${toString ./.}/.forgejo"
+                      || strPath == "${toString ./.}/.forgejo/workflows"
                      || strPath == "${toString ./.}/docs"
                      || strPath == "${toString ./.}/deploy"
                      || strPath == "${toString ./.}/deploy/systemd"))
              || (pkgs.lib.hasInfix "/tests/" strPath
                  && pkgs.lib.hasSuffix ".sh" path)
              || (pkgs.lib.hasInfix "/scripts/" strPath)
-             || (pkgs.lib.hasInfix "/.forgejo/workflows/" strPath
-                 && pkgs.lib.hasSuffix ".yml" path)
-             || strPath == "${toString ./.}/docs/OPERATIONS.md"
+              || (pkgs.lib.hasInfix "/.forgejo/workflows/" strPath
+                  && pkgs.lib.hasSuffix ".yml" path)
+              || strPath == "${toString ./.}/.forgejo/pull_request_template.md"
+              || strPath == "${toString ./.}/.kilo/command/prepare-forgejo-pr.md"
+              || strPath == "${toString ./.}/.kilo/skills/rust-workspace-engineering/SKILL.md"
+              || strPath == "${toString ./.}/docs/OPERATIONS.md"
              || strPath == "${toString ./.}/docs/THREAT-MODEL.md"
              || strPath == "${toString ./.}/deploy/systemd/auto_review.env.example";
         };

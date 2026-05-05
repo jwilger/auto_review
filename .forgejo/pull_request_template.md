@@ -37,7 +37,7 @@ Delete the comment block once you've filled the rest in.
 <!-- Human-side release/readiness checklist. Project-enforced checks
 belong in CI/static analysis jobs. -->
 
-- [ ] CHANGELOG.md updated (under `[Unreleased]`)
+- [ ] Commit titles follow conventional commits; the release PR generates changelog notes from conventional commits
 - [ ] Public surface changes have rustdoc on the new items
 - [ ] If the change touches a documented threat (T#) in
       `docs/THREAT-MODEL.md`, the corresponding red-team test

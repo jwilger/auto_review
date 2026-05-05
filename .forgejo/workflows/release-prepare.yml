@@ -43,6 +43,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
+          fetch-depth: 0
       - name: Validate release inputs
         env:
           RELEASE_VERSION: ${{ inputs.version }}
@@ -75,6 +76,7 @@ jobs:
           branch="release/v${version}"
           git config user.name "auto_review release automation"
           git config user.email "auto_review@git.johnwilger.com"
+          git fetch --tags
           git fetch origin main "$branch" || git fetch origin main
           git switch -C "$branch" origin/main
           nix develop --command scripts/release prepare --workspace . --version "$version" --date "$date"
