@@ -87,6 +87,7 @@ jobs:
           # The branch update remains a force-with-lease push:
           # git push --force-with-lease origin "$branch"
           git -c credential.helper='!f() { printf "username=release\npassword=%s\n" "$FORGEJO_ACTIONS_TOKEN"; }; f' push --force-with-lease origin "$branch"
+          nix develop --command tea login add --name auto_review-release --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
           pr_index="$(nix develop --command tea pr list --repo jwilger/auto_review --state open --fields index,head --output csv | awk -F, -v branch="$branch" '$2 == branch { print $1; exit }')"
           if [ -n "$pr_index" ]; then
             nix develop --command tea pr edit --repo jwilger/auto_review "$pr_index" --title "chore(release): prepare v${version}" --description "Prepare release v${version}."

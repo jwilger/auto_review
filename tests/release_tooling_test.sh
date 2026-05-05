@@ -841,6 +841,20 @@ test_prepare_workflow_pushes_release_branch_with_prepare_secret_helper() {
   assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow pushes the branch with the prepare-scoped token credential helper" 'git -c credential.helper=' 'FORGEJO_ACTIONS_TOKEN' 'push --force-with-lease origin "$branch"'
 }
 
+test_release_tooling_configures_tea_login_before_token_bearing_tea_commands() {
+  local prepare_workflow release_tool
+  prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
+  release_tool="$ROOT/scripts/release"
+
+  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow configures a non-interactive tea login from Actions token env" 'tea login add' '--url' 'GITEA_SERVER_URL' '--token' 'GITEA_SERVER_TOKEN'
+  assert_file_contains_before "$prepare_workflow" 'tea login add' 'tea pr list --repo jwilger/auto_review' "release PR preparation workflow configures tea login before listing release PRs"
+  assert_file_contains_before "$prepare_workflow" 'tea login add' 'tea pr edit --repo jwilger/auto_review' "release PR preparation workflow configures tea login before editing release PRs"
+  assert_file_contains_before "$prepare_workflow" 'tea login add' 'tea pr create --repo jwilger/auto_review' "release PR preparation workflow configures tea login before creating release PRs"
+
+  assert_file_has_line_containing_all "$release_tool" "release publish tooling configures a non-interactive tea login from release token env" 'tea login add' '--url' 'GITEA_SERVER_URL' '--token' 'GITEA_SERVER_TOKEN'
+  assert_file_contains_before "$release_tool" 'tea login add' 'tea release create --repo jwilger/auto_review' "release publish tooling configures tea login before creating the Forgejo release"
+}
+
 test_publish_workflow_requires_trusted_release_environment() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
@@ -953,6 +967,7 @@ test_changelog_mentions_issue_66_release_automation_under_unreleased
 test_prepare_workflow_configures_git_identity_before_commit
 test_prepare_workflow_checkout_does_not_persist_credentials
 test_prepare_workflow_pushes_release_branch_with_prepare_secret_helper
+test_release_tooling_configures_tea_login_before_token_bearing_tea_commands
 test_publish_workflow_requires_trusted_release_environment
 test_release_tooling_tests_are_wired_into_nix_flake_check
 test_release_secrets_are_documented_for_operators
