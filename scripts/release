@@ -76,15 +76,16 @@ case "$command" in
       printf '+## [%s] - %s\n' "$version" "$date"
       exit 0
     fi
-    python3 - "$workspace/Cargo.toml" "$workspace/CHANGELOG.md" "$version" "$date" <<'PY'
+    python3 - "$workspace/Cargo.toml" "$workspace/CHANGELOG.md" "$workspace/Cargo.lock" "$version" "$date" <<'PY'
 import pathlib
 import re
 import sys
 
 cargo_toml = pathlib.Path(sys.argv[1])
 changelog = pathlib.Path(sys.argv[2])
-version = sys.argv[3]
-date = sys.argv[4]
+cargo_lock = pathlib.Path(sys.argv[3])
+version = sys.argv[4]
+date = sys.argv[5]
 
 cargo_text = cargo_toml.read_text()
 updated_cargo, replacements = re.subn(
@@ -96,6 +97,22 @@ updated_cargo, replacements = re.subn(
 if replacements != 1:
     raise SystemExit('workspace package version not found')
 cargo_toml.write_text(updated_cargo)
+
+if cargo_lock.exists():
+    lock_text = cargo_lock.read_text()
+    lock_parts = lock_text.split('[[package]]')
+    updated_parts = [lock_parts[0]]
+    for package in lock_parts[1:]:
+        name_match = re.search(r'(?m)^name\s*=\s*"([^"]+)"', package)
+        if name_match and name_match.group(1).startswith('ar-'):
+            package = re.sub(
+                r'(?m)^(version\s*=\s*")[^"]+("\s*)$',
+                rf'\g<1>{version}\2',
+                package,
+                count=1,
+            )
+        updated_parts.append(package)
+    cargo_lock.write_text('[[package]]'.join(updated_parts))
 
 changelog_text = changelog.read_text()
 changelog.write_text(changelog_text.replace('## [Unreleased]', f'## [Unreleased]\n\n## [{version}] - {date}', 1))

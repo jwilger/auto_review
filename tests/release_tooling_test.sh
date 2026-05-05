@@ -277,6 +277,57 @@ PY
   assert_not_contains "$(<"$workdir/Cargo.toml")" 'version = "2.3.4"' "prepare non-dry-run removes the previous arbitrary workspace version"
 }
 
+test_prepare_non_dry_run_updates_cargo_lock_workspace_package_versions() {
+  local workdir output status lock_status lock_output
+  workdir="$(mktemp -d)"
+  make_workspace "$workdir"
+  cp "$ROOT/Cargo.lock" "$workdir/Cargo.lock"
+
+  output="$({
+    FORGEJO_TOKEN= "$RELEASE_TOOL" prepare \
+      --workspace "$workdir" \
+      --version 0.1.0 \
+      --date 2026-05-04
+  } 2>&1)"
+  status=$?
+
+  if [[ $status -eq 0 ]]; then
+    pass "prepare non-dry-run exits successfully before Cargo.lock verification"
+  else
+    fail "prepare non-dry-run exits successfully before Cargo.lock verification (status $status, output: $output)"
+  fi
+
+  lock_output="$(python3 - "$workdir/Cargo.lock" <<'PY'
+import pathlib
+import sys
+
+lock = pathlib.Path(sys.argv[1]).read_text()
+bad_versions = []
+for package in lock.split('[[package]]'):
+    name = None
+    version = None
+    for line in package.splitlines():
+        if line.startswith('name = ') and '"' in line:
+            name = line.split('"', 2)[1]
+        if line.startswith('version = ') and '"' in line:
+            version = line.split('"', 2)[1]
+    if name and name.startswith('ar-') and version != '0.1.0':
+        bad_versions.append(f'{name} {version}')
+
+if bad_versions:
+    print('workspace Cargo.lock package versions not updated to 0.1.0: ' + ', '.join(bad_versions))
+    sys.exit(1)
+PY
+  )"
+  lock_status=$?
+
+  if [[ $lock_status -eq 0 ]]; then
+    pass "prepare non-dry-run updates Cargo.lock workspace package versions"
+  else
+    fail "prepare non-dry-run updates Cargo.lock workspace package versions ($lock_output)"
+  fi
+}
+
 test_publish_dry_run_requires_merged_release_pr_signal() {
   local workdir unmerged_output unmerged_status merged_output merged_status
   workdir="$(mktemp -d)"
@@ -960,6 +1011,7 @@ test_release_secrets_are_documented_for_operators() {
 test_prepare_dry_run_plans_release_pr_changes_without_publish
 test_prepare_non_dry_run_updates_release_files
 test_prepare_non_dry_run_updates_arbitrary_current_workspace_version
+test_prepare_non_dry_run_updates_cargo_lock_workspace_package_versions
 test_publish_dry_run_requires_merged_release_pr_signal
 test_publish_non_dry_run_uses_scoped_forgejo_commands_with_fakes
 test_publish_non_dry_run_pushes_tag_and_sends_changelog_notes
