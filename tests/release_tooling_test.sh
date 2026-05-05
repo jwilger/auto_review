@@ -695,6 +695,7 @@ PY
     fail "release PR preparation workflow runs automatically after pushes and merges to main ($output)"
   fi
   assert_file_contains "$prepare_workflow" 'release-plz release-pr --forge gitea --git-token "$RELEASE_PREPARE_TOKEN"' "release PR preparation workflow uses release-plz Gitea release-pr with the prepare token"
+  assert_file_contains "$prepare_workflow" '--repo-url https://git.johnwilger.com/jwilger/auto_review' "release PR preparation workflow passes the HTTPS Forgejo repo URL to release-plz"
   assert_file_not_contains "$prepare_workflow" 'scripts/release prepare' "release PR preparation workflow does not call the hand-rolled prepare script"
   assert_file_contains "$prepare_workflow" 'fetch-depth: 0' "release PR preparation workflow checks out full history for changelog generation"
   assert_file_contains "$prepare_workflow" 'git fetch --tags' "release PR preparation workflow fetches tags for changelog generation"
@@ -719,6 +720,7 @@ PY
   assert_file_contains "$publish_workflow" 'closed' "publish workflow runs when release PRs close"
   assert_file_contains "$publish_workflow" 'nix develop' "publish workflow enters the Nix development environment before project tooling"
   assert_file_contains "$publish_workflow" 'release-plz release --forge gitea --git-token "$RELEASE_PUBLISH_TOKEN"' "publish workflow uses release-plz Gitea release with the publish token"
+  assert_file_contains "$publish_workflow" '--repo-url https://git.johnwilger.com/jwilger/auto_review' "publish workflow passes the HTTPS Forgejo repo URL to release-plz"
   assert_file_not_contains "$publish_workflow" 'scripts/release publish' "publish workflow does not call the hand-rolled publish script"
   assert_file_not_contains "$publish_workflow" 'RELEASE_VERSION="${FORGEJO_PULL_REQUEST_HEAD_BRANCH#release/v}"' "publish workflow does not derive a release version from a hand-managed branch"
   assert_file_not_contains "$publish_workflow" '[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]' "publish workflow does not duplicate release-plz version selection"
