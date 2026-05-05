@@ -79,6 +79,7 @@ strong `AR_CI_REVIEW_TOKEN` (generate it independently from
 example `AUTO_REVIEW_ACTION_TOKEN`.
 
 Release automation uses separate credentials with separate blast radii. Configure the release preparation credential as Forgejo Actions secret `RELEASE_PREPARE_TOKEN`; its release preparation PAT blast radius is to prepare release PR branches and release PRs only in `jwilger/auto_review` for trusted `main` push runs.
+Create a dedicated release bot Forgejo user for release PR commits. Add its public SSH signing key to that account, store the private key as Forgejo Actions secret `RELEASE_SIGNING_KEY`, and set repository variables `RELEASE_BOT_NAME` and `RELEASE_BOT_EMAIL` to the bot identity attached to the signing key.
 Configure the release publishing credential as protected `release-publish` environment secret `RELEASE_PUBLISH_TOKEN`; require a manual approval gate on that environment before the secret is exposed. Its release publishing PAT blast radius is to push tags and create releases only in `jwilger/auto_review`. Keep both out of the gateway systemd environment.
 
 Projects choose their own prerequisites in workflow YAML. A review job should

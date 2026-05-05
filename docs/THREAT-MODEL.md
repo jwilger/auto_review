@@ -59,6 +59,7 @@ PR author┤ Forgejo (HTTPS)   │───────────────�
 | Forgejo API ← bot PAT             | Scoped: `write:repository`, `write:issue`, `read:user`       |
 | Forgejo API ← Release preparation PAT | Forgejo Actions secret `RELEASE_PREPARE_TOKEN`, scoped to prepare release PR branches and release PRs only in `jwilger/auto_review` |
 | Forgejo API ← Release publishing PAT | Scoped to push tags and create releases only in `jwilger/auto_review` |
+| Forgejo Actions → Release signing key | Forgejo Actions secret `RELEASE_SIGNING_KEY`, scoped to release PR commit signing by the release bot |
 
 ## Asset Inventory
 
@@ -195,7 +196,9 @@ exfiltration if the runner or Forgejo is breached).
 Actions secret `RELEASE_PREPARE_TOKEN` can prepare release PR branches
 and release PRs only in `jwilger/auto_review`; the
 `RELEASE_PUBLISH_TOKEN` credential can push tags and create releases
-only in `jwilger/auto_review`. Release automation delegates release PR branch, release PR, version, tag, and Forgejo release selection to `release-plz`
+only in `jwilger/auto_review`. The release signing key is attached to a
+dedicated release bot Forgejo user and exposed only to release preparation so
+`release-plz` can sign release PR commits. Release automation delegates release PR branch, release PR, version, tag, and Forgejo release selection to `release-plz`
 with the Gitea forge adapter. Publish only runs for release PRs merged into `main`
 and refuses token-bearing publication when the merged release PR changed files
 outside expected root and package release metadata: `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`, plus
