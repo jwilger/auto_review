@@ -388,6 +388,62 @@ CHANGELOG
   assert_not_contains "$changelog" 'pre-tag change must stay out (#100)' "prepare excludes commits before previous v tag"
 }
 
+test_prepare_does_not_duplicate_existing_release_section_when_previous_tag_is_missing() {
+  local workdir output status changelog duplicate_count new_count
+  workdir="$(mktemp -d)"
+  make_workspace "$workdir"
+  cp "$ROOT/Cargo.lock" "$workdir/Cargo.lock"
+  cat >"$workdir/CHANGELOG.md" <<'CHANGELOG'
+# Changelog
+
+All notable changes to this project will be documented in this file.
+
+<!-- release-prepare inserts generated release sections below this line -->
+
+## [0.1.0] - 2026-05-04
+
+### Added
+
+- *(cli)* add status output (#101)
+CHANGELOG
+
+  git -C "$workdir" init >/dev/null
+  git -C "$workdir" config user.name "release tooling test"
+  git -C "$workdir" config user.email "release-tooling-test@example.invalid"
+  git_commit_all "$workdir" "feat(cli): add status output (#101)"
+  git_commit_all "$workdir" "chore(release): v0.1.0"
+  git_commit_all "$workdir" "fix(gateway): reject stale CI review SHAs (#102)"
+
+  output="$({
+    FORGEJO_TOKEN= "$RELEASE_TOOL" prepare \
+      --workspace "$workdir" \
+      --version 0.1.1 \
+      --date 2026-05-05
+  } 2>&1)"
+  status=$?
+
+  if [[ $status -eq 0 ]]; then
+    pass "prepare non-dry-run exits successfully before missing-tag changelog verification"
+  else
+    fail "prepare non-dry-run exits successfully before missing-tag changelog verification (status $status, output: $output)"
+  fi
+
+  changelog="$(<"$workdir/CHANGELOG.md")"
+  assert_file_contains_before "$workdir/CHANGELOG.md" '## [0.1.1] - 2026-05-05' '## [0.1.0] - 2026-05-04' "prepare inserts the new release section above existing release sections"
+  duplicate_count="$(grep -F -c -- '- *(cli)* add status output (#101)' "$workdir/CHANGELOG.md")"
+  new_count="$(grep -F -c -- '- *(gateway)* reject stale CI review SHAs (#102)' "$workdir/CHANGELOG.md")"
+  if [[ "$duplicate_count" == 1 ]]; then
+    pass "prepare does not duplicate notes already present in an existing release section"
+  else
+    fail "prepare does not duplicate notes already present in an existing release section (count: $duplicate_count)"
+  fi
+  if [[ "$new_count" == 1 ]]; then
+    pass "prepare includes only new commits after the previous release section when tag is missing"
+  else
+    fail "prepare includes only new commits after the previous release section when tag is missing (count: $new_count, changelog: $changelog)"
+  fi
+}
+
 test_pr_guidance_delegates_changelog_notes_to_release_prepare() {
   local pr_template agents skill prepare_command
   pr_template="$ROOT/.forgejo/pull_request_template.md"
@@ -1100,6 +1156,7 @@ test_prepare_non_dry_run_updates_release_files
 test_prepare_non_dry_run_updates_arbitrary_current_workspace_version
 test_prepare_non_dry_run_updates_cargo_lock_workspace_package_versions
 test_prepare_generates_release_notes_from_conventional_commits_since_previous_tag
+test_prepare_does_not_duplicate_existing_release_section_when_previous_tag_is_missing
 test_pr_guidance_delegates_changelog_notes_to_release_prepare
 test_publish_dry_run_requires_merged_release_pr_signal
 test_publish_non_dry_run_uses_scoped_forgejo_commands_with_fakes

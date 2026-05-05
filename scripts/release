@@ -152,7 +152,9 @@ def release_notes():
         if scope:
             parts.append(f"*({scope})*")
         parts.append(message)
-        grouped[bucket].append(" ".join(parts))
+        note = " ".join(parts)
+        if note not in existing_changelog_entries:
+            grouped[bucket].append(note)
     lines = []
     for key, heading in headings:
         if grouped[key]:
@@ -187,6 +189,11 @@ if cargo_lock.exists():
     cargo_lock.write_text('[[package]]'.join(updated_parts))
 
 changelog_text = changelog.read_text()
+existing_changelog_entries = {
+    line.strip()
+    for line in changelog_text.splitlines()
+    if line.startswith("- ")
+}
 notes = release_notes()
 release_section = f'## [{version}] - {date}'
 if notes:
