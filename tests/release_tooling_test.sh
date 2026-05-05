@@ -656,6 +656,8 @@ PY
   assert_file_contains "$prepare_workflow" 'tea pr' "release PR preparation workflow manages release PRs with tea"
   assert_file_contains "$prepare_workflow" 'tea pr list --repo jwilger/auto_review' "release PR preparation workflow looks up an existing PR before editing"
   assert_file_contains "$prepare_workflow" 'tea pr create --repo jwilger/auto_review' "release PR preparation workflow opens a scoped Forgejo PR"
+  assert_file_contains "$prepare_workflow" '--title "chore(release): v${version}"' "release PR preparation workflow titles release PRs without prepare wording"
+  assert_file_not_contains "$prepare_workflow" '--title "chore(release): prepare v${version}"' "release PR preparation workflow does not include prepare wording in PR titles"
   assert_file_contains "$prepare_workflow" 'tea pr edit --repo jwilger/auto_review "$pr_index"' "release PR preparation workflow edits an existing scoped Forgejo PR by index"
   assert_file_not_contains "$prepare_workflow" 'tea pr edit --repo jwilger/auto_review "$branch"' "release PR preparation workflow does not pass a branch name to tea pr edit"
   assert_file_contains "$prepare_workflow" 'nix develop' "release PR preparation workflow enters the Nix development environment before project tooling"
@@ -682,6 +684,14 @@ test_release_workflows_install_or_reuse_nix_like_ci_before_nix_develop() {
   assert_file_contains "$publish_workflow" 'https://install.determinate.systems/nix' "publish workflow uses the CI Nix installer path"
   assert_file_contains "$publish_workflow" 'echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"' "publish workflow persists the Nix path for later steps"
   assert_file_contains_before "$publish_workflow" 'Install or reuse Nix' 'nix develop' "publish workflow installs Nix before nix develop"
+}
+
+test_prepare_workflow_skips_release_pr_merge_pushes() {
+  local prepare_workflow
+  prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
+
+  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow skips release PR merge pushes by title" 'github.event_name' 'push' 'github.event.head_commit.message' 'chore(release): v'
+  assert_file_contains "$prepare_workflow" 'workflow_dispatch' "release PR preparation workflow still supports manual dispatch"
 }
 
 test_prepare_workflow_validates_dispatch_inputs_before_token_bearing_steps() {
@@ -799,7 +809,7 @@ test_publish_workflow_validates_provenance_and_changed_files_before_publish_toke
   assert_file_contains "$publish_workflow" 'RELEASE_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}' "publish workflow records the release PR merge SHA for provenance checks"
   assert_file_contains "$publish_workflow" 'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"' "publish workflow derives changed files from the merged release PR"
   assert_file_contains "$publish_workflow" 'case "$changed_file" in' "publish workflow evaluates each changed file before publishing"
-  assert_file_contains "$publish_workflow" 'Cargo.toml|CHANGELOG.md)' "publish workflow allows only release metadata files before publishing"
+  assert_file_contains "$publish_workflow" 'Cargo.toml|Cargo.lock|CHANGELOG.md)' "publish workflow allows release metadata files before publishing"
   assert_file_contains "$publish_workflow" '.forgejo/workflows/*|scripts/*)' "publish workflow explicitly rejects script and workflow changes before publishing"
   assert_file_contains "$publish_workflow" 'refusing token-bearing publish for release PR file:' "publish workflow fails closed for unexpected release PR files"
   assert_file_contains_before "$publish_workflow" 'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"' 'FORGEJO_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow validates changed files before exposing publish token to release tooling"
@@ -1096,6 +1106,7 @@ test_publish_non_dry_run_uses_scoped_forgejo_commands_with_fakes
 test_publish_non_dry_run_pushes_tag_and_sends_changelog_notes
 test_release_workflows_exist_for_prepare_pr_and_publish_on_merge
 test_release_workflows_install_or_reuse_nix_like_ci_before_nix_develop
+test_prepare_workflow_skips_release_pr_merge_pushes
 test_prepare_workflow_validates_dispatch_inputs_before_token_bearing_steps
 test_publish_workflow_requires_release_pr_base_branch_main
 test_release_workflows_use_prepare_secret_and_protected_publish_token
