@@ -58,7 +58,7 @@ PR author┤ Forgejo (HTTPS)   │───────────────�
 | Operator config (.env) → process  | Trusted (operator owns the host)                             |
 | Forgejo API ← bot PAT             | Scoped: `write:repository`, `write:issue`, `read:user`       |
 | Forgejo API ← Release preparation PAT | Forgejo Actions secret `RELEASE_PREPARE_TOKEN`, scoped to prepare release PR branches and release PRs only in `jwilger/auto_review` |
-| Forgejo API ← Release publishing PAT | Scoped to push tags and create releases only in `jwilger/auto_review` |
+| Forgejo package registry ← Release publishing PAT | Protected `release-publish` environment secret `RELEASE_PUBLISH_TOKEN`, scoped to publish container images only to `git.johnwilger.com/jwilger/auto_review/ar-gateway` |
 | Forgejo Actions → Release signing key | Forgejo Actions secret `RELEASE_SIGNING_KEY`, scoped to release PR commit signing by the release bot |
 
 ## Asset Inventory
@@ -74,6 +74,9 @@ What an attacker would target, and what protects each:
 | Reviewer host (root filesystem, host PATs of other tools) | Lateral movement | Runtime does not execute repo-supplied linter/tool configs; gateway runs as non-root |
 | Other repos the bot can write to       | Cross-repo blast radius                         | Bot PAT scoping; per-repo `enabled: false`   |
 | Learnings store (SQLite)               | LLM-prompt injection vector if poisoned         | Append-only; chat command surface gated to repo collaborators |
+| Release preparation PAT                | Can prepare release PR metadata                 | Forgejo Actions secret `RELEASE_PREPARE_TOKEN`; release preparation PAT blast radius is to prepare release PR branches and release PRs only in `jwilger/auto_review` |
+| Release publishing PAT                 | Can publish release images                      | Protected `release-publish` environment secret `RELEASE_PUBLISH_TOKEN`; release publishing PAT blast radius is to publish container images only to `git.johnwilger.com/jwilger/auto_review/ar-gateway` |
+| Release signing key                    | Signs release PR commits                        | Forgejo Actions secret `RELEASE_SIGNING_KEY`; dedicated release bot Forgejo user |
 
 ## Attacker Profiles
 
@@ -194,17 +197,17 @@ access until rotated. Operators should rotate periodically; the
 exfiltration if the runner or Forgejo is breached).
 *Mitigation:* The release workflows split credentials by phase. The Forgejo
 Actions secret `RELEASE_PREPARE_TOKEN` can prepare release PR branches
-and release PRs only in `jwilger/auto_review`; the
-`RELEASE_PUBLISH_TOKEN` credential can push tags and create releases
-only in `jwilger/auto_review`. The release signing key is attached to a
-dedicated release bot Forgejo user and exposed only to release preparation so
-`release-plz` can sign release PR commits. Release automation delegates release PR branch, release PR, version, tag, and Forgejo release selection to `release-plz`
-with the Gitea forge adapter. Publish only runs for release PRs merged into `main`
-and refuses token-bearing publication when the merged release PR changed files
-outside expected root and package release metadata: `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`, plus
-`crates/*/Cargo.toml` and `crates/*/CHANGELOG.md`.
+and release PRs only in `jwilger/auto_review`; the protected
+`release-publish` environment secret `RELEASE_PUBLISH_TOKEN`, paired with
+the release bot identity in repository variable `RELEASE_BOT_NAME`, can publish container images only
+to `git.johnwilger.com/jwilger/auto_review/ar-gateway`.
+The release signing key is attached to a dedicated release bot Forgejo user and
+exposed only to release preparation so `release-plz` can sign release PR
+commits. Release automation delegates release PR branch, release PR, and
+version selection to `release-plz` with the Gitea forge adapter. Publish only
+runs for release PRs merged into `main`, builds the release Docker image with `nix build .#ar-gateway-image`, publishes only `git.johnwilger.com/jwilger/auto_review/ar-gateway` to the Forgejo package registry, and refuses token-bearing publication when the merged release PR changed files outside expected root release metadata: `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`.
 *Residual risk:* **Release preparation PAT blast radius** is limited to forged
-release branches/PR metadata in the project repository. **Release publishing PAT blast radius** is limited to forged tags/releases in the project repository.
+release branches/PR metadata in the project repository. **Release publishing PAT blast radius** is limited to forged package images in the project registry.
 Rotate the Actions secret if workflow logs, runner state, or Forgejo secrets are
 suspected of exposure.
 

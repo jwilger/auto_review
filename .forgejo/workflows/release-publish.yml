@@ -45,6 +45,7 @@ jobs:
           fetch-depth: 0
       - name: Validate release provenance and changed files
         env:
+          FORGEJO_PULL_REQUEST_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
           FORGEJO_PULL_REQUEST_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
           RELEASE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
@@ -58,8 +59,6 @@ jobs:
           git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA" | while IFS= read -r changed_file; do
             case "$changed_file" in
               Cargo.toml|Cargo.lock|CHANGELOG.md)
-                ;;
-              crates/*/Cargo.toml|crates/*/CHANGELOG.md)
                 ;;
               .forgejo/workflows/*|scripts/*)
                 printf 'refusing token-bearing publish for release PR file: %s\n' "$changed_file" >&2
@@ -78,14 +77,19 @@ jobs:
           set -euo pipefail
           git switch -C main "$RELEASE_MERGE_SHA"
           git branch --set-upstream-to=origin/main main
-      - name: Publish Forgejo release
-        env:
-          RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
-          FORGEJO_EVENT_NAME: pull_request
-          FORGEJO_EVENT_ACTION: closed
-          FORGEJO_PULL_REQUEST_MERGED: ${{ github.event.pull_request.merged }}
-          FORGEJO_PULL_REQUEST_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
-          FORGEJO_PULL_REQUEST_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
+      - name: Build Nix Docker image
         run: |
           set -euo pipefail
-          nix develop --command release-plz release --forge gitea --git-token "$RELEASE_PUBLISH_TOKEN" --repo-url https://git.johnwilger.com/jwilger/auto_review
+          nix develop --command nix build .#ar-gateway-image
+      - name: Publish Docker image to Forgejo package registry
+        env:
+          RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
+          RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
+          RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_BOT_NAME:-}" ]; then
+            printf 'missing RELEASE_BOT_NAME repository variable\n' >&2
+            exit 1
+          fi
+          nix develop --command skopeo copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_MERGE_SHA}"

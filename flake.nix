@@ -142,6 +142,7 @@
             tea
             python3
             jq
+            skopeo
             kubernetes-helm
             pkg-config
             openssl
