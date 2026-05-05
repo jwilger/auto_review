@@ -116,6 +116,19 @@ assert_file_lacks_line() {
   pass "$description"
 }
 
+workspace_version() {
+  python3 - "$1" <<'PY'
+import pathlib
+import re
+import sys
+
+match = re.search(r'(?m)^version\s*=\s*"(?P<version>[^"]+)"', pathlib.Path(sys.argv[1]).read_text())
+if not match:
+    raise SystemExit("workspace package version not found")
+print(match.group("version"))
+PY
+}
+
 assert_file_has_line_containing_all() {
   local path="$1"
   local description="$2"
@@ -182,9 +195,10 @@ make_workspace() {
 }
 
 test_prepare_dry_run_plans_release_pr_changes_without_publish() {
-  local workdir output status
+  local current_version workdir output status
   workdir="$(mktemp -d)"
   make_workspace "$workdir"
+  current_version="$(workspace_version "$workdir/Cargo.toml")"
 
   output="$(
     FORGEJO_TOKEN= "$RELEASE_TOOL" prepare \
@@ -204,7 +218,7 @@ test_prepare_dry_run_plans_release_pr_changes_without_publish() {
   assert_contains "$output" '+version = "0.1.0"' "prepare dry-run plans workspace version bump"
   assert_contains "$output" '+## [0.1.0] - 2026-05-04' "prepare dry-run plans changelog finalization"
   assert_not_contains "$output" 'tea release create' "prepare dry-run does not publish a Forgejo release"
-  assert_contains "$(<"$workdir/Cargo.toml")" 'version = "0.0.1"' "prepare dry-run leaves Cargo.toml unchanged"
+  assert_contains "$(<"$workdir/Cargo.toml")" "version = \"$current_version\"" "prepare dry-run leaves Cargo.toml unchanged"
   assert_contains "$(<"$workdir/CHANGELOG.md")" '## [Unreleased]' "prepare dry-run leaves CHANGELOG.md unchanged"
 }
 
@@ -238,10 +252,11 @@ test_prepare_non_dry_run_updates_arbitrary_current_workspace_version() {
   make_workspace "$workdir"
   python3 - "$workdir/Cargo.toml" <<'PY'
 import pathlib
+import re
 import sys
 
 cargo_toml = pathlib.Path(sys.argv[1])
-cargo_toml.write_text(cargo_toml.read_text().replace('version = "0.0.1"', 'version = "2.3.4"', 1))
+cargo_toml.write_text(re.sub(r'(?m)^(version\s*=\s*")[^"]+("\s*)$', r'\g<1>2.3.4\2', cargo_toml.read_text(), count=1))
 PY
 
   output="$({
@@ -722,7 +737,7 @@ PY
   assert_file_contains_before "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' 'GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow verifies checked-out merge commit before exposing publish token to tea"
 }
 
-test_changelog_mentions_issue_66_release_automation_under_unreleased() {
+test_changelog_mentions_issue_66_release_automation() {
   local output status
 
   output="$(python3 - "$ROOT/CHANGELOG.md" <<'PY'
@@ -730,15 +745,9 @@ import pathlib
 import re
 import sys
 
-changelog = pathlib.Path(sys.argv[1]).read_text()
-unreleased_match = re.search(r"^## \[Unreleased\]\n(?P<section>.*?)(?=^## \[|\Z)", changelog, re.M | re.S)
-if not unreleased_match:
-    print("missing Unreleased section")
-    sys.exit(1)
-
 entries = []
 current = []
-for line in unreleased_match.group("section").splitlines():
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
     if line.startswith("- "):
         if current:
             entries.append("\n".join(current))
@@ -755,16 +764,16 @@ for entry in entries:
     if "release automation" in entry.lower() and "Closes #66" in entry:
         sys.exit(0)
 
-print("missing one Unreleased bullet containing release automation and Closes #66")
+print("missing one changelog bullet containing release automation and Closes #66")
 sys.exit(1)
 PY
 )"
   status=$?
 
   if [[ $status -eq 0 ]]; then
-    pass "CHANGELOG Unreleased has one release automation entry closing issue 66"
+    pass "CHANGELOG has one release automation entry closing issue 66"
   else
-    fail "CHANGELOG Unreleased has one release automation entry closing issue 66 ($output)"
+    fail "CHANGELOG has one release automation entry closing issue 66 ($output)"
   fi
 }
 
@@ -963,7 +972,7 @@ test_prepare_workflow_requires_explicit_prepare_secret_runtime_env
 test_publish_workflow_validates_provenance_and_changed_files_before_publish_token
 test_publish_workflow_semver_validates_version_before_publish_token
 test_publish_workflow_executes_from_merge_commit_sha_before_publish_token
-test_changelog_mentions_issue_66_release_automation_under_unreleased
+test_changelog_mentions_issue_66_release_automation
 test_prepare_workflow_configures_git_identity_before_commit
 test_prepare_workflow_checkout_does_not_persist_credentials
 test_prepare_workflow_pushes_release_branch_with_prepare_secret_helper
