@@ -870,7 +870,7 @@ test_publish_workflow_validates_provenance_and_changed_files_before_publish_toke
 
   assert_file_contains "$publish_workflow" 'Validate release provenance and changed files' "publish workflow has a no-token provenance validation step"
   assert_file_contains "$publish_workflow" 'RELEASE_BASE_SHA: ${{ github.event.pull_request.base.sha }}' "publish workflow records the release PR base SHA for provenance checks"
-  assert_file_contains "$publish_workflow" 'RELEASE_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}' "publish workflow records the release PR merge SHA for provenance checks"
+  assert_file_contains "$publish_workflow" 'RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}' "publish workflow records the release merge SHA for provenance checks"
   assert_file_contains "$publish_workflow" 'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"' "publish workflow derives changed files from the merged release PR"
   assert_file_contains "$publish_workflow" 'case "$changed_file" in' "publish workflow evaluates each changed file before publishing"
   assert_file_contains "$publish_workflow" 'Cargo.toml|Cargo.lock|CHANGELOG.md)' "publish workflow allows release metadata files before publishing"
@@ -961,7 +961,7 @@ test_publish_workflow_executes_from_merge_commit_sha_before_publish_token() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  assert_file_contains "$publish_workflow" 'ref: ${{ github.event.pull_request.merge_commit_sha }}' "publish workflow checks out the merged release PR commit"
+  assert_file_contains "$publish_workflow" 'ref: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}' "publish workflow checks out the release merge commit"
   output="$(python3 - "$publish_workflow" <<'PY'
 import pathlib
 import sys
@@ -1294,6 +1294,194 @@ PY
   fi
 }
 
+test_publish_workflow_supports_manual_dispatch_from_release_merge_sha() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+if "workflow_dispatch:" not in workflow:
+    print("publish workflow is missing workflow_dispatch trigger")
+    sys.exit(1)
+if "release_merge_sha:" not in workflow:
+    print("publish workflow is missing release_merge_sha dispatch input")
+    sys.exit(1)
+
+dispatch_section = workflow.split("workflow_dispatch:", 1)[1].split("jobs:", 1)[0]
+for required in ["inputs:", "release_merge_sha:", "required: true"]:
+    if required not in dispatch_section:
+        print(f"publish workflow dispatch input contract is missing: {required}")
+        sys.exit(1)
+dispatch_lines = dispatch_section.splitlines()
+inputs_line = None
+for index, line in enumerate(dispatch_lines):
+    if line.strip() == "inputs:":
+        inputs_line = index
+        break
+if inputs_line is None:
+    print("publish workflow dispatch input contract is missing: inputs:")
+    sys.exit(1)
+input_names = []
+for line in dispatch_lines[inputs_line + 1:]:
+    if not line.strip():
+        continue
+    indent = len(line) - len(line.lstrip())
+    if indent <= 4:
+        break
+    stripped = line.strip()
+    if indent == 6 and stripped.endswith(":"):
+        input_names.append(stripped[:-1])
+if input_names != ["release_merge_sha"]:
+    print(f"publish workflow dispatch should expose only release_merge_sha input, got: {input_names}")
+    sys.exit(1)
+release_input_lines = dispatch_section.split("release_merge_sha:", 1)[1].splitlines()
+release_input = "\n".join(
+    line
+    for line in release_input_lines
+    if not line.strip() or len(line) - len(line.lstrip()) > 6
+)
+if "required: true" not in release_input:
+    print("publish workflow release_merge_sha dispatch input must be required")
+    sys.exit(1)
+
+job_header = "  release-publish:"
+if job_header not in workflow:
+    print("release-publish job is missing")
+    sys.exit(1)
+job_section = workflow.split(job_header, 1)[1]
+job_if = None
+for line in job_section.splitlines():
+    if line.startswith("    steps:"):
+        break
+    if line.startswith("    if:"):
+        job_if = line
+        break
+if job_if is None:
+    print("release-publish job is missing an if condition")
+    sys.exit(1)
+condition = job_if.split("if:", 1)[1].strip()
+if condition.startswith("${{") and condition.endswith("}}"):
+    condition = condition[3:-2].strip()
+paths = [path.strip(" ()") for path in condition.split("||")]
+if len(paths) < 2:
+    print("release-publish job condition must admit manual dispatch through a separate || path")
+    sys.exit(1)
+trusted_pr_paths = [
+    path for path in paths
+    if "github.event.pull_request.merged == true" in path
+    and "github.event.pull_request.base.ref == 'main'" in path
+    and "startsWith(github.event.pull_request.head.ref, 'release-plz-')" in path
+]
+manual_paths = [
+    path for path in paths
+    if "github.event_name == 'workflow_dispatch'" in path
+    and "inputs.release_merge_sha" in path
+    and "pull_request" not in path
+]
+if not trusted_pr_paths:
+    print("release-publish job condition is missing trusted merged release PR path")
+    sys.exit(1)
+if not manual_paths:
+    print("release-publish job condition is missing separate workflow_dispatch path gated by non-empty inputs.release_merge_sha")
+    sys.exit(1)
+expected_manual_paths = {
+    "github.event_name == 'workflow_dispatch' && inputs.release_merge_sha != ''",
+    'github.event_name == \'workflow_dispatch\' && inputs.release_merge_sha != ""',
+}
+if not any(path in expected_manual_paths for path in manual_paths):
+    print("release-publish job workflow_dispatch path must be exactly github.event_name == 'workflow_dispatch' && inputs.release_merge_sha != ''")
+    sys.exit(1)
+
+release_sha = "${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}"
+required_markers = [
+    f"ref: {release_sha}",
+    f"RELEASE_MERGE_SHA: {release_sha}",
+    "environment: release-publish",
+    'git switch -C main "$RELEASE_MERGE_SHA"',
+    'release-plz release --forge gitea --git-token "$RELEASE_PUBLISH_TOKEN"',
+]
+missing = [marker for marker in required_markers if marker not in workflow]
+if missing:
+    print("publish workflow manual dispatch does not reuse release merge SHA for checkout/provenance/branch attachment/publication: " + ", ".join(missing))
+    sys.exit(1)
+
+publish_marker = 'release-plz release --forge gitea --git-token "$RELEASE_PUBLISH_TOKEN"'
+before_publish = workflow.split(publish_marker, 1)[0]
+for required in [
+    "Validate release provenance and changed files",
+    '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]',
+    'git merge-base --is-ancestor "$RELEASE_MERGE_SHA" origin/main',
+    'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"',
+]:
+    if required not in before_publish:
+        print(f"publish workflow manual dispatch is missing no-token provenance validation before publish token exposure: {required}")
+        sys.exit(1)
+token_index = workflow.find("RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}")
+validation_index = workflow.find("Validate release provenance and changed files")
+if token_index == -1:
+    print("publish workflow is missing protected release publish token exposure")
+    sys.exit(1)
+if validation_index == -1 or token_index < validation_index:
+    print("publish workflow exposes publish token before no-token provenance validation")
+    sys.exit(1)
+validation_step = None
+lines = workflow.splitlines()
+for index, line in enumerate(lines):
+    if line.strip() == "- name: Validate release provenance and changed files":
+        step_lines = [line]
+        for nested in lines[index + 1:]:
+            if nested.startswith("      - "):
+                break
+            step_lines.append(nested)
+        validation_step = "\n".join(step_lines)
+        break
+if validation_step is None:
+    print("publish workflow is missing validation step")
+    sys.exit(1)
+if "RELEASE_PUBLISH_TOKEN" in validation_step:
+    print("publish workflow validation step must not expose RELEASE_PUBLISH_TOKEN")
+    sys.exit(1)
+publish_step_index = workflow.find("Publish Forgejo release")
+if publish_step_index == -1:
+    print("publish workflow is missing publish step")
+    sys.exit(1)
+if publish_step_index < validation_index or token_index < publish_step_index:
+    print("publish workflow must expose RELEASE_PUBLISH_TOKEN only in the publish step after validation completes")
+    sys.exit(1)
+publish_step_lines = None
+for index, line in enumerate(lines):
+    if line.strip() == "- name: Publish Forgejo release":
+        step_lines = [line]
+        for nested in lines[index + 1:]:
+            if nested.startswith("      - "):
+                break
+            step_lines.append(nested)
+        publish_step_lines = set(range(index, index + len(step_lines)))
+        break
+if publish_step_lines is None:
+    print("publish workflow is missing publish step")
+    sys.exit(1)
+for index, line in enumerate(lines):
+    if "RELEASE_PUBLISH_TOKEN" in line and index not in publish_step_lines:
+        print("publish workflow must confine every RELEASE_PUBLISH_TOKEN reference to the publish step")
+        sys.exit(1)
+for forbidden in ["git clone", "tea pr checkout", "gh pr checkout"]:
+    if forbidden in workflow:
+        print(f"publish workflow should not require local manual checkout recovery commands, found: {forbidden}")
+        sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow supports protected manual dispatch from a release merge SHA"
+  else
+    fail "publish workflow supports protected manual dispatch from a release merge SHA ($output)"
+  fi
+}
+
 test_release_tooling_tests_are_wired_into_nix_flake_check() {
   local flake
   flake="$ROOT/flake.nix"
@@ -1383,6 +1571,7 @@ test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_release
 test_prepare_workflow_checkout_does_not_persist_credentials
 test_prepare_workflow_authenticates_release_plz_git_push_without_checkout_credentials
 test_publish_workflow_requires_trusted_release_environment
+test_publish_workflow_supports_manual_dispatch_from_release_merge_sha
 test_release_tooling_tests_are_wired_into_nix_flake_check
 test_release_plz_config_stays_minimal_and_private
 test_release_secrets_are_documented_for_operators
