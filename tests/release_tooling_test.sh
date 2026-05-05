@@ -1011,6 +1011,76 @@ PY
   assert_file_contains_before "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' 'release-plz release --forge gitea --git-token "$RELEASE_PUBLISH_TOKEN"' "publish workflow verifies checked-out merge commit before invoking release-plz with the publish token"
 }
 
+test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_release_plz() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+release_plz = 'release-plz release --forge gitea --git-token "$RELEASE_PUBLISH_TOKEN"'
+if release_plz not in workflow:
+    print('missing release-plz release invocation with publish token')
+    sys.exit(1)
+
+before_release_plz = workflow.split(release_plz, 1)[0]
+lines = before_release_plz.splitlines()
+attach_head_patterns = [
+    r'\bgit\s+switch\b.*(?:-C|--force-create|-c|--create)\s+main\b.*\$RELEASE_MERGE_SHA',
+    r'\bgit\s+checkout\b.*(?:-B|-b)\s+main\b.*\$RELEASE_MERGE_SHA',
+]
+move_main_patterns = [
+    r'\bgit\s+branch\b.*(?:-f|--force)\s+main\b.*\$RELEASE_MERGE_SHA',
+    r'\bgit\s+update-ref\s+refs/heads/main\s+\$RELEASE_MERGE_SHA\b',
+]
+checkout_main_patterns = [
+    r'\bgit\s+switch\b(?!.*\$RELEASE_MERGE_SHA).*\bmain\b',
+    r'\bgit\s+checkout\b(?!.*\$RELEASE_MERGE_SHA).*\bmain\b',
+]
+set_upstream_patterns = [
+    r'\bgit\s+branch\b.*(?:--set-upstream-to|-u)(?:=|\s+)origin/main(?:\s+main)?\b',
+]
+upstream_remote_patterns = [r'\bgit\s+config\s+branch\.main\.remote\s+origin\b']
+upstream_merge_patterns = [r'\bgit\s+config\s+branch\.main\.merge\s+refs/heads/main\b']
+
+def first_matching_line(patterns, start=0):
+    for index, line in enumerate(lines[start:], start):
+        if any(re.search(pattern, line) for pattern in patterns):
+            return index
+    return None
+
+attach_line = first_matching_line(attach_head_patterns)
+if attach_line is None:
+    move_main_line = first_matching_line(move_main_patterns)
+    if move_main_line is not None:
+        checkout_main_line = first_matching_line(checkout_main_patterns, move_main_line + 1)
+        if checkout_main_line is not None:
+            attach_line = checkout_main_line
+
+if attach_line is None:
+    print('missing attached HEAD on local main at $RELEASE_MERGE_SHA before release-plz')
+    sys.exit(1)
+
+set_upstream_line = first_matching_line(set_upstream_patterns, attach_line + 1)
+remote_line = first_matching_line(upstream_remote_patterns, attach_line + 1)
+merge_line = first_matching_line(upstream_merge_patterns, attach_line + 1)
+if set_upstream_line is None and (remote_line is None or merge_line is None):
+    print('missing complete local main upstream tracking of origin/main after HEAD attaches to main and before release-plz')
+    sys.exit(1)
+sys.exit(0)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow attaches the merge commit to main with upstream before release-plz"
+  else
+    fail "publish workflow attaches the merge commit to main with upstream before release-plz ($output)"
+  fi
+}
+
 test_changelog_uses_release_marker_without_unreleased_section() {
   local output status
 
@@ -1309,6 +1379,7 @@ test_publish_workflow_requires_release_pr_base_branch_main
 test_release_workflows_use_prepare_secret_and_protected_publish_token
 test_publish_workflow_validates_provenance_and_changed_files_before_publish_token
 test_publish_workflow_executes_from_merge_commit_sha_before_publish_token
+test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_release_plz
 test_prepare_workflow_checkout_does_not_persist_credentials
 test_prepare_workflow_authenticates_release_plz_git_push_without_checkout_credentials
 test_publish_workflow_requires_trusted_release_environment

@@ -60,8 +60,15 @@ jobs:
                 printf 'refusing token-bearing publish for release PR file: %s\n' "$changed_file" >&2
                 exit 1
                 ;;
-              esac
+            esac
           done
+      - name: Attach merge commit to main
+        env:
+          RELEASE_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          git switch -C main "$RELEASE_MERGE_SHA"
+          git branch --set-upstream-to=origin/main main
       - name: Publish Forgejo release
         env:
           RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
