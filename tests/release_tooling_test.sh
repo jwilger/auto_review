@@ -1101,6 +1101,42 @@ PY
   fi
 }
 
+test_prepare_workflow_authenticates_release_plz_git_push_without_checkout_credentials() {
+  local prepare_workflow output status
+  prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
+
+  assert_file_contains "$prepare_workflow" 'persist-credentials: false' "release PR preparation workflow keeps checkout credentials disabled"
+  output="$(python3 - "$prepare_workflow" <<'PY'
+import pathlib
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+release_plz = 'release-plz release-pr --forge gitea --git-token "$RELEASE_PREPARE_TOKEN"'
+if release_plz not in workflow:
+    print('missing release-plz release-pr invocation')
+    sys.exit(1)
+
+before_release_plz = workflow.split(release_plz, 1)[0]
+required = [
+    'export GIT_CONFIG_COUNT=4',
+    'export GIT_CONFIG_KEY_3=url.https://release-plz:${RELEASE_PREPARE_TOKEN}@git.johnwilger.com/.insteadOf',
+    'export GIT_CONFIG_VALUE_3=https://git.johnwilger.com/',
+]
+missing = [marker for marker in required if marker not in before_release_plz]
+if missing:
+    print('missing exported release-plz authenticated Forgejo HTTPS git push config before release-plz: ' + ', '.join(missing))
+    sys.exit(1)
+sys.exit(0)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "release PR preparation workflow rewrites Forgejo HTTPS git pushes to use the prepare token"
+  else
+    fail "release PR preparation workflow rewrites Forgejo HTTPS git pushes to use the prepare token ($output)"
+  fi
+}
+
 test_prepare_workflow_lets_release_plz_manage_release_branch_with_prepare_token() {
   local prepare_workflow
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
@@ -1274,6 +1310,7 @@ test_release_workflows_use_prepare_secret_and_protected_publish_token
 test_publish_workflow_validates_provenance_and_changed_files_before_publish_token
 test_publish_workflow_executes_from_merge_commit_sha_before_publish_token
 test_prepare_workflow_checkout_does_not_persist_credentials
+test_prepare_workflow_authenticates_release_plz_git_push_without_checkout_credentials
 test_publish_workflow_requires_trusted_release_environment
 test_release_tooling_tests_are_wired_into_nix_flake_check
 test_release_plz_config_stays_minimal_and_private
