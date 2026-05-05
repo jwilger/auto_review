@@ -123,11 +123,14 @@ PY
       printf 'missing FORGEJO_TOKEN\n' >&2
       exit 1
     fi
+    : "${GITEA_SERVER_URL:=https://git.johnwilger.com}"
+    : "${GITEA_SERVER_TOKEN:=$FORGEJO_TOKEN}"
     notes_file="$(release_notes_file "$workspace/CHANGELOG.md" "$version")"
     git -C "$workspace" tag -a "v$version" -m "Release v$version"
     git -C "$workspace" \
       -c 'credential.helper=!f() { printf "username=release\npassword=%s\n" "$FORGEJO_TOKEN"; }; f' \
       push origin "v$version"
+    tea login add --name auto_review-release --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
     tea release create --repo jwilger/auto_review --tag "v$version" --note-file "$notes_file"
     ;;
   *)
