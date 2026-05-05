@@ -57,7 +57,7 @@ PR author┤ Forgejo (HTTPS)   │───────────────�
 | LLM tool calls → workspace        | Read-only; whitelisted operations only                       |
 | Operator config (.env) → process  | Trusted (operator owns the host)                             |
 | Forgejo API ← bot PAT             | Scoped: `write:repository`, `write:issue`, `read:user`       |
-| Forgejo API ← Release preparation PAT | Forgejo Actions secret `FORGEJO_RELEASE_PREPARE_TOKEN`, scoped to prepare release PR branches and release PRs only in `jwilger/auto_review` |
+| Forgejo API ← Release preparation PAT | Forgejo Actions secret `RELEASE_PREPARE_TOKEN`, scoped to prepare release PR branches and release PRs only in `jwilger/auto_review` |
 | Forgejo API ← Release publishing PAT | Scoped to push tags and create releases only in `jwilger/auto_review` |
 
 ## Asset Inventory
@@ -192,9 +192,9 @@ access until rotated. Operators should rotate periodically; the
 *Attacker:* A2 (via malicious workflow changes), A4 (via Actions secret
 exfiltration if the runner or Forgejo is breached).
 *Mitigation:* The release workflows split credentials by phase. The Forgejo
-Actions secret `FORGEJO_RELEASE_PREPARE_TOKEN` can prepare release PR branches
+Actions secret `RELEASE_PREPARE_TOKEN` can prepare release PR branches
 and release PRs only in `jwilger/auto_review`; the
-`FORGEJO_RELEASE_PUBLISH_TOKEN` credential can push tags and create releases
+`RELEASE_PUBLISH_TOKEN` credential can push tags and create releases
 only in `jwilger/auto_review`. Prepare validates dispatch inputs before any
 token-bearing step. Publish only runs for release PRs merged into `main`,
 validates the derived semantic version, and refuses token-bearing publication
