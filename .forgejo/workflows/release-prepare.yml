@@ -41,6 +41,10 @@ jobs:
       - name: Prepare release PR
         env:
           RELEASE_PREPARE_TOKEN: ${{ secrets.RELEASE_PREPARE_TOKEN }}
+          GIT_AUTHOR_NAME: Auto Review Bot
+          GIT_AUTHOR_EMAIL: auto-review@noreply.git.johnwilger.com
+          GIT_COMMITTER_NAME: Auto Review Bot
+          GIT_COMMITTER_EMAIL: auto-review@noreply.git.johnwilger.com
         run: |
           set -euo pipefail
           if [ -z "${RELEASE_PREPARE_TOKEN:-}" ]; then
