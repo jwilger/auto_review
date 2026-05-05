@@ -78,7 +78,7 @@ jobs:
           git fetch origin main "$branch" || git fetch origin main
           git switch -C "$branch" origin/main
           nix develop --command scripts/release prepare --workspace . --version "$version" --date "$date"
-          git add Cargo.toml CHANGELOG.md
+          git add Cargo.toml Cargo.lock CHANGELOG.md
           if git diff --cached --quiet; then
             git commit --allow-empty -m "chore(release): prepare v${version}"
           else
