@@ -7,7 +7,7 @@ on:
 jobs:
   release-publish:
     runs-on: docker
-    if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && startsWith(github.event.pull_request.head.ref, 'release/v') }}
+    if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && startsWith(github.event.pull_request.head.ref, 'release-plz-') }}
     environment: release-publish
     steps:
       - name: Install or reuse Nix
@@ -37,6 +37,7 @@ jobs:
         with:
           ref: ${{ github.event.pull_request.merge_commit_sha }}
           persist-credentials: false
+          fetch-depth: 0
       - name: Validate release provenance and changed files
         env:
           FORGEJO_PULL_REQUEST_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
@@ -45,11 +46,11 @@ jobs:
         run: |
           set -euo pipefail
           [[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]
-          RELEASE_VERSION="${FORGEJO_PULL_REQUEST_HEAD_BRANCH#release/v}"
-          [[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
           git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA" | while IFS= read -r changed_file; do
             case "$changed_file" in
               Cargo.toml|Cargo.lock|CHANGELOG.md)
+                ;;
+              crates/*/Cargo.toml|crates/*/CHANGELOG.md)
                 ;;
               .forgejo/workflows/*|scripts/*)
                 printf 'refusing token-bearing publish for release PR file: %s\n' "$changed_file" >&2
@@ -59,14 +60,11 @@ jobs:
                 printf 'refusing token-bearing publish for release PR file: %s\n' "$changed_file" >&2
                 exit 1
                 ;;
-            esac
+              esac
           done
-          printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
       - name: Publish Forgejo release
         env:
-          FORGEJO_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
-          GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
-          GITEA_SERVER_URL: https://git.johnwilger.com
+          RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
           FORGEJO_EVENT_NAME: pull_request
           FORGEJO_EVENT_ACTION: closed
           FORGEJO_PULL_REQUEST_MERGED: ${{ github.event.pull_request.merged }}
@@ -74,4 +72,4 @@ jobs:
           FORGEJO_PULL_REQUEST_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
         run: |
           set -euo pipefail
-          nix develop --command scripts/release publish --workspace . --version "$RELEASE_VERSION"
+          nix develop --command release-plz release --forge gitea --git-token "$RELEASE_PUBLISH_TOKEN"

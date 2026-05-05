@@ -195,11 +195,11 @@ exfiltration if the runner or Forgejo is breached).
 Actions secret `RELEASE_PREPARE_TOKEN` can prepare release PR branches
 and release PRs only in `jwilger/auto_review`; the
 `RELEASE_PUBLISH_TOKEN` credential can push tags and create releases
-only in `jwilger/auto_review`. Prepare validates dispatch inputs before any
-token-bearing step. Publish only runs for release PRs merged into `main`,
-validates the derived semantic version, and refuses token-bearing publication
-when the merged release PR changed files outside `Cargo.toml` and
-`CHANGELOG.md`.
+only in `jwilger/auto_review`. Release automation delegates release PR branch, release PR, version, tag, and Forgejo release selection to `release-plz`
+with the Gitea forge adapter. Publish only runs for release PRs merged into `main`
+and refuses token-bearing publication when the merged release PR changed files
+outside expected root and package release metadata: `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`, plus
+`crates/*/Cargo.toml` and `crates/*/CHANGELOG.md`.
 *Residual risk:* **Release preparation PAT blast radius** is limited to forged
 release branches/PR metadata in the project repository. **Release publishing PAT blast radius** is limited to forged tags/releases in the project repository.
 Rotate the Actions secret if workflow logs, runner state, or Forgejo secrets are
