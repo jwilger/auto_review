@@ -3,11 +3,15 @@ name: Publish release
 on:
   pull_request:
     types: [closed]
+  workflow_dispatch:
+    inputs:
+      release_merge_sha:
+        required: true
 
 jobs:
   release-publish:
     runs-on: docker
-    if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && startsWith(github.event.pull_request.head.ref, 'release-plz-') }}
+    if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && startsWith(github.event.pull_request.head.ref, 'release-plz-') == true || (github.event_name == 'workflow_dispatch' && inputs.release_merge_sha != '') }}
     environment: release-publish
     steps:
       - name: Install or reuse Nix
@@ -35,17 +39,21 @@ jobs:
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
         with:
-          ref: ${{ github.event.pull_request.merge_commit_sha }}
+          ref: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
           persist-credentials: false
           fetch-depth: 0
       - name: Validate release provenance and changed files
         env:
           FORGEJO_PULL_REQUEST_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
           RELEASE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          RELEASE_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
+          if [[ -z "$RELEASE_BASE_SHA" ]]; then
+            RELEASE_BASE_SHA="$RELEASE_MERGE_SHA^1"
+          fi
           [[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]
+          git merge-base --is-ancestor "$RELEASE_MERGE_SHA" origin/main
           git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA" | while IFS= read -r changed_file; do
             case "$changed_file" in
               Cargo.toml|Cargo.lock|CHANGELOG.md)
@@ -64,7 +72,7 @@ jobs:
           done
       - name: Attach merge commit to main
         env:
-          RELEASE_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+          RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
           git switch -C main "$RELEASE_MERGE_SHA"
