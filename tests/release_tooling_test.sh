@@ -901,6 +901,13 @@ test_prepare_workflow_pushes_release_branch_with_prepare_secret_helper() {
   assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow pushes the branch with the prepare-scoped token credential helper" 'git -c credential.helper=' 'FORGEJO_ACTIONS_TOKEN' 'push --force-with-lease origin "$branch"'
 }
 
+test_prepare_workflow_stages_cargo_lock_after_prepare() {
+  local prepare_workflow
+  prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
+
+  assert_file_contains_before "$prepare_workflow" 'scripts/release prepare' 'git add Cargo.toml Cargo.lock CHANGELOG.md' "release PR preparation workflow stages Cargo.lock with release metadata after prepare"
+}
+
 test_release_tooling_configures_tea_login_before_token_bearing_tea_commands() {
   local prepare_workflow release_tool
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
@@ -1028,6 +1035,7 @@ test_changelog_mentions_issue_66_release_automation
 test_prepare_workflow_configures_git_identity_before_commit
 test_prepare_workflow_checkout_does_not_persist_credentials
 test_prepare_workflow_pushes_release_branch_with_prepare_secret_helper
+test_prepare_workflow_stages_cargo_lock_after_prepare
 test_release_tooling_configures_tea_login_before_token_bearing_tea_commands
 test_publish_workflow_requires_trusted_release_environment
 test_release_tooling_tests_are_wired_into_nix_flake_check
