@@ -23,4 +23,4 @@ Pure helpers get adjacent unit tests. HTTP integrations use `wiremock`. LLM beha
 
 ## User-Facing Changes
 
-Update `CHANGELOG.md` under `[Unreleased]` for user-facing or operator-facing behavior.
+Use conventional commit titles for user-facing or operator-facing behavior; the release PR generates changelog notes from conventional commits.
