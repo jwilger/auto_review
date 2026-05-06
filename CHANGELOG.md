@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.2.0] - 2026-05-06
+
+### Added
+
+- *(release)* promote release candidate images (#110)
+- *(release)* create prerelease entries for candidates (#113)
+
+### Fixed
+
+- *(release)* use bot login for registry auth (#112)
+- *(release)* avoid multiline rc release note quoting (#114)
+
 ## [0.1.3] - 2026-05-06
 
 ### Fixed
