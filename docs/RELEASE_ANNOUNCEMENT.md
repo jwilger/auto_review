@@ -100,7 +100,7 @@ numbers, "today") before posting.
 > outbound calls are to the LLM provider you configure.
 >
 > **Deploy:** `docker compose up` next to your Forgejo
-> instance. `auto_review init` mints the bot user, registers
+> instance. `auto-review auth init` mints the bot user, registers
 > the webhook, and bootstraps `.auto_review.yaml`.
 >
 > Repo: `<repo URL>`

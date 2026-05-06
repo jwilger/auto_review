@@ -42,11 +42,12 @@ pub async fn init(args: InitArgs) -> Result<()> {
     println!();
     println!("Save this token (it will not be shown again):");
     println!();
-    println!("    export FORGEJO_TOKEN={}", token.sha1);
+    println!("    export AR_FORGEJO_TOKEN={}", token.sha1);
     println!();
     println!("Recommended next step:");
-    println!("    auto_review register-webhook --owner OWNER --repo REPO \\");
+    println!("    auto-review webhook register --owner OWNER --repo REPO \\");
     println!("        --forgejo-url {} \\", args.forgejo_url);
+    println!("        --token \"$AR_FORGEJO_TOKEN\" \\");
     println!("        --gateway-url https://reviewer.example.com \\");
     println!("        --webhook-secret \"$(openssl rand -hex 32)\"");
     println!();
@@ -1188,6 +1189,20 @@ fn expand_config_paths(paths: &[std::path::PathBuf]) -> Result<Vec<std::path::Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn init_operator_guidance_uses_unified_cli_and_gateway_token_env() {
+        let source = include_str!("commands.rs");
+        let gateway_token_env = ["export AR_", "FORGEJO_TOKEN="].concat();
+        let nested_register_command = ["auto-review webhook", " register"].concat();
+        let gateway_token_flag = ["--token \\\"$AR_", "FORGEJO_TOKEN\\\""].concat();
+        let removed_flat_register_command = ["auto", "_review register-webhook"].concat();
+
+        assert!(source.contains(&gateway_token_env));
+        assert!(source.contains(&nested_register_command));
+        assert!(source.contains(&gateway_token_flag));
+        assert!(!source.contains(&removed_flat_register_command));
+    }
 
     #[test]
     fn webhook_secret_check_accepts_a_strong_secret() {

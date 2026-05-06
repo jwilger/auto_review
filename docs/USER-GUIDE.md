@@ -125,7 +125,7 @@ ignored_paths:
 Validate locally before committing:
 
 ```bash
-auto_review validate-config .auto_review.yaml
+auto-review config validate .auto_review.yaml
 ```
 
 A failing validation exits non-zero, so this fits cleanly in a
@@ -135,7 +135,7 @@ permissive runtime loader silently ignores. Recommended for
 pre-commit hooks where a typo would silently disable a setting:
 
 ```bash
-auto_review validate-config --strict .auto_review.yaml
+auto-review config validate --strict .auto_review.yaml
 ```
 
 ## What the bot can't do

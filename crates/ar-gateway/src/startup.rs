@@ -1,11 +1,11 @@
+use crate::config::{compose_state_path, resolve_db_backing, DbBacking};
+use crate::dedup::{DeliveryDedup, RecentDeliveries, SqliteDeliveries};
+use crate::metrics::{Metrics, MetricsObserver};
+use crate::poller::{ChatPoller, SharedCommentCursors, DEFAULT_POLL_INTERVAL};
+use crate::ratelimit::TokenBucket;
+use crate::{build_router, AppState, ChatDeps, GatewayInfo, ReadinessProbe};
 use anyhow::{Context, Result};
 use ar_forgejo::Client as ForgejoClient;
-use ar_gateway::config::{compose_state_path, resolve_db_backing, DbBacking};
-use ar_gateway::dedup::{DeliveryDedup, RecentDeliveries, SqliteDeliveries};
-use ar_gateway::metrics::{Metrics, MetricsObserver};
-use ar_gateway::poller::{ChatPoller, SharedCommentCursors, DEFAULT_POLL_INTERVAL};
-use ar_gateway::ratelimit::TokenBucket;
-use ar_gateway::{build_router, AppState, ChatDeps, GatewayInfo, ReadinessProbe};
 use ar_index::{
     InMemoryLearningsStore, InMemoryVectorStore, SqliteLearningsStore, SqliteVectorStore,
     VectorStore,
@@ -22,16 +22,87 @@ use std::time::Duration;
 use tokio::net::TcpListener;
 use tokio::sync::Mutex;
 
-#[tokio::main]
-async fn main() -> Result<()> {
+#[derive(Clone, Copy)]
+struct GatewayStartupEnvValues<'a> {
+    bind: Option<&'a str>,
+    webhook_secret: Option<&'a str>,
+    forgejo_base_url: Option<&'a str>,
+    ar_forgejo_token: Option<&'a str>,
+    llm_base_url: Option<&'a str>,
+    llm_reasoning_model: Option<&'a str>,
+}
+
+#[derive(Debug)]
+struct GatewayStartupConfig {
+    bind: String,
+    webhook_secret: String,
+    forgejo_base_url: String,
+    ar_forgejo_token: String,
+    llm_base_url: String,
+    llm_reasoning_model: String,
+}
+
+impl GatewayStartupConfig {
+    fn from_env_values(values: GatewayStartupEnvValues<'_>) -> Result<Self> {
+        let llm_reasoning_model = values
+            .llm_reasoning_model
+            .unwrap_or("qwen2.5-coder:32b")
+            .to_string();
+
+        if llm_reasoning_model.trim().is_empty() {
+            anyhow::bail!(
+                "LLM_REASONING_MODEL is set to an empty/whitespace value; \
+                 unset it to take the default (qwen2.5-coder:32b) or set \
+                 a real model name"
+            );
+        }
+
+        Ok(Self {
+            bind: values.bind.unwrap_or("0.0.0.0:8080").to_string(),
+            webhook_secret: values
+                .webhook_secret
+                .context("WEBHOOK_SECRET is required")?
+                .to_string(),
+            forgejo_base_url: values
+                .forgejo_base_url
+                .context("FORGEJO_BASE_URL is required")?
+                .to_string(),
+            ar_forgejo_token: values
+                .ar_forgejo_token
+                .context("AR_FORGEJO_TOKEN is required")?
+                .to_string(),
+            llm_base_url: values
+                .llm_base_url
+                .context("LLM_BASE_URL is required")?
+                .to_string(),
+            llm_reasoning_model,
+        })
+    }
+}
+
+pub async fn run_from_env() -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ar_gateway=debug")),
         )
-        .init();
+        .try_init()
+        .ok();
 
-    let bind = env::var("AR_GATEWAY_BIND").unwrap_or_else(|_| "0.0.0.0:8080".into());
+    let bind_env = env::var("AR_GATEWAY_BIND").ok();
+    let webhook_secret_env = env::var("WEBHOOK_SECRET").ok();
+    let forgejo_base_env = env::var("FORGEJO_BASE_URL").ok();
+    let forgejo_token_env = read_non_empty_env("AR_FORGEJO_TOKEN");
+    let llm_base_env = env::var("LLM_BASE_URL").ok();
+    let reasoning_model_env = env::var("LLM_REASONING_MODEL").ok();
+    let startup_config = GatewayStartupConfig::from_env_values(GatewayStartupEnvValues {
+        bind: bind_env.as_deref(),
+        webhook_secret: webhook_secret_env.as_deref(),
+        forgejo_base_url: forgejo_base_env.as_deref(),
+        ar_forgejo_token: forgejo_token_env.as_deref(),
+        llm_base_url: llm_base_env.as_deref(),
+        llm_reasoning_model: reasoning_model_env.as_deref(),
+    })?;
 
     // git is required for the workspace clone phase. Probe up
     // front so a missing-git deploy surfaces in the first log
@@ -65,7 +136,7 @@ async fn main() -> Result<()> {
         }
     }
 
-    let secret = env::var("WEBHOOK_SECRET").context("WEBHOOK_SECRET is required")?;
+    let secret = startup_config.webhook_secret;
     // Forgejo's webhook docs recommend a strong random secret; HMAC-
     // SHA256 with a short shared key is brute-forceable. Warn at
     // startup rather than at first verify so operators see this in
@@ -78,24 +149,11 @@ async fn main() -> Result<()> {
              attack. Recommend 32+ random bytes (e.g. `openssl rand -hex 32`)"
         );
     }
-    let forgejo_base = env::var("FORGEJO_BASE_URL").context("FORGEJO_BASE_URL is required")?;
-    let forgejo_token = forgejo_api_token_from_env_values(read_non_empty_env("AR_FORGEJO_TOKEN"))?;
-    let llm_base = env::var("LLM_BASE_URL").context("LLM_BASE_URL is required")?;
+    let forgejo_base = startup_config.forgejo_base_url;
+    let forgejo_token = startup_config.ar_forgejo_token;
+    let llm_base = startup_config.llm_base_url;
     let llm_api_key = env::var("LLM_API_KEY").ok();
-    let reasoning_model =
-        env::var("LLM_REASONING_MODEL").unwrap_or_else(|_| "qwen2.5-coder:32b".into());
-    // An empty string is a more confusing failure mode than a
-    // missing variable, because clap-style "missing required" never
-    // fires (env::var returns Ok("")) and every subsequent review
-    // 400s with whatever cryptic message the upstream provider
-    // returns for `"model": ""`. Surface this at startup instead.
-    if reasoning_model.trim().is_empty() {
-        anyhow::bail!(
-            "LLM_REASONING_MODEL is set to an empty/whitespace value; \
-             unset it to take the default (qwen2.5-coder:32b) or set \
-             a real model name"
-        );
-    }
+    let reasoning_model = startup_config.llm_reasoning_model;
 
     // Bot identity: read once and validate up-front so the poller
     // and the chat handler see the same values. AR_BOT_LOGIN gates
@@ -491,9 +549,10 @@ async fn main() -> Result<()> {
 
     let app = build_router(state);
 
-    let listener = TcpListener::bind(&bind)
+    let listener = TcpListener::bind(&startup_config.bind)
         .await
-        .with_context(|| format!("bind {bind}"))?;
+        .with_context(|| format!("bind {}", startup_config.bind))?;
+    let bind = startup_config.bind;
     tracing::info!(%bind, "ar-gateway listening");
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
@@ -591,10 +650,6 @@ fn read_non_empty_env(name: &str) -> Option<String> {
     }
 }
 
-fn forgejo_api_token_from_env_values(ar_forgejo_token: Option<String>) -> Result<String> {
-    ar_forgejo_token.context("AR_FORGEJO_TOKEN is required")
-}
-
 fn validate_ci_review_token(raw: Option<String>) -> Result<Option<String>> {
     let Some(token) = raw else {
         return Ok(None);
@@ -682,21 +737,88 @@ mod tests {
     }
 
     #[test]
-    fn forgejo_api_token_accepts_gateway_bot_env() {
-        let gateway_bot_token = "gateway-bot-pat".to_string();
+    fn startup_config_from_explicit_env_values_applies_defaults_and_safe_validation() {
+        let secret = "super-secret-webhook-value";
+        let forgejo_token = "forgejo-token-that-must-not-leak";
+        let values = GatewayStartupEnvValues {
+            bind: None,
+            webhook_secret: Some(secret),
+            forgejo_base_url: Some("https://forgejo.example.test"),
+            ar_forgejo_token: Some(forgejo_token),
+            llm_base_url: Some("https://llm.example.test/v1"),
+            llm_reasoning_model: None,
+        };
 
-        let token = forgejo_api_token_from_env_values(Some(gateway_bot_token.clone())).unwrap();
+        let config = GatewayStartupConfig::from_env_values(values).unwrap();
 
-        assert_eq!(token, gateway_bot_token);
-    }
+        assert_eq!(config.bind, "0.0.0.0:8080");
+        assert_eq!(config.webhook_secret, secret);
+        assert_eq!(config.forgejo_base_url, "https://forgejo.example.test");
+        assert_eq!(config.ar_forgejo_token, forgejo_token);
+        assert_eq!(config.llm_base_url, "https://llm.example.test/v1");
+        assert_eq!(config.llm_reasoning_model, "qwen2.5-coder:32b");
 
-    #[test]
-    fn forgejo_api_token_requires_gateway_bot_env() {
-        let err = forgejo_api_token_from_env_values(None).unwrap_err();
+        for (missing_name, missing_values) in [
+            (
+                "WEBHOOK_SECRET",
+                GatewayStartupEnvValues {
+                    webhook_secret: None,
+                    ..values
+                },
+            ),
+            (
+                "FORGEJO_BASE_URL",
+                GatewayStartupEnvValues {
+                    forgejo_base_url: None,
+                    ..values
+                },
+            ),
+            (
+                "AR_FORGEJO_TOKEN",
+                GatewayStartupEnvValues {
+                    ar_forgejo_token: None,
+                    ..values
+                },
+            ),
+            (
+                "LLM_BASE_URL",
+                GatewayStartupEnvValues {
+                    llm_base_url: None,
+                    ..values
+                },
+            ),
+        ] {
+            let err = GatewayStartupConfig::from_env_values(missing_values).unwrap_err();
+            let message = err.to_string();
+
+            assert!(
+                message.contains(missing_name),
+                "missing {missing_name} error should name the env var, got: {message}"
+            );
+            assert!(
+                !message.contains(secret) && !message.contains(forgejo_token),
+                "missing {missing_name} error must not leak secrets, got: {message}"
+            );
+        }
+
+        let whitespace_model_err = GatewayStartupConfig::from_env_values(GatewayStartupEnvValues {
+            llm_reasoning_model: Some(" \t\n "),
+            ..values
+        })
+        .unwrap_err();
+        let message = whitespace_model_err.to_string();
 
         assert!(
-            err.to_string().contains("AR_FORGEJO_TOKEN"),
-            "missing gateway bot token error should name AR_FORGEJO_TOKEN, got: {err}"
+            message.contains("LLM_REASONING_MODEL"),
+            "whitespace reasoning model error should name LLM_REASONING_MODEL, got: {message}"
+        );
+        assert!(
+            message.contains("empty") || message.contains("whitespace"),
+            "whitespace reasoning model error should explain the value is empty/whitespace, got: {message}"
+        );
+        assert!(
+            !message.contains(secret) && !message.contains(forgejo_token),
+            "whitespace reasoning model error must not leak secrets, got: {message}"
         );
     }
 }

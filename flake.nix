@@ -163,18 +163,10 @@
         };
 
         # ----- Packages ----------------------------------------------
-        # The gateway is the single binary operators run; expose it
-        # as the default package so `nix build` produces a
-        # deployable artefact.
+        # auto-review is the single binary operators run; expose it as
+        # the default package so `nix build` produces a deployable
+        # artefact.
         packages = rec {
-          ar-gateway = craneLib.buildPackage (
-            commonArgs
-            // {
-              inherit cargoArtifacts;
-              pname = "ar-gateway";
-              cargoExtraArgs = "-p ar-gateway --bin ar-gateway";
-            }
-          );
           ar-cli = craneLib.buildPackage (
             commonArgs
             // {
@@ -193,7 +185,7 @@
               chmod 0700 var/lib/auto_review
             '';
             contents = [
-              ar-gateway
+              ar-cli
               pkgs.cacert
               # Workspace preparation shells out to git for clone/fetch/checkout.
               # Keep it in the deploy-shaped image so reviews do not fail after
@@ -201,7 +193,7 @@
               pkgs.git
             ];
             config = {
-              Cmd = [ "${ar-gateway}/bin/ar-gateway" ];
+              Cmd = [ "${ar-cli}/bin/auto-review" "gateway" ];
               Env = [
                 "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
                 "PATH=/bin"
@@ -215,7 +207,7 @@
               User = "65532:65532";
             };
           };
-          default = self.packages.${system}.ar-gateway;
+          default = self.packages.${system}.ar-cli;
         };
 
         apps = {

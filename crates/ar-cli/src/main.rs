@@ -5,10 +5,19 @@ mod bench;
 mod cli;
 mod commands;
 
-use cli::{Cli, Command};
+use cli::{
+    AuthCommand, BenchCommand, Cli, Command, ConfigCommand, HistoryCommand, LearningsCommand,
+    OpsCommand, ReviewCommand, WebhookCommand,
+};
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let cli = Cli::parse();
+
+    if matches!(cli.command, Command::Gateway) {
+        return ar_gateway::run_from_env().await;
+    }
+
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -16,21 +25,23 @@ async fn main() -> Result<()> {
         )
         .init();
 
-    let cli = Cli::parse();
     match cli.command {
-        Command::Init(args) => commands::init(args).await,
-        Command::RegisterWebhook(args) => commands::register_webhook(args).await,
-        Command::ListWebhooks(args) => commands::list_webhooks(args).await,
-        Command::UnregisterWebhook(args) => commands::unregister_webhook(args).await,
-        Command::ReviewOnce(args) => commands::review_once(args).await,
-        Command::Bench(args) => bench::run(args).await,
-        Command::ValidateConfig(args) => commands::validate_config(args),
-        Command::TestWebhook(args) => commands::test_webhook(args).await,
-        Command::Doctor(args) => commands::doctor(args).await,
-        Command::Status(args) => commands::status(args).await,
-        Command::ResetPr(args) => commands::reset_pr(args).await,
-        Command::PurgeHistory(args) => commands::purge_history(args).await,
-        Command::ListLearnings(args) => commands::list_learnings(args).await,
-        Command::ForgetLearning(args) => commands::forget_learning(args).await,
+        Command::Gateway => unreachable!("gateway command returned before CLI tracing init"),
+        Command::Auth(AuthCommand::Init(args)) => commands::init(args).await,
+        Command::Webhook(WebhookCommand::Register(args)) => commands::register_webhook(args).await,
+        Command::Webhook(WebhookCommand::List(args)) => commands::list_webhooks(args).await,
+        Command::Webhook(WebhookCommand::Unregister(args)) => {
+            commands::unregister_webhook(args).await
+        }
+        Command::Webhook(WebhookCommand::Test(args)) => commands::test_webhook(args).await,
+        Command::Config(ConfigCommand::Validate(args)) => commands::validate_config(args),
+        Command::Review(ReviewCommand::Once(args)) => commands::review_once(args).await,
+        Command::Bench(BenchCommand::Run(args)) => bench::run(args).await,
+        Command::Ops(OpsCommand::Doctor(args)) => commands::doctor(args).await,
+        Command::Ops(OpsCommand::Status(args)) => commands::status(args).await,
+        Command::History(HistoryCommand::ResetPr(args)) => commands::reset_pr(args).await,
+        Command::History(HistoryCommand::Purge(args)) => commands::purge_history(args).await,
+        Command::Learnings(LearningsCommand::List(args)) => commands::list_learnings(args).await,
+        Command::Learnings(LearningsCommand::Forget(args)) => commands::forget_learning(args).await,
     }
 }

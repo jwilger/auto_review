@@ -25,7 +25,7 @@ dropping in another `labelled-<class>.json` next to these.
 ## Running
 
 ```sh
-auto_review bench bench/fixtures \
+auto-review bench run bench/fixtures \
     --llm-base-url http://localhost:11434 \
     --llm-model qwen2.5-coder:32b
 ```
@@ -34,7 +34,7 @@ Optional verifier pass (drops findings the cheap model doesn't
 corroborate):
 
 ```sh
-auto_review bench bench/fixtures \
+auto-review bench run bench/fixtures \
     --llm-base-url http://localhost:11434 \
     --llm-model qwen2.5-coder:32b \
     --llm-cheap-model qwen2.5-coder:7b
@@ -51,13 +51,13 @@ deltas alongside the regular aggregate:
 
 ```sh
 # Capture today's numbers as the baseline.
-auto_review bench bench/fixtures \
+auto-review bench run bench/fixtures \
     --llm-base-url http://localhost:11434 \
     --llm-model qwen2.5-coder:32b \
     --json > baseline.json
 
 # Tomorrow, after a prompt change, compare:
-auto_review bench bench/fixtures \
+auto-review bench run bench/fixtures \
     --llm-base-url http://localhost:11434 \
     --llm-model qwen2.5-coder:32b \
     --baseline baseline.json

@@ -85,7 +85,7 @@ everyone (and CI) picks up the same versions.
   pre-recorded responses. See `crates/ar-review/src/heal.rs` and
   `crates/ar-review/src/pipeline.rs` for examples.
 - **End-to-end behaviour** that depends on real `git`, real Forgejo,
-  or real LLMs is exercised via `auto_review review-once` and is
+  or real LLMs is exercised via `auto-review review once` and is
   not currently covered by automated tests.
 
 ## Architecture overview

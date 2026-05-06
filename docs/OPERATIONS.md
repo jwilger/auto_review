@@ -51,10 +51,10 @@ Before exposing a freshly-deployed gateway to Forgejo:
 # Confirms PAT validity, LLM reachability, and secret entropy
 # all in one shot. Reads env vars so a configured deploy needs
 # no args.
-auto_review doctor
+auto-review ops doctor
 
 # Confirms the webhook intake path works end-to-end.
-auto_review test-webhook \
+auto-review webhook test \
     --gateway-url https://reviewer.example.com \
     --webhook-secret "$WEBHOOK_SECRET"
 
@@ -62,7 +62,7 @@ auto_review test-webhook \
 # success rate. Run from anywhere with HTTP access to the
 # gateway; complements `doctor` (deps) and `test-webhook`
 # (intake) with the live-state view.
-auto_review status --gateway-url https://reviewer.example.com
+auto-review ops status --gateway-url https://reviewer.example.com
 ```
 
 Both commands are fast and idempotent — drop them into your
@@ -262,7 +262,7 @@ for either secret drift or active probing.
    means the header isn't being sent (proxy stripping it?).
 3. Smoke-test the intake path with a fresh signature:
    ```bash
-   auto_review test-webhook \
+   auto-review webhook test \
        --gateway-url https://reviewer.example.com \
        --webhook-secret "$WEBHOOK_SECRET"
    ```
@@ -411,7 +411,7 @@ own. If reviews start taking minutes, check:
 ### 6.1 Gateway bot PAT (`AR_FORGEJO_TOKEN`)
 
 ```bash
-auto_review init \
+auto-review auth init \
     --forgejo-url $FORGEJO_BASE_URL \
     --username $AR_BOT_LOGIN \
     --token-name auto_review-$(date -I)
@@ -425,9 +425,9 @@ the old token in Forgejo's user settings. Rotate at least every
 ### 6.2 LLM API key (`LLM_API_KEY`)
 
 Provider-specific. After rotation: update the env, restart the
-gateway, run a smoke-test PR through `auto_review review-once
+gateway, run a smoke-test PR through `auto-review review once
 --dry-run` to confirm prompt rendering succeeds, then a real
-`review-once` to confirm the new key works.
+`auto-review review once` to confirm the new key works.
 
 ### 6.3 Webhook secret (`WEBHOOK_SECRET`)
 
@@ -436,14 +436,14 @@ Generate a new value (`openssl rand -hex 32`). Update both:
 2. Every Forgejo webhook configured against this gateway. Audit
    them with:
    ```bash
-   auto_review list-webhooks --owner <O> --repo <R>
+   auto-review webhook list --owner <O> --repo <R>
    ```
    Then either patch each one in Forgejo's webhook UI, or remove
    the old hook and re-register cleanly:
    ```bash
-   auto_review unregister-webhook --owner <O> --repo <R> \
+   auto-review webhook unregister --owner <O> --repo <R> \
        --match-url reviewer.example.com
-   auto_review register-webhook --owner <O> --repo <R> \
+   auto-review webhook register --owner <O> --repo <R> \
        --gateway-url https://reviewer.example.com \
        --webhook-secret "$WEBHOOK_SECRET"
    ```
@@ -481,7 +481,7 @@ guidelines: |
 These get injected into the LLM prompt's "repository conventions"
 section. Validate locally:
 ```bash
-auto_review validate-config .auto_review.yaml
+auto-review config validate .auto_review.yaml
 ```
 
 ### 7.1.4 Purge old review-history rows
@@ -492,7 +492,7 @@ reviewed; closed PRs from months ago don't need their
 
 ```bash
 # Run weekly via systemd timer or cron
-auto_review purge-history --older-than-days 90
+auto-review history purge --older-than-days 90
 ```
 
 `--history-db` reads `AR_HISTORY_DB` by default. Use
@@ -516,7 +516,7 @@ the next CI-triggered or explicit forced review runs as a full review (not an
 incremental `compare` against a stale baseline):
 
 ```bash
-auto_review reset-pr \
+auto-review history reset-pr \
     --history-db /var/lib/auto_review/review_history.db \
     --owner $OWNER --repo $REPO --pr $PR
 ```
@@ -563,8 +563,8 @@ sqlite3 /var/lib/auto_review/learnings.db ".backup '/backup/learnings-$(date -I)
 
 **Inspect:**
 ```bash
-auto_review list-learnings   # uses AR_LEARNINGS_DB by default
-auto_review list-learnings --json | jq    # machine-readable
+auto-review learnings list   # uses AR_LEARNINGS_DB by default
+auto-review learnings list --json | jq    # machine-readable
 ```
 
 (For a custom inspection query, `sqlite3` against the file
@@ -573,7 +573,7 @@ works too — the schema is documented in
 
 **Forget a single learning:**
 ```bash
-auto_review forget-learning --id <ID>
+auto-review learnings forget --id <ID>
 ```
 Same effect as `@<bot> forget` from a PR thread but operates
 directly on the SQLite store, so operators can script bulk
@@ -593,17 +593,17 @@ read the [CHANGELOG](../CHANGELOG.md) before bumping.
 ```bash
 # Build the new version
 git -C /opt/auto_review pull
-cargo build --release -p ar-gateway -p ar-cli
+cargo build --release -p ar-cli
 
 # Validate config still parses (some keys may have moved)
-auto_review validate-config /etc/auto_review/
+auto-review config validate /etc/auto_review/
 
 # Restart
 sudo systemctl restart auto_review.service
 
 # Smoke-test
 curl -s http://localhost:8080/version | jq
-auto_review doctor
+auto-review ops doctor
 ```
 
 The systemd unit ships under
@@ -611,7 +611,7 @@ The systemd unit ships under
 haven't installed it, follow that README first.
 
 If the new version fails to start, the old binary is still on disk
-at `target/release/ar-gateway.bak` (manual; we do not auto-back-up).
+at `target/release/auto-review.bak` (manual; we do not auto-back-up).
 Roll back, file an issue.
 
 ## 9.1 Forgejo review-comment resolution gap

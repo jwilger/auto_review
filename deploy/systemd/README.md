@@ -8,9 +8,9 @@ deploy option.
 ## Install
 
 ```bash
-# 1. Build the gateway binary.
-cargo build --release -p ar-gateway
-sudo install -m 0755 target/release/ar-gateway /usr/local/bin/ar-gateway
+# 1. Build the unified binary.
+cargo build --release -p ar-cli
+sudo install -m 0755 target/release/auto-review /usr/local/bin/auto-review
 
 # 2. Create a dedicated unprivileged user.
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin auto_review
@@ -37,7 +37,7 @@ sudo systemctl enable --now auto_review.service
 # 6. Verify.
 sudo systemctl status auto_review.service
 journalctl -u auto_review.service --since "5m ago"
-auto_review doctor    # validates config end-to-end
+auto-review ops doctor    # validates config end-to-end
 ```
 
 After the service is up, register the webhook on each repo per
@@ -94,9 +94,9 @@ LimitNOFILE=16384
 
 ```bash
 git -C /opt/auto_review pull
-cargo build --release -p ar-gateway
-auto_review validate-config /etc/auto_review/    # if applicable
-sudo install -m 0755 target/release/ar-gateway /usr/local/bin/ar-gateway
+cargo build --release -p ar-cli
+auto-review config validate /etc/auto_review/    # if applicable
+sudo install -m 0755 target/release/auto-review /usr/local/bin/auto-review
 sudo systemctl restart auto_review.service
 sudo systemctl status auto_review.service
 ```
@@ -115,5 +115,5 @@ sudo systemctl daemon-reload
 # Optional: purge state
 sudo rm -rf /etc/auto_review /var/lib/auto_review
 sudo userdel auto_review
-sudo rm /usr/local/bin/ar-gateway
+sudo rm /usr/local/bin/auto-review
 ```
