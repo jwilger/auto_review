@@ -763,15 +763,15 @@ test_prepare_workflow_skips_release_pr_merge_pushes() {
   local prepare_workflow
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
 
-  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow skips release PR merge pushes by title" 'github.event_name' 'push' 'github.event.head_commit.message' 'chore(release): v'
+  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow skips release PR merge pushes by title" 'github.event_name' 'push' 'github.event.head_commit.message' 'chore: release'
   assert_file_contains "$prepare_workflow" 'workflow_dispatch' "release PR preparation workflow still supports manual dispatch"
 }
 
-test_prepare_workflow_skips_release_infra_fix_pushes() {
+test_prepare_workflow_runs_release_infra_fix_pushes() {
   local prepare_workflow
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
 
-  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow skips release infrastructure fixes by title" 'github.event_name' 'push' 'github.event.head_commit.message' 'fix(release)'
+  assert_file_not_contains "$prepare_workflow" "fix(release)" "release PR preparation workflow runs after release infrastructure fixes"
   assert_file_contains "$prepare_workflow" 'workflow_dispatch' "release PR preparation workflow still supports manual dispatch after release infrastructure fixes"
 }
 
@@ -1689,7 +1689,8 @@ test_release_secrets_are_documented_for_operators() {
 
 test_release_workflows_exist_for_prepare_pr_and_publish_on_merge
 test_release_workflows_install_or_reuse_nix_like_ci_before_nix_develop
-test_prepare_workflow_skips_release_infra_fix_pushes
+test_prepare_workflow_skips_release_pr_merge_pushes
+test_prepare_workflow_runs_release_infra_fix_pushes
 test_prepare_workflow_plans_and_checks_semver_before_release_metadata_commit
 test_publish_workflow_requires_release_pr_base_branch_main
 test_release_workflows_use_prepare_secret_and_protected_publish_token
