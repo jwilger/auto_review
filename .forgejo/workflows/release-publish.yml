@@ -88,6 +88,16 @@ jobs:
           RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
+          mkdir -p "$HOME/.config/containers"
+          cat > "$HOME/.config/containers/policy.json" <<'EOF'
+          {
+            "default": [
+              {
+                "type": "insecureAcceptAnything"
+              }
+            ]
+          }
+          EOF
           if [ -z "${RELEASE_BOT_NAME:-}" ]; then
             printf 'missing RELEASE_BOT_NAME repository variable\n' >&2
             exit 1
