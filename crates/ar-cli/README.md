@@ -30,6 +30,17 @@ ongoing operations, debugging, and benchmarks share one command surface.
 | `webhook list` | Audits webhooks already installed on a repo. |
 | `webhook unregister` | Deletes a webhook by id or by URL substring. |
 
+### Gateway isolation rollout
+
+Direct `auto-review gateway` startup fails closed while the embedded OCI rootfs
+payload is rolled out. The published container image marks its packaged
+container boundary with `AR_GATEWAY_EXTERNAL_ISOLATION=container` and startup
+logs that the external marker was used. Direct binary operators must explicitly
+opt out with `auto-review gateway --bare` or `AR_GATEWAY_BARE=true`, which logs
+that only application-level controls are active and this is not
+container-equivalent isolation. Full `/info` and `ops doctor` posture reporting
+is tracked separately by issue #122.
+
 ### Ongoing operations
 
 | Command | Purpose |

@@ -150,8 +150,12 @@ WEBHOOK_SECRET=shared-secret \
 AR_CI_REVIEW_TOKEN=e2e-action-token \
 LLM_BASE_URL=http://localhost:11434 \
 LLM_REASONING_MODEL=qwen2.5-coder:7b \
-./target/release/auto-review gateway
+./target/release/auto-review gateway --bare
 ```
+
+The E2E runbook uses explicit bare mode because it starts the direct binary on
+the test host. Bare mode is an opt-out from the embedded OCI launcher; it keeps
+application-level controls only and is not container-equivalent isolation.
 
 ## 8. Open a PR
 

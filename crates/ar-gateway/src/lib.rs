@@ -15,7 +15,7 @@ pub mod ratelimit;
 mod startup;
 pub mod webhook;
 
-pub use startup::run_from_env;
+pub use startup::{run_from_env, StartupOptions};
 
 use ar_forgejo::Client as ForgejoClient;
 use ar_index::LearningsStore;
