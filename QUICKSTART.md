@@ -82,13 +82,19 @@ export LLM_REASONING_MODEL=qwen2.5-coder:32b
 # export LLM_API_KEY=sk-...
 # export LLM_REASONING_MODEL=gpt-4o-mini
 
-./target/release/auto-review gateway
+./target/release/auto-review gateway --bare
 ```
 
 The gateway listens on `0.0.0.0:8080` by default; override with
 `AR_GATEWAY_BIND=0.0.0.0:9090`. It needs to be reachable from your
 Forgejo instance — put it behind a reverse proxy (or expose it
 directly inside your private network).
+
+During the single-binary OCI rollout, direct binary startup fails closed unless
+the embedded launcher is available or you explicitly opt out with `--bare` (or
+`AR_GATEWAY_BARE=true`). Bare mode logs that only application-level controls are
+active and is not container-equivalent isolation. The published container image
+marks its external container boundary automatically.
 
 Store the same `AR_CI_REVIEW_TOKEN` value as a CI secret (for example,
 `AUTO_REVIEW_ACTION_TOKEN`) so your workflow can call `POST /reviews/ci` after

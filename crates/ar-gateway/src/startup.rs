@@ -42,6 +42,99 @@ struct GatewayStartupConfig {
     llm_reasoning_model: String,
 }
 
+#[derive(Debug)]
+pub struct StartupOptions {
+    pub bare: bool,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GatewayLaunchOutcome {
+    ContinueInProcess,
+    #[allow(dead_code)]
+    OuterLauncherFinished,
+}
+
+#[derive(Clone, Copy)]
+struct GatewayLauncherEnvValues<'a> {
+    bare: Option<&'a str>,
+    external_isolation: Option<&'a str>,
+}
+
+#[derive(Debug)]
+struct OciSetupDiagnostic {
+    _detail: String,
+}
+
+impl OciSetupDiagnostic {
+    fn new(detail: impl Into<String>) -> Self {
+        Self {
+            _detail: detail.into(),
+        }
+    }
+}
+
+fn select_gateway_launcher(
+    values: GatewayLauncherEnvValues<'_>,
+    prepare_oci: impl FnOnce() -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic>,
+) -> Result<GatewayLaunchOutcome> {
+    if values.external_isolation == Some("container") {
+        tracing::info!(
+            "external container isolation marker detected; embedded OCI launcher skipped because this process is already expected to run inside the packaged container boundary"
+        );
+        return Ok(GatewayLaunchOutcome::ContinueInProcess);
+    }
+
+    let use_oci = match values.bare.map(str::trim).map(str::to_ascii_lowercase) {
+        None => true,
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => false,
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => true,
+        Some(_) => anyhow::bail!(
+            "AR_GATEWAY_BARE has an unrecognized value; use true/false, yes/no, on/off, or 1/0"
+        ),
+    };
+
+    if use_oci {
+        prepare_oci().map_err(|_diagnostic| {
+            anyhow::anyhow!(
+                "OCI gateway launcher setup failed: embedded OCI launcher is not yet available; set AR_GATEWAY_BARE (or pass --bare) to opt out"
+            )
+        })
+    } else {
+        tracing::warn!("{}", explicit_bare_gateway_mode_warning());
+        Ok(GatewayLaunchOutcome::ContinueInProcess)
+    }
+}
+
+fn explicit_bare_gateway_mode_warning() -> &'static str {
+    "Warning: bare gateway mode selected; only application-level controls are active, not container-equivalent isolation."
+}
+
+fn select_gateway_launcher_for_startup_options(
+    options: StartupOptions,
+    values: GatewayLauncherEnvValues<'_>,
+    prepare_oci: impl FnOnce() -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic>,
+) -> Result<GatewayLaunchOutcome> {
+    let bare = if options.bare {
+        Some("true")
+    } else {
+        values.bare
+    };
+
+    select_gateway_launcher(
+        GatewayLauncherEnvValues {
+            bare,
+            external_isolation: values.external_isolation,
+        },
+        prepare_oci,
+    )
+}
+
+fn prepare_embedded_oci_gateway() -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic> {
+    Err(OciSetupDiagnostic::new(
+        "embedded OCI gateway launcher is not yet available until the minimal rootfs bundle from issue #118 is available",
+    ))
+}
+
 impl GatewayStartupConfig {
     fn from_env_values(values: GatewayStartupEnvValues<'_>) -> Result<Self> {
         let llm_reasoning_model = values
@@ -80,7 +173,7 @@ impl GatewayStartupConfig {
     }
 }
 
-pub async fn run_from_env() -> Result<()> {
+pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
@@ -88,6 +181,21 @@ pub async fn run_from_env() -> Result<()> {
         )
         .try_init()
         .ok();
+
+    let bare_env = env::var("AR_GATEWAY_BARE").ok();
+    let external_isolation_env = env::var("AR_GATEWAY_EXTERNAL_ISOLATION").ok();
+    let launch_outcome = select_gateway_launcher_for_startup_options(
+        options,
+        GatewayLauncherEnvValues {
+            bare: bare_env.as_deref(),
+            external_isolation: external_isolation_env.as_deref(),
+        },
+        prepare_embedded_oci_gateway,
+    )?;
+
+    if matches!(launch_outcome, GatewayLaunchOutcome::OuterLauncherFinished) {
+        return Ok(());
+    }
 
     let bind_env = env::var("AR_GATEWAY_BIND").ok();
     let webhook_secret_env = env::var("WEBHOOK_SECRET").ok();
@@ -694,6 +802,118 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::{Arc, Mutex};
+
+    fn run_from_env_source() -> &'static str {
+        let source = include_str!("startup.rs");
+        let start = source
+            .find("pub async fn run_from_env(options: StartupOptions)")
+            .unwrap_or_else(|| panic!("startup.rs should define run_from_env with StartupOptions"));
+        let end = source[start..]
+            .find("fn validate_ci_review_token")
+            .map(|offset| start + offset)
+            .unwrap_or_else(|| {
+                panic!("run_from_env source should precede validate_ci_review_token")
+            });
+
+        &source[start..end]
+    }
+
+    struct CapturingSubscriber {
+        messages: Arc<Mutex<Vec<String>>>,
+    }
+
+    impl tracing::Subscriber for CapturingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = MessageVisitor::default();
+            event.record(&mut visitor);
+            if let Some(message) = visitor.message {
+                self.messages.lock().unwrap().push(message);
+            }
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    #[derive(Default)]
+    struct MessageVisitor {
+        message: Option<String>,
+    }
+
+    impl tracing::field::Visit for MessageVisitor {
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            if field.name() == "message" {
+                self.message = Some(value.to_string());
+            }
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            if field.name() == "message" {
+                self.message = Some(format!("{value:?}").trim_matches('"').to_string());
+            }
+        }
+    }
+
+    #[test]
+    fn run_from_env_wires_startup_options_and_bare_env_to_launcher_before_gateway_config() {
+        let source = run_from_env_source();
+        let selector = source
+            .find("select_gateway_launcher_for_startup_options")
+            .unwrap_or_else(|| {
+                panic!(
+                    "run_from_env must call select_gateway_launcher_for_startup_options before normal startup"
+                )
+            });
+        let config = source
+            .find("GatewayStartupConfig::from_env_values")
+            .unwrap_or_else(|| panic!("run_from_env should continue through GatewayStartupConfig"));
+
+        assert!(
+            selector < config,
+            "run_from_env must select the launcher before normal gateway config/startup"
+        );
+
+        let launcher_wiring = &source[..config];
+
+        assert!(
+            launcher_wiring.contains("AR_GATEWAY_BARE"),
+            "run_from_env must read AR_GATEWAY_BARE before selecting the launcher"
+        );
+        assert!(
+            launcher_wiring.contains("AR_GATEWAY_EXTERNAL_ISOLATION"),
+            "run_from_env must read AR_GATEWAY_EXTERNAL_ISOLATION before selecting the launcher"
+        );
+        assert!(
+            launcher_wiring[selector..].contains("options"),
+            "run_from_env must pass its StartupOptions into the launcher selector"
+        );
+        assert!(
+            launcher_wiring[selector..].contains("GatewayLauncherEnvValues"),
+            "run_from_env must pass GatewayLauncherEnvValues into the launcher selector"
+        );
+        assert!(
+            launcher_wiring[selector..].contains("bare:"),
+            "run_from_env must wire the AR_GATEWAY_BARE value into GatewayLauncherEnvValues::bare"
+        );
+        assert!(
+            launcher_wiring[selector..].contains("external_isolation:"),
+            "run_from_env must wire AR_GATEWAY_EXTERNAL_ISOLATION into GatewayLauncherEnvValues::external_isolation"
+        );
+    }
 
     #[test]
     fn ci_review_token_unset_empty_or_whitespace_disables_endpoint() {
@@ -819,6 +1039,255 @@ mod tests {
         assert!(
             !message.contains(secret) && !message.contains(forgejo_token),
             "whitespace reasoning model error must not leak secrets, got: {message}"
+        );
+    }
+
+    #[test]
+    fn launcher_decision_defaults_to_oci_and_fails_closed_when_setup_unavailable() {
+        let err = select_gateway_launcher(
+            GatewayLauncherEnvValues {
+                bare: None,
+                external_isolation: None,
+            },
+            || {
+                Err(OciSetupDiagnostic::new(
+                    "rootless OCI setup failed while preparing /run/secrets/ar-token",
+                ))
+            },
+        )
+        .unwrap_err();
+        let message = err.to_string();
+
+        assert!(
+            message.contains("OCI"),
+            "default gateway launcher failure should identify the OCI launcher path, got: {message}"
+        );
+        assert!(
+            message.contains("not yet available"),
+            "default gateway launcher failure should say the embedded OCI launcher is not yet available, got: {message}"
+        );
+        assert!(
+            message.contains("AR_GATEWAY_BARE") || message.contains("--bare"),
+            "default gateway launcher failure should name the explicit bare opt-out, got: {message}"
+        );
+        assert!(
+            !message.contains("ar-token") && !message.contains("/run/secrets"),
+            "launcher diagnostics must not echo secret-bearing paths, got: {message}"
+        );
+    }
+
+    #[test]
+    fn launcher_decision_trueish_bare_values_skip_oci_preparation() {
+        for bare in ["1", "true", "yes", "on", " TRUE ", "Yes", "On"] {
+            let outcome = select_gateway_launcher(
+                GatewayLauncherEnvValues {
+                    bare: Some(bare),
+                    external_isolation: None,
+                },
+                || panic!("true-ish AR_GATEWAY_BARE={bare:?} must skip OCI preparation"),
+            )
+            .unwrap();
+
+            assert_eq!(outcome, GatewayLaunchOutcome::ContinueInProcess);
+        }
+    }
+
+    #[test]
+    fn explicit_bare_launcher_selection_emits_prominent_warning() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = CapturingSubscriber {
+            messages: Arc::clone(&captured),
+        };
+
+        tracing::subscriber::with_default(subscriber, || {
+            select_gateway_launcher(
+                GatewayLauncherEnvValues {
+                    bare: Some("true"),
+                    external_isolation: None,
+                },
+                || panic!("explicit bare mode must skip OCI preparation"),
+            )
+            .unwrap();
+        });
+
+        let messages = captured.lock().unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message == explicit_bare_gateway_mode_warning()),
+            "select_gateway_launcher must emit the explicit bare warning; captured messages: {messages:?}"
+        );
+    }
+
+    #[test]
+    fn explicit_bare_gateway_mode_warning_names_limited_controls_without_isolation_claim() {
+        let warning = explicit_bare_gateway_mode_warning();
+        let lower = warning.to_ascii_lowercase();
+
+        assert!(
+            lower.contains("warning") || lower.contains("caution"),
+            "bare gateway mode notice must be prominent, got: {warning}"
+        );
+        assert!(
+            lower.contains("bare"),
+            "bare gateway mode notice should name the selected mode, got: {warning}"
+        );
+        assert!(
+            lower.contains("only application-level controls"),
+            "bare gateway mode notice must say only application-level controls are active, got: {warning}"
+        );
+        assert!(
+            lower.contains("not container-equivalent isolation"),
+            "bare gateway mode notice must not imply container-equivalent isolation, got: {warning}"
+        );
+        assert!(
+            !lower.contains("container-equivalent isolation is active"),
+            "bare gateway mode notice must not claim container-equivalent isolation is active, got: {warning}"
+        );
+    }
+
+    #[test]
+    fn launcher_decision_falseish_bare_values_prepare_oci() {
+        for bare in ["0", "false", "no", "off", " FALSE ", "No", "Off"] {
+            let mut prepared_oci = false;
+
+            let outcome = select_gateway_launcher(
+                GatewayLauncherEnvValues {
+                    bare: Some(bare),
+                    external_isolation: None,
+                },
+                || {
+                    prepared_oci = true;
+                    Ok(GatewayLaunchOutcome::OuterLauncherFinished)
+                },
+            )
+            .unwrap();
+
+            assert_eq!(outcome, GatewayLaunchOutcome::OuterLauncherFinished);
+
+            assert!(
+                prepared_oci,
+                "false-ish AR_GATEWAY_BARE={bare:?} must call OCI preparation"
+            );
+        }
+    }
+
+    #[test]
+    fn external_container_isolation_continues_without_bare_warning_or_oci_preparation() {
+        let captured = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = CapturingSubscriber {
+            messages: Arc::clone(&captured),
+        };
+
+        let outcome = tracing::subscriber::with_default(subscriber, || {
+            select_gateway_launcher(
+                GatewayLauncherEnvValues {
+                    bare: None,
+                    external_isolation: Some("container"),
+                },
+                || panic!("external container isolation should not prepare embedded OCI"),
+            )
+        })
+        .unwrap();
+
+        assert_eq!(outcome, GatewayLaunchOutcome::ContinueInProcess);
+        let messages = captured.lock().unwrap();
+        assert!(
+            messages
+                .iter()
+                .any(|message| message.contains("external container isolation marker")),
+            "external container isolation must emit an auditable startup posture log; captured messages: {messages:?}"
+        );
+        assert!(
+            messages
+                .iter()
+                .all(|message| message != explicit_bare_gateway_mode_warning()),
+            "external container isolation must not emit explicit bare-mode warnings"
+        );
+    }
+
+    #[test]
+    fn launcher_decision_rejects_unrecognized_bare_opt_out_without_preparing_oci() {
+        let err = select_gateway_launcher(
+            GatewayLauncherEnvValues {
+                bare: Some("maybe-/run/secrets/ar-token"),
+                external_isolation: None,
+            },
+            || panic!("unrecognized AR_GATEWAY_BARE value must fail before OCI preparation"),
+        )
+        .unwrap_err();
+        let message = err.to_string();
+
+        assert!(
+            message.contains("AR_GATEWAY_BARE"),
+            "unrecognized bare opt-out error should name AR_GATEWAY_BARE, got: {message}"
+        );
+        assert!(
+            !message.contains("maybe-/run/secrets/ar-token")
+                && !message.contains("ar-token")
+                && !message.contains("/run/secrets"),
+            "unrecognized bare opt-out error must not echo raw env values, got: {message}"
+        );
+    }
+
+    #[test]
+    fn startup_options_bare_true_selects_explicit_bare_when_env_unset() {
+        select_gateway_launcher_for_startup_options(
+            StartupOptions { bare: true },
+            GatewayLauncherEnvValues {
+                bare: None,
+                external_isolation: None,
+            },
+            || panic!("CLI --bare must skip OCI preparation when AR_GATEWAY_BARE is unset"),
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn startup_options_bare_false_with_env_unset_uses_default_oci_path() {
+        let mut prepared_oci = false;
+
+        select_gateway_launcher_for_startup_options(
+            StartupOptions { bare: false },
+            GatewayLauncherEnvValues {
+                bare: None,
+                external_isolation: None,
+            },
+            || {
+                prepared_oci = true;
+                Ok(GatewayLaunchOutcome::OuterLauncherFinished)
+            },
+        )
+        .unwrap();
+
+        assert!(
+            prepared_oci,
+            "without CLI --bare or AR_GATEWAY_BARE, startup must fail closed through OCI setup"
+        );
+    }
+
+    #[test]
+    fn startup_options_reject_invalid_env_when_no_cli_bare_override_exists() {
+        let err = select_gateway_launcher_for_startup_options(
+            StartupOptions { bare: false },
+            GatewayLauncherEnvValues {
+                bare: Some("maybe-/run/secrets/ar-token"),
+                external_isolation: None,
+            },
+            || panic!("invalid AR_GATEWAY_BARE must fail before OCI preparation"),
+        )
+        .unwrap_err();
+        let message = err.to_string();
+
+        assert!(
+            message.contains("AR_GATEWAY_BARE"),
+            "invalid env error should name AR_GATEWAY_BARE, got: {message}"
+        );
+        assert!(
+            !message.contains("maybe-/run/secrets/ar-token")
+                && !message.contains("ar-token")
+                && !message.contains("/run/secrets"),
+            "invalid env error must not echo raw env values, got: {message}"
         );
     }
 }

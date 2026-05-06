@@ -198,6 +198,7 @@
                 "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
                 "PATH=/bin"
                 "AR_GATEWAY_BIND=0.0.0.0:8080"
+                "AR_GATEWAY_EXTERNAL_ISOLATION=container"
                 "RUST_LOG=info,ar_gateway=debug"
               ];
               ExposedPorts = {

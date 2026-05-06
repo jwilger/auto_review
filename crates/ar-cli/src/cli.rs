@@ -14,7 +14,7 @@ pub struct Cli {
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Gateway lifecycle commands.
-    Gateway,
+    Gateway(GatewayArgs),
 
     /// Authentication and token setup commands.
     #[command(subcommand)]
@@ -47,6 +47,13 @@ pub enum Command {
     /// Learning-store maintenance commands.
     #[command(subcommand)]
     Learnings(LearningsCommand),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct GatewayArgs {
+    /// Run the gateway directly with only application-level controls.
+    #[arg(long)]
+    pub bare: bool,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1080,15 +1087,39 @@ mod tests {
     }
 
     #[test]
-    fn gateway_is_direct_command_without_run_subcommand() {
+    fn gateway_accepts_bare_opt_out_without_legacy_run_subcommand() {
         let direct_gateway = Cli::try_parse_from(["auto-review", "gateway"]);
+        let bare_gateway = Cli::try_parse_from(["auto-review", "gateway", "--bare"]);
         let legacy_gateway_run = Cli::try_parse_from(["auto-review", "gateway", "run"]);
 
         let mut failures = Vec::new();
-        if let Err(error) = direct_gateway {
-            failures.push(format!(
+        match direct_gateway.map(|cli| cli.command) {
+            Ok(Command::Gateway(args)) => {
+                if args.bare {
+                    failures.push(
+                        "`auto-review gateway` should default to non-bare startup".to_owned(),
+                    );
+                }
+            }
+            Ok(other) => failures.push(format!(
+                "`auto-review gateway` should parse as Command::Gateway, got {other:?}"
+            )),
+            Err(error) => failures.push(format!(
                 "`auto-review gateway` should be accepted directly: {error}"
-            ));
+            )),
+        }
+        match bare_gateway.map(|cli| cli.command) {
+            Ok(Command::Gateway(args)) => {
+                if !args.bare {
+                    failures.push("`auto-review gateway --bare` should set the explicit bare opt-out".to_owned());
+                }
+            }
+            Ok(other) => failures.push(format!(
+                "`auto-review gateway --bare` should parse as Command::Gateway, got {other:?}"
+            )),
+            Err(error) => failures.push(format!(
+                "`auto-review gateway --bare` should be accepted as an explicit bare opt-out: {error}"
+            )),
         }
         if legacy_gateway_run.is_ok() {
             failures.push("legacy `auto-review gateway run` should be rejected".to_owned());
@@ -1109,21 +1140,27 @@ mod tests {
             .unwrap_or_else(|e| panic!("read {}: {e}", gateway_lib_path.display()));
 
         assert!(
-            cli_main.contains("return ar_gateway::run_from_env().await;"),
-            "`auto-review gateway` should dispatch through ar_gateway::run_from_env(); actual ar-cli main:\n{cli_main}"
+            cli_main.contains("ar_gateway::StartupOptions")
+                && cli_main.contains("bare: args.bare")
+                && cli_main.contains("ar_gateway::run_from_env("),
+            "`auto-review gateway` should pass parsed gateway options through the shared ar-gateway startup seam; actual ar-cli main:\n{cli_main}"
         );
         assert!(
-            cli_main.find("return ar_gateway::run_from_env().await;")
+            cli_main.find("ar_gateway::run_from_env(")
                 < cli_main.find("tracing_subscriber::fmt()"),
-            "`auto-review gateway` should enter ar_gateway::run_from_env() before CLI tracing initialization so gateway defaults are preserved; actual ar-cli main:\n{cli_main}"
+            "`auto-review gateway` should enter the shared ar-gateway startup seam before CLI tracing initialization so gateway defaults are preserved; actual ar-cli main:\n{cli_main}"
+        );
+        assert!(
+            !cli_main.contains("return ar_gateway::run_from_env().await;"),
+            "`auto-review gateway` should not hard-code run_from_env() without parsed options"
         );
         assert!(
             !cli_main.contains("gateway run is not implemented"),
             "`auto-review gateway` should not return the old placeholder error"
         );
         assert!(
-            gateway_lib.contains("pub use startup::run_from_env;"),
-            "ar-gateway library should expose the shared run_from_env() startup seam"
+            gateway_lib.contains("pub use startup::{run_from_env, StartupOptions};"),
+            "ar-gateway library should expose the shared run_from_env(options) startup seam"
         );
         assert!(
             !gateway_main_path.exists(),
@@ -1149,6 +1186,10 @@ mod tests {
         assert!(
             flake.contains("Cmd = [ \"${ar-cli}/bin/auto-review\" \"gateway\" ];"),
             "gateway container should start through auto-review gateway"
+        );
+        assert!(
+            flake.contains("AR_GATEWAY_EXTERNAL_ISOLATION=container"),
+            "gateway container should mark its external container isolation so the direct-binary OCI launcher is not used inside the image"
         );
         assert!(
             !flake.contains("cargoExtraArgs = \"-p ar-gateway --bin ar-gateway\""),

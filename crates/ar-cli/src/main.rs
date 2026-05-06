@@ -14,8 +14,8 @@ use cli::{
 async fn main() -> Result<()> {
     let cli = Cli::parse();
 
-    if matches!(cli.command, Command::Gateway) {
-        return ar_gateway::run_from_env().await;
+    if let Command::Gateway(args) = cli.command {
+        return ar_gateway::run_from_env(ar_gateway::StartupOptions { bare: args.bare }).await;
     }
 
     tracing_subscriber::fmt()
@@ -26,7 +26,7 @@ async fn main() -> Result<()> {
         .init();
 
     match cli.command {
-        Command::Gateway => unreachable!("gateway command returned before CLI tracing init"),
+        Command::Gateway(_) => unreachable!("gateway command returned before CLI tracing init"),
         Command::Auth(AuthCommand::Init(args)) => commands::init(args).await,
         Command::Webhook(WebhookCommand::Register(args)) => commands::register_webhook(args).await,
         Command::Webhook(WebhookCommand::List(args)) => commands::list_webhooks(args).await,
