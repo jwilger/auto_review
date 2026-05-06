@@ -763,9 +763,10 @@ test_prepare_workflow_builds_and_publishes_release_candidate_images() {
   local prepare_workflow output status
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
 
-  assert_file_contains "$prepare_workflow" 'RELEASE_CANDIDATE_TOKEN: ${{ secrets.RELEASE_CANDIDATE_TOKEN }}' "release PR preparation workflow exposes the candidate-scoped registry token"
+  assert_file_contains "$prepare_workflow" 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "release PR preparation workflow exposes the publish registry token for candidate publication"
   assert_file_contains "$prepare_workflow" 'RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}' "release PR preparation workflow uses the release bot name for candidate registry publication"
-  assert_file_not_contains "$prepare_workflow" 'RELEASE_PUBLISH_TOKEN' "release PR preparation workflow does not expose the protected publish token"
+  assert_file_not_contains "$prepare_workflow" 'RELEASE_CANDIDATE_TOKEN' "release PR preparation workflow does not use a separate candidate registry token"
+  assert_file_contains "$prepare_workflow" 'missing RELEASE_PUBLISH_TOKEN' "release PR preparation workflow fails clearly when the publish registry token is missing"
   assert_file_contains "$prepare_workflow" 'nix build .#ar-gateway-image' "release PR preparation workflow builds the ar-gateway image candidate"
   assert_file_contains "$prepare_workflow" 'RELEASE_CANDIDATE_SHA' "release PR preparation workflow derives a candidate SHA tag"
   assert_file_contains "$prepare_workflow" 'RELEASE_CANDIDATE_TAG' "release PR preparation workflow derives a stable release-candidate tag variable"
@@ -795,7 +796,7 @@ require_ordered(
         'git commit -m "chore: release v$RELEASE_VERSION"',
         'RELEASE_CANDIDATE_SHA',
         'nix build .#ar-gateway-image',
-        'RELEASE_CANDIDATE_TOKEN',
+        'RELEASE_PUBLISH_TOKEN',
         'docker-archive:./result',
     ],
     'release candidate publication flow',
@@ -819,8 +820,8 @@ if not publish_steps:
     errors.append('prepare workflow must use skopeo to publish docker-archive:./result as candidate images')
 else:
     publish_text = '\n'.join(publish_steps)
-    if 'RELEASE_CANDIDATE_TOKEN' not in publish_text:
-        errors.append('candidate image publication must authenticate with RELEASE_CANDIDATE_TOKEN')
+    if 'RELEASE_PUBLISH_TOKEN' not in publish_text:
+        errors.append('candidate image publication must authenticate with RELEASE_PUBLISH_TOKEN')
     if 'RELEASE_BOT_NAME' not in publish_text:
         errors.append('candidate image publication must authenticate as RELEASE_BOT_NAME')
     if 'docker-archive:./result' not in publish_text:
@@ -832,8 +833,8 @@ else:
 
 for step_match in re.finditer(r'- name: (?P<name>[^\n]+)(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow):
     body = step_match.group('body')
-    if 'RELEASE_CANDIDATE_TOKEN' in body and 'nix build .#ar-gateway-image' in body:
-        errors.append('candidate-token-bearing step must publish only after a separate no-token Nix image build')
+    if 'RELEASE_PUBLISH_TOKEN' in body and 'nix build .#ar-gateway-image' in body:
+        errors.append('publish-token-bearing step must publish only after a separate no-token Nix image build')
 
 if 'tea pr create' not in workflow:
     errors.append('prepare workflow must create the release PR')
@@ -2154,14 +2155,12 @@ PY
 )"
 
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release preparation PAT' "threat model names the operator-created release preparation PAT asset"
-  assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release candidate publishing PAT' "threat model names the release candidate publishing PAT asset"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release publishing PAT' "threat model names the release publishing PAT asset"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release preparation PAT blast radius' "threat model documents the release preparation PAT blast radius"
-  assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release candidate publishing PAT blast radius' "threat model documents the release candidate publishing PAT blast radius"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release publishing PAT blast radius' "threat model documents the release publishing PAT blast radius"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'prepare release PR branches and release PRs only in `jwilger/auto_review`' "threat model documents the release preparation PAT scope"
-  assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'publish candidate images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` only' "threat model documents the release candidate PAT package registry scope"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review`' "threat model documents the release publishing PAT package registry and release API scope"
+  assert_file_not_contains "$ROOT/docs/THREAT-MODEL.md" 'Release candidate publishing PAT' "threat model does not document a separate candidate publishing PAT"
   assert_contains "$t5a" 'builds the release candidate Docker image with `nix build .#ar-gateway-image` after the release metadata commit' "T5a mitigation documents Nix-built candidate image provenance"
   assert_contains "$t5a" 'publishes candidate image tags for the release PR head SHA and release-candidate tag' "T5a mitigation documents release candidate image tags"
   assert_contains "$t5a" 'promotes the candidate image to the release version and `latest` tags' "T5a mitigation documents final release image promotion instead of rebuilding"
@@ -2173,22 +2172,20 @@ PY
   assert_not_contains "$t5a" 'Prepare validates dispatch inputs' "T5a mitigation does not describe stale manual dispatch input validation"
   assert_not_contains "$t5a" 'validates the derived semantic version' "T5a mitigation does not describe stale derived semantic-version validation"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release preparation PAT blast radius' "operations docs summarize the release preparation PAT blast radius"
-  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release candidate publishing PAT blast radius' "operations docs summarize the release candidate publishing PAT blast radius"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release publishing PAT blast radius' "operations docs summarize the release publishing PAT blast radius"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'prepare release PR branches and release PRs only in `jwilger/auto_review`' "operations docs constrain the release preparation PAT scope"
-  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'publish candidate images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` only' "operations docs constrain the release candidate publishing PAT scope"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review`' "operations docs constrain the release publishing PAT package registry and release API scope"
 }
 
 test_release_secrets_are_documented_for_operators() {
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'Forgejo Actions secret `RELEASE_PREPARE_TOKEN`' "operations docs require an operator-created release preparation Actions secret"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Forgejo Actions secret `RELEASE_PREPARE_TOKEN`' "threat model documents the operator-created release preparation Actions secret"
-  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'Forgejo Actions secret `RELEASE_CANDIDATE_TOKEN`' "operations docs require a candidate image publishing Actions secret"
-  assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Forgejo Actions secret `RELEASE_CANDIDATE_TOKEN`' "threat model documents the candidate image publishing Actions secret"
+  assert_file_not_contains "$ROOT/docs/OPERATIONS.md" 'Forgejo Actions secret `RELEASE_CANDIDATE_TOKEN`' "operations docs do not require a separate candidate image publishing Actions secret"
+  assert_file_not_contains "$ROOT/docs/THREAT-MODEL.md" 'Forgejo Actions secret `RELEASE_CANDIDATE_TOKEN`' "threat model does not document a separate candidate image publishing Actions secret"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release candidate image' "operations docs document release candidate image provenance"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release candidate image tag' "operations docs document the release candidate image tag"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release publishing credential' "operations docs identify the release publishing credential purpose"
-  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'protected `release-publish` environment secret `RELEASE_PUBLISH_TOKEN`' "operations docs document release publishing credential as a protected environment secret"
+  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`' "operations docs document release publishing credential as an Actions secret"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release bot Forgejo user' "operations docs require a dedicated release bot user"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'Forgejo Actions secret `RELEASE_SIGNING_KEY`' "operations docs document the release signing key secret"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'repository variables `RELEASE_BOT_NAME` and `RELEASE_BOT_EMAIL`' "operations docs document release bot identity variables"
@@ -2197,8 +2194,8 @@ test_release_secrets_are_documented_for_operators() {
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'release bot identity in repository variable `RELEASE_BOT_NAME`' "threat model reuses release bot identity for registry publishing"
   assert_file_not_contains "$ROOT/docs/THREAT-MODEL.md" 'RELEASE_REGISTRY_USER' "threat model does not require a separate registry user variable"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release signing key' "threat model names the release signing key asset"
-  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'manual approval gate' "operations docs require a manual approval gate for release publishing credentials"
-  assert_file_not_contains "$ROOT/docs/OPERATIONS.md" 'Configure the release publishing credential as Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`' "operations docs do not describe the publish token as an ordinary repo-wide Actions secret"
+  assert_file_not_contains "$ROOT/docs/OPERATIONS.md" 'manual approval gate' "operations docs do not require a manual approval gate for release publishing credentials"
+  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'Configure the release publishing credential as Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`' "operations docs describe the publish token as an ordinary Actions secret"
   assert_file_not_contains "$ROOT/docs/OPERATIONS.md" 'FORGEJO_RELEASE_PREPARE_TOKEN' "operations docs do not expose the old operator-facing prepare secret name"
   assert_file_not_contains "$ROOT/docs/OPERATIONS.md" 'FORGEJO_RELEASE_PUBLISH_TOKEN' "operations docs do not expose the old operator-facing publish secret name"
   assert_file_not_contains "$ROOT/docs/THREAT-MODEL.md" 'FORGEJO_RELEASE_PREPARE_TOKEN' "threat model does not expose the old operator-facing prepare secret name"

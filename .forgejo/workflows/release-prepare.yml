@@ -156,10 +156,14 @@ jobs:
           fi
       - name: Publish release candidate Docker image to Forgejo package registry
         env:
-          RELEASE_CANDIDATE_TOKEN: ${{ secrets.RELEASE_CANDIDATE_TOKEN }}
+          RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
           RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
         run: |
           set -euo pipefail
+          if [ -z "${RELEASE_PUBLISH_TOKEN:-}" ]; then
+            printf 'missing RELEASE_PUBLISH_TOKEN\n' >&2
+            exit 1
+          fi
           if [ -z "${RELEASE_BOT_NAME:-}" ]; then
             printf 'missing RELEASE_BOT_NAME repository variable\n' >&2
             exit 1
@@ -174,5 +178,5 @@ jobs:
             ]
           }
           EOF
-          nix develop --command skopeo copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_CANDIDATE_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA"
-          nix develop --command skopeo copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_CANDIDATE_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_TAG"
+          nix develop --command skopeo copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA"
+          nix develop --command skopeo copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_TAG"

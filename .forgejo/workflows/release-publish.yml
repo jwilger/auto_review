@@ -119,6 +119,10 @@ jobs:
             ]
           }
           EOF
+          if [ -z "${RELEASE_PUBLISH_TOKEN:-}" ]; then
+            printf 'missing RELEASE_PUBLISH_TOKEN\n' >&2
+            exit 1
+          fi
           if [ -z "${RELEASE_BOT_NAME:-}" ]; then
             printf 'missing RELEASE_BOT_NAME repository variable\n' >&2
             exit 1
