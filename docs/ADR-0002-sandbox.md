@@ -69,6 +69,13 @@ tests for an `@auto_review tests` command instead of only proposing scaffolds),
 that feature must be gated explicitly with its own required sandbox/runtime
 configuration and must fail closed when the isolation backend is unavailable.
 
+Issue #115 led to accepted decisions for a downloadable single `auto-review`
+binary and its gateway isolation posture. See
+[`ADR-0005`](./ADR-0005-single-public-executable.md) for the public executable
+and release distribution decision, and
+[`ADR-0006`](./ADR-0006-embedded-oci-gateway-isolation.md) for the embedded OCI
+gateway isolation decision.
+
 Git itself is the one remaining host subprocess in normal workspace
 preparation. Because Git can be influenced by ambient host config, filters,
 templates, hooks, credential prompts, and transport environment,
