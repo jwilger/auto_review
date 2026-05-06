@@ -213,7 +213,7 @@ Tool-calling is via the LLM provider's native function-calling API where availab
 | Local-LLM quality gap on reasoning step | High | Default reasoning tier to Sonnet/o3 in cloud profile; ship a "quality benchmark" CLI that runs a fixed PR corpus against the configured model and emits a score |
 | Token cost on big PRs (cloud profile) | High | Triage skip + summary caching + per-PR token cap with degraded fallback |
 | LanceDB embedded vs Postgres/pgvector | Medium | Start LanceDB (zero ops, what CodeRabbit uses); abstract behind a `VectorStore` trait so we can swap |
-| No Forgejo App identity → no marketplace one-click install | Low (self-hosted only) | Ship an `auto_review init` CLI that creates the bot user, mints the PAT, and registers the webhook in one command |
+| No Forgejo App identity → no marketplace one-click install | Low (self-hosted only) | Ship an `auto-review auth init` CLI that creates the bot user, mints the PAT, and guides webhook registration. |
 | Multi-line review comments partially supported by Forgejo (gitea#36231) | Low | Detect via API capability probe; degrade to single-line citing range in body |
 | Forgejo Reviews API quirks across versions | Low | Pin tested versions; capability matrix in docs |
 | License compatibility of bundled linters | Medium | Most are MIT/Apache; semgrep is LGPL-2.1 (OK to ship as binary). Audit + document per-tool licensing in `THIRD_PARTY.md` |
@@ -232,7 +232,7 @@ The user has greenlit the full-clone scope; phasing keeps each milestone shippab
 - `ar-forgejo` fetches diff, posts review with inline comments via Reviews API.
 - `ar-llm` with OpenAI + Ollama providers; single-pass review prompt with JSON-schema output and self-heal loop.
 - 5 bundled linters running outside the sandbox (just for MVP): ruff, eslint, shellcheck, hadolint, markdownlint.
-- `auto_review init` CLI for bot setup.
+- `auto-review auth init` CLI for bot setup.
 - **Verification**: stand up a dev Forgejo, bot reviews real PRs end-to-end on 3 sample repos (Rust, TS, Python).
 
 ### Milestone 2 — RAG + learnings + triage (4–6 weeks)

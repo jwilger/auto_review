@@ -36,7 +36,7 @@ LLM_CHEAP_BASE_URL
 LLM_CHEAP_API_KEY
 ```
 
-`auto_review doctor --llm-base-url ... --llm-reasoning-model ...`
+`auto-review ops doctor --llm-base-url ... --llm-reasoning-model ...`
 verifies each configured model is loaded on the inference server.
 
 ## Tests

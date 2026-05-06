@@ -22,13 +22,11 @@ the CI review endpoint, and the install / PAT / hook-registration flow.
 - An LLM endpoint reachable from your shell. Cheapest: an Ollama
   process locally with `qwen2.5-coder:7b` pulled. The runbook
   works with any OpenAI-compatible endpoint.
-- The auto_review binaries built. Either:
-  - `nix build .#ar-gateway .#ar-cli` (recommended;
-    flake-pinned toolchain), then refer to
-    `./result/bin/ar-gateway` and `./result-1/bin/auto_review`.
+- The `auto-review` binary built. Either:
+  - `nix build .#ar-cli` (recommended; flake-pinned toolchain), then
+    refer to `./result/bin/auto-review`.
   - `nix develop --command cargo build --release --workspace`,
-    then refer to `./target/release/ar-gateway` and
-    `./target/release/auto_review`.
+    then refer to `./target/release/auto-review`.
 
 ## 1. Boot Forgejo
 
@@ -152,7 +150,7 @@ WEBHOOK_SECRET=shared-secret \
 AR_CI_REVIEW_TOKEN=e2e-action-token \
 LLM_BASE_URL=http://localhost:11434 \
 LLM_REASONING_MODEL=qwen2.5-coder:7b \
-./target/release/ar-gateway
+./target/release/auto-review gateway
 ```
 
 ## 8. Open a PR

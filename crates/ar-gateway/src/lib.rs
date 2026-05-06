@@ -12,7 +12,10 @@ pub mod hmac;
 pub mod metrics;
 pub mod poller;
 pub mod ratelimit;
+mod startup;
 pub mod webhook;
+
+pub use startup::run_from_env;
 
 use ar_forgejo::Client as ForgejoClient;
 use ar_index::LearningsStore;

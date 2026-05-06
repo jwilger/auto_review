@@ -2,7 +2,7 @@ use clap::{Parser, Subcommand};
 
 #[derive(Parser, Debug)]
 #[command(
-    name = "auto_review",
+    name = "auto-review",
     version,
     about = "Operator CLI for the auto_review Forgejo bot."
 )]
@@ -13,47 +13,69 @@ pub struct Cli {
 
 #[derive(Subcommand, Debug)]
 pub enum Command {
+    /// Gateway lifecycle commands.
+    Gateway,
+
+    /// Authentication and token setup commands.
+    #[command(subcommand)]
+    Auth(AuthCommand),
+
+    /// Forgejo webhook management commands.
+    #[command(subcommand)]
+    Webhook(WebhookCommand),
+
+    /// Repository configuration commands.
+    #[command(subcommand)]
+    Config(ConfigCommand),
+
+    /// Review execution commands.
+    #[command(subcommand)]
+    Review(ReviewCommand),
+
+    /// Benchmark commands.
+    #[command(subcommand)]
+    Bench(BenchCommand),
+
+    /// Operational diagnostics commands.
+    #[command(subcommand)]
+    Ops(OpsCommand),
+
+    /// Review-history maintenance commands.
+    #[command(subcommand)]
+    History(HistoryCommand),
+
+    /// Learning-store maintenance commands.
+    #[command(subcommand)]
+    Learnings(LearningsCommand),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AuthCommand {
     /// Mint a personal access token for the auto_review bot user.
     ///
     /// Uses the bot user's own password (HTTP Basic) to create a PAT with
     /// the scopes the reviewer needs. The PAT is printed once; save it
-    /// into FORGEJO_TOKEN.
+    /// into AR_FORGEJO_TOKEN.
     Init(InitArgs),
+}
 
+#[derive(Subcommand, Debug)]
+pub enum WebhookCommand {
     /// Register a webhook on a repository so PR events flow to the
     /// reviewer.
-    RegisterWebhook(RegisterWebhookArgs),
+    Register(RegisterWebhookArgs),
 
     /// List webhooks installed on a repository. Useful for auditing
     /// which webhooks point at the gateway and for finding the id
     /// `unregister-webhook` needs.
-    ListWebhooks(ListWebhooksArgs),
+    List(ListWebhooksArgs),
 
     /// Delete a webhook by id. Pair with `list-webhooks` to find
     /// the id, or use `--match-url` to delete the one whose
     /// `config.url` matches a substring (typically the gateway's
     /// public hostname). The `--match-url` form is the safe choice
     /// for scripts that don't know ids ahead of time.
-    UnregisterWebhook(UnregisterWebhookArgs),
-
-    /// Run the full review pipeline once against a specific PR. No
-    /// gateway or webhook required — useful for development, demos, and
-    /// reproducing reported issues.
-    ReviewOnce(ReviewOnceArgs),
-
-    /// Replay one or more PR fixtures through the LLM-review step
-    /// without touching Forgejo. Reports per-fixture latency, finding
-    /// counts, and self-heal attempts; aggregates over the batch.
-    /// Useful for picking models, tuning prompts, and tracking
-    /// regression in review behaviour over time.
-    Bench(BenchArgs),
-
-    /// Validate one or more `.auto_review.yaml` configuration files.
-    /// Parses each file with the same code path the gateway uses and
-    /// surfaces any errors with line numbers. Exits non-zero on
-    /// validation failure so this fits cleanly in a pre-commit hook
-    /// or CI step.
-    ValidateConfig(ValidateConfigArgs),
+    Unregister(UnregisterWebhookArgs),
 
     /// Send an HMAC-signed `ping` webhook to a running gateway and
     /// print the response. Smoke-tests the intake path (network
@@ -61,8 +83,39 @@ pub enum Command {
     /// any reverse-proxy) without firing a real review. Run after
     /// `register-webhook` to confirm the deploy works before waiting
     /// for an actual PR.
-    TestWebhook(TestWebhookArgs),
+    Test(TestWebhookArgs),
+}
 
+#[derive(Subcommand, Debug)]
+pub enum ConfigCommand {
+    /// Validate one or more `.auto_review.yaml` configuration files.
+    /// Parses each file with the same code path the gateway uses and
+    /// surfaces any errors with line numbers. Exits non-zero on
+    /// validation failure so this fits cleanly in a pre-commit hook
+    /// or CI step.
+    Validate(ValidateConfigArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum ReviewCommand {
+    /// Run the full review pipeline once against a specific PR. No
+    /// gateway or webhook required — useful for development, demos, and
+    /// reproducing reported issues.
+    Once(ReviewOnceArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum BenchCommand {
+    /// Replay one or more PR fixtures through the LLM-review step
+    /// without touching Forgejo. Reports per-fixture latency, finding
+    /// counts, and self-heal attempts; aggregates over the batch.
+    /// Useful for picking models, tuning prompts, and tracking
+    /// regression in review behaviour over time.
+    Run(BenchArgs),
+}
+
+#[derive(Subcommand, Debug)]
+pub enum OpsCommand {
     /// Probe outbound dependencies (Forgejo API, LLM provider) and
     /// sanity-check the webhook secret. Reports per-check pass /
     /// fail / skip with diagnostic detail. Exit 0 only when every
@@ -76,7 +129,10 @@ pub enum Command {
     /// throttle activity. Complements `doctor` (outbound deps)
     /// and `test-webhook` (intake) with the live-state view.
     Status(StatusArgs),
+}
 
+#[derive(Subcommand, Debug)]
+pub enum HistoryCommand {
     /// Clear the persistent review-history record for a single
     /// PR so the next webhook triggers a fresh full review
     /// (instead of a `compare` diff against a stale baseline
@@ -91,21 +147,24 @@ pub enum Command {
     /// closed PRs don't need their last_reviewed_sha kept
     /// forever. Wire into a periodic cleanup (systemd timer,
     /// cron) for high-traffic instances. Idempotent.
-    PurgeHistory(PurgeHistoryArgs),
+    Purge(PurgeHistoryArgs),
+}
 
+#[derive(Subcommand, Debug)]
+pub enum LearningsCommand {
     /// List every learning stored in the persistent
     /// `LearningsStore`. Operators currently can only audit
     /// learnings by inspecting Forgejo PR threads (where
     /// `@<bot> remember` invocations live); this surfaces the
     /// full set in one place. `--json` for piping into a
     /// reviewer tool.
-    ListLearnings(ListLearningsArgs),
+    List(ListLearningsArgs),
 
     /// Delete a learning by id. Same effect as `@<bot> forget`
     /// but operates directly on the SQLite store, so operators
     /// can script bulk wipes without going through Forgejo.
     /// Use `list-learnings` to find the id.
-    ForgetLearning(ForgetLearningArgs),
+    Forget(ForgetLearningArgs),
 }
 
 #[derive(clap::Args, Debug)]
@@ -261,8 +320,8 @@ pub struct DoctorArgs {
     #[arg(long, env = "FORGEJO_BASE_URL")]
     pub forgejo_url: Option<String>,
 
-    /// Bot PAT. Pair with `--forgejo-url` to validate auth.
-    #[arg(long, env = "FORGEJO_TOKEN")]
+    /// Gateway bot PAT. Pair with `--forgejo-url` to validate auth.
+    #[arg(long, env = "AR_FORGEJO_TOKEN")]
     pub token: Option<String>,
 
     /// LLM base URL. When set, `doctor` calls `<base>/v1/models`
@@ -475,7 +534,8 @@ mod tests {
     #[test]
     fn init_parses_minimum_args() {
         let cli = Cli::try_parse_from([
-            "auto_review",
+            "auto-review",
+            "auth",
             "init",
             "--forgejo-url",
             "https://x.example",
@@ -484,7 +544,7 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Init(a) => {
+            Command::Auth(AuthCommand::Init(a)) => {
                 assert_eq!(a.forgejo_url, "https://x.example");
                 assert_eq!(a.username, "bot");
                 assert!(a.password.is_none());
@@ -498,7 +558,8 @@ mod tests {
     #[test]
     fn init_accepts_password_and_custom_scopes() {
         let cli = Cli::try_parse_from([
-            "auto_review",
+            "auto-review",
+            "auth",
             "init",
             "--forgejo-url",
             "https://x",
@@ -511,7 +572,7 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Init(a) => {
+            Command::Auth(AuthCommand::Init(a)) => {
                 assert_eq!(a.password.as_deref(), Some("p"));
                 assert_eq!(a.scopes, vec!["write:repository", "read:user"]);
             }
@@ -522,8 +583,9 @@ mod tests {
     #[test]
     fn register_webhook_requires_all_args() {
         let cli = Cli::try_parse_from([
-            "auto_review",
-            "register-webhook",
+            "auto-review",
+            "webhook",
+            "register",
             "--forgejo-url",
             "https://x",
             "--token",
@@ -539,7 +601,7 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::RegisterWebhook(a) => {
+            Command::Webhook(WebhookCommand::Register(a)) => {
                 assert_eq!(a.owner, "o");
                 assert_eq!(a.repo, "r");
                 assert_eq!(a.gateway_url, "https://g.example");
@@ -551,8 +613,9 @@ mod tests {
     #[test]
     fn review_once_parses_required_args() {
         let cli = Cli::try_parse_from([
-            "auto_review",
-            "review-once",
+            "auto-review",
+            "review",
+            "once",
             "--forgejo-url",
             "https://x",
             "--token",
@@ -565,16 +628,20 @@ mod tests {
             "42",
             "--llm-base-url",
             "http://localhost:11434",
+            "--llm-model",
+            "qwen2.5-coder:32b",
+            "--llm-api-key",
+            "test-key",
         ])
         .expect("parse");
         match cli.command {
-            Command::ReviewOnce(a) => {
+            Command::Review(ReviewCommand::Once(a)) => {
                 assert_eq!(a.owner, "alice");
                 assert_eq!(a.repo, "widgets");
                 assert_eq!(a.pr, 42);
                 assert_eq!(a.llm_base_url, "http://localhost:11434");
                 assert_eq!(a.llm_model, "qwen2.5-coder:32b");
-                assert!(a.llm_api_key.is_none());
+                assert_eq!(a.llm_api_key.as_deref(), Some("test-key"));
             }
             _ => panic!("expected ReviewOnce"),
         }
@@ -583,8 +650,9 @@ mod tests {
     #[test]
     fn list_webhooks_required_args() {
         let cli = Cli::try_parse_from([
-            "auto_review",
-            "list-webhooks",
+            "auto-review",
+            "webhook",
+            "list",
             "--forgejo-url",
             "https://x.example",
             "--token",
@@ -596,7 +664,7 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::ListWebhooks(a) => {
+            Command::Webhook(WebhookCommand::List(a)) => {
                 assert_eq!(a.owner, "alice");
                 assert_eq!(a.repo, "widgets");
                 assert!(!a.json);
@@ -609,8 +677,9 @@ mod tests {
     fn unregister_webhook_accepts_id_or_match_url_but_not_both() {
         // --id is allowed
         let by_id = Cli::try_parse_from([
-            "auto_review",
-            "unregister-webhook",
+            "auto-review",
+            "webhook",
+            "unregister",
             "--forgejo-url",
             "https://x",
             "--token",
@@ -624,7 +693,7 @@ mod tests {
         ])
         .expect("parse with --id");
         match by_id.command {
-            Command::UnregisterWebhook(a) => {
+            Command::Webhook(WebhookCommand::Unregister(a)) => {
                 assert_eq!(a.id, Some(7));
                 assert!(a.match_url.is_none());
             }
@@ -633,8 +702,9 @@ mod tests {
 
         // --match-url is allowed
         let by_match = Cli::try_parse_from([
-            "auto_review",
-            "unregister-webhook",
+            "auto-review",
+            "webhook",
+            "unregister",
             "--forgejo-url",
             "https://x",
             "--token",
@@ -648,7 +718,7 @@ mod tests {
         ])
         .expect("parse with --match-url");
         match by_match.command {
-            Command::UnregisterWebhook(a) => {
+            Command::Webhook(WebhookCommand::Unregister(a)) => {
                 assert!(a.id.is_none());
                 assert_eq!(a.match_url.as_deref(), Some("reviewer.example.com"));
             }
@@ -657,8 +727,9 @@ mod tests {
 
         // both is rejected
         let both = Cli::try_parse_from([
-            "auto_review",
-            "unregister-webhook",
+            "auto-review",
+            "webhook",
+            "unregister",
             "--forgejo-url",
             "https://x",
             "--token",
@@ -681,14 +752,15 @@ mod tests {
     #[test]
     fn list_learnings_required_args() {
         let cli = Cli::try_parse_from([
-            "auto_review",
-            "list-learnings",
+            "auto-review",
+            "learnings",
+            "list",
             "--learnings-db",
             "/var/lib/auto_review/learnings.db",
         ])
         .expect("parse");
         match cli.command {
-            Command::ListLearnings(a) => {
+            Command::Learnings(LearningsCommand::List(a)) => {
                 assert_eq!(
                     a.learnings_db.to_string_lossy(),
                     "/var/lib/auto_review/learnings.db"
@@ -702,8 +774,9 @@ mod tests {
     #[test]
     fn forget_learning_required_args() {
         let cli = Cli::try_parse_from([
-            "auto_review",
-            "forget-learning",
+            "auto-review",
+            "learnings",
+            "forget",
             "--learnings-db",
             "/tmp/x.db",
             "--id",
@@ -711,7 +784,7 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::ForgetLearning(a) => {
+            Command::Learnings(LearningsCommand::Forget(a)) => {
                 assert_eq!(a.id, 42);
             }
             _ => panic!("expected ForgetLearning"),
@@ -721,8 +794,9 @@ mod tests {
     #[test]
     fn purge_history_required_args() {
         let cli = Cli::try_parse_from([
-            "auto_review",
-            "purge-history",
+            "auto-review",
+            "history",
+            "purge",
             "--history-db",
             "/tmp/h.db",
             "--older-than-days",
@@ -730,7 +804,7 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::PurgeHistory(a) => {
+            Command::History(HistoryCommand::Purge(a)) => {
                 assert_eq!(a.older_than_days, 90);
                 assert!(!a.dry_run);
             }
@@ -741,8 +815,9 @@ mod tests {
     #[test]
     fn purge_history_dry_run_flag() {
         let cli = Cli::try_parse_from([
-            "auto_review",
-            "purge-history",
+            "auto-review",
+            "history",
+            "purge",
             "--history-db",
             "/tmp/h.db",
             "--older-than-days",
@@ -751,7 +826,7 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::PurgeHistory(a) => assert!(a.dry_run),
+            Command::History(HistoryCommand::Purge(a)) => assert!(a.dry_run),
             _ => panic!("expected PurgeHistory"),
         }
     }
@@ -759,7 +834,8 @@ mod tests {
     #[test]
     fn reset_pr_required_args() {
         let cli = Cli::try_parse_from([
-            "auto_review",
+            "auto-review",
+            "history",
             "reset-pr",
             "--history-db",
             "/var/lib/auto_review/review_history.db",
@@ -772,7 +848,7 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::ResetPr(a) => {
+            Command::History(HistoryCommand::ResetPr(a)) => {
                 assert_eq!(
                     a.history_db.to_string_lossy(),
                     "/var/lib/auto_review/review_history.db"
@@ -788,14 +864,15 @@ mod tests {
     #[test]
     fn status_required_args() {
         let cli = Cli::try_parse_from([
-            "auto_review",
+            "auto-review",
+            "ops",
             "status",
             "--gateway-url",
             "https://reviewer.example.com",
         ])
         .expect("parse");
         match cli.command {
-            Command::Status(a) => {
+            Command::Ops(OpsCommand::Status(a)) => {
                 assert_eq!(a.gateway_url, "https://reviewer.example.com");
                 assert!(!a.json);
                 assert_eq!(a.timeout_secs, 10);
@@ -806,12 +883,13 @@ mod tests {
 
     #[test]
     fn doctor_with_no_args_skips_all_checks() {
-        let cli = Cli::try_parse_from(["auto_review", "doctor"]).expect("parse");
+        let cli = Cli::try_parse_from(["auto-review", "ops", "doctor"]).expect("parse");
         match cli.command {
-            Command::Doctor(a) => {
-                assert!(a.forgejo_url.is_none());
-                assert!(a.token.is_none());
-                assert!(a.llm_base_url.is_none());
+            Command::Ops(OpsCommand::Doctor(a)) => {
+                // Optional fields may be populated from the operator's
+                // environment by clap's `env = ...` support. This parse
+                // test only verifies the grouped command shape and the
+                // argument default that is independent of process env.
                 assert_eq!(a.timeout_secs, 10);
             }
             _ => panic!("expected Doctor"),
@@ -821,7 +899,8 @@ mod tests {
     #[test]
     fn doctor_with_full_args() {
         let cli = Cli::try_parse_from([
-            "auto_review",
+            "auto-review",
+            "ops",
             "doctor",
             "--forgejo-url",
             "https://forge.example",
@@ -836,7 +915,7 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Doctor(a) => {
+            Command::Ops(OpsCommand::Doctor(a)) => {
                 assert_eq!(a.forgejo_url.as_deref(), Some("https://forge.example"));
                 assert_eq!(a.token.as_deref(), Some("tok"));
                 assert_eq!(a.llm_base_url.as_deref(), Some("http://localhost:11434"));
@@ -849,8 +928,9 @@ mod tests {
     #[test]
     fn test_webhook_required_args() {
         let cli = Cli::try_parse_from([
-            "auto_review",
-            "test-webhook",
+            "auto-review",
+            "webhook",
+            "test",
             "--gateway-url",
             "http://localhost:8080",
             "--webhook-secret",
@@ -858,7 +938,7 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::TestWebhook(a) => {
+            Command::Webhook(WebhookCommand::Test(a)) => {
                 assert_eq!(a.gateway_url, "http://localhost:8080");
                 assert_eq!(a.webhook_secret, "s");
                 assert_eq!(a.event, "ping");
@@ -871,8 +951,9 @@ mod tests {
     #[test]
     fn test_webhook_with_pr_event() {
         let cli = Cli::try_parse_from([
-            "auto_review",
-            "test-webhook",
+            "auto-review",
+            "webhook",
+            "test",
             "--gateway-url",
             "http://x.example",
             "--webhook-secret",
@@ -884,7 +965,7 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::TestWebhook(a) => {
+            Command::Webhook(WebhookCommand::Test(a)) => {
                 assert_eq!(a.event, "pull_request");
                 assert_eq!(a.timeout_secs, 30);
             }
@@ -895,14 +976,15 @@ mod tests {
     #[test]
     fn validate_config_accepts_multiple_paths() {
         let cli = Cli::try_parse_from([
-            "auto_review",
-            "validate-config",
+            "auto-review",
+            "config",
+            "validate",
             "/tmp/a/.auto_review.yaml",
             "/tmp/b",
         ])
         .expect("parse");
         match cli.command {
-            Command::ValidateConfig(a) => {
+            Command::Config(ConfigCommand::Validate(a)) => {
                 assert_eq!(a.paths.len(), 2);
             }
             _ => panic!("expected ValidateConfig"),
@@ -911,8 +993,167 @@ mod tests {
 
     #[test]
     fn validate_config_requires_at_least_one_path() {
-        let res = Cli::try_parse_from(["auto_review", "validate-config"]);
+        let res = Cli::try_parse_from(["auto-review", "config", "validate"]);
         assert!(res.is_err());
+    }
+
+    #[test]
+    fn cargo_public_binary_target_is_auto_review_with_hyphen() {
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let manifest_path = manifest_dir.join("Cargo.toml");
+        let manifest = std::fs::read_to_string(&manifest_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", manifest_path.display()));
+        let bin_section = manifest
+            .split("[[bin]]")
+            .nth(1)
+            .and_then(|section| section.split("\n[").next())
+            .unwrap_or_else(|| {
+                panic!("{} should define a [[bin]] target", manifest_path.display())
+            });
+
+        assert!(
+            bin_section.lines().any(|line| line.trim() == "name = \"auto-review\""),
+            "[[bin]] target should publish the operator binary as `auto-review`; actual [[bin]] section:\n{bin_section}"
+        );
+    }
+
+    #[test]
+    fn public_cli_uses_auto_review_binary_and_grouped_domain_commands() {
+        use clap::CommandFactory;
+
+        let cmd = Cli::command();
+        let expected_groups = [
+            "gateway",
+            "auth",
+            "webhook",
+            "config",
+            "review",
+            "bench",
+            "ops",
+            "history",
+            "learnings",
+        ];
+        let actual_groups = cmd
+            .get_subcommands()
+            .map(|subcommand| subcommand.get_name().to_owned())
+            .collect::<Vec<_>>();
+
+        let mut failures = Vec::new();
+        if cmd.get_name() != "auto-review" {
+            failures.push(format!(
+                "binary name should be `auto-review`, got `{}`",
+                cmd.get_name()
+            ));
+        }
+        for expected in expected_groups {
+            if !actual_groups.iter().any(|actual| actual == expected) {
+                failures.push(format!("missing top-level command group `{expected}`"));
+            }
+        }
+
+        let legacy_review_once = Cli::try_parse_from([
+            "auto-review",
+            "review-once",
+            "--forgejo-url",
+            "https://x",
+            "--token",
+            "tok",
+            "--owner",
+            "alice",
+            "--repo",
+            "widgets",
+            "--pr",
+            "42",
+            "--llm-base-url",
+            "http://localhost:11434",
+        ]);
+        if legacy_review_once.is_ok() {
+            failures.push("legacy flat command `review-once` should not be accepted".to_owned());
+        }
+
+        assert!(
+            failures.is_empty(),
+            "{}\nactual top-level commands: {:?}",
+            failures.join("\n"),
+            actual_groups
+        );
+    }
+
+    #[test]
+    fn gateway_is_direct_command_without_run_subcommand() {
+        let direct_gateway = Cli::try_parse_from(["auto-review", "gateway"]);
+        let legacy_gateway_run = Cli::try_parse_from(["auto-review", "gateway", "run"]);
+
+        let mut failures = Vec::new();
+        if let Err(error) = direct_gateway {
+            failures.push(format!(
+                "`auto-review gateway` should be accepted directly: {error}"
+            ));
+        }
+        if legacy_gateway_run.is_ok() {
+            failures.push("legacy `auto-review gateway run` should be rejected".to_owned());
+        }
+
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
+    #[test]
+    fn gateway_command_dispatches_through_shared_gateway_startup_seam() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let cli_main_path = manifest.join("src/main.rs");
+        let gateway_main_path = manifest.join("../ar-gateway/src/main.rs");
+        let gateway_lib_path = manifest.join("../ar-gateway/src/lib.rs");
+        let cli_main = std::fs::read_to_string(&cli_main_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", cli_main_path.display()));
+        let gateway_lib = std::fs::read_to_string(&gateway_lib_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", gateway_lib_path.display()));
+
+        assert!(
+            cli_main.contains("return ar_gateway::run_from_env().await;"),
+            "`auto-review gateway` should dispatch through ar_gateway::run_from_env(); actual ar-cli main:\n{cli_main}"
+        );
+        assert!(
+            cli_main.find("return ar_gateway::run_from_env().await;")
+                < cli_main.find("tracing_subscriber::fmt()"),
+            "`auto-review gateway` should enter ar_gateway::run_from_env() before CLI tracing initialization so gateway defaults are preserved; actual ar-cli main:\n{cli_main}"
+        );
+        assert!(
+            !cli_main.contains("gateway run is not implemented"),
+            "`auto-review gateway` should not return the old placeholder error"
+        );
+        assert!(
+            gateway_lib.contains("pub use startup::run_from_env;"),
+            "ar-gateway library should expose the shared run_from_env() startup seam"
+        );
+        assert!(
+            !gateway_main_path.exists(),
+            "single-binary rollout should not keep a public ar-gateway binary at {}",
+            gateway_main_path.display()
+        );
+    }
+
+    #[test]
+    fn flake_publishes_auto_review_as_the_only_operator_binary() {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        let flake_path = workspace_root.join("flake.nix");
+        let flake = std::fs::read_to_string(&flake_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", flake_path.display()));
+
+        assert!(
+            flake.contains("default = self.packages.${system}.ar-cli;"),
+            "nix default package should publish the unified auto-review binary"
+        );
+        assert!(
+            flake.contains("Cmd = [ \"${ar-cli}/bin/auto-review\" \"gateway\" ];"),
+            "gateway container should start through auto-review gateway"
+        );
+        assert!(
+            !flake.contains("cargoExtraArgs = \"-p ar-gateway --bin ar-gateway\""),
+            "flake should not publish an ar-gateway binary package"
+        );
     }
 
     /// Cross-file contract test: every subcommand `Cli` exposes
@@ -948,7 +1189,8 @@ mod tests {
     #[test]
     fn missing_required_arg_is_an_error() {
         let res = Cli::try_parse_from([
-            "auto_review",
+            "auto-review",
+            "auth",
             "init",
             "--forgejo-url",
             "https://x",

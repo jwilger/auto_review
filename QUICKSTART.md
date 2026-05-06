@@ -1,6 +1,7 @@
 # Quickstart
 
-Get `auto_review` reviewing PRs on a Forgejo instance you control.
+Get `auto_review` reviewing PRs on a Forgejo instance you control with the
+single `auto-review` command.
 
 ## Prerequisites
 
@@ -34,24 +35,22 @@ cd auto_review
 
 # Recommended: flake-pinned build. No system Rust install
 # needed; reproducible across machines.
-nix build .#ar-gateway .#ar-cli
+nix build .#ar-cli
 
 # Alternative: cargo from inside the dev shell.
 nix develop --command cargo build --release --workspace
 ```
 
 `nix build` produces:
-- `result/bin/ar-gateway` — the long-running HTTP server.
-- `result-1/bin/auto_review` — the operator CLI.
+- `result/bin/auto-review` — the unified operator CLI and gateway entrypoint.
 
 The cargo path produces:
-- `target/release/ar-gateway`
-- `target/release/auto_review`
+- `target/release/auto-review`
 
 ## 3. Mint a personal access token for the bot
 
 ```sh
-./target/release/auto_review init \
+./target/release/auto-review auth init \
     --forgejo-url https://forgejo.example.com \
     --username auto-review
 # Prompts for the bot's password.
@@ -83,7 +82,7 @@ export LLM_REASONING_MODEL=qwen2.5-coder:32b
 # export LLM_API_KEY=sk-...
 # export LLM_REASONING_MODEL=gpt-4o-mini
 
-./target/release/ar-gateway
+./target/release/auto-review gateway
 ```
 
 The gateway listens on `0.0.0.0:8080` by default; override with
@@ -98,7 +97,7 @@ its prerequisite jobs pass.
 ## 5. Register the webhook on a repo
 
 ```sh
-./target/release/auto_review register-webhook \
+./target/release/auto-review webhook register \
     --forgejo-url $FORGEJO_BASE_URL \
     --token "$AR_FORGEJO_TOKEN" \
     --owner alice --repo widgets \
@@ -116,20 +115,20 @@ into your deploy script:
 ```sh
 # Outbound deps: Forgejo PAT valid? LLM endpoint reachable?
 # Configured models actually loaded? Webhook secret strong?
-./target/release/auto_review doctor
+./target/release/auto-review ops doctor
 
 # Inbound: gateway accepts a signed webhook end-to-end?
-./target/release/auto_review test-webhook \
+./target/release/auto-review webhook test \
     --gateway-url https://reviewer.example.com \
     --webhook-secret "$WEBHOOK_SECRET"
 
 # Live snapshot: confirms /info, /metrics, runtime config
-./target/release/auto_review status \
+./target/release/auto-review ops status \
     --gateway-url https://reviewer.example.com
 ```
 
 Each exits non-zero on a real problem so they fit cleanly in
-shell pipes (`auto_review doctor && auto_review test-webhook ...`).
+shell pipes (`auto-review ops doctor && auto-review webhook test ...`).
 See `docs/OPERATIONS.md` §0 for the full pre-deploy/post-deploy
 checklist these implement.
 
@@ -139,7 +138,7 @@ Before flipping the gateway live, you can run the full pipeline against
 one specific PR. No webhook required:
 
 ```sh
-./target/release/auto_review review-once \
+./target/release/auto-review review once \
     --forgejo-url $FORGEJO_BASE_URL \
     --token $AR_FORGEJO_TOKEN \
     --owner alice --repo widgets --pr 42 \
@@ -207,12 +206,12 @@ of the common failure modes with explicit error messages.
 
 If those pass and reviews still don't appear:
 - **Gateway returns 401 Unauthorized**: the webhook signature didn't
-  verify. `auto_review test-webhook` confirms whether the gateway-
+  verify. `auto-review webhook test` confirms whether the gateway-
   side secret is correct; if it passes, check that Forgejo's
   webhook config has the same secret byte-for-byte.
 - **Reviews never appear**: check the gateway logs (`RUST_LOG=debug`).
   Common causes: bot user lacks repo access (run
-  `auto_review doctor`), LLM endpoint unreachable, invalid
+  `auto-review ops doctor`), LLM endpoint unreachable, invalid
   `AR_FORGEJO_TOKEN`, or a CI workflow that never calls `POST /reviews/ci` after
   required checks pass.
 - **LLM returns malformed JSON repeatedly**: the self-heal loop is
@@ -235,7 +234,7 @@ Required:
 | Env var | Notes |
 |---|---|
 | `FORGEJO_BASE_URL` | e.g. `https://forgejo.example.com` |
-| `AR_FORGEJO_TOKEN` | gateway bot user's PAT (`auto_review init`) |
+| `AR_FORGEJO_TOKEN` | gateway bot user's PAT (`auto-review auth init`) |
 | `WEBHOOK_SECRET` | HMAC secret; matches Forgejo's webhook config |
 | `LLM_BASE_URL` | OpenAI-compatible endpoint root |
 

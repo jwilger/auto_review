@@ -10,7 +10,7 @@ Gitea-compatible API contract; tested against Forgejo 7+.
 |--------|---------|
 | `client::Client` | Authenticated HTTP wrapper. Constructor takes `base_url + token`. |
 | `client::Client` methods | `get_pr_diff`, `list_changed_files`, `create_review`, `post_commit_status`, `create_webhook`, `list_webhooks`, `delete_webhook`, `get_pull_request`, `get_compare_diff`, `post_issue_comment`, `list_pr_review_comments`, `get_server_version`. |
-| `init::InitClient` | Basic-auth bootstrap for `auto_review init` (mints the bot's first PAT). |
+| `init::InitClient` | Basic-auth bootstrap for `auto-review auth init` (mints the bot's first PAT). |
 | `types` | DTOs: `ChangedFile`, `CreateReviewRequest`, `ReviewComment`, `ReviewEvent`, `CommitStatus`, `CreateWebhookRequest`, `WebhookConfig`, `CreatedWebhook`, `WebhookSummary`, `PullRequestSummary`, `PullRequestEvent`, etc. |
 | `webhook` | Pull-request and issue-comment webhook payload types (deserialised from Forgejo's JSON). |
 

@@ -183,7 +183,7 @@ review.
 *Attacker:* A1 (via T1), A4 (via env exfiltration if reviewer host
 is breached).
 *Mitigation:* Token scoped to the minimum the bot needs
-(`write:repository`, `write:issue`, `read:user`). `auto_review init`
+(`write:repository`, `write:issue`, `read:user`). `auto-review auth init`
 documents this scoping. The token is loaded from the process
 environment only and is never logged. The orchestrator log redactor
 (`workspace::redact_token`) strips the token from any URL we log.

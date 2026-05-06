@@ -24,10 +24,10 @@ Group=auto_review
 # `deploy/systemd/auto_review.env.example` for the full list.
 EnvironmentFile=/etc/auto_review/auto_review.env
 
-# The binary is built with `cargo build --release -p ar-cli`
-# (or `-p ar-gateway`); operators install it under /usr/local/bin
-# or symlink from a pinned location. Adjust for your layout.
-ExecStart=/usr/local/bin/ar-gateway
+# The binary is built with `cargo build --release -p ar-cli`;
+# operators install it under /usr/local/bin or symlink from a pinned
+# location. Adjust for your layout.
+ExecStart=/usr/local/bin/auto-review gateway
 
 # Workspace tmpfs for the orchestrator's clones. Smaller systems
 # can drop this and let clones go to /tmp; bigger ones with

@@ -11,7 +11,7 @@ gateway's metrics layer.
 |--------|-------------|
 | `dispatcher::JobDispatcher` | Trait the gateway calls. `NoOpDispatcher` for tests; `SpawningDispatcher` for production. |
 | `dispatcher::ReviewObservation`, `ReviewObserver` | Lifecycle-event trait the gateway implements via `MetricsObserver`. Keeps the orchestrator metrics-format-agnostic. |
-| `dispatcher::run_review_job` | The end-to-end review pipeline activity: clone, RAG-context, review, verify, post. Used by both the dispatcher and the `auto_review review-once` CLI command. |
+| `dispatcher::run_review_job` | The end-to-end review pipeline activity: clone, RAG-context, review, verify, post. Used by both the dispatcher and the `auto-review review once` CLI command. |
 | `review_history::ReviewHistory` | Trait for per-PR "last reviewed SHA" tracking. `InMemoryReviewHistory` for ephemeral; `SqliteReviewHistory` for persistent. |
 | `state` | State-machine enum + transitions for the per-PR `pr_run` row. |
 
