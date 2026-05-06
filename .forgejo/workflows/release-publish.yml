@@ -92,10 +92,16 @@ jobs:
           PY
           )"
           printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
-      - name: Build Nix Docker image
+      - name: Derive release candidate SHA
+        env:
+          RELEASE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
+          RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
-          nix develop --command nix build .#ar-gateway-image
+          if [ -z "${RELEASE_CANDIDATE_SHA:-}" ]; then
+            RELEASE_CANDIDATE_SHA="$(git rev-parse "$RELEASE_MERGE_SHA^2")"
+          fi
+          printf 'RELEASE_CANDIDATE_SHA=%s\n' "$RELEASE_CANDIDATE_SHA" >> "$GITHUB_ENV"
       - name: Publish Docker image to Forgejo package registry
         env:
           RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
@@ -117,9 +123,8 @@ jobs:
             printf 'missing RELEASE_BOT_NAME repository variable\n' >&2
             exit 1
           fi
-          nix develop --command skopeo copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_MERGE_SHA}"
-          nix develop --command skopeo copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_VERSION}"
-          nix develop --command skopeo copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:latest"
+          nix develop --command skopeo copy --src-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA" "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_VERSION"
+          nix develop --command skopeo copy --src-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA" "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:latest"
       - name: Create Forgejo Release
         env:
           GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}

@@ -734,7 +734,7 @@ PY
   assert_file_contains "$publish_workflow" 'pull_request' "publish workflow listens for pull request events"
   assert_file_contains "$publish_workflow" 'closed' "publish workflow runs when release PRs close"
   assert_file_contains "$publish_workflow" 'nix develop' "publish workflow enters the Nix development environment before project tooling"
-  assert_file_contains "$publish_workflow" 'nix build .#ar-gateway-image' "publish workflow builds the Nix Docker image before publication"
+  assert_file_not_contains "$publish_workflow" 'nix build .#ar-gateway-image' "publish workflow promotes the release candidate image instead of rebuilding it"
   assert_file_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway' "publish workflow targets the Forgejo package registry image repository"
   assert_file_not_contains "$publish_workflow" 'release-plz' "publish workflow does not use release-plz"
   assert_file_not_contains "$publish_workflow" 'scripts/release publish' "publish workflow does not call the hand-rolled publish script"
@@ -757,6 +757,104 @@ test_release_workflows_install_or_reuse_nix_like_ci_before_nix_develop() {
   assert_file_contains "$publish_workflow" 'https://install.determinate.systems/nix' "publish workflow uses the CI Nix installer path"
   assert_file_contains "$publish_workflow" 'echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"' "publish workflow persists the Nix path for later steps"
   assert_file_contains_before "$publish_workflow" 'Install or reuse Nix' 'nix develop' "publish workflow installs Nix before nix develop"
+}
+
+test_prepare_workflow_builds_and_publishes_release_candidate_images() {
+  local prepare_workflow output status
+  prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
+
+  assert_file_contains "$prepare_workflow" 'RELEASE_CANDIDATE_TOKEN: ${{ secrets.RELEASE_CANDIDATE_TOKEN }}' "release PR preparation workflow exposes the candidate-scoped registry token"
+  assert_file_contains "$prepare_workflow" 'RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}' "release PR preparation workflow uses the release bot name for candidate registry publication"
+  assert_file_not_contains "$prepare_workflow" 'RELEASE_PUBLISH_TOKEN' "release PR preparation workflow does not expose the protected publish token"
+  assert_file_contains "$prepare_workflow" 'nix build .#ar-gateway-image' "release PR preparation workflow builds the ar-gateway image candidate"
+  assert_file_contains "$prepare_workflow" 'RELEASE_CANDIDATE_SHA' "release PR preparation workflow derives a candidate SHA tag"
+  assert_file_contains "$prepare_workflow" 'RELEASE_CANDIDATE_TAG' "release PR preparation workflow derives a stable release-candidate tag variable"
+  assert_file_contains "$prepare_workflow" 'docker-archive:./result' "release PR preparation workflow publishes the Nix-built archive as the candidate image"
+  assert_file_contains "$prepare_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA' "release PR preparation workflow publishes the candidate SHA image tag"
+  assert_file_contains "$prepare_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_TAG' "release PR preparation workflow publishes the release-candidate image tag"
+
+  output="$(python3 - "$prepare_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+def require_ordered(markers, label):
+    cursor = 0
+    for marker in markers:
+        found = workflow.find(marker, cursor)
+        if found == -1:
+            errors.append(f'{label} missing ordered marker: {marker}')
+            return
+        cursor = found + len(marker)
+
+require_ordered(
+    [
+        'git commit -m "chore: release v$RELEASE_VERSION"',
+        'RELEASE_CANDIDATE_SHA',
+        'nix build .#ar-gateway-image',
+        'RELEASE_CANDIDATE_TOKEN',
+        'docker-archive:./result',
+    ],
+    'release candidate publication flow',
+)
+
+candidate_tag_derivation_patterns = [
+    r'RELEASE_CANDIDATE_TAG\s*=\s*[^\n]*\$\{?RELEASE_VERSION\}?[^\n]*rc[^\n]*(?:GITHUB_RUN_NUMBER|RELEASE_CANDIDATE_SHA)',
+    r'printf\s+-v\s+RELEASE_CANDIDATE_TAG[\s\S]{0,300}\$\{?RELEASE_VERSION\}?[\s\S]{0,300}rc[\s\S]{0,300}(?:GITHUB_RUN_NUMBER|RELEASE_CANDIDATE_SHA)',
+    r'RELEASE_CANDIDATE_TAG[\s\S]{0,300}\$\{?RELEASE_VERSION\}?[\s\S]{0,300}rc[\s\S]{0,300}(?:GITHUB_RUN_NUMBER|RELEASE_CANDIDATE_SHA)',
+]
+if not any(re.search(pattern, workflow) for pattern in candidate_tag_derivation_patterns):
+    errors.append('RELEASE_CANDIDATE_TAG must be a SemVer pre-release candidate derived from RELEASE_VERSION with rc provenance tied to GITHUB_RUN_NUMBER or RELEASE_CANDIDATE_SHA')
+
+publish_steps = []
+for step_match in re.finditer(r'- name: (?P<name>[^\n]+)(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow):
+    body = step_match.group('body')
+    if 'skopeo copy' in body and 'docker-archive:./result' in body:
+        publish_steps.append(body)
+
+if not publish_steps:
+    errors.append('prepare workflow must use skopeo to publish docker-archive:./result as candidate images')
+else:
+    publish_text = '\n'.join(publish_steps)
+    if 'RELEASE_CANDIDATE_TOKEN' not in publish_text:
+        errors.append('candidate image publication must authenticate with RELEASE_CANDIDATE_TOKEN')
+    if 'RELEASE_BOT_NAME' not in publish_text:
+        errors.append('candidate image publication must authenticate as RELEASE_BOT_NAME')
+    if 'docker-archive:./result' not in publish_text:
+        errors.append('candidate image publication must use docker-archive:./result as the source')
+    if 'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA' not in publish_text and 'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_CANDIDATE_SHA}' not in publish_text:
+        errors.append('prepare workflow must publish docker-archive:./result to the RELEASE_CANDIDATE_SHA tag')
+    if 'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_TAG' not in publish_text and 'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_CANDIDATE_TAG}' not in publish_text:
+        errors.append('prepare workflow must publish docker-archive:./result to the RELEASE_CANDIDATE_TAG tag')
+
+for step_match in re.finditer(r'- name: (?P<name>[^\n]+)(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow):
+    body = step_match.group('body')
+    if 'RELEASE_CANDIDATE_TOKEN' in body and 'nix build .#ar-gateway-image' in body:
+        errors.append('candidate-token-bearing step must publish only after a separate no-token Nix image build')
+
+if 'tea pr create' not in workflow:
+    errors.append('prepare workflow must create the release PR')
+else:
+    pr_section = workflow[workflow.find('tea pr create'):]
+    if 'git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA' not in pr_section:
+        errors.append('release PR create/update description must expose the candidate SHA image ref')
+    if 'git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_TAG' not in pr_section and 'git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_CANDIDATE_TAG}' not in pr_section:
+        errors.append('release PR create/update description must expose the release-candidate image ref')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "release PR preparation workflow builds and publishes release candidate images after the metadata commit"
+  else
+    fail "release PR preparation workflow builds and publishes release candidate images after the metadata commit ($output)"
+  fi
 }
 
 test_prepare_workflow_skips_release_pr_merge_pushes() {
@@ -1440,6 +1538,46 @@ test_prepare_workflow_manages_release_branch_with_prepare_token() {
   assert_file_contains "$prepare_workflow" 'git push --force-with-lease origin "$branch"' "release PR preparation workflow pushes release branches with the prepare token"
 }
 
+test_prepare_workflow_updates_existing_release_pr_body_with_candidate_images() {
+  local prepare_workflow output status
+  prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
+
+  output="$(python3 - "$prepare_workflow" <<'PY'
+import pathlib
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+else_marker = 'else\n            printf \'release PR already open: #%s\\n\' "$existing_pr"'
+if else_marker not in workflow:
+    print('prepare workflow is missing the existing_pr else branch marker')
+    sys.exit(1)
+
+existing_pr_branch = workflow.split(else_marker, 1)[1].split('          fi', 1)[0]
+has_update_command = 'tea pr edit' in existing_pr_branch or 'tea api' in existing_pr_branch
+missing = []
+if not has_update_command:
+    missing.append('tea pr edit or tea api update in existing_pr branch')
+for marker in [
+    'git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA',
+    'git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_TAG',
+]:
+    if marker not in existing_pr_branch:
+        missing.append(marker)
+
+if missing:
+    print('existing release PR branch must update the PR body with candidate image refs: ' + ', '.join(missing))
+    sys.exit(1)
+sys.exit(0)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "prepare workflow updates existing release PR body with release candidate image refs"
+  else
+    fail "prepare workflow updates existing release PR body with release candidate image refs ($output)"
+  fi
+}
+
 test_prepare_workflow_stages_only_root_release_metadata() {
   local prepare_workflow
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
@@ -1478,7 +1616,7 @@ errors = []
 
 image = 'git.johnwilger.com/jwilger/auto_review/ar-gateway'
 required_image_tags = {
-    'merge SHA image tag': [f'{image}:$RELEASE_MERGE_SHA', f'{image}:${{RELEASE_MERGE_SHA}}'],
+    'candidate SHA source image tag': [f'{image}:$RELEASE_CANDIDATE_SHA', f'{image}:${{RELEASE_CANDIDATE_SHA}}'],
     'raw release version image tag': [f'{image}:$RELEASE_VERSION', f'{image}:${{RELEASE_VERSION}}'],
     'latest image tag': [f'{image}:latest'],
 }
@@ -1569,22 +1707,20 @@ if 'release-plz release --forge gitea --git-token "$RELEASE_PUBLISH_TOKEN"' in w
 if 'RELEASE_REGISTRY_USER' in workflow:
     errors.append('publish workflow should reuse RELEASE_BOT_NAME instead of a separate RELEASE_REGISTRY_USER')
 
+if 'nix build .#ar-gateway-image' in workflow:
+    errors.append('publish workflow must promote the prepared candidate image instead of rebuilding .#ar-gateway-image')
+if 'docker-archive:./result' in workflow:
+    errors.append('publish workflow must not publish release tags from docker-archive:./result')
+
 required_markers = [
-    'nix build .#ar-gateway-image',
     'git.johnwilger.com/jwilger/auto_review/ar-gateway',
     'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}',
     'RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}',
+    'RELEASE_CANDIDATE_SHA',
 ]
 missing = [marker for marker in required_markers if marker not in workflow]
 if missing:
-    errors.append('publish workflow does not build and publish the Nix Docker image to the Forgejo package registry: ' + ', '.join(missing))
-
-nix_build_index = workflow.find('nix build .#ar-gateway-image')
-token_index = workflow.find('RELEASE_PUBLISH_TOKEN')
-if nix_build_index == -1:
-    errors.append('publish workflow is missing the no-token Nix image build step')
-elif token_index != -1 and token_index < nix_build_index:
-    errors.append('publish workflow must build .#ar-gateway-image before any RELEASE_PUBLISH_TOKEN exposure or reference')
+    errors.append('publish workflow does not promote the release candidate Docker image to the Forgejo package registry: ' + ', '.join(missing))
 
 lines = workflow.splitlines()
 for index, line in enumerate(lines):
@@ -1595,25 +1731,33 @@ for index, line in enumerate(lines):
                 break
             step_lines.append(nested)
         step = '\n'.join(step_lines)
-        if 'RELEASE_PUBLISH_TOKEN' in step and 'nix build .#ar-gateway-image' in step:
-            errors.append('token-bearing publish step must only perform registry authentication/copy, not the Nix image build')
+        if 'RELEASE_PUBLISH_TOKEN' in step and ('nix build .#ar-gateway-image' in step or 'docker-archive:./result' in step):
+            errors.append('token-bearing publish step must promote the candidate image, not rebuild or publish a docker archive')
             break
 
-registry_ref = r'git\.johnwilger\.com/jwilger/auto_review/ar-gateway(?::[^\s"\']+)?'
-publish_matches = []
-for pattern in [
-    rf'\b(?:docker|podman)\s+load\b[^\n]*(?:--input|-i)\s+\./result[\s\S]*\b(?:docker|podman)\s+push\b[^\n]*{registry_ref}',
-    rf'\bskopeo\s+copy\b[^\n]*docker-archive:\./result[^\n]*docker://{registry_ref}',
-]:
-    publish_matches.extend(re.finditer(pattern, workflow))
-if not publish_matches:
-    errors.append('publish workflow is missing a concrete Docker image registry publication operation to git.johnwilger.com/jwilger/auto_review/ar-gateway')
+promotion_steps = []
+for step_match in re.finditer(r'- name: (?P<name>[^\n]+)(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow):
+    body = step_match.group('body')
+    if 'skopeo copy' in body and 'RELEASE_CANDIDATE_SHA' in body:
+        promotion_steps.append(body)
+if not promotion_steps:
+    errors.append('publish workflow is missing concrete skopeo promotion from docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA')
     before_publish = workflow
     publish_text = ''
 else:
-    first_publish = min(match.start() for match in publish_matches)
+    first_publish = min(workflow.find(step) for step in promotion_steps)
     before_publish = workflow[:first_publish]
-    publish_text = workflow[first_publish:max(match.end() for match in publish_matches)]
+    publish_text = '\n'.join(promotion_steps)
+    if 'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA' not in publish_text and 'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_CANDIDATE_SHA}' not in publish_text:
+        errors.append('publish workflow must use the release candidate SHA image as the promotion source')
+    version_destinations = [
+        'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_VERSION',
+        'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_VERSION}',
+    ]
+    if not any(destination in publish_text for destination in version_destinations):
+        errors.append('publish workflow must promote the release candidate image to RELEASE_VERSION')
+    if 'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:latest' not in publish_text:
+        errors.append('publish workflow must promote the release candidate image to latest')
 auth_patterns = [
     r'\b(?:docker|podman)\s+login\b[^\n]*git\.johnwilger\.com[\s\S]{0,400}\$RELEASE_PUBLISH_TOKEN',
     r'\$RELEASE_PUBLISH_TOKEN[\s\S]{0,400}\b(?:docker|podman)\s+login\b[^\n]*git\.johnwilger\.com',
@@ -1626,9 +1770,10 @@ if not has_login_before_publish and not has_skopeo_creds_on_copy:
 if re.search(r'git\.johnwilger\.com/jwilger/auto_review/ar-gateway:dev\b', workflow):
     errors.append('publish workflow must not publish the flake image default :dev tag as the release artifact')
 
-release_tagged_ref = r'git\.johnwilger\.com/jwilger/auto_review/ar-gateway:(?:v(?:\$\{?RELEASE_VERSION\}?|[0-9])|\$\{?RELEASE_MERGE_SHA\}?|\$\{?GITHUB_SHA\}?|\$\{?RELEASE_IMAGE_TAG\}?)'
-if not re.search(release_tagged_ref, workflow):
-    errors.append('publish workflow must retag the Nix image with a release-appropriate tag or provenance before publication')
+if 'git.johnwilger.com/jwilger/auto_review/ar-gateway:latest' not in workflow:
+    errors.append('publish workflow must promote the release candidate image to latest')
+if 'git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_VERSION' not in workflow and 'git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_VERSION}' not in workflow:
+    errors.append('publish workflow must promote the release candidate image to RELEASE_VERSION')
 
 if errors:
     print('; '.join(errors))
@@ -1811,7 +1956,7 @@ required_markers = [
     'git switch -C main "$RELEASE_MERGE_SHA"',
     'Publish Docker image to Forgejo package registry',
     'tea release create',
-    'nix build .#ar-gateway-image',
+    'RELEASE_CANDIDATE_SHA',
     'git.johnwilger.com/jwilger/auto_review/ar-gateway',
 ]
 missing = [marker for marker in required_markers if marker not in workflow]
@@ -1896,6 +2041,74 @@ PY
   fi
 }
 
+test_publish_workflow_derives_and_promotes_release_candidate_sha() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  assert_file_not_contains "$publish_workflow" 'nix build .#ar-gateway-image' "publish workflow does not rebuild the ar-gateway image during final publication"
+  assert_file_not_contains "$publish_workflow" 'docker-archive:./result' "publish workflow does not publish final release tags from a local docker archive"
+  assert_file_contains "$publish_workflow" 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow uses the protected publish token for promotion"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+publish_marker = 'Publish Docker image to Forgejo package registry'
+if publish_marker not in workflow:
+    errors.append('publish workflow is missing the token-bearing image promotion step')
+    before_publish = workflow
+else:
+    before_publish = workflow.split(publish_marker, 1)[0]
+
+if 'github.event.pull_request.head.sha' not in before_publish:
+    errors.append('publish workflow must derive RELEASE_CANDIDATE_SHA from the merged release PR head SHA before token exposure')
+manual_fallback_patterns = [
+    r'git\s+rev-parse\s+"?\$RELEASE_MERGE_SHA\^2"?',
+    r'git\s+rev-parse\s+"?\$\{RELEASE_MERGE_SHA\}\^2"?',
+]
+if not any(re.search(pattern, before_publish) for pattern in manual_fallback_patterns):
+    errors.append('publish workflow must fall back to git rev-parse "$RELEASE_MERGE_SHA^2" for manual dispatch')
+if 'RELEASE_CANDIDATE_SHA' not in before_publish:
+    errors.append('publish workflow must derive RELEASE_CANDIDATE_SHA before token-bearing promotion')
+
+promotion_step_match = re.search(r'- name: Publish Docker image to Forgejo package registry(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
+if not promotion_step_match:
+    errors.append('publish workflow must have a dedicated image promotion step')
+else:
+    step = promotion_step_match.group('body')
+    if 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' not in step:
+        errors.append('image promotion step must receive RELEASE_PUBLISH_TOKEN')
+    if 'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA' not in step and 'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_CANDIDATE_SHA}' not in step:
+        errors.append('image promotion step must copy from the release candidate SHA image ref')
+    for destination in [
+        ('docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_VERSION', 'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_VERSION}'),
+        'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:latest',
+    ]:
+        if isinstance(destination, tuple):
+            if not any(candidate in step for candidate in destination):
+                errors.append('image promotion step must copy the candidate to RELEASE_VERSION')
+        elif destination not in step:
+            errors.append(f'image promotion step must copy the candidate to {destination}')
+    if 'docker-archive:./result' in step or 'nix build .#ar-gateway-image' in step:
+        errors.append('image promotion step must not rebuild or publish from docker-archive:./result')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow derives the release candidate SHA and promotes that image to release tags"
+  else
+    fail "publish workflow derives the release candidate SHA and promotes that image to release tags ($output)"
+  fi
+}
+
 test_release_tooling_tests_are_wired_into_nix_flake_check() {
   local flake
   flake="$ROOT/flake.nix"
@@ -1941,12 +2154,17 @@ PY
 )"
 
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release preparation PAT' "threat model names the operator-created release preparation PAT asset"
+  assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release candidate publishing PAT' "threat model names the release candidate publishing PAT asset"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release publishing PAT' "threat model names the release publishing PAT asset"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release preparation PAT blast radius' "threat model documents the release preparation PAT blast radius"
+  assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release candidate publishing PAT blast radius' "threat model documents the release candidate publishing PAT blast radius"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release publishing PAT blast radius' "threat model documents the release publishing PAT blast radius"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'prepare release PR branches and release PRs only in `jwilger/auto_review`' "threat model documents the release preparation PAT scope"
+  assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'publish candidate images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` only' "threat model documents the release candidate PAT package registry scope"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review`' "threat model documents the release publishing PAT package registry and release API scope"
-  assert_contains "$t5a" 'builds the release Docker image with `nix build .#ar-gateway-image`' "T5a mitigation documents Nix-built image provenance for publishing"
+  assert_contains "$t5a" 'builds the release candidate Docker image with `nix build .#ar-gateway-image` after the release metadata commit' "T5a mitigation documents Nix-built candidate image provenance"
+  assert_contains "$t5a" 'publishes candidate image tags for the release PR head SHA and release-candidate tag' "T5a mitigation documents release candidate image tags"
+  assert_contains "$t5a" 'promotes the candidate image to the release version and `latest` tags' "T5a mitigation documents final release image promotion instead of rebuilding"
   assert_contains "$t5a" 'publishes only `git.johnwilger.com/jwilger/auto_review/ar-gateway` to the Forgejo package registry and creates the matching Forgejo Release entry' "T5a mitigation documents package registry and Forgejo Release publication instead of cargo publishing"
   assert_not_contains "$t5a" 'Forgejo release selection to `release-plz`' "T5a mitigation does not describe stale release-plz cargo publication"
   assert_contains "$t5a" '`Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`' "T5a mitigation publish allowlist includes Cargo.toml, Cargo.lock, and CHANGELOG.md"
@@ -1955,14 +2173,20 @@ PY
   assert_not_contains "$t5a" 'Prepare validates dispatch inputs' "T5a mitigation does not describe stale manual dispatch input validation"
   assert_not_contains "$t5a" 'validates the derived semantic version' "T5a mitigation does not describe stale derived semantic-version validation"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release preparation PAT blast radius' "operations docs summarize the release preparation PAT blast radius"
+  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release candidate publishing PAT blast radius' "operations docs summarize the release candidate publishing PAT blast radius"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release publishing PAT blast radius' "operations docs summarize the release publishing PAT blast radius"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'prepare release PR branches and release PRs only in `jwilger/auto_review`' "operations docs constrain the release preparation PAT scope"
+  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'publish candidate images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` only' "operations docs constrain the release candidate publishing PAT scope"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review`' "operations docs constrain the release publishing PAT package registry and release API scope"
 }
 
 test_release_secrets_are_documented_for_operators() {
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'Forgejo Actions secret `RELEASE_PREPARE_TOKEN`' "operations docs require an operator-created release preparation Actions secret"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Forgejo Actions secret `RELEASE_PREPARE_TOKEN`' "threat model documents the operator-created release preparation Actions secret"
+  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'Forgejo Actions secret `RELEASE_CANDIDATE_TOKEN`' "operations docs require a candidate image publishing Actions secret"
+  assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Forgejo Actions secret `RELEASE_CANDIDATE_TOKEN`' "threat model documents the candidate image publishing Actions secret"
+  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release candidate image' "operations docs document release candidate image provenance"
+  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release candidate image tag' "operations docs document the release candidate image tag"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release publishing credential' "operations docs identify the release publishing credential purpose"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'protected `release-publish` environment secret `RELEASE_PUBLISH_TOKEN`' "operations docs document release publishing credential as a protected environment secret"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release bot Forgejo user' "operations docs require a dedicated release bot user"
@@ -1986,6 +2210,7 @@ test_release_secrets_are_documented_for_operators() {
 
 test_release_workflows_exist_for_prepare_pr_and_publish_on_merge
 test_release_workflows_install_or_reuse_nix_like_ci_before_nix_develop
+test_prepare_workflow_builds_and_publishes_release_candidate_images
 test_prepare_workflow_skips_release_pr_merge_pushes
 test_prepare_workflow_runs_release_infra_fix_pushes
 test_prepare_workflow_plans_and_checks_semver_before_release_metadata_commit
@@ -2001,12 +2226,14 @@ test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_image_p
 test_prepare_workflow_checkout_does_not_persist_credentials
 test_prepare_workflow_authenticates_git_push_without_checkout_credentials
 test_prepare_workflow_manages_release_branch_with_prepare_token
+test_prepare_workflow_updates_existing_release_pr_body_with_candidate_images
 test_prepare_workflow_stages_only_root_release_metadata
 test_release_tooling_uses_local_prepare_and_image_registry_for_publish
 test_publish_workflow_promotes_release_image_tags_and_generates_release_notes
 test_publish_workflow_publishes_nix_docker_image_to_forgejo_registry
 test_publish_workflow_requires_trusted_release_environment
 test_publish_workflow_supports_manual_dispatch_from_release_merge_sha
+test_publish_workflow_derives_and_promotes_release_candidate_sha
 test_release_tooling_tests_are_wired_into_nix_flake_check
 test_release_plz_config_is_removed_and_workspace_crates_stay_private
 test_release_secrets_are_documented_for_operators

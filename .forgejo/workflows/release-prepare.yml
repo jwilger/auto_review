@@ -38,8 +38,7 @@ jobs:
         with:
           persist-credentials: false
           fetch-depth: 0
-      - name: Prepare release PR
-        env:
+      - env:
           RELEASE_PREPARE_TOKEN: ${{ secrets.RELEASE_PREPARE_TOKEN }}
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
           RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
@@ -122,6 +121,14 @@ jobs:
             exit 0
           fi
           git commit -m "chore: release v$RELEASE_VERSION"
+          RELEASE_CANDIDATE_SHA="$(git rev-parse HEAD)"
+          RELEASE_CANDIDATE_TAG="$RELEASE_VERSION-rc.${GITHUB_RUN_NUMBER:-0}"
+          {
+             printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION"
+             printf 'RELEASE_CANDIDATE_SHA=%s\n' "$RELEASE_CANDIDATE_SHA"
+             printf 'RELEASE_CANDIDATE_TAG=%s\n' "$RELEASE_CANDIDATE_TAG"
+          } >> "$GITHUB_ENV"
+          nix develop --command nix build .#ar-gateway-image
           git push --force-with-lease origin "$branch"
           export GITEA_SERVER_URL="https://git.johnwilger.com"
           export GITEA_SERVER_TOKEN="$RELEASE_PREPARE_TOKEN"
@@ -134,7 +141,38 @@ jobs:
           done
           existing_pr="$(printf '%s\n' "$open_prs" | nix develop --command jq -r --arg branch "$branch" '.[] | select(.head.ref == $branch) | .number' | head -n 1)"
           if [ -z "$existing_pr" ]; then
-            nix develop --command tea pr create --login "$tea_login" --repo jwilger/auto_review --head "$branch" --base main --title "chore: release v$RELEASE_VERSION" --description "Prepare release v$RELEASE_VERSION."
+            nix develop --command tea pr create --login "$tea_login" --repo jwilger/auto_review --head "$branch" --base main --title "chore: release v$RELEASE_VERSION" --description "Prepare release v$RELEASE_VERSION.
+
+          Release candidate images:
+          - git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA
+          - git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_TAG"
           else
             printf 'release PR already open: #%s\n' "$existing_pr"
+            nix develop --command tea pr edit --login "$tea_login" --repo jwilger/auto_review "$existing_pr" --description "Prepare release v$RELEASE_VERSION.
+
+          Release candidate images:
+          - git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA
+          - git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_TAG"
           fi
+      - name: Publish release candidate Docker image to Forgejo package registry
+        env:
+          RELEASE_CANDIDATE_TOKEN: ${{ secrets.RELEASE_CANDIDATE_TOKEN }}
+          RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_BOT_NAME:-}" ]; then
+            printf 'missing RELEASE_BOT_NAME repository variable\n' >&2
+            exit 1
+          fi
+          mkdir -p "$HOME/.config/containers"
+          cat > "$HOME/.config/containers/policy.json" <<'EOF'
+          {
+            "default": [
+              {
+                "type": "insecureAcceptAnything"
+              }
+            ]
+          }
+          EOF
+          nix develop --command skopeo copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_CANDIDATE_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA"
+          nix develop --command skopeo copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_CANDIDATE_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_TAG"
