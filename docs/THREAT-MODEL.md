@@ -202,10 +202,11 @@ and release PRs only in `jwilger/auto_review`; the protected
 the release bot identity in repository variable `RELEASE_BOT_NAME`, can publish container images only
 to `git.johnwilger.com/jwilger/auto_review/ar-gateway`.
 The release signing key is attached to a dedicated release bot Forgejo user and
-exposed only to release preparation so `release-plz` can sign release PR
-commits. Release automation delegates release PR branch, release PR, and
-version selection to `release-plz` with the Gitea forge adapter. Publish only
-runs for release PRs merged into `main`, builds the release Docker image with `nix build .#ar-gateway-image`, publishes only `git.johnwilger.com/jwilger/auto_review/ar-gateway` to the Forgejo package registry, and refuses token-bearing publication when the merged release PR changed files outside expected root release metadata: `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`.
+exposed only to release preparation so git can sign release PR commits. Release
+automation computes a single root release version from conventional commits,
+checks the selected bump with `cargo semver-checks`, updates only root release
+metadata, and uses `tea` to open the Forgejo release PR. Publish only runs for
+release PRs merged into `main`, builds the release Docker image with `nix build .#ar-gateway-image`, publishes only `git.johnwilger.com/jwilger/auto_review/ar-gateway` to the Forgejo package registry, and refuses token-bearing publication when the merged release PR changed files outside expected root release metadata: `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`.
 *Residual risk:* **Release preparation PAT blast radius** is limited to forged
 release branches/PR metadata in the project repository. **Release publishing PAT blast radius** is limited to forged package images in the project registry.
 Rotate the Actions secret if workflow logs, runner state, or Forgejo secrets are

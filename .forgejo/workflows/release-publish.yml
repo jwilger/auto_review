@@ -12,7 +12,7 @@ on:
 jobs:
   release-publish:
     runs-on: docker
-    if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && startsWith(github.event.pull_request.head.ref, 'release-plz-') == true || (github.event_name == 'workflow_dispatch' && inputs.release_merge_sha != '') }}
+    if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && startsWith(github.event.pull_request.head.ref, 'release/v') == true || (github.event_name == 'workflow_dispatch' && inputs.release_merge_sha != '') }}
     environment: release-publish
     steps:
       - name: Install or reuse Nix

@@ -2,7 +2,7 @@
 set -euo pipefail
 
 usage() {
-  printf 'usage: scripts/release <prepare|publish> --workspace <path> --version <version> [--date <date>] [--dry-run]\n' >&2
+  printf 'usage: scripts/release <plan|prepare|publish> --workspace <path> [--version <version>] [--date <date>] [--release-type <patch|minor|major>] [--dry-run]\n' >&2
 }
 
 command="${1:-}"
@@ -16,6 +16,7 @@ workspace="."
 version=""
 date=""
 dry_run=false
+release_type_override=""
 
 release_notes_file() {
   local changelog="$1"
@@ -49,6 +50,10 @@ while [[ $# -gt 0 ]]; do
       dry_run=true
       shift
       ;;
+    --release-type)
+      release_type_override="${2:-}"
+      shift 2
+      ;;
     *)
       usage
       exit 2
@@ -56,18 +61,98 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-if [[ -z "$version" ]]; then
-  usage
-  exit 2
-fi
-
-if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-  printf 'release version must be semantic x.y.z\n' >&2
-  exit 2
-fi
-
 case "$command" in
+  plan)
+    python3 - "$workspace" "$workspace/Cargo.toml" "$release_type_override" <<'PY'
+import pathlib
+import re
+import subprocess
+import sys
+
+workspace = pathlib.Path(sys.argv[1])
+cargo_toml = pathlib.Path(sys.argv[2])
+release_type_override = sys.argv[3]
+
+
+def git_output(*args):
+    return subprocess.check_output(
+        ["git", "-C", str(workspace), *args],
+        stderr=subprocess.DEVNULL,
+        text=True,
+    )
+
+
+def previous_release_tag():
+    try:
+        return git_output("describe", "--tags", "--match", "v[0-9]*", "--abbrev=0").strip()
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return ""
+
+
+def commits_since_previous_release(tag):
+    revision = f"{tag}..HEAD" if tag else "HEAD"
+    try:
+        raw = git_output("log", "--no-show-signature", "--reverse", "--format=%s%x00%B%x1e", revision)
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        return []
+    commits = []
+    for record in raw.split("\x1e"):
+        record = record.strip("\n")
+        if not record:
+            continue
+        subject, _, body = record.partition("\x00")
+        commits.append((subject.strip(), body))
+    return commits
+
+
+version_match = re.search(r'(?m)^version\s*=\s*"(?P<version>[^"]+)"', cargo_toml.read_text())
+if not version_match:
+    raise SystemExit("workspace package version not found")
+major, minor, patch = [int(part) for part in version_match.group("version").split(".")]
+baseline_tag = previous_release_tag()
+conventional = re.compile(r"^(?P<kind>[a-zA-Z]+)(?:\([^)]+\))?(?P<breaking>!)?: .+$")
+release_type = "patch"
+for subject, body in commits_since_previous_release(baseline_tag):
+    match = conventional.match(subject)
+    kind = match.group("kind").lower() if match else ""
+    breaking = bool(match and match.group("breaking")) or "BREAKING CHANGE:" in body
+    if breaking:
+        release_type = "major" if major > 0 else "minor"
+        break
+    if kind == "feat" and release_type == "patch":
+        release_type = "minor"
+
+if release_type_override:
+    if release_type_override not in {"patch", "minor", "major"}:
+        raise SystemExit("release type must be patch, minor, or major")
+    release_type = release_type_override
+
+if release_type == "major":
+    major += 1
+    minor = 0
+    patch = 0
+elif release_type == "minor":
+    minor += 1
+    patch = 0
+else:
+    patch += 1
+
+print(f"version={major}.{minor}.{patch}")
+print(f"release_type={release_type}")
+print(f"baseline_tag={baseline_tag}")
+PY
+    ;;
   prepare)
+    if [[ -z "$version" ]]; then
+      usage
+      exit 2
+    fi
+
+    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      printf 'release version must be semantic x.y.z\n' >&2
+      exit 2
+    fi
+
     if [[ -z "$date" ]]; then
       date="$(date +%F)"
     fi
@@ -205,6 +290,16 @@ changelog.write_text(changelog_text.replace(marker, f'{marker}\n\n{release_secti
 PY
     ;;
   publish)
+    if [[ -z "$version" ]]; then
+      usage
+      exit 2
+    fi
+
+    if [[ ! "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+      printf 'release version must be semantic x.y.z\n' >&2
+      exit 2
+    fi
+
     if [[ "${FORGEJO_EVENT_NAME:-}" != "pull_request" || "${FORGEJO_EVENT_ACTION:-}" != "closed" || "${FORGEJO_PULL_REQUEST_HEAD_BRANCH:-}" != "release/v$version" ]]; then
       printf 'release publish must run from a closed release PR\n' >&2
       exit 1

@@ -9,7 +9,7 @@ on:
 jobs:
   release-prepare:
     runs-on: docker
-    if: "${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore: release') }}"
+    if: "${{ github.event_name != 'push' || (!startsWith(github.event.head_commit.message, 'chore: release') && !startsWith(github.event.head_commit.message, 'fix(release)')) }}"
     steps:
       - name: Install or reuse Nix
         run: |
@@ -72,7 +72,52 @@ jobs:
           export GIT_CONFIG_VALUE_1="$signing_key"
           export GIT_CONFIG_KEY_2=commit.gpgsign
           export GIT_CONFIG_VALUE_2=true
-          export GIT_CONFIG_KEY_3=url.https://release-plz:${RELEASE_PREPARE_TOKEN}@git.johnwilger.com/.insteadOf
+          export GIT_CONFIG_KEY_3=url.https://release:${RELEASE_PREPARE_TOKEN}@git.johnwilger.com/.insteadOf
           export GIT_CONFIG_VALUE_3=https://git.johnwilger.com/
           git fetch --tags
-          nix develop --command release-plz release-pr --forge gitea --git-token "$RELEASE_PREPARE_TOKEN" --repo-url https://git.johnwilger.com/jwilger/auto_review
+          release_plan="$(nix develop --command scripts/release plan --workspace .)"
+          BASELINE_TAG="$(printf '%s\n' "$release_plan" | awk -F= '$1 == "baseline_tag" { print $2 }')"
+          if [ -n "$BASELINE_TAG" ]; then
+            semver_selected=false
+            for candidate_type in patch minor major; do
+              if nix develop --command cargo semver-checks --workspace --baseline-rev "$BASELINE_TAG" --release-type "$candidate_type"; then
+                candidate_plan="$(nix develop --command scripts/release plan --workspace . --release-type "$candidate_type")"
+                RELEASE_VERSION="$(printf '%s\n' "$candidate_plan" | awk -F= '$1 == "version" { print $2 }')"
+                RELEASE_TYPE="$candidate_type"
+                semver_selected=true
+                break
+              fi
+            done
+            if [ "$semver_selected" != true ]; then
+              printf 'cargo-semver-checks rejected patch, minor, and major release planning\n' >&2
+              exit 1
+            fi
+          else
+            candidate_plan="$(nix develop --command scripts/release plan --workspace . --release-type patch)"
+            RELEASE_VERSION="$(printf '%s\n' "$candidate_plan" | awk -F= '$1 == "version" { print $2 }')"
+            RELEASE_TYPE=patch
+          fi
+          if [ -z "$RELEASE_VERSION" ] || [ -z "$RELEASE_TYPE" ]; then
+            printf 'release plan did not produce a version and release type\n' >&2
+            exit 1
+          fi
+          branch="release/v$RELEASE_VERSION"
+          git switch -C "$branch"
+          nix develop --command scripts/release prepare --workspace . --version "$RELEASE_VERSION" --date "$(date +%F)"
+          git add Cargo.toml Cargo.lock CHANGELOG.md
+          if git diff --cached --quiet; then
+            printf 'release metadata already up to date for v%s\n' "$RELEASE_VERSION"
+            exit 0
+          fi
+          git commit -m "chore: release v$RELEASE_VERSION"
+          git push --force-with-lease origin "$branch"
+          export GITEA_SERVER_URL="https://git.johnwilger.com"
+          export GITEA_SERVER_TOKEN="$RELEASE_PREPARE_TOKEN"
+          tea_login="auto_review-release-${GITHUB_RUN_ID:-$$}"
+          tea login add --name "$tea_login" --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
+          existing_pr="$(tea api --login "$tea_login" 'repos/jwilger/auto_review/pulls?state=open' | jq -r --arg branch "$branch" '.[] | select(.head.ref == $branch) | .number' | head -n 1)"
+          if [ -z "$existing_pr" ]; then
+            tea pr create --login "$tea_login" --repo jwilger/auto_review --head "$branch" --base main --title "chore: release v$RELEASE_VERSION" --description "Prepare release v$RELEASE_VERSION."
+          else
+            printf 'release PR already open: #%s\n' "$existing_pr"
+          fi

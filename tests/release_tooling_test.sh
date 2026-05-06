@@ -694,37 +694,39 @@ PY
   else
     fail "release PR preparation workflow runs automatically after pushes and merges to main ($output)"
   fi
-  assert_file_contains "$prepare_workflow" 'release-plz release-pr --forge gitea --git-token "$RELEASE_PREPARE_TOKEN"' "release PR preparation workflow uses release-plz Gitea release-pr with the prepare token"
-  assert_file_contains "$prepare_workflow" '--repo-url https://git.johnwilger.com/jwilger/auto_review' "release PR preparation workflow passes the HTTPS Forgejo repo URL to release-plz"
-  assert_file_not_contains "$prepare_workflow" 'scripts/release prepare' "release PR preparation workflow does not call the hand-rolled prepare script"
+  assert_file_contains "$prepare_workflow" 'scripts/release plan --workspace .' "release PR preparation workflow computes the next release version locally"
+  assert_file_contains "$prepare_workflow" 'for candidate_type in patch minor major' "release PR preparation workflow selects the release type by trying patch, minor, then major"
+  assert_file_contains "$prepare_workflow" 'cargo semver-checks --workspace --baseline-rev "$BASELINE_TAG" --release-type "$candidate_type"' "release PR preparation workflow validates each candidate bump with cargo-semver-checks"
+  assert_file_contains "$prepare_workflow" 'scripts/release plan --workspace . --release-type "$candidate_type"' "release PR preparation workflow recomputes the version from the semver-checks-selected release type"
+  assert_file_contains "$prepare_workflow" 'scripts/release prepare --workspace . --version "$RELEASE_VERSION"' "release PR preparation workflow updates root release metadata with project tooling"
+  assert_file_not_contains "$prepare_workflow" 'release-plz' "release PR preparation workflow does not invoke release-plz"
   assert_file_contains "$prepare_workflow" 'fetch-depth: 0' "release PR preparation workflow checks out full history for changelog generation"
   assert_file_contains "$prepare_workflow" 'git fetch --tags' "release PR preparation workflow fetches tags for changelog generation"
   assert_file_not_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not map tea token from unsupported forgejo.token expression"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not map git push token from unsupported forgejo.token expression"
   assert_file_contains "$prepare_workflow" 'RELEASE_PREPARE_TOKEN: ${{ secrets.RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow exposes the explicit prepare-scoped Actions secret to release tooling"
-  assert_file_contains "$prepare_workflow" 'RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}' "release PR preparation workflow exposes the release bot signing key only to release-plz"
+  assert_file_contains "$prepare_workflow" 'RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}' "release PR preparation workflow exposes the release bot signing key only to release preparation"
   assert_file_contains "$prepare_workflow" 'RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}' "release PR preparation workflow uses the configured release bot name"
   assert_file_contains "$prepare_workflow" 'RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}' "release PR preparation workflow uses the configured release bot email"
-  assert_file_contains "$prepare_workflow" 'GIT_AUTHOR_NAME="$RELEASE_BOT_NAME"' "release PR preparation workflow gives release-plz the release bot author name"
-  assert_file_contains "$prepare_workflow" 'GIT_AUTHOR_EMAIL="$RELEASE_BOT_EMAIL"' "release PR preparation workflow gives release-plz the release bot author email"
-  assert_file_contains "$prepare_workflow" 'GIT_COMMITTER_NAME="$RELEASE_BOT_NAME"' "release PR preparation workflow gives release-plz the release bot committer name"
-  assert_file_contains "$prepare_workflow" 'GIT_COMMITTER_EMAIL="$RELEASE_BOT_EMAIL"' "release PR preparation workflow gives release-plz the release bot committer email"
-  assert_file_contains "$prepare_workflow" 'GIT_CONFIG_KEY_0=gpg.format' "release PR preparation workflow configures git SSH signing format for release-plz"
-  assert_file_contains "$prepare_workflow" 'GIT_CONFIG_VALUE_0=ssh' "release PR preparation workflow configures git SSH signing format value for release-plz"
+  assert_file_contains "$prepare_workflow" 'GIT_AUTHOR_NAME="$RELEASE_BOT_NAME"' "release PR preparation workflow gives git the release bot author name"
+  assert_file_contains "$prepare_workflow" 'GIT_AUTHOR_EMAIL="$RELEASE_BOT_EMAIL"' "release PR preparation workflow gives git the release bot author email"
+  assert_file_contains "$prepare_workflow" 'GIT_COMMITTER_NAME="$RELEASE_BOT_NAME"' "release PR preparation workflow gives git the release bot committer name"
+  assert_file_contains "$prepare_workflow" 'GIT_COMMITTER_EMAIL="$RELEASE_BOT_EMAIL"' "release PR preparation workflow gives git the release bot committer email"
+  assert_file_contains "$prepare_workflow" 'GIT_CONFIG_KEY_0=gpg.format' "release PR preparation workflow configures git SSH signing format"
+  assert_file_contains "$prepare_workflow" 'GIT_CONFIG_VALUE_0=ssh' "release PR preparation workflow configures git SSH signing format value"
   assert_file_contains "$prepare_workflow" 'GIT_CONFIG_KEY_1=user.signingkey' "release PR preparation workflow points git at the release bot signing key"
-  assert_file_contains "$prepare_workflow" 'GIT_CONFIG_KEY_2=commit.gpgsign' "release PR preparation workflow requires release-plz commits to be signed"
-  assert_file_contains "$prepare_workflow" 'GIT_CONFIG_VALUE_2=true' "release PR preparation workflow enables release-plz commit signing"
+  assert_file_contains "$prepare_workflow" 'GIT_CONFIG_KEY_2=commit.gpgsign' "release PR preparation workflow requires release commits to be signed"
+  assert_file_contains "$prepare_workflow" 'GIT_CONFIG_VALUE_2=true' "release PR preparation workflow enables release commit signing"
   assert_file_not_contains "$prepare_workflow" 'Auto Review Bot' "release PR preparation workflow does not attribute release commits to the review bot"
-  assert_file_not_contains "$prepare_workflow" 'repo_token=' "release PR preparation workflow passes the prepare token directly to release-plz instead of deriving tea/git helper tokens"
-  assert_file_not_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN' "release PR preparation workflow does not configure tea tokens for release-plz"
+  assert_file_not_contains "$prepare_workflow" 'repo_token=' "release PR preparation workflow does not derive shared helper tokens"
+  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN="$RELEASE_PREPARE_TOKEN"' "release PR preparation workflow configures tea with only the prepare token"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN' "release PR preparation workflow does not configure manual git push helper tokens"
-  assert_file_not_contains "$prepare_workflow" 'git fetch origin' "release PR preparation workflow does not manually inspect remote release branches"
-  assert_file_not_contains "$prepare_workflow" 'git switch' "release PR preparation workflow does not manually switch release branches"
-  assert_file_not_contains "$prepare_workflow" 'git push --force-with-lease' "release PR preparation workflow delegates release branch updates to release-plz"
-  assert_file_not_contains "$prepare_workflow" 'git commit' "release PR preparation workflow delegates release commits to release-plz"
-  assert_file_not_contains "$prepare_workflow" 'git add Cargo.toml Cargo.lock CHANGELOG.md' "release PR preparation workflow does not stage release metadata manually"
-  assert_file_not_contains "$prepare_workflow" 'tea login add' "release PR preparation workflow does not configure tea login"
-  assert_file_not_contains "$prepare_workflow" 'tea pr' "release PR preparation workflow delegates release PR management to release-plz"
+  assert_file_contains "$prepare_workflow" 'git switch -C "$branch"' "release PR preparation workflow switches to the release branch"
+  assert_file_contains "$prepare_workflow" 'git push --force-with-lease origin "$branch"' "release PR preparation workflow updates the release branch"
+  assert_file_contains "$prepare_workflow" 'git commit -m "chore: release v$RELEASE_VERSION"' "release PR preparation workflow creates a signed release metadata commit"
+  assert_file_contains "$prepare_workflow" 'git add Cargo.toml Cargo.lock CHANGELOG.md' "release PR preparation workflow stages only root release metadata"
+  assert_file_contains "$prepare_workflow" 'tea login add' "release PR preparation workflow configures tea with the prepare token"
+  assert_file_contains "$prepare_workflow" 'tea pr create' "release PR preparation workflow creates the release PR"
   assert_file_contains "$prepare_workflow" 'nix develop' "release PR preparation workflow enters the Nix development environment before project tooling"
   assert_file_not_contains "$prepare_workflow" 'gh ' "release PR preparation workflow does not invoke GitHub tooling"
 
@@ -734,8 +736,7 @@ PY
   assert_file_contains "$publish_workflow" 'nix develop' "publish workflow enters the Nix development environment before project tooling"
   assert_file_contains "$publish_workflow" 'nix build .#ar-gateway-image' "publish workflow builds the Nix Docker image before publication"
   assert_file_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway' "publish workflow targets the Forgejo package registry image repository"
-  assert_file_not_contains "$publish_workflow" 'release-plz release --forge gitea --git-token "$RELEASE_PUBLISH_TOKEN"' "publish workflow does not delegate publication to release-plz cargo release"
-  assert_file_not_contains "$publish_workflow" '--repo-url https://git.johnwilger.com/jwilger/auto_review' "publish workflow does not pass a Forgejo repo URL to release-plz for cargo publishing"
+  assert_file_not_contains "$publish_workflow" 'release-plz' "publish workflow does not use release-plz"
   assert_file_not_contains "$publish_workflow" 'scripts/release publish' "publish workflow does not call the hand-rolled publish script"
   assert_file_not_contains "$publish_workflow" 'RELEASE_VERSION="${FORGEJO_PULL_REQUEST_HEAD_BRANCH#release/v}"' "publish workflow does not derive a release version from a hand-managed branch"
   assert_file_not_contains "$publish_workflow" '[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]' "publish workflow does not duplicate release-plz version selection"
@@ -766,23 +767,23 @@ test_prepare_workflow_skips_release_pr_merge_pushes() {
   assert_file_contains "$prepare_workflow" 'workflow_dispatch' "release PR preparation workflow still supports manual dispatch"
 }
 
-test_prepare_workflow_validates_dispatch_inputs_before_token_bearing_steps() {
+test_prepare_workflow_skips_release_infra_fix_pushes() {
+  local prepare_workflow
+  prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
+
+  assert_file_has_line_containing_all "$prepare_workflow" "release PR preparation workflow skips release infrastructure fixes by title" 'github.event_name' 'push' 'github.event.head_commit.message' 'fix(release)'
+  assert_file_contains "$prepare_workflow" 'workflow_dispatch' "release PR preparation workflow still supports manual dispatch after release infrastructure fixes"
+}
+
+test_prepare_workflow_plans_and_checks_semver_before_release_metadata_commit() {
   local prepare_workflow output status
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
 
-  assert_file_contains "$prepare_workflow" 'RELEASE_VERSION: ${{ inputs.version }}' "release PR preparation workflow moves dispatch version through env"
-  assert_file_contains "$prepare_workflow" 'RELEASE_DATE: ${{ inputs.date }}' "release PR preparation workflow moves dispatch date through env"
   output="$(python3 - "$prepare_workflow" <<'PY'
 import pathlib
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text()
-token_marker = 'release-plz release-pr --forge gitea --git-token "$RELEASE_PREPARE_TOKEN"'
-if token_marker not in workflow:
-    print('missing release-plz release-pr invocation with prepare token')
-    sys.exit(1)
-
-validation_section, token_section = workflow.split(token_marker, 1)
 
 def require_ordered(section, markers, label):
     cursor = 0
@@ -794,23 +795,30 @@ def require_ordered(section, markers, label):
         cursor = found + len(marker)
 
 require_ordered(
-    validation_section,
+    workflow,
     [
-        'RELEASE_PREPARE_TOKEN: ${{ secrets.RELEASE_PREPARE_TOKEN }}',
+        'scripts/release plan --workspace .',
+        'for candidate_type in patch minor major',
+        'cargo semver-checks --workspace --baseline-rev "$BASELINE_TAG" --release-type "$candidate_type"',
+        'scripts/release prepare --workspace . --version "$RELEASE_VERSION"',
+        'git add Cargo.toml Cargo.lock CHANGELOG.md',
+        'git commit -m "chore: release v$RELEASE_VERSION"',
+        'git push --force-with-lease origin "$branch"',
+        'tea pr create',
     ],
-    'prepare token environment',
+    'release preparation flow',
 )
-for forbidden in ['scripts/release prepare', 'branch="release/', '--title', '--tag']:
+for forbidden in ['release-plz', 'crates/*/CHANGELOG.md']:
     if forbidden in workflow:
-        print(f'prepare workflow should rely on release-plz defaults, found: {forbidden}')
+        print(f'prepare workflow should use local root-release tooling, found: {forbidden}')
         sys.exit(1)
 PY
   )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "release PR preparation workflow invokes release-plz with the prepare token and no manual defaults"
+    pass "release PR preparation workflow plans, semver-checks, commits, pushes, and opens the release PR"
   else
-    fail "release PR preparation workflow invokes release-plz with the prepare token and no manual defaults ($output)"
+    fail "release PR preparation workflow plans, semver-checks, commits, pushes, and opens the release PR ($output)"
   fi
 }
 
@@ -830,9 +838,9 @@ test_release_workflows_use_prepare_secret_and_protected_publish_token() {
   assert_file_not_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not use unsupported forgejo.token expression for tea"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not use unsupported forgejo.token expression for git push"
   assert_file_contains "$prepare_workflow" 'RELEASE_PREPARE_TOKEN: ${{ secrets.RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow exposes the prepare-scoped Actions secret to release tooling"
-  assert_file_contains "$prepare_workflow" 'release-plz release-pr --forge gitea --git-token "$RELEASE_PREPARE_TOKEN"' "release PR preparation workflow passes only the prepare-scoped token to release-plz"
+  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN="$RELEASE_PREPARE_TOKEN"' "release PR preparation workflow passes only the prepare-scoped token to tea"
   assert_file_not_contains "$prepare_workflow" 'repo_token=' "release PR preparation workflow does not derive shared helper tokens"
-  assert_file_not_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN' "release PR preparation workflow does not expose tea token environment"
+  assert_file_not_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow does not expose tea token at step scope"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN' "release PR preparation workflow does not expose manual git push token environment"
   assert_file_not_contains "$prepare_workflow" 'TEA_TOKEN:' "release PR preparation workflow does not use tea's legacy token env var"
   assert_file_not_contains "$prepare_workflow" 'secrets.FORGEJO_TOKEN' "release PR preparation workflow does not use the legacy shared Actions secret"
@@ -842,7 +850,7 @@ test_release_workflows_use_prepare_secret_and_protected_publish_token() {
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_RELEASE_PUBLISH_TOKEN' "release PR preparation workflow does not expose the publish-scoped Actions secret"
 
   assert_file_contains "$publish_workflow" 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow uses the publish-scoped protected environment secret"
-  assert_file_not_contains "$publish_workflow" 'release-plz release --forge gitea --git-token "$RELEASE_PUBLISH_TOKEN"' "publish workflow does not pass the publish-scoped token to release-plz cargo release"
+  assert_file_not_contains "$publish_workflow" 'release-plz' "publish workflow does not use release-plz"
   assert_file_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway' "publish workflow confines the publish-scoped token to registry image publication"
   assert_file_not_contains "$publish_workflow" 'FORGEJO_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow does not expose legacy FORGEJO_TOKEN to publish tooling"
   assert_file_not_contains "$publish_workflow" 'GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow does not expose tea token environment"
@@ -859,12 +867,12 @@ test_prepare_workflow_requires_explicit_prepare_secret_runtime_env() {
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
 
   assert_file_contains "$prepare_workflow" 'RELEASE_PREPARE_TOKEN: ${{ secrets.RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow receives the explicit prepare secret"
-  assert_file_contains "$prepare_workflow" 'release-plz release-pr --forge gitea --git-token "$RELEASE_PREPARE_TOKEN"' "release PR preparation workflow gives release-plz the prepare token directly"
+  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN="$RELEASE_PREPARE_TOKEN"' "release PR preparation workflow gives tea the prepare token directly"
   assert_file_not_contains "$prepare_workflow" 'repo_token=' "release PR preparation workflow does not copy the prepare secret into a shared helper token"
-  assert_file_not_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN' "release PR preparation workflow does not configure tea token env"
+  assert_file_not_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow does not expose tea token at step scope"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN' "release PR preparation workflow does not configure manual git push token env"
   assert_file_not_contains "$prepare_workflow" 'GITHUB_TOKEN:-' "release PR preparation workflow does not fall back to GitHub-compatible auto token aliases"
-  assert_file_not_contains "$prepare_workflow" 'GITEA_SERVER_URL=' "release PR preparation workflow does not configure tea server URL for release-plz"
+  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_URL="https://git.johnwilger.com"' "release PR preparation workflow configures tea for Forgejo"
 }
 
 test_publish_workflow_validates_provenance_and_changed_files_before_publish_token() {
@@ -955,13 +963,13 @@ PY
   assert_file_contains_before "$publish_workflow" '.forgejo/workflows/*|scripts/*)' 'Publish Docker image to Forgejo package registry' "publish workflow rejects script and workflow changes before publishing the image with the publish token"
 }
 
-test_publish_workflow_delegates_version_selection_to_release_plz() {
+test_publish_workflow_uses_release_pr_merge_sha_not_a_recomputed_version() {
   local publish_workflow
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
   assert_file_not_contains "$publish_workflow" 'RELEASE_VERSION="${FORGEJO_PULL_REQUEST_HEAD_BRANCH#release/v}"' "publish workflow does not derive a release version from a hand-managed branch"
-  assert_file_not_contains "$publish_workflow" '[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]' "publish workflow does not duplicate release-plz version selection"
-  assert_file_not_contains "$publish_workflow" 'release-plz release --forge gitea --git-token "$RELEASE_PUBLISH_TOKEN"' "publish workflow does not use release-plz cargo publication"
+  assert_file_not_contains "$publish_workflow" '[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]' "publish workflow does not recompute release versions"
+  assert_file_not_contains "$publish_workflow" 'release-plz' "publish workflow does not use release-plz"
   assert_file_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway' "publish workflow publishes the application Docker image rather than workspace crates"
 }
 
@@ -1019,7 +1027,7 @@ PY
   assert_file_contains_before "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' 'Publish Docker image to Forgejo package registry' "publish workflow verifies checked-out merge commit before publishing the image with the publish token"
 }
 
-test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_release_plz() {
+test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_image_publish() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
@@ -1117,13 +1125,13 @@ PY
   fi
 }
 
-test_prepare_workflow_delegates_git_identity_and_commits_to_release_plz() {
+test_prepare_workflow_uses_release_bot_identity_for_signed_commits() {
   local prepare_workflow
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
 
-  assert_file_not_contains "$prepare_workflow" 'git config user.name' "release PR preparation workflow does not hand-configure git author name"
-  assert_file_not_contains "$prepare_workflow" 'git config user.email' "release PR preparation workflow does not hand-configure git author email"
-  assert_file_not_contains "$prepare_workflow" 'git commit' "release PR preparation workflow delegates release commits to release-plz"
+  assert_file_contains "$prepare_workflow" 'GIT_AUTHOR_NAME="$RELEASE_BOT_NAME"' "release PR preparation workflow sets release bot author name"
+  assert_file_contains "$prepare_workflow" 'GIT_AUTHOR_EMAIL="$RELEASE_BOT_EMAIL"' "release PR preparation workflow sets release bot author email"
+  assert_file_contains "$prepare_workflow" 'git commit -m "chore: release v$RELEASE_VERSION"' "release PR preparation workflow creates the signed release commit"
 }
 
 test_prepare_workflow_checkout_does_not_persist_credentials() {
@@ -1179,7 +1187,7 @@ PY
   fi
 }
 
-test_prepare_workflow_authenticates_release_plz_git_push_without_checkout_credentials() {
+test_prepare_workflow_authenticates_git_push_without_checkout_credentials() {
   local prepare_workflow output status
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
 
@@ -1189,20 +1197,20 @@ import pathlib
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text()
-release_plz = 'release-plz release-pr --forge gitea --git-token "$RELEASE_PREPARE_TOKEN"'
-if release_plz not in workflow:
-    print('missing release-plz release-pr invocation')
+push_marker = 'git push --force-with-lease origin "$branch"'
+if push_marker not in workflow:
+    print('missing release branch push')
     sys.exit(1)
 
-before_release_plz = workflow.split(release_plz, 1)[0]
+before_push = workflow.split(push_marker, 1)[0]
 required = [
     'export GIT_CONFIG_COUNT=4',
-    'export GIT_CONFIG_KEY_3=url.https://release-plz:${RELEASE_PREPARE_TOKEN}@git.johnwilger.com/.insteadOf',
+    'export GIT_CONFIG_KEY_3=url.https://release:${RELEASE_PREPARE_TOKEN}@git.johnwilger.com/.insteadOf',
     'export GIT_CONFIG_VALUE_3=https://git.johnwilger.com/',
 ]
-missing = [marker for marker in required if marker not in before_release_plz]
+missing = [marker for marker in required if marker not in before_push]
 if missing:
-    print('missing exported release-plz authenticated Forgejo HTTPS git push config before release-plz: ' + ', '.join(missing))
+    print('missing exported authenticated Forgejo HTTPS git push config before push: ' + ', '.join(missing))
     sys.exit(1)
 sys.exit(0)
 PY
@@ -1215,36 +1223,39 @@ PY
   fi
 }
 
-test_prepare_workflow_lets_release_plz_manage_release_branch_with_prepare_token() {
+test_prepare_workflow_manages_release_branch_with_prepare_token() {
   local prepare_workflow
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
 
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not map git push token from unsupported forgejo.token expression"
   assert_file_contains "$prepare_workflow" 'RELEASE_PREPARE_TOKEN: ${{ secrets.RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow receives the operator-created prepare secret"
-  assert_file_contains "$prepare_workflow" 'release-plz release-pr --forge gitea --git-token "$RELEASE_PREPARE_TOKEN"' "release PR preparation workflow gives release-plz the prepare token for release branch and PR management"
+  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN="$RELEASE_PREPARE_TOKEN"' "release PR preparation workflow gives tea the prepare token for release PR management"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN' "release PR preparation workflow does not expose a manual git push helper token"
   assert_file_not_contains "$prepare_workflow" 'git -c credential.helper=' "release PR preparation workflow does not install manual git credential helpers"
-  assert_file_not_contains "$prepare_workflow" 'push --force-with-lease origin "$branch"' "release PR preparation workflow does not manually push release branches"
+  assert_file_contains "$prepare_workflow" 'git push --force-with-lease origin "$branch"' "release PR preparation workflow pushes release branches with the prepare token"
 }
 
-test_prepare_workflow_does_not_stage_release_metadata_manually() {
+test_prepare_workflow_stages_only_root_release_metadata() {
   local prepare_workflow
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
 
-  assert_file_contains "$prepare_workflow" 'release-plz release-pr --forge gitea --git-token "$RELEASE_PREPARE_TOKEN"' "release PR preparation workflow delegates release metadata updates to release-plz"
-  assert_file_not_contains "$prepare_workflow" 'git add Cargo.toml Cargo.lock CHANGELOG.md' "release PR preparation workflow does not stage release metadata manually"
+  assert_file_contains "$prepare_workflow" 'scripts/release prepare --workspace . --version "$RELEASE_VERSION"' "release PR preparation workflow updates root release metadata"
+  assert_file_contains "$prepare_workflow" 'git add Cargo.toml Cargo.lock CHANGELOG.md' "release PR preparation workflow stages root release metadata explicitly"
+  assert_file_not_contains "$prepare_workflow" 'crates/*/CHANGELOG.md' "release PR preparation workflow does not stage per-crate changelogs"
 }
 
-test_release_tooling_uses_release_plz_for_prepare_and_image_registry_for_publish() {
+test_release_tooling_uses_local_prepare_and_image_registry_for_publish() {
   local prepare_workflow publish_workflow
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  assert_file_contains "$prepare_workflow" 'release-plz release-pr --forge gitea --git-token "$RELEASE_PREPARE_TOKEN"' "release PR preparation workflow invokes release-plz release-pr"
-  assert_file_not_contains "$publish_workflow" 'release-plz release --forge gitea --git-token "$RELEASE_PUBLISH_TOKEN"' "publish workflow does not invoke release-plz release"
+  assert_file_contains "$prepare_workflow" 'scripts/release plan --workspace .' "release PR preparation workflow invokes local release planning"
+  assert_file_contains "$prepare_workflow" 'scripts/release prepare --workspace . --version "$RELEASE_VERSION"' "release PR preparation workflow invokes local release metadata preparation"
+  assert_file_not_contains "$prepare_workflow" 'release-plz' "release PR preparation workflow does not invoke release-plz"
+  assert_file_not_contains "$publish_workflow" 'release-plz' "publish workflow does not invoke release-plz"
   assert_file_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway' "publish workflow targets the application image package registry"
-  assert_file_not_contains "$prepare_workflow" 'tea login add' "release PR preparation workflow does not configure tea login"
-  assert_file_not_contains "$prepare_workflow" 'tea pr' "release PR preparation workflow does not use tea for PR management"
+  assert_file_contains "$prepare_workflow" 'tea login add' "release PR preparation workflow configures tea login"
+  assert_file_contains "$prepare_workflow" 'tea pr create' "release PR preparation workflow uses tea for PR management"
   assert_file_not_contains "$publish_workflow" 'tea login add' "publish workflow does not configure tea login"
   assert_file_not_contains "$publish_workflow" 'tea release create' "publish workflow does not use tea for release publication"
 }
@@ -1477,7 +1488,7 @@ trusted_pr_paths = [
     path for path in paths
     if "github.event.pull_request.merged == true" in path
     and "github.event.pull_request.base.ref == 'main'" in path
-    and "startsWith(github.event.pull_request.head.ref, 'release-plz-')" in path
+    and "startsWith(github.event.pull_request.head.ref, 'release/v')" in path
 ]
 manual_paths = [
     path for path in paths
@@ -1594,9 +1605,9 @@ test_release_tooling_tests_are_wired_into_nix_flake_check() {
 
   assert_file_contains "$flake" 'release-tooling' "nix flake check exposes the release tooling shell test"
   assert_file_contains "$flake" 'bash tests/release_tooling_test.sh' "nix flake check runs release tooling tests"
-  assert_file_contains "$flake" 'release-plz' "nix flake/dev shell/check exposes release-plz"
+  assert_file_not_contains "$flake" 'release-plz' "nix flake/dev shell/check does not expose release-plz"
   assert_file_contains "$flake" 'skopeo' "nix flake/dev shell/check exposes skopeo for registry image publication"
-  assert_file_contains "$flake" 'cargo-semver-checks' "nix flake/dev shell/check exposes cargo-semver-checks for release-plz semver defaults"
+  assert_file_contains "$flake" 'cargo-semver-checks' "nix flake/dev shell/check exposes cargo-semver-checks for release planning"
   assert_file_contains "$flake" '/tests/' "nix flake source includes release tooling tests"
   assert_file_contains "$flake" 'AGENTS.md' "nix flake source includes contributor guidance checked by release tooling tests"
   assert_file_contains "$flake" '.forgejo/pull_request_template.md' "nix flake source includes PR template checked by release tooling tests"
@@ -1604,16 +1615,17 @@ test_release_tooling_tests_are_wired_into_nix_flake_check() {
   assert_file_contains "$flake" '.kilo/skills/rust-workspace-engineering/SKILL.md' "nix flake source includes Rust workspace skill checked by release tooling tests"
 }
 
-test_release_plz_config_stays_minimal_and_private() {
+test_release_plz_config_is_removed_and_workspace_crates_stay_private() {
   local config cargo
   config="$ROOT/release-plz.toml"
   cargo="$ROOT/Cargo.toml"
 
-  assert_file_exists "$config" "release-plz configuration exists"
-  assert_file_not_contains "$config" 'branch' "release-plz config does not customize release branch names"
-  assert_file_not_contains "$config" 'title' "release-plz config does not customize release PR titles"
-  assert_file_not_contains "$config" 'tag' "release-plz config does not customize release tag names"
-  assert_file_contains "$cargo" 'publish = false' "workspace crates remain private/non-publish for release-plz"
+  if [[ ! -f "$config" ]]; then
+    pass "release-plz configuration is removed"
+  else
+    fail "release-plz configuration is removed (unexpected file: $config)"
+  fi
+  assert_file_contains "$cargo" 'publish = false' "workspace crates remain private/non-publish"
 }
 
 test_release_token_blast_radius_is_documented() {
@@ -1677,18 +1689,23 @@ test_release_secrets_are_documented_for_operators() {
 
 test_release_workflows_exist_for_prepare_pr_and_publish_on_merge
 test_release_workflows_install_or_reuse_nix_like_ci_before_nix_develop
+test_prepare_workflow_skips_release_infra_fix_pushes
+test_prepare_workflow_plans_and_checks_semver_before_release_metadata_commit
 test_publish_workflow_requires_release_pr_base_branch_main
 test_release_workflows_use_prepare_secret_and_protected_publish_token
 test_publish_workflow_validates_provenance_and_changed_files_before_publish_token
 test_publish_workflow_executes_from_merge_commit_sha_before_publish_token
-test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_release_plz
+test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_image_publish
 test_prepare_workflow_checkout_does_not_persist_credentials
-test_prepare_workflow_authenticates_release_plz_git_push_without_checkout_credentials
+test_prepare_workflow_authenticates_git_push_without_checkout_credentials
+test_prepare_workflow_manages_release_branch_with_prepare_token
+test_prepare_workflow_stages_only_root_release_metadata
+test_release_tooling_uses_local_prepare_and_image_registry_for_publish
 test_publish_workflow_publishes_nix_docker_image_to_forgejo_registry
 test_publish_workflow_requires_trusted_release_environment
 test_publish_workflow_supports_manual_dispatch_from_release_merge_sha
 test_release_tooling_tests_are_wired_into_nix_flake_check
-test_release_plz_config_stays_minimal_and_private
+test_release_plz_config_is_removed_and_workspace_crates_stay_private
 test_release_secrets_are_documented_for_operators
 test_release_token_blast_radius_is_documented
 

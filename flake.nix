@@ -49,7 +49,6 @@
             (craneLib.filterCargoSources path type)
              || baseName == "deny.toml"
               || baseName == "CHANGELOG.md"
-              || baseName == "release-plz.toml"
               || baseName == "AGENTS.md"
               || baseName == "flake.nix"
              || pkgs.lib.hasInfix "/.cargo/" strPath
@@ -136,7 +135,6 @@
             cargo-deny
             cargo-nextest
             cargo-semver-checks
-            release-plz
             git
             forgejo-mcp
             tea
@@ -369,7 +367,6 @@
               git
               python3
               cargo-semver-checks
-              release-plz
               tea
             ];
           } ''
