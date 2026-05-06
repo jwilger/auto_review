@@ -77,6 +77,21 @@ jobs:
           set -euo pipefail
           git switch -C main "$RELEASE_MERGE_SHA"
           git branch --set-upstream-to=origin/main main
+      - name: Derive release version from checked-out metadata
+        run: |
+          set -euo pipefail
+          # RELEASE_VERSION=Cargo.toml checked-out metadata.
+          RELEASE_VERSION="$(python3 - <<'PY'
+          import pathlib
+          import re
+
+          match = re.search(r'(?m)^version\s*=\s*"(?P<version>[^"]+)"', pathlib.Path("Cargo.toml").read_text())
+          if not match:
+              raise SystemExit("workspace package version not found in Cargo.toml")
+          print(match.group("version"))
+          PY
+          )"
+          printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
       - name: Build Nix Docker image
         run: |
           set -euo pipefail
@@ -103,3 +118,25 @@ jobs:
             exit 1
           fi
           nix develop --command skopeo copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_MERGE_SHA}"
+          nix develop --command skopeo copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_VERSION}"
+          nix develop --command skopeo copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:latest"
+      - name: Create Forgejo Release
+        env:
+          GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
+          GITEA_SERVER_URL: https://git.johnwilger.com
+          RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          RELEASE_NOTES_FILE="$(mktemp)"
+          # Generate notes from the finalized CHANGELOG.md ## [$RELEASE_VERSION] section.
+          awk "/^## \\[$RELEASE_VERSION\\]/{emit=1; next} /^## \\[/{if (emit) exit} emit {print}" CHANGELOG.md > "$RELEASE_NOTES_FILE"
+          printf '\nDocker image: git.johnwilger.com/jwilger/auto_review/ar-gateway:%s\n' "$RELEASE_VERSION" >> "$RELEASE_NOTES_FILE"
+          tea_login="auto_review-release-publish-${GITHUB_RUN_ID:-$$}"
+          nix develop --command tea login add --name "$tea_login" --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
+          nix develop --command tea release create \
+            --login "$tea_login" \
+            --repo jwilger/auto_review \
+            --tag v$RELEASE_VERSION \
+            --target "$RELEASE_MERGE_SHA" \
+            --title "v$RELEASE_VERSION" \
+            --note-file "$RELEASE_NOTES_FILE"

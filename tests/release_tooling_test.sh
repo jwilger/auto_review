@@ -1013,11 +1013,10 @@ test_release_workflows_use_prepare_secret_and_protected_publish_token() {
 
   assert_file_contains "$publish_workflow" 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow uses the publish-scoped protected environment secret"
   assert_file_not_contains "$publish_workflow" 'release-plz' "publish workflow does not use release-plz"
-  assert_file_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway' "publish workflow confines the publish-scoped token to registry image publication"
+  assert_file_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway' "publish workflow uses the publish-scoped token for registry image publication"
+  assert_file_contains "$publish_workflow" 'GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow intentionally broadens the publish-scoped token to Forgejo Release creation"
+  assert_file_contains "$publish_workflow" 'GITEA_SERVER_URL: https://git.johnwilger.com' "publish workflow points Forgejo Release API calls at the Forgejo server"
   assert_file_not_contains "$publish_workflow" 'FORGEJO_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow does not expose legacy FORGEJO_TOKEN to publish tooling"
-  assert_file_not_contains "$publish_workflow" 'GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow does not expose tea token environment"
-  assert_file_not_contains "$publish_workflow" 'GITEA_SERVER_URL: https://git.johnwilger.com' "publish workflow does not configure tea server environment"
-  assert_file_not_contains "$publish_workflow" 'TEA_TOKEN:' "publish workflow does not use tea's legacy token env var"
   assert_file_not_contains "$publish_workflow" 'secrets.FORGEJO_TOKEN' "publish workflow does not use the legacy shared Actions secret"
   assert_file_not_contains "$publish_workflow" 'secrets.FORGEJO_RELEASE_PREPARE_TOKEN' "publish workflow does not reference the old disallowed prepare secret name"
   assert_file_not_contains "$publish_workflow" 'secrets.FORGEJO_RELEASE_PUBLISH_TOKEN' "publish workflow does not reference the old disallowed publish secret name"
@@ -1126,13 +1125,57 @@ PY
 }
 
 test_publish_workflow_uses_release_pr_merge_sha_not_a_recomputed_version() {
-  local publish_workflow
+  local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
   assert_file_not_contains "$publish_workflow" 'RELEASE_VERSION="${FORGEJO_PULL_REQUEST_HEAD_BRANCH#release/v}"' "publish workflow does not derive a release version from a hand-managed branch"
   assert_file_not_contains "$publish_workflow" '[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]' "publish workflow does not recompute release versions"
   assert_file_not_contains "$publish_workflow" 'release-plz' "publish workflow does not use release-plz"
   assert_file_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway' "publish workflow publishes the application Docker image rather than workspace crates"
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+for forbidden in [
+    'FORGEJO_PULL_REQUEST_HEAD_BRANCH#release/v',
+    'scripts/release plan',
+    'cargo semver-checks',
+]:
+    if forbidden in workflow:
+        errors.append(f'publish workflow must not derive RELEASE_VERSION from branch names or planning: {forbidden}')
+
+trusted_metadata_patterns = [
+    r'RELEASE_VERSION=.*Cargo\.toml',
+    r'Cargo\.toml.*RELEASE_VERSION=',
+    r'workspace_version\s+Cargo\.toml',
+    r'pathlib\.Path\(["\']Cargo\.toml["\']\).*version',
+]
+if not any(re.search(pattern, workflow) for pattern in trusted_metadata_patterns):
+    errors.append('publish workflow must derive RELEASE_VERSION from trusted Cargo.toml at the checked-out merge commit')
+
+publish_marker = 'Publish Docker image to Forgejo package registry'
+if publish_marker in workflow:
+    before_publish = workflow.split(publish_marker, 1)[0]
+    if 'Cargo.toml' not in before_publish or 'RELEASE_VERSION' not in before_publish:
+        errors.append('publish workflow must derive RELEASE_VERSION before token-bearing publication begins')
+else:
+    errors.append('publish workflow is missing the token-bearing publication step marker')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+sys.exit(0)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow derives release version from checked-out Cargo.toml metadata"
+  else
+    fail "publish workflow derives release version from checked-out Cargo.toml metadata ($output)"
+  fi
 }
 
 test_publish_workflow_executes_from_merge_commit_sha_before_publish_token() {
@@ -1418,8 +1461,96 @@ test_release_tooling_uses_local_prepare_and_image_registry_for_publish() {
   assert_file_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway' "publish workflow targets the application image package registry"
   assert_file_contains "$prepare_workflow" 'tea login add' "release PR preparation workflow configures tea login"
   assert_file_contains "$prepare_workflow" 'tea pr create' "release PR preparation workflow uses tea for PR management"
-  assert_file_not_contains "$publish_workflow" 'tea login add' "publish workflow does not configure tea login"
-  assert_file_not_contains "$publish_workflow" 'tea release create' "publish workflow does not use tea for release publication"
+  assert_file_contains "$publish_workflow" 'tea release create' "publish workflow creates a Forgejo Release entry"
+}
+
+test_publish_workflow_promotes_release_image_tags_and_generates_release_notes() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+image = 'git.johnwilger.com/jwilger/auto_review/ar-gateway'
+required_image_tags = {
+    'merge SHA image tag': [f'{image}:$RELEASE_MERGE_SHA', f'{image}:${{RELEASE_MERGE_SHA}}'],
+    'raw release version image tag': [f'{image}:$RELEASE_VERSION', f'{image}:${{RELEASE_VERSION}}'],
+    'latest image tag': [f'{image}:latest'],
+}
+for description, candidates in required_image_tags.items():
+    if not any(candidate in workflow for candidate in candidates):
+        errors.append(f'missing {description}')
+
+release_markers = [
+    'tea login add',
+    'tea release create',
+    '--repo jwilger/auto_review',
+    '--tag v$RELEASE_VERSION',
+    '--target "$RELEASE_MERGE_SHA"',
+    '--note-file',
+    'GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}',
+    'GITEA_SERVER_URL: https://git.johnwilger.com',
+]
+missing_release_markers = [marker for marker in release_markers if marker not in workflow]
+if missing_release_markers:
+    errors.append('missing authenticated Forgejo Release creation markers: ' + ', '.join(missing_release_markers))
+
+note_file_candidates = ['release_notes_file', 'RELEASE_NOTES_FILE', 'notes_file']
+if not any(candidate in workflow for candidate in note_file_candidates):
+    errors.append('publish workflow must write a dedicated release notes file before tea release create')
+
+finalized_changelog_patterns = [
+    r'CHANGELOG\.md[\s\S]{0,500}## \[\$RELEASE_VERSION\]',
+    r'## \[\$RELEASE_VERSION\][\s\S]{0,500}CHANGELOG\.md',
+    r'CHANGELOG\.md[\s\S]{0,500}## \[v?\$\{?RELEASE_VERSION\}?\]',
+]
+if not any(re.search(pattern, workflow) for pattern in finalized_changelog_patterns):
+    errors.append('release notes file must be generated from the finalized CHANGELOG.md section for RELEASE_VERSION')
+
+docker_link_candidates = [
+    'git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_VERSION',
+    'git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_VERSION}',
+]
+if not any(candidate in workflow for candidate in docker_link_candidates):
+    errors.append('release notes file must include the raw-version release Docker image link git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_VERSION')
+
+if '--note-file' in workflow and 'tea release create' in workflow:
+    note_file_index = min((workflow.find(candidate) for candidate in note_file_candidates if candidate in workflow), default=-1)
+    release_create_index = workflow.find('tea release create')
+    if note_file_index == -1 or note_file_index > release_create_index:
+        errors.append('release notes file must be generated before tea release create consumes --note-file')
+
+release_step_match = re.search(r'- name: Create Forgejo Release(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
+if not release_step_match:
+    errors.append('publish workflow must have a dedicated Create Forgejo Release step')
+else:
+    release_step = release_step_match.group('body')
+    if 'GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' not in release_step:
+        errors.append('Create Forgejo Release step must receive the publish token as GITEA_SERVER_TOKEN')
+    if 'tea login add' not in release_step:
+        errors.append('Create Forgejo Release step must authenticate tea explicitly with tea login add')
+    if 'tea release create' not in release_step:
+        errors.append('Create Forgejo Release step must create the Forgejo Release with tea release create')
+    if '--target "$RELEASE_MERGE_SHA"' not in release_step:
+        errors.append('tea release create must pin the release tag target to $RELEASE_MERGE_SHA')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+sys.exit(0)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow promotes release image tags and generates Forgejo release notes"
+  else
+    fail "publish workflow promotes release image tags and generates Forgejo release notes ($output)"
+  fi
 }
 
 test_publish_workflow_publishes_nix_docker_image_to_forgejo_registry() {
@@ -1679,6 +1810,7 @@ required_markers = [
     "environment: release-publish",
     'git switch -C main "$RELEASE_MERGE_SHA"',
     'Publish Docker image to Forgejo package registry',
+    'tea release create',
     'nix build .#ar-gateway-image',
     'git.johnwilger.com/jwilger/auto_review/ar-gateway',
 ]
@@ -1724,28 +1856,31 @@ if "RELEASE_PUBLISH_TOKEN" in validation_step:
     print("publish workflow validation step must not expose RELEASE_PUBLISH_TOKEN")
     sys.exit(1)
 publish_step_index = workflow.find("Publish Docker image to Forgejo package registry")
+release_step_index = workflow.find("tea release create")
 if publish_step_index == -1:
     print("publish workflow is missing publish step")
     sys.exit(1)
 if publish_step_index < validation_index or token_index < publish_step_index:
-    print("publish workflow must expose RELEASE_PUBLISH_TOKEN only in the publish step after validation completes")
+    print("publish workflow must expose RELEASE_PUBLISH_TOKEN only in token-bearing publish/release steps after validation completes")
     sys.exit(1)
-publish_step_lines = None
+allowed_token_lines = set()
 for index, line in enumerate(lines):
-    if line.strip() == "- name: Publish Docker image to Forgejo package registry":
+    if line.strip() in {
+        "- name: Publish Docker image to Forgejo package registry",
+        "- name: Create Forgejo Release",
+    }:
         step_lines = [line]
         for nested in lines[index + 1:]:
             if nested.startswith("      - "):
                 break
             step_lines.append(nested)
-        publish_step_lines = set(range(index, index + len(step_lines)))
-        break
-if publish_step_lines is None:
+        allowed_token_lines.update(range(index, index + len(step_lines)))
+if not allowed_token_lines:
     print("publish workflow is missing publish step")
     sys.exit(1)
 for index, line in enumerate(lines):
-    if "RELEASE_PUBLISH_TOKEN" in line and index not in publish_step_lines:
-        print("publish workflow must confine every RELEASE_PUBLISH_TOKEN reference to the publish step")
+    if "RELEASE_PUBLISH_TOKEN" in line and index not in allowed_token_lines:
+        print("publish workflow must confine every RELEASE_PUBLISH_TOKEN reference to token-bearing image publish or Forgejo Release steps")
         sys.exit(1)
 for forbidden in ["git clone", "tea pr checkout", "gh pr checkout"]:
     if forbidden in workflow:
@@ -1810,9 +1945,9 @@ PY
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release preparation PAT blast radius' "threat model documents the release preparation PAT blast radius"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'Release publishing PAT blast radius' "threat model documents the release publishing PAT blast radius"
   assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'prepare release PR branches and release PRs only in `jwilger/auto_review`' "threat model documents the release preparation PAT scope"
-  assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'publish container images only to `git.johnwilger.com/jwilger/auto_review/ar-gateway`' "threat model documents the release publishing PAT package registry scope"
+  assert_file_contains "$ROOT/docs/THREAT-MODEL.md" 'publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review`' "threat model documents the release publishing PAT package registry and release API scope"
   assert_contains "$t5a" 'builds the release Docker image with `nix build .#ar-gateway-image`' "T5a mitigation documents Nix-built image provenance for publishing"
-  assert_contains "$t5a" 'publishes only `git.johnwilger.com/jwilger/auto_review/ar-gateway` to the Forgejo package registry' "T5a mitigation documents package registry publication instead of cargo publishing"
+  assert_contains "$t5a" 'publishes only `git.johnwilger.com/jwilger/auto_review/ar-gateway` to the Forgejo package registry and creates the matching Forgejo Release entry' "T5a mitigation documents package registry and Forgejo Release publication instead of cargo publishing"
   assert_not_contains "$t5a" 'Forgejo release selection to `release-plz`' "T5a mitigation does not describe stale release-plz cargo publication"
   assert_contains "$t5a" '`Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`' "T5a mitigation publish allowlist includes Cargo.toml, Cargo.lock, and CHANGELOG.md"
   assert_contains "$t5a" 'root release metadata' "T5a mitigation documents root release metadata is permitted"
@@ -1822,7 +1957,7 @@ PY
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release preparation PAT blast radius' "operations docs summarize the release preparation PAT blast radius"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'release publishing PAT blast radius' "operations docs summarize the release publishing PAT blast radius"
   assert_file_contains "$ROOT/docs/OPERATIONS.md" 'prepare release PR branches and release PRs only in `jwilger/auto_review`' "operations docs constrain the release preparation PAT scope"
-  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'publish container images only to `git.johnwilger.com/jwilger/auto_review/ar-gateway`' "operations docs constrain the release publishing PAT package registry scope"
+  assert_file_contains "$ROOT/docs/OPERATIONS.md" 'publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review`' "operations docs constrain the release publishing PAT package registry and release API scope"
 }
 
 test_release_secrets_are_documented_for_operators() {
@@ -1860,6 +1995,7 @@ test_prepare_workflow_runs_tea_and_jq_inside_nix_develop
 test_publish_workflow_requires_release_pr_base_branch_main
 test_release_workflows_use_prepare_secret_and_protected_publish_token
 test_publish_workflow_validates_provenance_and_changed_files_before_publish_token
+test_publish_workflow_uses_release_pr_merge_sha_not_a_recomputed_version
 test_publish_workflow_executes_from_merge_commit_sha_before_publish_token
 test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_image_publish
 test_prepare_workflow_checkout_does_not_persist_credentials
@@ -1867,6 +2003,7 @@ test_prepare_workflow_authenticates_git_push_without_checkout_credentials
 test_prepare_workflow_manages_release_branch_with_prepare_token
 test_prepare_workflow_stages_only_root_release_metadata
 test_release_tooling_uses_local_prepare_and_image_registry_for_publish
+test_publish_workflow_promotes_release_image_tags_and_generates_release_notes
 test_publish_workflow_publishes_nix_docker_image_to_forgejo_registry
 test_publish_workflow_requires_trusted_release_environment
 test_publish_workflow_supports_manual_dispatch_from_release_merge_sha
