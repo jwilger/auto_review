@@ -858,6 +858,96 @@ PY
   fi
 }
 
+test_prepare_workflow_creates_prerelease_entry_for_release_candidate() {
+  local prepare_workflow output status
+  prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
+
+  output="$(python3 - "$prepare_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+if 'tea release create' not in workflow:
+    print('prepare workflow must create a Forgejo Release entry for RELEASE_CANDIDATE_TAG with tea release create --prerelease')
+    sys.exit(1)
+
+start = workflow.find('release_publish_login=')
+if start == -1:
+    print('prepare workflow must use a publish-token tea login for release candidate prereleases')
+    sys.exit(1)
+release_block = workflow[start:]
+
+required_markers = [
+    'RELEASE_CANDIDATE_TAG',
+    'GITEA_SERVER_TOKEN',
+    'tea login add',
+    '--token "$GITEA_SERVER_TOKEN"',
+    'tea release edit',
+    'tea release create',
+    '--login "$release_publish_login"',
+    '--repo jwilger/auto_review',
+    '--tag',
+    '"$RELEASE_CANDIDATE_TAG"',
+    '--target "$RELEASE_CANDIDATE_SHA"',
+    '--prerelease',
+    '--prerelease true',
+    '|| nix develop --command tea release create',
+]
+missing = [marker for marker in required_markers if marker not in release_block]
+if missing:
+    print('prepare workflow must create a prerelease Forgejo Release for each release candidate; missing: ' + ', '.join(missing))
+    sys.exit(1)
+
+edit_start = release_block.find('tea release edit')
+create_start = release_block.find('tea release create')
+if edit_start == -1 or create_start == -1 or edit_start > create_start:
+    print('prepare workflow must update an existing prerelease before falling back to create')
+    sys.exit(1)
+edit_block = release_block[edit_start:create_start]
+create_block = release_block[create_start:]
+shared_release_markers = [
+    '--login "$release_publish_login"',
+    '--repo jwilger/auto_review',
+    '--target "$RELEASE_CANDIDATE_SHA"',
+    '--title "$RELEASE_CANDIDATE_TAG"',
+    '--note "$release_note"',
+]
+for block_name, block in [('edit', edit_block), ('create', create_block)]:
+    missing_from_block = [marker for marker in shared_release_markers if marker not in block]
+    if missing_from_block:
+        print(f'prepare workflow {block_name} prerelease command is missing: ' + ', '.join(missing_from_block))
+        sys.exit(1)
+if '--prerelease true' not in edit_block:
+    print('prepare workflow edit prerelease command must preserve prerelease=true')
+    sys.exit(1)
+if '--tag "$RELEASE_CANDIDATE_TAG"' not in create_block or '--prerelease' not in create_block:
+    print('prepare workflow create prerelease command must create the release-candidate tag as prerelease')
+    sys.exit(1)
+
+ordered_markers = [
+    'RELEASE_CANDIDATE_TAG="$RELEASE_VERSION-rc.${GITHUB_RUN_NUMBER:-0}"',
+    'nix develop --command skopeo copy',
+    'tea release edit',
+    'tea release create',
+]
+cursor = 0
+for marker in ordered_markers:
+    found = workflow.find(marker, cursor)
+    if found == -1:
+        print('prepare workflow must publish candidate images before creating or updating the prerelease; missing ordered marker: ' + marker)
+        sys.exit(1)
+    cursor = found + len(marker)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "release PR preparation workflow creates a prerelease Forgejo Release for each release candidate"
+  else
+    fail "release PR preparation workflow creates a prerelease Forgejo Release for each release candidate ($output)"
+  fi
+}
+
 test_prepare_workflow_skips_release_pr_merge_pushes() {
   local prepare_workflow
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
@@ -1099,7 +1189,8 @@ test_release_workflows_use_prepare_secret_and_protected_publish_token() {
   assert_file_not_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not use unsupported forgejo.token expression for tea"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN: ${{ forgejo.token }}' "release PR preparation workflow does not use unsupported forgejo.token expression for git push"
   assert_file_contains "$prepare_workflow" 'RELEASE_PREPARE_TOKEN: ${{ secrets.RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow exposes the prepare-scoped Actions secret to release tooling"
-  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN="$RELEASE_PREPARE_TOKEN"' "release PR preparation workflow passes only the prepare-scoped token to tea"
+  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN="$RELEASE_PREPARE_TOKEN"' "release PR preparation workflow passes the prepare-scoped token to PR management tea calls"
+  assert_file_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN="$RELEASE_PUBLISH_TOKEN"' "release PR preparation workflow passes the publish-scoped token to release creation tea calls"
   assert_file_not_contains "$prepare_workflow" 'repo_token=' "release PR preparation workflow does not derive shared helper tokens"
   assert_file_not_contains "$prepare_workflow" 'GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PREPARE_TOKEN }}' "release PR preparation workflow does not expose tea token at step scope"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_ACTIONS_TOKEN' "release PR preparation workflow does not expose manual git push token environment"
@@ -1108,9 +1199,9 @@ test_release_workflows_use_prepare_secret_and_protected_publish_token() {
   assert_file_not_contains "$prepare_workflow" 'secrets.FORGEJO_RELEASE_PREPARE_TOKEN' "release PR preparation workflow does not reference the old disallowed prepare secret name"
   assert_file_not_contains "$prepare_workflow" 'secrets.FORGEJO_RELEASE_PUBLISH_TOKEN' "release PR preparation workflow does not reference the old disallowed publish secret name"
   assert_file_not_contains "$prepare_workflow" 'FORGEJO_RELEASE_PREPARE_TOKEN' "release PR preparation workflow does not reference the old disallowed prepare token name anywhere"
-  assert_file_not_contains "$prepare_workflow" 'FORGEJO_RELEASE_PUBLISH_TOKEN' "release PR preparation workflow does not expose the publish-scoped Actions secret"
+  assert_file_not_contains "$prepare_workflow" 'FORGEJO_RELEASE_PUBLISH_TOKEN' "release PR preparation workflow does not expose the old publish-scoped Actions secret"
 
-  assert_file_contains "$publish_workflow" 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow uses the publish-scoped protected environment secret"
+  assert_file_contains "$publish_workflow" 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow uses the publish-scoped Actions secret"
   assert_file_not_contains "$publish_workflow" 'release-plz' "publish workflow does not use release-plz"
   assert_file_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway' "publish workflow uses the publish-scoped token for registry image publication"
   assert_file_contains "$publish_workflow" 'GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow intentionally broadens the publish-scoped token to Forgejo Release creation"
@@ -2048,7 +2139,7 @@ test_publish_workflow_derives_and_promotes_release_candidate_sha() {
 
   assert_file_not_contains "$publish_workflow" 'nix build .#ar-gateway-image' "publish workflow does not rebuild the ar-gateway image during final publication"
   assert_file_not_contains "$publish_workflow" 'docker-archive:./result' "publish workflow does not publish final release tags from a local docker archive"
-  assert_file_contains "$publish_workflow" 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow uses the protected publish token for promotion"
+  assert_file_contains "$publish_workflow" 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow uses the publish token for promotion"
 
   output="$(python3 - "$publish_workflow" <<'PY'
 import pathlib
@@ -2208,6 +2299,7 @@ test_release_secrets_are_documented_for_operators() {
 test_release_workflows_exist_for_prepare_pr_and_publish_on_merge
 test_release_workflows_install_or_reuse_nix_like_ci_before_nix_develop
 test_prepare_workflow_builds_and_publishes_release_candidate_images
+test_prepare_workflow_creates_prerelease_entry_for_release_candidate
 test_prepare_workflow_skips_release_pr_merge_pushes
 test_prepare_workflow_runs_release_infra_fix_pushes
 test_prepare_workflow_plans_and_checks_semver_before_release_metadata_commit

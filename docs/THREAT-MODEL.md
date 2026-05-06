@@ -58,7 +58,7 @@ PR author┤ Forgejo (HTTPS)   │───────────────�
 | Operator config (.env) → process  | Trusted (operator owns the host)                             |
 | Forgejo API ← bot PAT             | Scoped: `write:repository`, `write:issue`, `read:user`       |
 | Forgejo API ← Release preparation PAT | Forgejo Actions secret `RELEASE_PREPARE_TOKEN`, scoped to prepare release PR branches and release PRs only in `jwilger/auto_review` |
-| Forgejo package registry and Releases API ← Release publishing PAT | Protected `release-publish` environment secret `RELEASE_PUBLISH_TOKEN`, scoped to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review` |
+| Forgejo package registry and Releases API ← Release publishing PAT | Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`, scoped to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review` |
 | Forgejo Actions → Release signing key | Forgejo Actions secret `RELEASE_SIGNING_KEY`, scoped to release PR commit signing by the release bot |
 
 ## Asset Inventory
@@ -75,7 +75,7 @@ What an attacker would target, and what protects each:
 | Other repos the bot can write to       | Cross-repo blast radius                         | Bot PAT scoping; per-repo `enabled: false`   |
 | Learnings store (SQLite)               | LLM-prompt injection vector if poisoned         | Append-only; chat command surface gated to repo collaborators |
 | Release preparation PAT                | Can prepare release PR metadata                 | Forgejo Actions secret `RELEASE_PREPARE_TOKEN`; release preparation PAT blast radius is to prepare release PR branches and release PRs only in `jwilger/auto_review` |
-| Release publishing PAT                 | Can publish release images and Forgejo Releases | Protected `release-publish` environment secret `RELEASE_PUBLISH_TOKEN`; release publishing PAT blast radius is to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review` |
+| Release publishing PAT                 | Can publish release images and Forgejo Releases | Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`; release publishing PAT blast radius is to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review` |
 | Release signing key                    | Signs release PR commits                        | Forgejo Actions secret `RELEASE_SIGNING_KEY`; dedicated release bot Forgejo user |
 
 ## Attacker Profiles
@@ -198,14 +198,14 @@ exfiltration if the runner or Forgejo is breached).
 *Mitigation:* The release workflows split repository metadata preparation from release publication. The Forgejo
 Actions secret `RELEASE_PREPARE_TOKEN` can prepare release PR branches
 and release PRs only in `jwilger/auto_review`; the protected
-`release-publish` environment secret `RELEASE_PUBLISH_TOKEN`, paired with
+Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`, paired with
 the release bot identity in repository variable `RELEASE_BOT_NAME`, can publish container images
 to `git.johnwilger.com/jwilger/auto_review/ar-gateway`, including release candidate tags, and create Forgejo Releases only in `jwilger/auto_review`.
 The release signing key is attached to a dedicated release bot Forgejo user and
 exposed only to release preparation so git can sign release PR commits. Release
 automation computes a single root release version from conventional commits,
 checks the selected bump with `cargo semver-checks`, updates only root release
-metadata, builds the release candidate Docker image with `nix build .#ar-gateway-image` after the release metadata commit, publishes candidate image tags for the release PR head SHA and release-candidate tag, and uses `tea` to open the Forgejo release PR. Publish only runs for
+metadata, builds the release candidate Docker image with `nix build .#ar-gateway-image` after the release metadata commit, publishes candidate image tags for the release PR head SHA and release-candidate tag, creates or updates a prerelease Forgejo Release entry for the release-candidate tag, and uses `tea` to open the Forgejo release PR. Publish only runs for
 release PRs merged into `main`, promotes the candidate image to the release version and `latest` tags, publishes only `git.johnwilger.com/jwilger/auto_review/ar-gateway` to the Forgejo package registry and creates the matching Forgejo Release entry, and refuses token-bearing publication when the merged release PR changed files outside expected root release metadata: `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`.
 *Residual risk:* **Release preparation PAT blast radius** is limited to forged
 release branches/PR metadata in the project repository. **Release publishing PAT blast radius** is limited to forged package images, including candidate tags, in the project registry and forged release entries in the project repository.
