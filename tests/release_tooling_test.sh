@@ -822,6 +822,51 @@ PY
   fi
 }
 
+test_prepare_workflow_runs_tea_and_jq_inside_nix_develop() {
+  local prepare_workflow output status
+  prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
+
+  output="$(python3 - "$prepare_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text().splitlines()
+bare_tool_pattern = re.compile(r'(^|[|;&]\s*)(tea|jq)\b')
+bare_tool_lines = []
+has_nix_tea = False
+has_nix_jq = False
+for line_number, line in enumerate(workflow, 1):
+    stripped = line.strip()
+    if not stripped or stripped.startswith('#'):
+        continue
+    if 'nix develop --command tea' in stripped:
+        has_nix_tea = True
+    if 'nix develop --command jq' in stripped:
+        has_nix_jq = True
+    if bare_tool_pattern.search(stripped):
+        bare_tool_lines.append(f'{line_number}: {stripped}')
+
+if bare_tool_lines:
+    print('prepare workflow invokes runner-provided tea/jq instead of Nix dev shell tools:')
+    print('\n'.join(bare_tool_lines))
+    sys.exit(1)
+if not has_nix_tea:
+    print('prepare workflow does not invoke tea through nix develop --command')
+    sys.exit(1)
+if not has_nix_jq:
+    print('prepare workflow does not invoke jq through nix develop --command')
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "release PR preparation workflow gets tea and jq from the Nix dev shell"
+  else
+    fail "release PR preparation workflow gets tea and jq from the Nix dev shell ($output)"
+  fi
+}
+
 test_publish_workflow_requires_release_pr_base_branch_main() {
   local publish_workflow
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
@@ -1692,6 +1737,7 @@ test_release_workflows_install_or_reuse_nix_like_ci_before_nix_develop
 test_prepare_workflow_skips_release_pr_merge_pushes
 test_prepare_workflow_runs_release_infra_fix_pushes
 test_prepare_workflow_plans_and_checks_semver_before_release_metadata_commit
+test_prepare_workflow_runs_tea_and_jq_inside_nix_develop
 test_publish_workflow_requires_release_pr_base_branch_main
 test_release_workflows_use_prepare_secret_and_protected_publish_token
 test_publish_workflow_validates_provenance_and_changed_files_before_publish_token

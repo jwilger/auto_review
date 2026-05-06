@@ -114,10 +114,10 @@ jobs:
           export GITEA_SERVER_URL="https://git.johnwilger.com"
           export GITEA_SERVER_TOKEN="$RELEASE_PREPARE_TOKEN"
           tea_login="auto_review-release-${GITHUB_RUN_ID:-$$}"
-          tea login add --name "$tea_login" --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
-          existing_pr="$(tea api --login "$tea_login" 'repos/jwilger/auto_review/pulls?state=open' | jq -r --arg branch "$branch" '.[] | select(.head.ref == $branch) | .number' | head -n 1)"
+          nix develop --command tea login add --name "$tea_login" --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
+          existing_pr="$(nix develop --command tea api --login "$tea_login" 'repos/jwilger/auto_review/pulls?state=open' | nix develop --command jq -r --arg branch "$branch" '.[] | select(.head.ref == $branch) | .number' | head -n 1)"
           if [ -z "$existing_pr" ]; then
-            tea pr create --login "$tea_login" --repo jwilger/auto_review --head "$branch" --base main --title "chore: release v$RELEASE_VERSION" --description "Prepare release v$RELEASE_VERSION."
+            nix develop --command tea pr create --login "$tea_login" --repo jwilger/auto_review --head "$branch" --base main --title "chore: release v$RELEASE_VERSION" --description "Prepare release v$RELEASE_VERSION."
           else
             printf 'release PR already open: #%s\n' "$existing_pr"
           fi
