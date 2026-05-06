@@ -208,6 +208,79 @@
               User = "65532:65532";
             };
           };
+          ar-gateway-embedded-oci-rootfs = pkgs.runCommand "embedded-gateway-oci-rootfs" {
+            rootfsClosure = pkgs.closureInfo {
+              rootPaths = [
+                ar-cli
+                pkgs.cacert
+                pkgs.git
+              ];
+            };
+            ociConfig = builtins.toJSON {
+              ociVersion = "1.0.2";
+              process = {
+                terminal = false;
+                user = {
+                  uid = 65532;
+                  gid = 65532;
+                };
+                args = [
+                  "/bin/auto-review"
+                  "gateway"
+                ];
+                env = [
+                  "SSL_CERT_FILE=/etc/ssl/certs/ca-bundle.crt"
+                  "PATH=/bin"
+                  "AR_GATEWAY_BIND=0.0.0.0:8080"
+                  "AR_GATEWAY_EXTERNAL_ISOLATION=container"
+                  "RUST_LOG=info,ar_gateway=debug"
+                ];
+                cwd = "/var/lib/auto_review";
+              };
+              root = {
+                path = "rootfs";
+                readonly = true;
+              };
+              mounts = [
+                {
+                  destination = "/tmp";
+                  type = "tmpfs";
+                  source = "tmpfs";
+                  options = [
+                    "nosuid"
+                    "nodev"
+                    "mode=1777"
+                  ];
+                }
+                {
+                  destination = "/var/lib/auto_review";
+                  type = "tmpfs";
+                  source = "tmpfs";
+                  options = [
+                    "nosuid"
+                    "nodev"
+                    "mode=0700"
+                    "uid=65532"
+                    "gid=65532"
+                  ];
+                }
+              ];
+            };
+            passAsFile = [ "ociConfig" ];
+          } ''
+            mkdir -p "$out/rootfs/bin" "$out/rootfs/etc/ssl/certs" "$out/rootfs/nix/store" "$out/rootfs/var/lib/auto_review" "$out/rootfs/tmp"
+            while IFS= read -r storePath; do
+              cp -a "$storePath" "$out/rootfs/nix/store/"
+            done < "$rootfsClosure/store-paths"
+            ln -s "${ar-cli}/bin/auto-review" "$out/rootfs/bin/auto-review"
+            ln -s "${pkgs.git}/bin/git" "$out/rootfs/bin/git"
+            ln -s "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" "$out/rootfs/etc/ssl/certs/ca-bundle.crt"
+            printf 'auto_review:x:65532:65532:auto_review:/var/lib/auto_review:/sbin/nologin\n' > "$out/rootfs/etc/passwd"
+            printf 'auto_review:x:65532:\n' > "$out/rootfs/etc/group"
+            printf 'hosts: files dns\n' > "$out/rootfs/etc/nsswitch.conf"
+            : > "$out/rootfs/etc/resolv.conf"
+            cp "$ociConfigPath" "$out/config.json"
+          '';
           default = self.packages.${system}.ar-cli;
         };
 
@@ -352,6 +425,43 @@
               buildPhaseCargoCommand = "cargo deny check licenses bans sources";
             }
           );
+          ar-gateway-embedded-oci-rootfs-contents = pkgs.runCommand "ar-gateway-embedded-oci-rootfs-contents" {
+            rootfsBundle = self.packages.${system}.ar-gateway-embedded-oci-rootfs;
+          } ''
+            set -eu
+
+            assert_resolves_inside_rootfs() {
+              path="$1"
+              if [ ! -e "$rootfsBundle/rootfs$path" ] && [ ! -L "$rootfsBundle/rootfs$path" ]; then
+                printf 'missing rootfs path: %s\n' "$path" >&2
+                exit 1
+              fi
+
+              if [ -L "$rootfsBundle/rootfs$path" ]; then
+                target="$(readlink "$rootfsBundle/rootfs$path")"
+                case "$target" in
+                  /*)
+                    resolved="$rootfsBundle/rootfs$target"
+                    ;;
+                  *)
+                    resolved="$(dirname "$rootfsBundle/rootfs$path")/$target"
+                    ;;
+                esac
+
+                if [ ! -e "$resolved" ]; then
+                  printf 'rootfs path %s points outside embedded bundle: %s\n' "$path" "$target" >&2
+                  printf 'expected target to resolve under %s/rootfs\n' "$rootfsBundle" >&2
+                  exit 1
+                fi
+              fi
+            }
+
+            assert_resolves_inside_rootfs /bin/auto-review
+            assert_resolves_inside_rootfs /bin/git
+            assert_resolves_inside_rootfs /etc/ssl/certs/ca-bundle.crt
+
+            touch "$out"
+          '';
           release-tooling = pkgs.runCommand "auto-review-release-tooling" {
             inherit src;
             nativeBuildInputs = with pkgs; [
