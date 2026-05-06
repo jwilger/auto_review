@@ -822,6 +822,123 @@ PY
   fi
 }
 
+test_prepare_workflow_closes_superseded_release_prs_before_creating_current_pr() {
+  local prepare_workflow output status
+  prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
+
+  output="$(python3 - "$prepare_workflow" <<'PY'
+import pathlib
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+create_marker = 'tea pr create'
+if create_marker not in workflow:
+    print('prepare workflow is missing release PR creation')
+    sys.exit(1)
+
+before_create = workflow.split(create_marker, 1)[0]
+required_markers = [
+    'pulls?state=open',
+    'release/v',
+    'superseded',
+]
+missing = [marker for marker in required_markers if marker not in before_create]
+if missing:
+    print('prepare workflow does not identify superseded open release/v* PRs before creating the current release PR: ' + ', '.join(missing))
+    sys.exit(1)
+
+close_markers = [
+    'tea pr close',
+    'state=closed',
+    '"state":"closed"',
+    "'state':'closed'",
+]
+if not any(marker in before_create for marker in close_markers):
+    print('prepare workflow does not close superseded open release/v* PRs before creating the current release PR')
+    sys.exit(1)
+
+if '.head.ref != $branch' not in before_create and '.head.ref != $current_branch' not in before_create and '!= "$branch"' not in before_create:
+    print('prepare workflow does not preserve the current release branch while closing older release/v* PRs')
+    sys.exit(1)
+PY
+  )"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "release PR preparation workflow closes superseded open release PRs before creating the current PR"
+  else
+    fail "release PR preparation workflow closes superseded open release PRs before creating the current PR ($output)"
+  fi
+}
+
+test_prepare_workflow_selects_maximum_of_semver_minimum_and_conventional_bump() {
+  local prepare_workflow output status
+  prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
+
+  output="$(python3 - "$prepare_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+
+prepare_index = workflow.find('scripts/release prepare --workspace . --version "$RELEASE_VERSION"')
+if prepare_index == -1:
+    print('prepare workflow is missing release metadata preparation')
+    sys.exit(1)
+
+semver_marker = 'cargo semver-checks --workspace --baseline-rev "$BASELINE_TAG" --release-type "$candidate_type"'
+semver_index = workflow.find(semver_marker)
+if semver_index == -1 or semver_index > prepare_index:
+    print('prepare workflow does not run cargo semver-checks before preparing release metadata')
+    sys.exit(1)
+
+before_semver = workflow[:semver_index]
+selection_section = workflow[semver_index:prepare_index]
+
+if 'scripts/release plan --workspace .' not in before_semver:
+    print('prepare workflow does not compute a conventional-commit release plan before semver-checks')
+    sys.exit(1)
+
+if not re.search(r'\$\([^)]*release_plan[^)]*release_type', before_semver, re.S):
+    print('prepare workflow does not retain the conventional-commit release type from the initial release plan')
+    sys.exit(1)
+
+if not re.search(r'=\s*"?\$candidate_type"?', selection_section):
+    print('prepare workflow does not retain the first semver-checks-compatible release type as the minimum allowed bump')
+    sys.exit(1)
+
+rank_patterns = [
+    r'patch[^\n]*(?:0|1)[\s\S]*minor[^\n]*(?:1|2)[\s\S]*major[^\n]*(?:2|3)',
+    r'(?:patch\s+minor\s+major|patch\|minor\|major|patch,\s*minor,\s*major)',
+    r'case[\s\S]*patch[\s\S]*minor[\s\S]*major[\s\S]*esac',
+]
+if not any(re.search(pattern, selection_section) for pattern in rank_patterns):
+    print('prepare workflow does not map/rank release bumps in patch < minor < major order')
+    sys.exit(1)
+
+comparison_patterns = [
+    r'\bmax\b',
+    r'\[\[[^\]]*(?:-gt|-ge|>|>=)[^\]]*\]\]',
+    r'\bif\b[\s\S]{0,160}(?:-gt|-ge|>|>=)[\s\S]{0,160}\bthen\b',
+]
+if not any(re.search(pattern, selection_section) for pattern in comparison_patterns):
+    print('prepare workflow does not compare conventional and semver bump ranks to choose the maximum')
+    sys.exit(1)
+
+replan = re.search(r'scripts/release plan --workspace \. --release-type "?\$[A-Za-z_][A-Za-z0-9_]*"?', selection_section)
+if not replan:
+    print('prepare workflow does not replan the release version from the selected maximum bump before preparing metadata')
+    sys.exit(1)
+PY
+  )"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "release PR preparation workflow selects the higher of semver minimum and conventional-commit bump"
+  else
+    fail "release PR preparation workflow selects the higher of semver minimum and conventional-commit bump ($output)"
+  fi
+}
+
 test_prepare_workflow_runs_tea_and_jq_inside_nix_develop() {
   local prepare_workflow output status
   prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
@@ -1737,6 +1854,8 @@ test_release_workflows_install_or_reuse_nix_like_ci_before_nix_develop
 test_prepare_workflow_skips_release_pr_merge_pushes
 test_prepare_workflow_runs_release_infra_fix_pushes
 test_prepare_workflow_plans_and_checks_semver_before_release_metadata_commit
+test_prepare_workflow_closes_superseded_release_prs_before_creating_current_pr
+test_prepare_workflow_selects_maximum_of_semver_minimum_and_conventional_bump
 test_prepare_workflow_runs_tea_and_jq_inside_nix_develop
 test_publish_workflow_requires_release_pr_base_branch_main
 test_release_workflows_use_prepare_secret_and_protected_publish_token
