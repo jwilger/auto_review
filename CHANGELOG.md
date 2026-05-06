@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.1.1] - 2026-05-06
+
+### Fixed
+
+- *(release)* attach publish checkout to main (#95)
+- *(release)* allow publish reruns from UI (#96)
+- *(release)* render publish rerun SHA input (#97)
+- *(review)* make incremental walkthroughs delta-focused (#98)
+- *(release)* publish Nix image from release workflow (#99)
+- *(release)* replace release-plz prep automation (#100)
+- *(release)* run prep after release fixes (#101)
+- *(release)* run release PR tooling through Nix (#102)
+- *(release)* supersede stale release PRs (#104)
+
 ## [0.1.0] - 2026-05-05
 
 ### Added
