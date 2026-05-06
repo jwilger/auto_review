@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.3.0] - 2026-05-06
+
+### Added
+
+- *(cli)* unify operator binary (#125)
+
+### Other
+
+- record single-binary ADRs (#123)
+
 ## [0.2.0] - 2026-05-06
 
 ### Added
