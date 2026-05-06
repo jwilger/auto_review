@@ -180,11 +180,10 @@ jobs:
           EOF
           nix develop --command skopeo copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA"
           nix develop --command skopeo copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_TAG"
-          release_note="Release candidate for v$RELEASE_VERSION.
-
-Docker images:
-- git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA
-- git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_TAG"
+          printf -v release_note 'Release candidate for v%s.\n\nDocker images:\n- git.johnwilger.com/jwilger/auto_review/ar-gateway:%s\n- git.johnwilger.com/jwilger/auto_review/ar-gateway:%s' \
+            "$RELEASE_VERSION" \
+            "$RELEASE_CANDIDATE_SHA" \
+            "$RELEASE_CANDIDATE_TAG"
           export GITEA_SERVER_URL="https://git.johnwilger.com"
           export GITEA_SERVER_TOKEN="$RELEASE_PUBLISH_TOKEN"
           release_publish_login="auto_review-release-candidate-${GITHUB_RUN_ID:-$$}"
