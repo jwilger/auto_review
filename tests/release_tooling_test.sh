@@ -1815,6 +1815,18 @@ if missing:
     errors.append('publish workflow does not promote the release candidate Docker image to the Forgejo package registry: ' + ', '.join(missing))
 
 lines = workflow.splitlines()
+def workflow_steps():
+    steps = []
+    for index, line in enumerate(lines):
+        if line.startswith('      - '):
+            step_lines = [line]
+            for nested in lines[index + 1:]:
+                if nested.startswith('      - '):
+                    break
+                step_lines.append(nested)
+            steps.append('\n'.join(step_lines))
+    return steps
+
 for index, line in enumerate(lines):
     if line.startswith('      - '):
         step_lines = [line]
@@ -1828,10 +1840,9 @@ for index, line in enumerate(lines):
             break
 
 promotion_steps = []
-for step_match in re.finditer(r'- name: (?P<name>[^\n]+)(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow):
-    body = step_match.group('body')
-    if 'skopeo copy' in body and 'RELEASE_CANDIDATE_SHA' in body:
-        promotion_steps.append(body)
+for step in workflow_steps():
+    if 'Publish Docker image to Forgejo package registry' in step or ('skopeo copy' in step and 'RELEASE_CANDIDATE_SHA' in step):
+        promotion_steps.append(step)
 if not promotion_steps:
     errors.append('publish workflow is missing concrete skopeo promotion from docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA')
     before_publish = workflow
@@ -1855,7 +1866,7 @@ auth_patterns = [
     r'\$RELEASE_PUBLISH_TOKEN[\s\S]{0,400}\b(?:docker|podman)\s+login\b[^\n]*git\.johnwilger\.com',
 ]
 has_login_before_publish = any(re.search(pattern, before_publish) for pattern in auth_patterns)
-has_skopeo_creds_on_copy = re.search(r'\bskopeo\s+copy\b[^\n]*(?:--dest-creds|--dest-authfile)\b[^\n]*\$RELEASE_PUBLISH_TOKEN', publish_text)
+has_skopeo_creds_on_copy = re.search(r'\bskopeo\s+copy\b[\s\S]{0,1000}(?:--src-creds|--dest-creds|--src-authfile|--dest-authfile)\b[\s\S]{0,300}\$RELEASE_PUBLISH_TOKEN', publish_text)
 if not has_login_before_publish and not has_skopeo_creds_on_copy:
     errors.append('publish workflow must authenticate to git.johnwilger.com with RELEASE_PUBLISH_TOKEN before pushing or copying the image')
 
@@ -2201,6 +2212,360 @@ PY
   fi
 }
 
+test_publish_workflow_attaches_binary_archives_checksums_signatures_and_provenance() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+release_step_match = re.search(r'- name: Create Forgejo Release(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
+if not release_step_match:
+    errors.append('publish workflow must have a dedicated Create Forgejo Release step')
+    release_step = ''
+    asset_upload_section = workflow
+else:
+    release_step = release_step_match.group('body')
+    asset_upload_section = workflow[release_step_match.start():]
+
+required_release_assets = {
+    'Linux x86_64 auto-review binary archive': [
+        'auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz',
+        'auto-review-${RELEASE_VERSION}-linux-x86_64.tar.gz',
+        'x86_64-unknown-linux',
+    ],
+    'Linux aarch64 auto-review binary archive': [
+        'auto-review-$RELEASE_VERSION-linux-aarch64.tar.gz',
+        'auto-review-${RELEASE_VERSION}-linux-aarch64.tar.gz',
+        'aarch64-unknown-linux',
+    ],
+    'SHA-256 checksum manifest': ['SHA256SUMS', 'sha256sum'],
+    'signature files': ['.sig', 'sign-blob', 'minisign', 'cosign sign-blob'],
+    'SBOM metadata': ['sbom', 'SBOM', 'cyclonedx', 'spdx', 'syft'],
+    'provenance metadata': ['provenance', 'attestation', 'slsa'],
+}
+for description, candidates in required_release_assets.items():
+    if not any(candidate in workflow for candidate in candidates):
+        errors.append(f'missing {description}')
+
+asset_attachment_markers = ['--asset', '--attachment', 'tea release assets create', 'tea release create']
+if not any(marker in asset_upload_section for marker in asset_attachment_markers):
+    errors.append('Forgejo release creation or following asset-upload step must attach binary archives, checksums, signatures, SBOM, and provenance metadata')
+
+for required in [
+    'auto-review',
+    'linux-x86_64',
+    'linux-aarch64',
+    'SHA256SUMS',
+    '.sig',
+    'sbom',
+    'provenance',
+]:
+    if required not in asset_upload_section:
+        errors.append(f'Forgejo release asset upload flow is missing marker after release creation: {required}')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow attaches Linux binary archives, checksums, signatures, SBOM, and provenance metadata"
+  else
+    fail "publish workflow attaches Linux binary archives, checksums, signatures, SBOM, and provenance metadata ($output)"
+  fi
+}
+
+test_publish_workflow_verifies_generated_binary_artifacts_before_release_upload() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+release_marker = 'Create Forgejo Release'
+before_release = workflow.split(release_marker, 1)[0] if release_marker in workflow else workflow
+required_before_release = [
+    'sha256sum -c SHA256SUMS',
+    'linux-x86_64',
+    'linux-aarch64',
+    '.sig',
+    'sbom',
+    'provenance',
+]
+for marker in required_before_release:
+    if marker not in before_release:
+        errors.append(f'generated release artifacts are not verified before Forgejo upload: {marker}')
+
+signature_verify_patterns = [
+    r'cosign\s+verify-blob[\s\S]{0,300}\.sig',
+    r'minisign\s+-V[\s\S]{0,300}\.sig',
+    r'gpg\s+--verify[\s\S]{0,300}\.sig',
+    r'ssh-keygen\s+-Y\s+verify[\s\S]{0,300}\.sig',
+]
+if not any(re.search(pattern, before_release) for pattern in signature_verify_patterns):
+    errors.append('generated binary signatures must be verified before Forgejo upload')
+
+artifact_build_index = min(
+    (index for index in [before_release.find('linux-x86_64'), before_release.find('linux-aarch64')] if index != -1),
+    default=-1,
+)
+checksum_verify_index = before_release.find('sha256sum -c SHA256SUMS')
+if artifact_build_index == -1 or checksum_verify_index == -1 or checksum_verify_index < artifact_build_index:
+    errors.append('checksum verification must run after binary artifact generation and before release creation')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow verifies generated binary artifacts before Forgejo upload"
+  else
+    fail "publish workflow verifies generated binary artifacts before Forgejo upload ($output)"
+  fi
+}
+
+test_publish_workflow_handles_release_signing_key_in_private_tempdir() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+step_match = re.search(r'- name: Build and verify Linux binary release artifacts(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
+if not step_match:
+    print('publish workflow is missing the binary artifact build/signing step')
+    sys.exit(1)
+
+step = step_match.group('body')
+if 'umask 077' not in step:
+    errors.append('binary signing step must set umask 077 before writing signing material')
+
+tempdir_match = re.search(r'(?P<var>[A-Za-z_][A-Za-z0-9_]*)="?\$\(mktemp -d\)"?', step)
+tempdir_var = tempdir_match.group('var') if tempdir_match else None
+if tempdir_var is None:
+    errors.append('binary signing step must create a private temporary directory with mktemp -d')
+else:
+    trap_patterns = [
+        rf"trap\s+'rm -rf \"\${tempdir_var}\"'\s+(?P<signals>[A-Z ]+)",
+        rf'trap\s+"rm -rf \\\"\${tempdir_var}\\\""\s+(?P<signals>[A-Z ]+)',
+        rf"trap\s+'rm -rf \"\${{{tempdir_var}}}\"'\s+(?P<signals>[A-Z ]+)",
+        rf'trap\s+"rm -rf \\\"\${{{tempdir_var}}}\\\""\s+(?P<signals>[A-Z ]+)',
+    ]
+    trap_matches = [match for pattern in trap_patterns for match in re.finditer(pattern, step)]
+    sign_indices = [index for marker in ['ssh-keygen -Y sign', 'ssh-keygen -y -f "$signing_key"'] if (index := step.find(marker)) != -1]
+    first_sign_index = min(sign_indices, default=-1)
+    if not trap_matches:
+        errors.append('binary signing step must install a trap that runs rm -rf "$signing_dir" on EXIT TERM INT')
+    elif first_sign_index == -1:
+        errors.append('binary signing step must sign with the private signing key')
+    else:
+        pre_sign_trap_signals = {
+            signal
+            for match in trap_matches
+            if match.start() < first_sign_index
+            for signal in match.group('signals').split()
+        }
+        missing_signals = sorted({'EXIT', 'TERM', 'INT'} - pre_sign_trap_signals)
+        if missing_signals:
+            errors.append('binary signing step must install signing directory cleanup traps before signing commands for: ' + ', '.join(missing_signals))
+    key_path_patterns = [
+        rf'signing_key="\${tempdir_var}/[^"\n]+"',
+        rf'signing_key="\${{{tempdir_var}}}/[^"\n]+"',
+    ]
+    if not any(re.search(pattern, step) for pattern in key_path_patterns):
+        errors.append('binary signing step must store the private key inside the private temporary directory')
+
+if 'chmod 600 "$signing_key"' not in step:
+    errors.append('binary signing step must chmod 600 the private signing key file')
+if 'printf \'%s\\n\' "$RELEASE_SIGNING_KEY" > "$signing_key"' not in step and 'printf "%s\\n" "$RELEASE_SIGNING_KEY" > "$signing_key"' not in step:
+    errors.append('binary signing step must write RELEASE_SIGNING_KEY only to the private signing key file')
+
+artifact_leak_patterns = [
+    r'RELEASE_SIGNING_KEY[^\n]*release-artifacts',
+    r'release-artifacts[^\n]*RELEASE_SIGNING_KEY',
+    r'private[-_]key',
+    r'id_(?:ed25519|rsa)',
+]
+for pattern in artifact_leak_patterns:
+    if re.search(pattern, step, re.I):
+        errors.append('binary signing step must not place RELEASE_SIGNING_KEY/private key material under release-artifacts')
+        break
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow handles release signing key in a private temporary directory"
+  else
+    fail "publish workflow handles release signing key in a private temporary directory ($output)"
+  fi
+}
+
+test_publish_workflow_allows_intentional_release_tooling_changes_before_token_publish() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import fnmatch
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+publish_marker = 'Publish Docker image to Forgejo package registry'
+if publish_marker not in workflow:
+    print('missing token-bearing image publication step')
+    sys.exit(1)
+
+validation_section = workflow.split(publish_marker, 1)[0]
+case_match = re.search(r'case "\$changed_file" in(?P<body>.*?)\n\s*esac', validation_section, re.S)
+if not case_match:
+    print('missing changed-file case allowlist before publish')
+    sys.exit(1)
+
+patterns = []
+reject_patterns = []
+case_lines = case_match.group('body').splitlines()
+index = 0
+while index < len(case_lines):
+    stripped = case_lines[index].strip()
+    index += 1
+    if not stripped or stripped.startswith('#') or ')' not in stripped:
+        continue
+    head = stripped.split(')', 1)[0]
+    arm_body = []
+    while index < len(case_lines):
+        body_line = case_lines[index].strip()
+        arm_body.append(body_line)
+        index += 1
+        if body_line == ';;':
+            break
+    meaningful_body = [line for line in arm_body if line and not line.startswith('#')]
+    is_pass_through = meaningful_body == [';;']
+    is_reject = any('exit' in line or 'refusing token-bearing publish' in line for line in meaningful_body)
+    parts = [part for part in head.split('|') if part]
+    if is_pass_through:
+        patterns.extend(parts)
+    if is_reject:
+        reject_patterns.extend(parts)
+
+required_allowed = [
+    '.forgejo/workflows/release-prepare.yml',
+    '.forgejo/workflows/release-publish.yml',
+    'scripts/release',
+    'tests/release_tooling_test.sh',
+]
+missing_allowed = [sample for sample in required_allowed if not any(fnmatch.fnmatchcase(sample, pattern) for pattern in patterns)]
+if missing_allowed:
+    print('publish allowlist does not permit intentional release workflow/script/test changes: ' + ', '.join(missing_allowed))
+    print('observed allowlist patterns: ' + ', '.join(patterns))
+    sys.exit(1)
+
+unexpected_samples = [
+    '.forgejo/workflows/ci.yml',
+    'scripts/unrelated-token-helper',
+    '.forgejo/workflows/untrusted.yml',
+]
+missing_rejections = [sample for sample in unexpected_samples if not any(fnmatch.fnmatchcase(sample, pattern) for pattern in reject_patterns)]
+if missing_rejections:
+    print('publish allowlist does not explicitly refuse unexpected token-bearing workflow/script changes: ' + ', '.join(missing_rejections))
+    print('observed reject patterns: ' + ', '.join(reject_patterns))
+    sys.exit(1)
+
+if 'refusing token-bearing publish for release PR file:' not in validation_section:
+    print('publish workflow must fail closed with a clear refusal for unexpected token-bearing changes')
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow allows intentional release tooling changes while rejecting unexpected token-bearing files"
+  else
+    fail "publish workflow allows intentional release tooling changes while rejecting unexpected token-bearing files ($output)"
+  fi
+}
+
+test_release_docs_account_for_final_binary_assets_and_publish_token_scope() {
+  local output status
+
+  output="$(python3 - "$ROOT/docs/THREAT-MODEL.md" "$ROOT/docs/OPERATIONS.md" <<'PY'
+import pathlib
+import re
+import sys
+
+threat = pathlib.Path(sys.argv[1]).read_text()
+operations = pathlib.Path(sys.argv[2]).read_text()
+combined = threat + '\n' + operations
+errors = []
+
+concept_patterns = {
+    'Linux x86_64 binary archive': r'(?is)(?:Linux[^\n]{0,80}x86_64|x86_64[^\n]{0,80}Linux)[^\n]{0,120}(?:archive|tarball|download|asset)',
+    'Linux aarch64 binary archive': r'(?is)(?:Linux[^\n]{0,80}aarch64|aarch64[^\n]{0,80}Linux)[^\n]{0,120}(?:archive|tarball|download|asset)',
+    'auto-review binary release asset': r'(?is)auto-review[^\n]{0,120}(?:binary|archive|tarball|download|asset)',
+    'SHA-256 checksum concept': r'(?is)(?:SHA-256|sha256|SHA256SUMS)',
+    'signature concept': r'(?is)(?:signature|\.sig|sign-blob|minisign|gpg --verify)',
+    'SBOM concept': r'(?is)(?:SBOM|software bill of materials|cyclonedx|spdx|syft)',
+    'provenance concept': r'(?is)(?:provenance|attestation|slsa)',
+    'release publish token scope': r'(?is)(?:RELEASE_PUBLISH_TOKEN|Release publishing PAT)[^\n]{0,240}(?:binary|archive|asset|checksum|signature|SBOM|provenance)',
+}
+for description, pattern in concept_patterns.items():
+    if not re.search(pattern, combined):
+        errors.append(f'docs missing binary release concept: {description}')
+
+for forbidden in ['future binary', 'future Linux binary', 'after issue #121 lands', 'Issue #121 must publish']:
+    if forbidden in combined:
+        errors.append(f'docs still describe binary assets as future work: {forbidden}')
+
+scope_patterns = [
+    r'Release publishing PAT[^\n]*(?:Linux binary archives|binary release assets)',
+    r'RELEASE_PUBLISH_TOKEN[^\n]*(?:Linux binary archives|binary release assets)',
+]
+if not any(re.search(pattern, combined, re.I) for pattern in scope_patterns):
+    errors.append('docs do not tie release publishing token scope to binary archives and metadata')
+
+verification_patterns = [
+    r'sha256sum\s+-c\s+SHA256SUMS',
+    r'(?:cosign\s+verify-blob|minisign\s+-V|gpg\s+--verify|ssh-keygen\s+-Y\s+verify)',
+]
+for pattern in verification_patterns:
+    if not re.search(pattern, combined):
+        errors.append(f'docs missing operator verification command matching: {pattern}')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "docs and threat model account for binary assets and publish token scope"
+  else
+    fail "docs and threat model account for binary assets and publish token scope ($output)"
+  fi
+}
+
 test_release_tooling_tests_are_wired_into_nix_flake_check() {
   local flake
   flake="$ROOT/flake.nix"
@@ -2323,6 +2688,11 @@ test_publish_workflow_publishes_nix_docker_image_to_forgejo_registry
 test_publish_workflow_requires_trusted_release_environment
 test_publish_workflow_supports_manual_dispatch_from_release_merge_sha
 test_publish_workflow_derives_and_promotes_release_candidate_sha
+test_publish_workflow_attaches_binary_archives_checksums_signatures_and_provenance
+test_publish_workflow_verifies_generated_binary_artifacts_before_release_upload
+test_publish_workflow_handles_release_signing_key_in_private_tempdir
+test_publish_workflow_allows_intentional_release_tooling_changes_before_token_publish
+test_release_docs_account_for_final_binary_assets_and_publish_token_scope
 test_release_tooling_tests_are_wired_into_nix_flake_check
 test_release_plz_config_is_removed_and_workspace_crates_stay_private
 test_release_secrets_are_documented_for_operators
