@@ -32,4 +32,4 @@ Observed failure output must be copied from an actual run, not paraphrased. Comm
 
 ## Exemptions
 
-RED is not required for docs-only changes, pure renames or moves where existing tests cover behavior, generated lockfile updates, and mechanical config chores. If a production Rust edit changes observable behavior, the exemption does not apply.
+RED is not required for docs-only changes, pure renames or moves where existing tests cover behavior, generated lockfile updates, and mechanical config chores. Do not create deterministic tests that assert documentation wording for docs-only changes; use human/operator review for those changes unless the documentation is generated from or consumed by executable behavior. If a production Rust edit changes observable behavior, the exemption does not apply.

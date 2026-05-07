@@ -53,12 +53,13 @@ container boundary and marks that posture with
 `AR_GATEWAY_EXTERNAL_ISOLATION=container`.
 
 Direct binary use is supported for local diagnostics, evaluation, and operators
-who intentionally manage the host boundary themselves. On supported Linux hosts,
-`auto-review gateway` defaults to the embedded OCI launcher. If embedded OCI
-setup is unavailable, startup fails closed unless the operator explicitly opts out
-with `auto-review gateway --bare` or `AR_GATEWAY_BARE=true`. That opt-out leaves
-only application-level controls active and must not be treated as
-container-equivalent isolation.
+who intentionally manage the host boundary themselves, including operators who
+build `auto_review` into their own custom VM images or container images. On
+supported Linux hosts, `auto-review gateway` defaults to the embedded OCI
+launcher. If embedded OCI setup is unavailable, startup fails closed unless the
+operator explicitly opts out with `auto-review gateway --bare` or
+`AR_GATEWAY_BARE=true`. That opt-out leaves only application-level controls
+active and must not be treated as container-equivalent isolation.
 
 Before exposing a freshly-deployed gateway to Forgejo:
 
@@ -372,6 +373,13 @@ Run the gateway inside your deployment isolation boundary (for example a
 container, VM, or service manager sandbox). The project exposes a Nix-built OCI
 image as `.#ar-gateway-image`; the image runs as uid/gid 65532 and binds
 `0.0.0.0:8080` inside the container.
+
+The flake also exposes the installable binary as `.#ar-cli`/the default package.
+Use `nix build .#ar-cli` when constructing custom VM images, custom container
+images, or direct systemd hosts; use `nix build .#ar-gateway-image` when you want
+the project image artifact. Native NixOS module support is not shipped yet, so
+NixOS operators should currently either run the OCI image or package the binary
+into their own module/service definition.
 
 For local development against the same image shape:
 

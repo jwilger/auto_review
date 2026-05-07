@@ -3,11 +3,13 @@
 For self-hosters who run the gateway directly on a Linux host
 (no k8s, no docker). Pairs with the [Helm chart](../helm/) and
 [`docker-compose.yml`](../docker-compose.yml) as the third
-deploy option.
+deploy option. This path exists for operators who want to build
+`auto_review` into their own custom VM images or container images
+instead of running the project-published Docker/OCI image unchanged.
 
 The Docker/OCI image is still the recommended production deployment because it
-provides an external container boundary. This unit is for direct binary hosts:
-it runs `auto-review gateway` under systemd hardening and sets
+provides an external container boundary. This unit is for custom direct-binary
+hosts: it runs `auto-review gateway` under systemd hardening and sets
 `AR_GATEWAY_BARE=true` in the example env file to explicitly opt out of the
 embedded OCI launcher. Bare systemd mode has application-level controls plus
 systemd hardening only; it is not container-equivalent isolation.
