@@ -114,7 +114,10 @@ bundled linters or repo-supplied linter configs. Deterministic linters, tests,
 and builds run in CI under the operator's CI isolation policy before CI calls
 the semantic-review endpoint. The reviewer runtime only clones for read-only
 context and LLM verification; `AR_SANDBOX_IMAGE` is not required for normal
-gateway startup and `/info` does not expose a sandbox field.
+gateway startup. `/info` does not expose a sandbox field; it does expose the
+non-secret `runtime_isolation` posture described in T1a so operators can
+distinguish embedded OCI, external-container, explicit-bare, and unsupported
+platform states without treating bare mode as container-equivalent.
 Git clone/fetch/checkout remain host subprocesses, so they run through a
 hermetic command wrapper that disables system/global Git config, clears
 env-injected Git config, isolates home config paths, and removes ambient Git
@@ -141,7 +144,13 @@ config declares `noNewPrivileges`, empty capability sets, PID/network/mount/IPC/
 UTS/cgroup namespaces, masked sensitive paths, readonly sensitive paths, and only
 the explicit `/tmp` and `/var/lib/auto_review` writable tmpfs mounts. Startup
 diagnostics name missing keys or failing subsystems without echoing configured
-secret values or rejected paths.
+secret values or rejected paths. Startup logs, `/info.runtime_isolation`, and
+`auto-review ops doctor/status` surface only non-secret posture labels and
+details: embedded OCI default/active intent, an external container marker from
+the packaged image, explicit bare mode, setup-failure summaries, and unsupported
+platforms. The doctor command warns rather than passes the default OCI posture
+unless it has verified the runtime boundary; explicit bare mode is always a
+warning and is never described as container-equivalent isolation.
 *Residual risk:* OCI setup still relies on the host kernel and the packaged
 runtime implementation. The staged `config.json` necessarily contains the
 allowlisted gateway secrets until the inner runtime exits and cleanup runs; a host
@@ -327,10 +336,14 @@ threat-model claims fail CI when a regression slips in:
   hex).
 - `crates/ar-review/src/workspace.rs` token-redactor tests —
   cover T5 (PAT compromise: tokens never appear in URL logs).
-- `crates/ar-gateway/src/startup.rs` OCI launcher tests and the
+- `crates/ar-gateway/src/startup.rs` OCI launcher/posture tests,
+  `crates/ar-gateway/src/webhook.rs` `/info` posture contract tests,
+  `crates/ar-cli/src/commands.rs` doctor/status posture tests, and the
   `ar-gateway-embedded-oci-config-contract` flake check cover T1a: packaged
   path rejection, staged `config.json` env allowlisting, diagnostic redaction,
-  runtime env clearing, and explicit OCI Linux isolation posture.
+  runtime env clearing, explicit OCI Linux isolation posture, non-secret
+  `/info.runtime_isolation`, and CLI warnings that avoid presenting bare mode
+  as container-equivalent isolation.
 
 T1 is now primarily an architectural guardrail: normal review jobs must not
 reintroduce repo-controlled deterministic tool execution. Issue #46's rescope

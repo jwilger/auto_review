@@ -583,7 +583,7 @@ mod tests {
 
     #[tokio::test]
     async fn info_with_full_wiring_returns_runtime_snapshot() {
-        use crate::GatewayInfo;
+        use crate::{GatewayInfo, RuntimeIsolationPostureInfo};
         let info = Arc::new(GatewayInfo {
             name: "auto_review",
             version: "0.0.1",
@@ -597,6 +597,7 @@ mod tests {
             reasoning_model: "qwen2.5-coder:32b".into(),
             poller_enabled: true,
             readiness_enabled: true,
+            runtime_isolation: RuntimeIsolationPostureInfo::oci_default(),
         });
         let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)).with_info(info));
         let req = Request::get("/info").body(Body::empty()).unwrap();
@@ -623,13 +624,11 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn info_surfaces_concrete_sqlite_path_for_persistent_backings() {
-        // Operators inspecting /info need to know *which* file the
-        // bot opened, not just that "sqlite" was selected — otherwise
-        // a deploy that picks the wrong XDG_STATE_HOME (or where the
-        // caller meant to override but the env var fell through to
-        // the default) is invisible to introspection.
-        use crate::GatewayInfo;
+    async fn info_reports_runtime_isolation_posture_without_secret_bearing_values() {
+        use crate::{GatewayInfo, RuntimeIsolationPostureInfo};
+
+        let secret_bearing_diagnostic =
+            "youki failed while opening /run/secrets/ar-token from secret-bearing bundle";
         let info = Arc::new(GatewayInfo {
             name: "auto_review",
             version: "0.0.1",
@@ -643,6 +642,54 @@ mod tests {
             reasoning_model: "qwen2.5-coder:32b".into(),
             poller_enabled: true,
             readiness_enabled: true,
+            runtime_isolation: RuntimeIsolationPostureInfo::oci_setup_failed(
+                secret_bearing_diagnostic,
+            ),
+        });
+        let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)).with_info(info));
+        let req = Request::get("/info").body(Body::empty()).unwrap();
+        let resp = app.oneshot(req).await.unwrap();
+        assert_eq!(resp.status(), StatusCode::OK);
+        let bytes = resp.into_body().collect().await.unwrap().to_bytes();
+        let body = String::from_utf8(bytes.to_vec()).unwrap();
+        let json: serde_json::Value = serde_json::from_str(&body).unwrap();
+
+        assert_eq!(json["runtime_isolation"]["kind"], "oci_setup_failed");
+        assert_eq!(json["runtime_isolation"]["label"], "OCI setup failed");
+        assert!(json["runtime_isolation"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("AR_GATEWAY_BARE"));
+        assert!(
+            !body.contains("/run/secrets")
+                && !body.contains("ar-token")
+                && !body.contains("secret-bearing"),
+            "GET /info must not leak secret-bearing posture diagnostics: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn info_surfaces_concrete_sqlite_path_for_persistent_backings() {
+        // Operators inspecting /info need to know *which* file the
+        // bot opened, not just that "sqlite" was selected — otherwise
+        // a deploy that picks the wrong XDG_STATE_HOME (or where the
+        // caller meant to override but the env var fell through to
+        // the default) is invisible to introspection.
+        use crate::{GatewayInfo, RuntimeIsolationPostureInfo};
+        let info = Arc::new(GatewayInfo {
+            name: "auto_review",
+            version: "0.0.1",
+            bot_login: "pr-bot".into(),
+            bot_name: "pr-bot".into(),
+            learnings: "sqlite:/var/lib/auto_review/learnings.db".into(),
+            history: "sqlite:/var/lib/auto_review/history.db".into(),
+            vector: "sqlite:/var/lib/auto_review/vector.db".into(),
+            dedup: "sqlite:/var/lib/auto_review/dedup.db".into(),
+            llm_tiers: vec!["reasoning", "cheap", "embedding"],
+            reasoning_model: "qwen2.5-coder:32b".into(),
+            poller_enabled: true,
+            readiness_enabled: true,
+            runtime_isolation: RuntimeIsolationPostureInfo::oci_default(),
         });
         let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)).with_info(info));
         let req = Request::get("/info").body(Body::empty()).unwrap();

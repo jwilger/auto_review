@@ -79,6 +79,41 @@ pub struct CiReviewEndpointDeps {
     pub forgejo: Arc<ForgejoClient>,
 }
 
+#[derive(Debug, Clone, Serialize)]
+pub struct RuntimeIsolationPostureInfo {
+    pub kind: &'static str,
+    pub label: String,
+    pub detail: String,
+}
+
+impl RuntimeIsolationPostureInfo {
+    pub fn oci_default() -> Self {
+        Self {
+            kind: "oci_default",
+            label: "packaged OCI container isolation".to_string(),
+            detail: "Gateway uses embedded OCI container-equivalent isolation by default."
+                .to_string(),
+        }
+    }
+
+    pub fn oci_setup_failed(detail: &str) -> Self {
+        let public_detail = if detail.contains("/run/secrets")
+            || detail.contains("secret-bearing")
+            || detail.contains("ar-token")
+        {
+            "embedded OCI setup failed before inner gateway startup"
+        } else {
+            detail
+        };
+
+        Self {
+            kind: "oci_setup_failed",
+            label: "OCI setup failed".to_string(),
+            detail: format!("OCI setup failed: {public_detail}; set AR_GATEWAY_BARE to opt out"),
+        }
+    }
+}
+
 /// Runtime-config snapshot returned from `GET /info`. Captured once
 /// at startup; nothing here changes during the gateway's lifetime
 /// (readiness state lives at `/readyz`, counters at `/metrics`).
@@ -118,6 +153,7 @@ pub struct GatewayInfo {
     /// Whether `/readyz` does an actual probe vs degrading to
     /// `/healthz` semantics.
     pub readiness_enabled: bool,
+    pub runtime_isolation: RuntimeIsolationPostureInfo,
 }
 
 /// Async-Mutex-guarded TTL cache wrapping a Forgejo reachability

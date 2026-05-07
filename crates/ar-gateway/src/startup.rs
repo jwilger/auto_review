@@ -3,7 +3,9 @@ use crate::dedup::{DeliveryDedup, RecentDeliveries, SqliteDeliveries};
 use crate::metrics::{Metrics, MetricsObserver};
 use crate::poller::{ChatPoller, SharedCommentCursors, DEFAULT_POLL_INTERVAL};
 use crate::ratelimit::TokenBucket;
-use crate::{build_router, AppState, ChatDeps, GatewayInfo, ReadinessProbe};
+use crate::{
+    build_router, AppState, ChatDeps, GatewayInfo, ReadinessProbe, RuntimeIsolationPostureInfo,
+};
 use anyhow::{Context, Result};
 use ar_forgejo::Client as ForgejoClient;
 use ar_index::{
@@ -66,6 +68,46 @@ struct GatewayLauncherEnvValues<'a> {
 #[derive(Debug)]
 struct OciSetupDiagnostic {
     _detail: String,
+}
+
+#[derive(Debug)]
+struct RuntimeIsolationPostureInput<'a> {
+    bare: Option<&'a str>,
+    external_isolation: Option<&'a str>,
+    oci_setup_diagnostic: Option<OciSetupDiagnostic>,
+    target_os: &'a str,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+enum RuntimeIsolationPostureKind {
+    OciDefault,
+    ExternalContainer,
+    ExplicitBare,
+    OciSetupFailure,
+    UnsupportedPlatform,
+}
+
+#[derive(Debug)]
+struct RuntimeIsolationPosture {
+    kind: RuntimeIsolationPostureKind,
+    operator_label: String,
+    operator_detail: String,
+}
+
+impl From<RuntimeIsolationPosture> for RuntimeIsolationPostureInfo {
+    fn from(posture: RuntimeIsolationPosture) -> Self {
+        Self {
+            kind: match posture.kind {
+                RuntimeIsolationPostureKind::OciDefault => "oci_default",
+                RuntimeIsolationPostureKind::ExternalContainer => "external_container",
+                RuntimeIsolationPostureKind::ExplicitBare => "explicit_bare",
+                RuntimeIsolationPostureKind::OciSetupFailure => "oci_setup_failed",
+                RuntimeIsolationPostureKind::UnsupportedPlatform => "unsupported_platform",
+            },
+            label: posture.operator_label,
+            detail: posture.operator_detail,
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -199,6 +241,63 @@ fn select_gateway_launcher(
 
 fn explicit_bare_gateway_mode_warning() -> &'static str {
     "Warning: bare gateway mode selected; only application-level controls are active, not container-equivalent isolation."
+}
+
+fn classify_runtime_isolation_posture(
+    input: RuntimeIsolationPostureInput<'_>,
+) -> Result<RuntimeIsolationPosture> {
+    if input.target_os != "linux" {
+        return Ok(RuntimeIsolationPosture {
+            kind: RuntimeIsolationPostureKind::UnsupportedPlatform,
+            operator_label: "unsupported platform".to_string(),
+            operator_detail:
+                "Embedded OCI isolation is unavailable on this platform; run in bare mode or provide external isolation."
+                    .to_string(),
+        });
+    }
+
+    if input.external_isolation == Some("container") {
+        return Ok(RuntimeIsolationPosture {
+            kind: RuntimeIsolationPostureKind::ExternalContainer,
+            operator_label: "external container isolation".to_string(),
+            operator_detail: "Gateway is already inside an externally provided container boundary."
+                .to_string(),
+        });
+    }
+
+    let use_oci = match input.bare.map(str::trim).map(str::to_ascii_lowercase) {
+        None => true,
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => false,
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => true,
+        Some(_) => anyhow::bail!(
+            "AR_GATEWAY_BARE has an unrecognized value; use true/false, yes/no, on/off, or 1/0"
+        ),
+    };
+
+    if !use_oci {
+        return Ok(RuntimeIsolationPosture {
+            kind: RuntimeIsolationPostureKind::ExplicitBare,
+            operator_label: "bare gateway mode".to_string(),
+            operator_detail: explicit_bare_gateway_mode_warning().to_string(),
+        });
+    }
+
+    if let Some(diagnostic) = input.oci_setup_diagnostic {
+        return Ok(RuntimeIsolationPosture {
+            kind: RuntimeIsolationPostureKind::OciSetupFailure,
+            operator_label: "OCI setup failed".to_string(),
+            operator_detail: format!(
+                "OCI setup failed: {diagnostic}; set AR_GATEWAY_BARE to opt out"
+            ),
+        });
+    }
+
+    Ok(RuntimeIsolationPosture {
+        kind: RuntimeIsolationPostureKind::OciDefault,
+        operator_label: "packaged OCI container isolation".to_string(),
+        operator_detail: "Gateway uses embedded OCI container-equivalent isolation by default."
+            .to_string(),
+    })
 }
 
 fn select_gateway_launcher_for_startup_options(
@@ -994,6 +1093,20 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         forgejo.clone(),
         Duration::from_secs(readiness_ttl_secs),
     ));
+    let runtime_isolation = RuntimeIsolationPostureInfo::from(classify_runtime_isolation_posture(
+        RuntimeIsolationPostureInput {
+            bare: bare_env.as_deref(),
+            external_isolation: external_isolation_env.as_deref(),
+            oci_setup_diagnostic: None,
+            target_os: env::consts::OS,
+        },
+    )?);
+    tracing::info!(
+        kind = runtime_isolation.kind,
+        label = %runtime_isolation.label,
+        detail = %runtime_isolation.detail,
+        "runtime isolation posture classified"
+    );
 
     // Snapshot the runtime config for /info. Read env-var-driven
     // booleans here once rather than threading them through every
@@ -1020,6 +1133,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         reasoning_model: reasoning_model.clone(),
         poller_enabled: poll_interval_secs > 0,
         readiness_enabled: true,
+        runtime_isolation,
     });
 
     let mut state = AppState::new(secret, dispatcher)
@@ -1677,6 +1791,104 @@ mod tests {
                 "{case} diagnostic must redact rejected traversal path details, got: {message}"
             );
         }
+    }
+
+    #[test]
+    fn runtime_isolation_posture_classifies_oci_default_as_container_equivalent() {
+        let posture = classify_runtime_isolation_posture(RuntimeIsolationPostureInput {
+            bare: None,
+            external_isolation: None,
+            oci_setup_diagnostic: None,
+            target_os: "linux",
+        })
+        .unwrap();
+
+        assert_eq!(posture.kind, RuntimeIsolationPostureKind::OciDefault);
+        assert!(
+            posture.operator_label.contains("container") || posture.operator_label.contains("OCI")
+        );
+        assert!(posture
+            .operator_detail
+            .contains("container-equivalent isolation"));
+    }
+
+    #[test]
+    fn runtime_isolation_posture_classifies_external_container_marker() {
+        let posture = classify_runtime_isolation_posture(RuntimeIsolationPostureInput {
+            bare: None,
+            external_isolation: Some("container"),
+            oci_setup_diagnostic: None,
+            target_os: "linux",
+        })
+        .unwrap();
+
+        assert_eq!(posture.kind, RuntimeIsolationPostureKind::ExternalContainer);
+        assert!(posture.operator_label.contains("external container"));
+        assert!(posture.operator_detail.contains("already inside"));
+    }
+
+    #[test]
+    fn runtime_isolation_posture_classifies_explicit_bare_without_isolation_claim() {
+        let posture = classify_runtime_isolation_posture(RuntimeIsolationPostureInput {
+            bare: Some("true"),
+            external_isolation: None,
+            oci_setup_diagnostic: None,
+            target_os: "linux",
+        })
+        .unwrap();
+
+        assert_eq!(posture.kind, RuntimeIsolationPostureKind::ExplicitBare);
+        assert!(posture.operator_label.contains("bare"));
+        assert!(posture
+            .operator_detail
+            .contains("only application-level controls"));
+        assert!(!posture
+            .operator_detail
+            .contains("container-equivalent isolation is active"));
+    }
+
+    #[test]
+    fn runtime_isolation_posture_redacts_secret_bearing_oci_setup_failure() {
+        let posture = classify_runtime_isolation_posture(RuntimeIsolationPostureInput {
+            bare: None,
+            external_isolation: None,
+            oci_setup_diagnostic: Some(OciSetupDiagnostic::new(
+                "youki failed while opening /run/secrets/ar-token from secret-bearing bundle",
+            )),
+            target_os: "linux",
+        })
+        .unwrap();
+
+        assert_eq!(posture.kind, RuntimeIsolationPostureKind::OciSetupFailure);
+        assert!(posture.operator_detail.contains("OCI setup failed"));
+        assert!(posture.operator_detail.contains("AR_GATEWAY_BARE"));
+        assert!(
+            !posture.operator_detail.contains("/run/secrets")
+                && !posture.operator_detail.contains("ar-token")
+                && !posture.operator_detail.contains("secret-bearing"),
+            "operator-visible posture details must redact secret-bearing diagnostics: {}",
+            posture.operator_detail
+        );
+    }
+
+    #[test]
+    fn runtime_isolation_posture_classifies_unsupported_platform_when_target_seam_reports_it() {
+        let posture = classify_runtime_isolation_posture(RuntimeIsolationPostureInput {
+            bare: None,
+            external_isolation: None,
+            oci_setup_diagnostic: None,
+            target_os: "windows",
+        })
+        .unwrap();
+
+        assert_eq!(
+            posture.kind,
+            RuntimeIsolationPostureKind::UnsupportedPlatform
+        );
+        assert!(posture.operator_label.contains("unsupported platform"));
+        assert!(
+            posture.operator_detail.contains("bare") || posture.operator_detail.contains("OCI")
+        );
     }
 
     fn required_inner_gateway_env_source() -> HashMap<&'static str, &'static str> {
