@@ -1184,7 +1184,7 @@ mod tests {
             "nix default package should publish the unified auto-review binary"
         );
         assert!(
-            flake.contains("Cmd = [ \"${ar-cli}/bin/auto-review\" \"gateway\" ];"),
+            flake.contains("Cmd = [ \"/bin/auto-review\" \"gateway\" ];"),
             "gateway container should start through auto-review gateway"
         );
         assert!(

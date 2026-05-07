@@ -193,7 +193,7 @@
               pkgs.git
             ];
             config = {
-              Cmd = [ "${ar-cli}/bin/auto-review" "gateway" ];
+              Cmd = [ "/bin/auto-review" "gateway" ];
               Env = [
                 "SSL_CERT_FILE=${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt"
                 "PATH=/bin"
@@ -578,6 +578,57 @@
             assert_resolves_inside_rootfs /bin/auto-review
             assert_resolves_inside_rootfs /bin/git
             assert_resolves_inside_rootfs /etc/ssl/certs/ca-bundle.crt
+
+            touch "$out"
+          '';
+          ar-gateway-docker-image-unified-binary-contract = pkgs.runCommand "ar-gateway-docker-image-unified-binary-contract" {
+            gatewayImage = self.packages.${system}.ar-gateway-image;
+            nativeBuildInputs = with pkgs; [ jq gnugrep ];
+          } ''
+            set -eu
+
+            image_dir="$PWD/image"
+            mkdir -p "$image_dir"
+            tar -xf "$gatewayImage" -C "$image_dir"
+
+            config_file="$(jq -r '.[0].Config' "$image_dir/manifest.json")"
+            config="$image_dir/$config_file"
+            missing=0
+
+            if ! jq -e '.config.Cmd == ["/bin/auto-review", "gateway"]' "$config" >/dev/null; then
+              printf 'docker image must launch the unified CLI as /bin/auto-review gateway; observed Cmd: %s\n' "$(jq -c '.config.Cmd' "$config")" >&2
+              missing=1
+            fi
+
+            if jq -e '((.config.Entrypoint // []) + (.config.Cmd // [])) | any(. == "ar-gateway" or test("(^|/)ar-gateway$"))' "$config" >/dev/null; then
+              printf 'docker image still carries a stale ar-gateway entrypoint expectation\n' >&2
+              missing=1
+            fi
+
+            assert_layer_contains() {
+              path="$1"
+              found=0
+              for layer in "$image_dir"/*/layer.tar; do
+                entries="$PWD/layer-entries.txt"
+                tar -tf "$layer" > "$entries" 2>/dev/null
+                if grep -Eq "^/?(\\./)?$path$" "$entries"; then
+                  found=1
+                  break
+                fi
+              done
+
+              if [ "$found" -ne 1 ]; then
+                printf 'docker image must contain /%s for operator exec/smoke usage\n' "$path" >&2
+                missing=1
+              fi
+            }
+
+            assert_layer_contains bin/auto-review
+            assert_layer_contains bin/git
+
+            if [ "$missing" -ne 0 ]; then
+              exit 1
+            fi
 
             touch "$out"
           '';
