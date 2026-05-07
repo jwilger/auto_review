@@ -16,7 +16,10 @@ use ar_orchestrator::sqlite_history::SqliteReviewHistory;
 use ar_orchestrator::SpawningDispatcher;
 use std::collections::HashMap;
 use std::env;
-use std::path::{Path, PathBuf};
+use std::fmt;
+use std::fs;
+use std::path::{Component, Path, PathBuf};
+use std::process::Command as ProcessCommand;
 use std::sync::Arc;
 use std::time::Duration;
 use tokio::net::TcpListener;
@@ -65,11 +68,100 @@ struct OciSetupDiagnostic {
     _detail: String,
 }
 
+#[derive(Clone, Copy, Debug)]
+struct EmbeddedOciGatewayInputs<'a> {
+    bundle_path: &'a Path,
+    runtime_path: &'a Path,
+}
+
+#[derive(Clone, Copy, Debug)]
+#[allow(dead_code)]
+struct EmbeddedOciGatewayEnvValues<'a> {
+    bundle_path: Option<&'a str>,
+    runtime_path: Option<&'a str>,
+}
+
+#[derive(Debug)]
+struct PackagedOciRuntimeCommand {
+    program: PathBuf,
+    args: Vec<PathBuf>,
+    clear_ambient_env: bool,
+    env: Vec<(String, String)>,
+}
+
+const PACKAGED_NIX_STORE_PREFIX: &str = "/nix/store";
+
+const STATIC_INNER_GATEWAY_ENV: &[(&str, &str)] = &[
+    ("SSL_CERT_FILE", "/etc/ssl/certs/ca-bundle.crt"),
+    ("PATH", "/bin"),
+    ("AR_GATEWAY_BIND", "0.0.0.0:8080"),
+    ("AR_GATEWAY_EXTERNAL_ISOLATION", "container"),
+    ("RUST_LOG", "info,ar_gateway=debug"),
+];
+
+const REQUIRED_INNER_GATEWAY_ENV: &[&str] = &[
+    "WEBHOOK_SECRET",
+    "FORGEJO_BASE_URL",
+    "AR_FORGEJO_TOKEN",
+    "LLM_BASE_URL",
+];
+
+const INNER_GATEWAY_ENV_ALLOWLIST: &[&str] = &[
+    "AR_GATEWAY_BIND",
+    "WEBHOOK_SECRET",
+    "FORGEJO_BASE_URL",
+    "AR_FORGEJO_TOKEN",
+    "LLM_BASE_URL",
+    "LLM_API_KEY",
+    "LLM_REASONING_MODEL",
+    "LLM_CHEAP_MODEL",
+    "LLM_CHEAP_BASE_URL",
+    "LLM_CHEAP_API_KEY",
+    "LLM_EMBEDDING_MODEL",
+    "LLM_EMBEDDING_BASE_URL",
+    "LLM_EMBEDDING_API_KEY",
+    "AR_EMBED_INPUT_CAP_BYTES",
+    "AR_EMBED_BATCH_SIZE",
+    "AR_EMBED_NUM_CTX",
+    "AR_BOT_LOGIN",
+    "AR_BOT_NAME",
+    "AR_CI_REVIEW_TOKEN",
+    "AR_LEARNINGS_DB",
+    "AR_HISTORY_DB",
+    "AR_VECTOR_DB",
+    "AR_DEDUP_DB",
+    "AR_DEDUP_CAPACITY",
+    "AR_POLL_INTERVAL_SECS",
+    "AR_READINESS_TTL_SECS",
+    "AR_REVIEW_CONCURRENCY",
+    "AR_WEBHOOK_RATE_PER_SEC",
+    "AR_WEBHOOK_BURST",
+    "AR_SEVERITY_FLOOR",
+    "RUST_LOG",
+];
+
 impl OciSetupDiagnostic {
     fn new(detail: impl Into<String>) -> Self {
         Self {
             _detail: detail.into(),
         }
+    }
+
+    fn public_detail(&self) -> &str {
+        if self._detail.contains("/run/secrets")
+            || self._detail.contains("secret-bearing")
+            || self._detail.contains("ar-token")
+        {
+            "embedded OCI setup failed before inner gateway startup"
+        } else {
+            &self._detail
+        }
+    }
+}
+
+impl fmt::Display for OciSetupDiagnostic {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.public_detail())
     }
 }
 
@@ -94,9 +186,9 @@ fn select_gateway_launcher(
     };
 
     if use_oci {
-        prepare_oci().map_err(|_diagnostic| {
+        prepare_oci().map_err(|diagnostic| {
             anyhow::anyhow!(
-                "OCI gateway launcher setup failed: embedded OCI launcher is not yet available; set AR_GATEWAY_BARE (or pass --bare) to opt out"
+                "OCI gateway launcher setup failed: {diagnostic}; set AR_GATEWAY_BARE (or pass --bare) to opt out"
             )
         })
     } else {
@@ -129,10 +221,350 @@ fn select_gateway_launcher_for_startup_options(
     )
 }
 
-fn prepare_embedded_oci_gateway() -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic> {
+fn prepare_embedded_oci_gateway_with_inputs(
+    inputs: EmbeddedOciGatewayInputs<'_>,
+    launch: impl FnOnce(
+        EmbeddedOciGatewayInputs<'_>,
+    ) -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic>,
+) -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic> {
+    validate_packaged_nix_store_path("bundle", inputs.bundle_path)?;
+    validate_packaged_nix_store_path("runtime", inputs.runtime_path)?;
+
+    launch(inputs)
+}
+
+fn validate_packaged_nix_store_path(
+    kind: &str,
+    path: &Path,
+) -> std::result::Result<(), OciSetupDiagnostic> {
+    if path.as_os_str().is_empty() {
+        return Err(OciSetupDiagnostic::new(format!(
+            "packaged OCI {kind} path is missing or empty"
+        )));
+    }
+
+    if !path.is_absolute() {
+        return Err(OciSetupDiagnostic::new(format!(
+            "packaged OCI {kind} path must be absolute and package-resolved under {PACKAGED_NIX_STORE_PREFIX}"
+        )));
+    }
+
+    if !path.starts_with(PACKAGED_NIX_STORE_PREFIX) {
+        return Err(OciSetupDiagnostic::new(format!(
+            "packaged OCI {kind} path must be package-resolved under {PACKAGED_NIX_STORE_PREFIX}"
+        )));
+    }
+
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return Err(OciSetupDiagnostic::new(format!(
+            "packaged OCI {kind} path must not contain traversal components"
+        )));
+    }
+
+    Ok(())
+}
+
+fn prepare_embedded_oci_gateway_from_env_values(
+    values: EmbeddedOciGatewayEnvValues<'_>,
+    launch: impl FnOnce(
+        EmbeddedOciGatewayInputs<'_>,
+    ) -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic>,
+) -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic> {
+    let bundle_path = values.bundle_path.ok_or_else(|| {
+        OciSetupDiagnostic::new("AR_GATEWAY_EMBEDDED_OCI_BUNDLE_PATH is required")
+    })?;
+    let runtime_path = values.runtime_path.ok_or_else(|| {
+        OciSetupDiagnostic::new("AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH is required")
+    })?;
+
+    prepare_embedded_oci_gateway_with_inputs(
+        EmbeddedOciGatewayInputs {
+            bundle_path: Path::new(bundle_path),
+            runtime_path: Path::new(runtime_path),
+        },
+        launch,
+    )
+}
+
+fn inner_gateway_process_env_from_lookup(
+    mut lookup: impl FnMut(&str) -> Option<String>,
+) -> std::result::Result<Vec<(String, String)>, OciSetupDiagnostic> {
+    let mut process_env = STATIC_INNER_GATEWAY_ENV
+        .iter()
+        .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
+        .collect::<Vec<_>>();
+
+    for name in INNER_GATEWAY_ENV_ALLOWLIST {
+        let value = lookup(name).filter(|value| !value.trim().is_empty());
+        if REQUIRED_INNER_GATEWAY_ENV.contains(name) && value.is_none() {
+            return Err(OciSetupDiagnostic::new(format!(
+                "{name} is required for staged OCI inner gateway config"
+            )));
+        }
+        if let Some(value) = value {
+            set_process_env_entry(&mut process_env, name, value);
+        }
+    }
+
+    set_process_env_entry(
+        &mut process_env,
+        "AR_GATEWAY_EXTERNAL_ISOLATION",
+        "container".to_string(),
+    );
+
+    Ok(process_env)
+}
+
+fn set_process_env_entry(process_env: &mut Vec<(String, String)>, name: &str, value: String) {
+    if let Some((_, existing_value)) = process_env
+        .iter_mut()
+        .find(|(existing_name, _)| existing_name == name)
+    {
+        *existing_value = value;
+    } else {
+        process_env.push((name.to_string(), value));
+    }
+}
+
+fn staged_oci_config_with_process_env(
+    mut config: serde_json::Value,
+    process_env: &[(String, String)],
+) -> std::result::Result<serde_json::Value, OciSetupDiagnostic> {
+    let Some(process) = config
+        .get_mut("process")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Err(OciSetupDiagnostic::new(
+            "packaged OCI config is missing a process object",
+        ));
+    };
+
+    process.insert(
+        "env".to_string(),
+        serde_json::Value::Array(
+            process_env
+                .iter()
+                .map(|(name, value)| serde_json::Value::String(format!("{name}={value}")))
+                .collect(),
+        ),
+    );
+
+    Ok(config)
+}
+
+fn stage_embedded_oci_gateway_bundle_at_path(
+    packaged_bundle: &Path,
+    staged_bundle: &Path,
+    process_env: &[(String, String)],
+) -> std::result::Result<PathBuf, OciSetupDiagnostic> {
+    let packaged_rootfs = packaged_bundle.join("rootfs");
+    if !packaged_rootfs.is_dir() {
+        return Err(OciSetupDiagnostic::new(
+            "packaged OCI bundle rootfs is missing",
+        ));
+    }
+
+    fs::create_dir(staged_bundle).map_err(|error| {
+        OciSetupDiagnostic::new(format!(
+            "staged OCI bundle directory could not be created: {}",
+            error.kind()
+        ))
+    })?;
+    restrict_stage_directory(staged_bundle)?;
+    link_packaged_rootfs(&packaged_rootfs, &staged_bundle.join("rootfs"))?;
+
+    let packaged_config =
+        fs::read_to_string(packaged_bundle.join("config.json")).map_err(|error| {
+            OciSetupDiagnostic::new(format!(
+                "packaged OCI config could not be read: {}",
+                error.kind()
+            ))
+        })?;
+    let config = serde_json::from_str::<serde_json::Value>(&packaged_config)
+        .map_err(|_error| OciSetupDiagnostic::new("packaged OCI config could not be parsed"))?;
+    let staged_config = staged_oci_config_with_process_env(config, process_env)?;
+    let staged_config = serde_json::to_vec_pretty(&staged_config)
+        .map_err(|_error| OciSetupDiagnostic::new("staged OCI config could not be serialized"))?;
+
+    fs::write(staged_bundle.join("config.json"), staged_config).map_err(|error| {
+        OciSetupDiagnostic::new(format!(
+            "staged OCI config could not be written: {}",
+            error.kind()
+        ))
+    })?;
+
+    Ok(staged_bundle.to_path_buf())
+}
+
+#[cfg(unix)]
+fn restrict_stage_directory(path: &Path) -> std::result::Result<(), OciSetupDiagnostic> {
+    use std::os::unix::fs::PermissionsExt;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+        OciSetupDiagnostic::new(format!(
+            "staged OCI bundle permissions could not be restricted: {}",
+            error.kind()
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn restrict_stage_directory(_path: &Path) -> std::result::Result<(), OciSetupDiagnostic> {
     Err(OciSetupDiagnostic::new(
-        "embedded OCI gateway launcher is not yet available until the minimal rootfs bundle from issue #118 is available",
+        "embedded OCI gateway launcher requires Unix staging permissions",
     ))
+}
+
+#[cfg(unix)]
+fn link_packaged_rootfs(
+    source: &Path,
+    destination: &Path,
+) -> std::result::Result<(), OciSetupDiagnostic> {
+    std::os::unix::fs::symlink(source, destination).map_err(|error| {
+        OciSetupDiagnostic::new(format!(
+            "packaged OCI rootfs could not be linked into staged bundle: {}",
+            error.kind()
+        ))
+    })
+}
+
+#[cfg(not(unix))]
+fn link_packaged_rootfs(
+    _source: &Path,
+    _destination: &Path,
+) -> std::result::Result<(), OciSetupDiagnostic> {
+    Err(OciSetupDiagnostic::new(
+        "embedded OCI gateway launcher requires Unix rootfs staging",
+    ))
+}
+
+fn unique_oci_stage_bundle_path() -> PathBuf {
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+
+    env::temp_dir().join(format!(
+        "auto-review-oci-bundle-{}-{timestamp}",
+        std::process::id()
+    ))
+}
+
+fn stage_embedded_oci_gateway_bundle(
+    packaged_bundle: &Path,
+    process_env: &[(String, String)],
+) -> std::result::Result<PathBuf, OciSetupDiagnostic> {
+    stage_embedded_oci_gateway_bundle_at_path(
+        packaged_bundle,
+        &unique_oci_stage_bundle_path(),
+        process_env,
+    )
+}
+
+fn build_packaged_oci_runtime_command(
+    runtime_path: &Path,
+    bundle_path: &Path,
+) -> PackagedOciRuntimeCommand {
+    PackagedOciRuntimeCommand {
+        program: runtime_path.to_path_buf(),
+        args: vec![
+            PathBuf::from("run"),
+            PathBuf::from("--bundle"),
+            bundle_path.to_path_buf(),
+            PathBuf::from("auto-review-gateway"),
+        ],
+        clear_ambient_env: true,
+        env: Vec::new(),
+    }
+}
+
+fn execute_packaged_oci_runtime_with_executor(
+    inputs: EmbeddedOciGatewayInputs<'_>,
+    executor: impl FnOnce(PackagedOciRuntimeCommand) -> std::result::Result<(), OciSetupDiagnostic>,
+) -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic> {
+    executor(build_packaged_oci_runtime_command(
+        inputs.runtime_path,
+        inputs.bundle_path,
+    ))
+    .map_err(|_diagnostic| {
+        OciSetupDiagnostic::new("packaged OCI runtime failed while starting the inner gateway")
+    })?;
+
+    Ok(GatewayLaunchOutcome::OuterLauncherFinished)
+}
+
+fn execute_packaged_oci_runtime_with_staged_bundle(
+    inputs: EmbeddedOciGatewayInputs<'_>,
+    process_env: &[(String, String)],
+    executor: impl FnOnce(PackagedOciRuntimeCommand) -> std::result::Result<(), OciSetupDiagnostic>,
+) -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic> {
+    let staged_bundle = stage_embedded_oci_gateway_bundle(inputs.bundle_path, process_env)?;
+    let outcome = execute_packaged_oci_runtime_with_executor(
+        EmbeddedOciGatewayInputs {
+            bundle_path: &staged_bundle,
+            runtime_path: inputs.runtime_path,
+        },
+        executor,
+    );
+
+    if let Err(error) = fs::remove_dir_all(&staged_bundle) {
+        tracing::warn!(
+            error = %error.kind(),
+            "staged OCI bundle cleanup failed after runtime exit"
+        );
+    }
+
+    outcome
+}
+
+fn run_packaged_oci_runtime_command(
+    command: PackagedOciRuntimeCommand,
+) -> std::result::Result<(), OciSetupDiagnostic> {
+    let mut process = ProcessCommand::new(&command.program);
+    process.args(&command.args);
+
+    if command.clear_ambient_env {
+        process.env_clear();
+    }
+    process.envs(command.env);
+
+    let status = process.status().map_err(|error| {
+        OciSetupDiagnostic::new(format!(
+            "packaged OCI runtime could not be started: {}",
+            error.kind()
+        ))
+    })?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(OciSetupDiagnostic::new(format!(
+            "packaged OCI runtime exited before starting the inner gateway: {status}"
+        )))
+    }
+}
+
+fn prepare_embedded_oci_gateway() -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic> {
+    let bundle_path = env::var("AR_GATEWAY_EMBEDDED_OCI_BUNDLE_PATH").ok();
+    let runtime_path = env::var("AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH").ok();
+    let process_env = inner_gateway_process_env_from_lookup(|name| env::var(name).ok())?;
+
+    prepare_embedded_oci_gateway_from_env_values(
+        EmbeddedOciGatewayEnvValues {
+            bundle_path: bundle_path.as_deref(),
+            runtime_path: runtime_path.as_deref(),
+        },
+        |inputs| {
+            execute_packaged_oci_runtime_with_staged_bundle(
+                inputs,
+                &process_env,
+                run_packaged_oci_runtime_command,
+            )
+        },
+    )
 }
 
 impl GatewayStartupConfig {
@@ -1063,8 +1495,8 @@ mod tests {
             "default gateway launcher failure should identify the OCI launcher path, got: {message}"
         );
         assert!(
-            message.contains("not yet available"),
-            "default gateway launcher failure should say the embedded OCI launcher is not yet available, got: {message}"
+            message.contains("setup failed") || message.contains("inner gateway startup"),
+            "default gateway launcher failure should report sanitized OCI setup failure context, got: {message}"
         );
         assert!(
             message.contains("AR_GATEWAY_BARE") || message.contains("--bare"),
@@ -1073,6 +1505,503 @@ mod tests {
         assert!(
             !message.contains("ar-token") && !message.contains("/run/secrets"),
             "launcher diagnostics must not echo secret-bearing paths, got: {message}"
+        );
+    }
+
+    #[test]
+    fn embedded_oci_gateway_with_packaged_inputs_returns_finished_after_fake_launcher_success() {
+        let launched = std::cell::Cell::new(false);
+        let packaged_inputs = EmbeddedOciGatewayInputs {
+            bundle_path: Path::new("/nix/store/test-ar-gateway-embedded-oci-rootfs"),
+            runtime_path: Path::new("/nix/store/test-embedded-youki-runtime"),
+        };
+
+        let outcome = prepare_embedded_oci_gateway_with_inputs(packaged_inputs, |inputs| {
+            launched.set(true);
+            assert_eq!(inputs.bundle_path, packaged_inputs.bundle_path);
+            assert_eq!(inputs.runtime_path, packaged_inputs.runtime_path);
+            Ok(GatewayLaunchOutcome::OuterLauncherFinished)
+        })
+        .unwrap_or_else(|diagnostic| {
+            panic!(
+                "valid packaged OCI inputs plus fake launcher success should return OuterLauncherFinished, got setup diagnostic: {diagnostic:?}"
+            )
+        });
+
+        assert!(launched.get(), "fake OCI launcher should be invoked");
+        assert_eq!(outcome, GatewayLaunchOutcome::OuterLauncherFinished);
+    }
+
+    #[test]
+    fn embedded_oci_gateway_consumes_wrapper_packaged_paths_from_explicit_env_values() {
+        let bundle_path = Path::new("/nix/store/wrapper-provided-ar-gateway-embedded-oci-rootfs");
+        let runtime_path = Path::new("/nix/store/wrapper-provided-embedded-youki-runtime");
+        let env_values = EmbeddedOciGatewayEnvValues {
+            bundle_path: Some(bundle_path.to_str().unwrap()),
+            runtime_path: Some(runtime_path.to_str().unwrap()),
+        };
+        let launched = std::cell::Cell::new(false);
+
+        let outcome = prepare_embedded_oci_gateway_from_env_values(env_values, |inputs| {
+            launched.set(true);
+            assert_eq!(
+                inputs.bundle_path, bundle_path,
+                "OCI preparation must use AR_GATEWAY_EMBEDDED_OCI_BUNDLE_PATH from the wrapper"
+            );
+            assert_eq!(
+                inputs.runtime_path, runtime_path,
+                "OCI preparation must use AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH from the wrapper"
+            );
+            Ok(GatewayLaunchOutcome::OuterLauncherFinished)
+        })
+        .unwrap_or_else(|diagnostic| {
+            panic!(
+                "wrapper-provided packaged OCI env values plus fake launcher success should return OuterLauncherFinished, got setup diagnostic: {diagnostic:?}"
+            )
+        });
+
+        assert!(launched.get(), "fake OCI launcher should be invoked");
+        assert_eq!(outcome, GatewayLaunchOutcome::OuterLauncherFinished);
+    }
+
+    #[test]
+    fn embedded_oci_gateway_rejects_relative_packaged_paths_before_runtime_lookup() {
+        for (case, packaged_inputs) in [
+            (
+                "relative runtime",
+                EmbeddedOciGatewayInputs {
+                    bundle_path: Path::new("/nix/store/test-ar-gateway-embedded-oci-rootfs"),
+                    runtime_path: Path::new(
+                        "secret-bearing-relative-runtime-/run/secrets/ar-token",
+                    ),
+                },
+            ),
+            (
+                "relative bundle",
+                EmbeddedOciGatewayInputs {
+                    bundle_path: Path::new("secret-bearing-relative-bundle-/run/secrets/ar-token"),
+                    runtime_path: Path::new("/nix/store/test-embedded-youki-runtime"),
+                },
+            ),
+        ] {
+            let diagnostic = prepare_embedded_oci_gateway_with_inputs(packaged_inputs, |_inputs| {
+                panic!("{case} must be rejected before PATH/runtime lookup")
+            })
+            .unwrap_err();
+            let message = format!("{diagnostic:?}");
+
+            assert!(
+                message.contains("absolute") || message.contains("package"),
+                "{case} diagnostic should explain packaged OCI paths must be absolute/package-resolved, got: {message}"
+            );
+            assert!(
+                !message.contains("secret-bearing")
+                    && !message.contains("ar-token")
+                    && !message.contains("/run/secrets"),
+                "{case} diagnostic must not leak raw secret-bearing paths, got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_oci_gateway_rejects_unpackaged_absolute_paths_before_runtime_lookup() {
+        for (case, packaged_inputs) in [
+            (
+                "tmp runtime",
+                EmbeddedOciGatewayInputs {
+                    bundle_path: Path::new("/nix/store/test-ar-gateway-embedded-oci-rootfs"),
+                    runtime_path: Path::new("/tmp/secret-bearing-youki-/run/secrets/ar-token"),
+                },
+            ),
+            (
+                "home bundle",
+                EmbeddedOciGatewayInputs {
+                    bundle_path: Path::new(
+                        "/home/alice/secret-bearing-rootfs-/run/secrets/ar-token",
+                    ),
+                    runtime_path: Path::new("/nix/store/test-embedded-youki-runtime"),
+                },
+            ),
+        ] {
+            let diagnostic = prepare_embedded_oci_gateway_with_inputs(packaged_inputs, |_inputs| {
+                panic!("{case} must be rejected before PATH/runtime lookup")
+            })
+            .unwrap_err();
+            let message = format!("{diagnostic:?}");
+
+            assert!(
+                message.contains("/nix/store") || message.contains("package-resolved"),
+                "{case} diagnostic should explain default packaged OCI paths must resolve through the Nix store, got: {message}"
+            );
+            assert!(
+                !message.contains("secret-bearing")
+                    && !message.contains("ar-token")
+                    && !message.contains("/run/secrets")
+                    && !message.contains("/tmp/")
+                    && !message.contains("/home/alice"),
+                "{case} diagnostic must redact rejected absolute paths, got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn embedded_oci_gateway_rejects_nix_store_paths_with_traversal_components() {
+        for (case, packaged_inputs) in [
+            (
+                "traversing runtime",
+                EmbeddedOciGatewayInputs {
+                    bundle_path: Path::new("/nix/store/test-ar-gateway-embedded-oci-rootfs"),
+                    runtime_path: Path::new("/nix/store/../../tmp/secret-bearing-youki"),
+                },
+            ),
+            (
+                "traversing bundle",
+                EmbeddedOciGatewayInputs {
+                    bundle_path: Path::new("/nix/store/../secret-bearing-rootfs"),
+                    runtime_path: Path::new("/nix/store/test-embedded-youki-runtime"),
+                },
+            ),
+        ] {
+            let diagnostic = prepare_embedded_oci_gateway_with_inputs(packaged_inputs, |_inputs| {
+                panic!("{case} must be rejected before runtime lookup")
+            })
+            .unwrap_err();
+            let message = format!("{diagnostic:?}");
+
+            assert!(
+                message.contains("traversal"),
+                "{case} diagnostic should reject traversal components, got: {message}"
+            );
+            assert!(
+                !message.contains("secret-bearing") && !message.contains("/tmp/"),
+                "{case} diagnostic must redact rejected traversal path details, got: {message}"
+            );
+        }
+    }
+
+    fn required_inner_gateway_env_source() -> HashMap<&'static str, &'static str> {
+        HashMap::from([
+            ("WEBHOOK_SECRET", "webhook-secret-value-that-must-not-leak"),
+            ("FORGEJO_BASE_URL", "https://forgejo.example.test"),
+            ("AR_FORGEJO_TOKEN", "forgejo-token-value-that-must-not-leak"),
+            ("LLM_BASE_URL", "https://llm.example.test/v1"),
+            ("AR_GATEWAY_BIND", "127.0.0.1:9090"),
+            ("LLM_REASONING_MODEL", "qwen-test-model"),
+        ])
+    }
+
+    fn process_env_map(entries: &[(String, String)]) -> HashMap<&str, &str> {
+        entries
+            .iter()
+            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .collect::<HashMap<_, _>>()
+    }
+
+    #[test]
+    fn inner_gateway_oci_env_allowlist_includes_required_config_and_excludes_unrelated_secret_names(
+    ) {
+        let mut source = required_inner_gateway_env_source();
+        source.insert("LLM_API_KEY", "llm-api-key-value-that-must-not-leak");
+        source.insert(
+            "AWS_SECRET_ACCESS_KEY",
+            "ambient-aws-secret-must-not-propagate",
+        );
+        source.insert("UNRELATED_TOKEN", "ambient-token-must-not-propagate");
+        source.insert(
+            "AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH",
+            "/tmp/unpackaged-youki",
+        );
+        source.insert("AR_GATEWAY_BARE", "true");
+
+        let process_env = inner_gateway_process_env_from_lookup(|name| {
+            source.get(name).map(|value| (*value).to_string())
+        })
+        .unwrap_or_else(|diagnostic| {
+            panic!("complete required env source should stage inner gateway env: {diagnostic:?}")
+        });
+        let env = process_env_map(&process_env);
+
+        for required_name in [
+            "WEBHOOK_SECRET",
+            "FORGEJO_BASE_URL",
+            "AR_FORGEJO_TOKEN",
+            "LLM_BASE_URL",
+        ] {
+            assert!(
+                env.contains_key(required_name),
+                "inner gateway env must include required config/secret {required_name}: {env:?}"
+            );
+        }
+
+        assert_eq!(env.get("AR_GATEWAY_BIND"), Some(&"127.0.0.1:9090"));
+        assert_eq!(env.get("LLM_REASONING_MODEL"), Some(&"qwen-test-model"));
+        assert_eq!(
+            env.get("LLM_API_KEY"),
+            Some(&"llm-api-key-value-that-must-not-leak")
+        );
+        assert_eq!(
+            env.get("AR_GATEWAY_EXTERNAL_ISOLATION"),
+            Some(&"container"),
+            "inner gateway must see the container marker from staged config.json, not runtime env inheritance"
+        );
+
+        for forbidden_name in [
+            "AWS_SECRET_ACCESS_KEY",
+            "UNRELATED_TOKEN",
+            "AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH",
+            "AR_GATEWAY_BARE",
+        ] {
+            assert!(
+                !env.contains_key(forbidden_name),
+                "unrelated or outer-launcher-only env {forbidden_name} must not enter staged config: {env:?}"
+            );
+        }
+        let rendered = format!("{process_env:?}");
+        assert!(
+            !rendered.contains("ambient-aws-secret-must-not-propagate")
+                && !rendered.contains("ambient-token-must-not-propagate")
+                && !rendered.contains("/tmp/unpackaged-youki"),
+            "staged allowlist must not contain unrelated ambient values: {rendered}"
+        );
+    }
+
+    #[test]
+    fn inner_gateway_oci_env_missing_required_diagnostic_omits_values() {
+        let mut source = required_inner_gateway_env_source();
+        source.remove("LLM_BASE_URL");
+        source.insert("AWS_SECRET_ACCESS_KEY", "ambient-aws-secret-must-not-leak");
+
+        let diagnostic = inner_gateway_process_env_from_lookup(|name| {
+            source.get(name).map(|value| (*value).to_string())
+        })
+        .unwrap_err();
+        let message = format!("{diagnostic:?}");
+
+        assert!(
+            message.contains("LLM_BASE_URL"),
+            "missing required env diagnostic should name the missing key, got: {message}"
+        );
+        assert!(
+            !message.contains("webhook-secret-value")
+                && !message.contains("forgejo-token-value")
+                && !message.contains("ambient-aws-secret")
+                && !message.contains("https://forgejo.example.test"),
+            "missing required env diagnostic must not leak configured values, got: {message}"
+        );
+    }
+
+    #[test]
+    fn staged_oci_config_replaces_process_env_with_explicit_allowlist() {
+        let mut source = required_inner_gateway_env_source();
+        source.insert("LLM_API_KEY", "llm-api-key-value-that-must-not-leak");
+        source.insert(
+            "AWS_SECRET_ACCESS_KEY",
+            "ambient-aws-secret-must-not-propagate",
+        );
+        let process_env = inner_gateway_process_env_from_lookup(|name| {
+            source.get(name).map(|value| (*value).to_string())
+        })
+        .unwrap();
+
+        let staged = staged_oci_config_with_process_env(
+            serde_json::json!({
+                "ociVersion": "1.0.2",
+                "process": {
+                    "args": ["/bin/auto-review", "gateway"],
+                    "env": [
+                        "PATH=/host/bin",
+                        "AWS_SECRET_ACCESS_KEY=ambient-aws-secret-must-not-propagate",
+                        "UNRELATED_TOKEN=ambient-token-must-not-propagate"
+                    ]
+                },
+                "root": { "path": "rootfs", "readonly": true }
+            }),
+            &process_env,
+        )
+        .unwrap_or_else(|diagnostic| panic!("staged config should be produced: {diagnostic:?}"));
+
+        let env_entries = staged["process"]["env"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|entry| entry.as_str().unwrap().to_string())
+            .collect::<Vec<_>>();
+        let rendered = format!("{env_entries:?}");
+
+        assert!(
+            rendered.contains("WEBHOOK_SECRET=webhook-secret-value-that-must-not-leak"),
+            "staged OCI config must carry required gateway secrets in process.env"
+        );
+        assert!(
+            rendered.contains("AR_GATEWAY_EXTERNAL_ISOLATION=container"),
+            "staged OCI config must carry the inner isolation marker"
+        );
+        assert!(
+            !rendered.contains("AWS_SECRET_ACCESS_KEY")
+                && !rendered.contains("UNRELATED_TOKEN")
+                && !rendered.contains("ambient-aws-secret-must-not-propagate")
+                && !rendered.contains("ambient-token-must-not-propagate"),
+            "staged OCI config must replace ambient config env with explicit allowlist: {rendered}"
+        );
+        assert_eq!(staged["root"]["path"], "rootfs");
+    }
+
+    #[test]
+    fn staged_oci_bundle_materializes_config_and_runtime_command_points_at_stage() {
+        let mut source = required_inner_gateway_env_source();
+        source.insert("LLM_API_KEY", "llm-api-key-value-that-must-not-leak");
+        let process_env = inner_gateway_process_env_from_lookup(|name| {
+            source.get(name).map(|value| (*value).to_string())
+        })
+        .unwrap();
+        let packaged_bundle = tempfile::tempdir().unwrap();
+        std::fs::create_dir(packaged_bundle.path().join("rootfs")).unwrap();
+        std::fs::write(
+            packaged_bundle.path().join("config.json"),
+            serde_json::json!({
+                "ociVersion": "1.0.2",
+                "process": { "env": ["UNRELATED_TOKEN=ambient-token-must-not-propagate"] },
+                "root": { "path": "rootfs", "readonly": true }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let stage_parent = tempfile::tempdir().unwrap();
+        let stage_bundle = stage_parent.path().join("auto-review-oci-stage");
+
+        let staged_bundle = stage_embedded_oci_gateway_bundle_at_path(
+            packaged_bundle.path(),
+            &stage_bundle,
+            &process_env,
+        )
+        .unwrap_or_else(|diagnostic| panic!("staged bundle should be created: {diagnostic:?}"));
+
+        assert_eq!(staged_bundle, stage_bundle);
+        assert!(
+            staged_bundle.join("config.json").is_file(),
+            "staged bundle must contain generated config.json"
+        );
+        assert!(
+            staged_bundle.join("rootfs").exists(),
+            "staged bundle must contain or link the packaged rootfs"
+        );
+        let staged_config = std::fs::read_to_string(staged_bundle.join("config.json")).unwrap();
+        assert!(staged_config.contains("WEBHOOK_SECRET=webhook-secret-value-that-must-not-leak"));
+        assert!(!staged_config.contains("UNRELATED_TOKEN"));
+
+        let command = build_packaged_oci_runtime_command(
+            Path::new("/nix/store/test-embedded-youki-runtime/bin/youki"),
+            &staged_bundle,
+        );
+
+        assert!(command.clear_ambient_env);
+        assert!(
+            command.env.is_empty(),
+            "OCI runtime process env must stay empty; inner gateway env belongs in staged config.json"
+        );
+        assert_eq!(
+            command.args,
+            vec![
+                PathBuf::from("run"),
+                PathBuf::from("--bundle"),
+                staged_bundle,
+                PathBuf::from("auto-review-gateway"),
+            ]
+        );
+    }
+
+    #[test]
+    fn packaged_oci_runtime_success_executes_packaged_runtime_against_packaged_bundle() {
+        let packaged_inputs = EmbeddedOciGatewayInputs {
+            bundle_path: Path::new("/nix/store/test-ar-gateway-embedded-oci-rootfs"),
+            runtime_path: Path::new("/nix/store/test-embedded-youki-runtime"),
+        };
+        let mut observed_runtime = None;
+        let mut observed_args = Vec::new();
+
+        let outcome = execute_packaged_oci_runtime_with_executor(packaged_inputs, |command| {
+            observed_runtime = Some(command.program.to_path_buf());
+            observed_args = command
+                .args
+                .iter()
+                .map(|arg| arg.to_path_buf())
+                .collect::<Vec<_>>();
+
+            Ok(())
+        })
+        .unwrap_or_else(|diagnostic| {
+            panic!(
+                "successful fake OCI runtime execution should finish the outer launcher, got setup diagnostic: {diagnostic:?}"
+            )
+        });
+
+        assert_eq!(outcome, GatewayLaunchOutcome::OuterLauncherFinished);
+        assert_eq!(
+            observed_runtime.as_deref(),
+            Some(packaged_inputs.runtime_path),
+            "OCI execution must use the packaged runtime binary"
+        );
+        assert_eq!(
+            observed_args,
+            vec![
+                PathBuf::from("run"),
+                PathBuf::from("--bundle"),
+                packaged_inputs.bundle_path.to_path_buf(),
+                PathBuf::from("auto-review-gateway"),
+            ],
+            "OCI execution must use the youki-compatible shape: run --bundle <bundle> <stable-container-id>"
+        );
+    }
+
+    #[test]
+    fn packaged_oci_runtime_command_clears_ambient_env_without_gateway_env_passthrough() {
+        let packaged_inputs = EmbeddedOciGatewayInputs {
+            bundle_path: Path::new("/nix/store/test-ar-gateway-embedded-oci-rootfs"),
+            runtime_path: Path::new("/nix/store/test-embedded-youki-runtime"),
+        };
+
+        execute_packaged_oci_runtime_with_executor(packaged_inputs, |command| {
+            assert!(
+                command.clear_ambient_env,
+                "OCI runtime command must clear the ambient process environment"
+            );
+            assert!(
+                command.env.is_empty(),
+                "inner gateway env values must be staged into OCI config.json, not inherited by the runtime process: {:?}",
+                command.env
+            );
+
+            Ok(())
+        })
+        .unwrap();
+    }
+
+    #[test]
+    fn packaged_oci_runtime_failure_diagnostic_omits_secret_bearing_command_paths() {
+        let packaged_inputs = EmbeddedOciGatewayInputs {
+            bundle_path: Path::new(
+                "/nix/store/test-ar-gateway-embedded-oci-rootfs-/run/secrets/ar-token",
+            ),
+            runtime_path: Path::new("/nix/store/test-embedded-youki-runtime-/run/secrets/ar-token"),
+        };
+
+        let diagnostic = execute_packaged_oci_runtime_with_executor(packaged_inputs, |_command| {
+            Err(OciSetupDiagnostic::new(
+                "runtime failure while using /run/secrets/ar-token and secret-bearing-runtime-path",
+            ))
+        })
+        .unwrap_err();
+        let message = format!("{diagnostic:?}");
+
+        assert!(
+            message.contains("runtime") || message.contains("OCI"),
+            "runtime failure diagnostic should identify the failing subsystem, got: {message}"
+        );
+        assert!(
+            !message.contains("secret-bearing")
+                && !message.contains("ar-token")
+                && !message.contains("/run/secrets"),
+            "runtime failure diagnostic must not leak raw secret-bearing paths, got: {message}"
         );
     }
 

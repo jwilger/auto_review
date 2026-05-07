@@ -1,7 +1,7 @@
 # auto_review Threat Model
 
 Status: **Living document**
-Last reviewed: 2026-05-03
+Last reviewed: 2026-05-06
 
 ## Scope
 
@@ -56,6 +56,7 @@ PR author┤ Forgejo (HTTPS)   │───────────────�
 | LLM output → review pipeline      | Untrusted: schema-validated, then verifier-cross-checked     |
 | LLM tool calls → workspace        | Read-only; whitelisted operations only                       |
 | Operator config (.env) → process  | Trusted (operator owns the host)                             |
+| Outer gateway launcher → embedded OCI inner gateway | Trusted wrapper paths only; staged OCI `config.json` carries an explicit gateway env allowlist |
 | Forgejo API ← bot PAT             | Scoped: `write:repository`, `write:issue`, `read:user`       |
 | Forgejo API ← Release preparation PAT | Forgejo Actions secret `RELEASE_PREPARE_TOKEN`, scoped to prepare release PR branches and release PRs only in `jwilger/auto_review` |
 | Forgejo package registry and Releases API ← Release publishing PAT | Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`, scoped to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review` |
@@ -77,6 +78,7 @@ What an attacker would target, and what protects each:
 | Release preparation PAT                | Can prepare release PR metadata                 | Forgejo Actions secret `RELEASE_PREPARE_TOKEN`; release preparation PAT blast radius is to prepare release PR branches and release PRs only in `jwilger/auto_review` |
 | Release publishing PAT                 | Can publish release images and Forgejo Releases | Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`; release publishing PAT blast radius is to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review` |
 | Release signing key                    | Signs release PR commits                        | Forgejo Actions secret `RELEASE_SIGNING_KEY`; dedicated release bot Forgejo user |
+| Staged embedded OCI `config.json`       | Temporarily contains allowlisted gateway secrets for the inner process | Created under owner-only staging, populated from an explicit allowlist, runtime env cleared, diagnostics redact values, cleaned after runtime exit |
 
 ## Attacker Profiles
 
@@ -121,6 +123,31 @@ refs or trees. Git terminal prompts are disabled so credential failures fail
 closed instead of invoking host prompt helpers.
 *Residual risk:* CI isolation is out of scope for this document; operators must
 harden Forgejo Actions or their chosen CI separately.
+
+### T1a. Embedded OCI launcher/rootfs/env staging bypass (#117)
+
+*Attacker:* A1 after finding a launcher/runtime weakness; A4/local host attacker
+after compromising the operator account.
+*Path:* The default `auto-review gateway` launcher could accidentally execute a
+host `youki`, use an unpackaged rootfs, omit OCI Linux isolation flags, inherit
+ambient host secrets into the inner process, or echo rejected secret-bearing paths
+in startup diagnostics.
+*Mitigation:* The packaged wrapper provides Nix-store-resolved embedded rootfs and
+runtime paths, and startup rejects default packaged paths outside `/nix/store`
+before runtime lookup. The outer launcher clears the runtime process environment
+and stages a deterministic OCI bundle whose generated `config.json` carries only
+the explicit gateway allowlist required by the inner process. The embedded OCI
+config declares `noNewPrivileges`, empty capability sets, PID/network/mount/IPC/
+UTS/cgroup namespaces, masked sensitive paths, readonly sensitive paths, and only
+the explicit `/tmp` and `/var/lib/auto_review` writable tmpfs mounts. Startup
+diagnostics name missing keys or failing subsystems without echoing configured
+secret values or rejected paths.
+*Residual risk:* OCI setup still relies on the host kernel and the packaged
+runtime implementation. The staged `config.json` necessarily contains the
+allowlisted gateway secrets until the inner runtime exits and cleanup runs; a host
+root compromise or compromise of the same operator account can read those staged
+files despite owner-only permissions. Operators should treat this as defence in
+depth for PR-originated attacks, not protection from a hostile host.
 
 ### T2. Webhook forgery / replay
 
@@ -300,6 +327,10 @@ threat-model claims fail CI when a regression slips in:
   hex).
 - `crates/ar-review/src/workspace.rs` token-redactor tests —
   cover T5 (PAT compromise: tokens never appear in URL logs).
+- `crates/ar-gateway/src/startup.rs` OCI launcher tests and the
+  `ar-gateway-embedded-oci-config-contract` flake check cover T1a: packaged
+  path rejection, staged `config.json` env allowlisting, diagnostic redaction,
+  runtime env clearing, and explicit OCI Linux isolation posture.
 
 T1 is now primarily an architectural guardrail: normal review jobs must not
 reintroduce repo-controlled deterministic tool execution. Issue #46's rescope
