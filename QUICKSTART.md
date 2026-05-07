@@ -187,6 +187,73 @@ take a couple of minutes per PR; small cloud models are much faster.
 
 ## Deployment options
 
+### Nix / NixOS
+
+The flake exposes the installable program, the gateway OCI image, and a NixOS
+module:
+
+```sh
+# Install or run the CLI without enabling a service.
+nix profile install git+https://git.johnwilger.com/jwilger/auto_review#ar-cli
+nix shell git+https://git.johnwilger.com/jwilger/auto_review#ar-cli -c auto-review --help
+
+# Build the recommended production image.
+nix build git+https://git.johnwilger.com/jwilger/auto_review#ar-gateway-image
+```
+
+On NixOS, prefer running the OCI image behind your container runtime for
+production because it supplies the external isolation boundary:
+
+```nix
+{
+  virtualisation.oci-containers.containers.auto-review-gateway = {
+    image = "git.johnwilger.com/jwilger/auto_review/ar-gateway:latest";
+    ports = [ "127.0.0.1:8080:8080" ];
+    volumes = [ "auto-review-state:/var/lib/auto_review" ];
+    environmentFiles = [ "/run/secrets/auto-review-gateway.env" ];
+  };
+}
+```
+
+For operators who intentionally choose a direct systemd/bare-host boundary, import
+the module and keep credentials in a root-owned runtime secret file rather than in
+the Nix store:
+
+```nix
+{
+  inputs.auto-review.url = "git+https://git.johnwilger.com/jwilger/auto_review";
+
+  outputs = { nixpkgs, auto-review, ... }: {
+    nixosConfigurations.reviewer = nixpkgs.lib.nixosSystem {
+      system = "x86_64-linux";
+      modules = [
+        auto-review.nixosModules.default
+        {
+          services.auto-review.gateway = {
+            enable = true;
+            environmentFile = "/run/secrets/auto-review-gateway.env";
+          };
+        }
+      ];
+    };
+  };
+}
+```
+
+To install only the `auto-review` program on NixOS without running the gateway:
+
+```nix
+{
+  imports = [ inputs.auto-review.nixosModules.default ];
+  programs.auto-review.enable = true;
+}
+```
+
+The environment file should contain the variables from §4 (`FORGEJO_BASE_URL`,
+`AR_FORGEJO_TOKEN`, `WEBHOOK_SECRET`, `AR_CI_REVIEW_TOKEN`, and LLM settings) and
+be provisioned by your secret manager, for example age/sops-nix, a tmpfiles rule
+fed by an encrypted volume, or another out-of-store mechanism.
+
 ### docker compose
 
 ```sh
