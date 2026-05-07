@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.3.0] - 2026-05-07
+
+### Added
+
+- *(cli)* unify operator binary (#125)
+- *(gateway)* add fail-closed OCI launcher seam (#127)
+- *(gateway)* package embedded OCI rootfs (#129)
+- *(gateway)* launch through embedded OCI runtime (#130)
+- *(ops)* report runtime isolation posture (#132)
+
+### Other
+
+- record single-binary ADRs (#123)
+- Run Docker image through unified auto-review binary (#131)
+- document single-binary rollout (#133)
+
 ## [0.2.0] - 2026-05-06
 
 ### Added
