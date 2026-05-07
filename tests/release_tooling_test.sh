@@ -2365,17 +2365,28 @@ if tempdir_var is None:
     errors.append('binary signing step must create a private temporary directory with mktemp -d')
 else:
     trap_patterns = [
-        rf"trap\s+'rm -rf \"\${tempdir_var}\"'\s+EXIT",
-        rf'trap\s+"rm -rf \\\"\${tempdir_var}\\\""\s+EXIT',
-        rf"trap\s+'rm -rf \"\${{{tempdir_var}}}\"'\s+EXIT",
-        rf'trap\s+"rm -rf \\\"\${{{tempdir_var}}}\\\""\s+EXIT',
+        rf"trap\s+'rm -rf \"\${tempdir_var}\"'\s+(?P<signals>[A-Z ]+)",
+        rf'trap\s+"rm -rf \\\"\${tempdir_var}\\\""\s+(?P<signals>[A-Z ]+)',
+        rf"trap\s+'rm -rf \"\${{{tempdir_var}}}\"'\s+(?P<signals>[A-Z ]+)",
+        rf'trap\s+"rm -rf \\\"\${{{tempdir_var}}}\\\""\s+(?P<signals>[A-Z ]+)',
     ]
-    trap_match = next((re.search(pattern, step) for pattern in trap_patterns if re.search(pattern, step)), None)
-    sign_index = step.find('ssh-keygen -Y sign')
-    if trap_match is None:
-        errors.append('binary signing step must install a trap that runs rm -rf "$signing_dir" on EXIT')
-    elif sign_index == -1 or trap_match.start() > sign_index:
-        errors.append('binary signing step must install the signing directory cleanup trap before signing')
+    trap_matches = [match for pattern in trap_patterns for match in re.finditer(pattern, step)]
+    sign_indices = [index for marker in ['ssh-keygen -Y sign', 'ssh-keygen -y -f "$signing_key"'] if (index := step.find(marker)) != -1]
+    first_sign_index = min(sign_indices, default=-1)
+    if not trap_matches:
+        errors.append('binary signing step must install a trap that runs rm -rf "$signing_dir" on EXIT TERM INT')
+    elif first_sign_index == -1:
+        errors.append('binary signing step must sign with the private signing key')
+    else:
+        pre_sign_trap_signals = {
+            signal
+            for match in trap_matches
+            if match.start() < first_sign_index
+            for signal in match.group('signals').split()
+        }
+        missing_signals = sorted({'EXIT', 'TERM', 'INT'} - pre_sign_trap_signals)
+        if missing_signals:
+            errors.append('binary signing step must install signing directory cleanup traps before signing commands for: ' + ', '.join(missing_signals))
     key_path_patterns = [
         rf'signing_key="\${tempdir_var}/[^"\n]+"',
         rf'signing_key="\${{{tempdir_var}}}/[^"\n]+"',

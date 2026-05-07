@@ -126,7 +126,7 @@ jobs:
           fi
           umask 077
           signing_dir="$(mktemp -d)"
-          trap 'rm -rf "$signing_dir"' EXIT
+          trap 'rm -rf "$signing_dir"' EXIT TERM INT
           signing_key="$signing_dir/release-signing-key"
           printf '%s\n' "$RELEASE_SIGNING_KEY" > "$signing_key"
           chmod 600 "$signing_key"
