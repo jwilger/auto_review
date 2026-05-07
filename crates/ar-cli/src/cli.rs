@@ -1197,6 +1197,71 @@ mod tests {
         );
     }
 
+    #[test]
+    fn flake_packages_minimal_embedded_gateway_oci_rootfs_bundle() {
+        let workspace_root = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .and_then(std::path::Path::parent)
+            .expect("workspace root");
+        let flake_path = workspace_root.join("flake.nix");
+        let flake = std::fs::read_to_string(&flake_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", flake_path.display()));
+
+        let package_name = "ar-gateway-embedded-oci-rootfs";
+        let embedded_package = flake.split(package_name).nth(1).unwrap_or_default();
+        let required_markers = [
+            (
+                flake.contains(&format!("{package_name} =")),
+                "packages should expose ar-gateway-embedded-oci-rootfs as the Nix-built embedded gateway OCI rootfs/bundle artifact",
+            ),
+            (
+                embedded_package.contains("rootfs") && embedded_package.contains("config.json"),
+                "embedded gateway artifact should be an OCI bundle/rootfs, not only the published Docker image",
+            ),
+            (
+                embedded_package.contains("${ar-cli}/bin/auto-review")
+                    || embedded_package.contains("/bin/auto-review"),
+                "embedded rootfs should contain the unified auto-review binary",
+            ),
+            (
+                embedded_package.contains("pkgs.git"),
+                "embedded rootfs should include git for clone/fetch/checkout at gateway runtime",
+            ),
+            (
+                embedded_package.contains("pkgs.cacert")
+                    && embedded_package.contains("ca-bundle.crt"),
+                "embedded rootfs should include CA certificates and point TLS clients at the bundle",
+            ),
+            (
+                embedded_package.contains("etc/passwd") && embedded_package.contains("etc/group"),
+                "embedded rootfs should provide minimal passwd/group files for the non-root gateway user",
+            ),
+            (
+                embedded_package.contains("etc/resolv.conf")
+                    || embedded_package.contains("etc/nsswitch.conf"),
+                "embedded rootfs should provide resolver basics for network access inside the bundle",
+            ),
+            (
+                embedded_package.contains("/tmp") && embedded_package.contains("/var/lib/auto_review"),
+                "embedded OCI config should declare writable tmp and gateway state mounts explicitly",
+            ),
+        ];
+
+        let mut failures: Vec<&str> = required_markers
+            .into_iter()
+            .filter_map(|(present, message)| (!present).then_some(message))
+            .collect();
+        for forbidden in ["pkgs.bash", "pkgs.coreutils", "busybox", "strace", "gdb"] {
+            if embedded_package.contains(forbidden) {
+                failures.push(
+                    "embedded rootfs should exclude shell/coreutils/debug extras from the default bundle",
+                );
+            }
+        }
+
+        assert!(failures.is_empty(), "{}", failures.join("\n"));
+    }
+
     /// Cross-file contract test: every subcommand `Cli` exposes
     /// must appear in `crates/ar-cli/README.md`. Adding a new
     /// subcommand without documenting it in the per-crate README
