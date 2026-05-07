@@ -16,6 +16,68 @@
       crane,
       flake-utils,
     }:
+    let
+      autoReviewNixosModule =
+        { config, lib, pkgs, ... }:
+        let
+          programCfg = config.programs.auto-review;
+          gatewayCfg = config.services.auto-review.gateway;
+          defaultPackage = self.packages.${pkgs.stdenv.hostPlatform.system}.default;
+        in
+        {
+          options = {
+            programs.auto-review = {
+              enable = lib.mkEnableOption "auto_review CLI installation";
+
+              package = lib.mkOption {
+                type = lib.types.package;
+                default = defaultPackage;
+                defaultText = lib.literalExpression "self.packages.${pkgs.system}.default";
+                description = "auto_review package to install.";
+              };
+            };
+
+            services.auto-review.gateway = {
+              enable = lib.mkEnableOption "auto_review gateway service";
+
+              environmentFile = lib.mkOption {
+                type = lib.types.nullOr lib.types.path;
+                default = null;
+                description = "Environment file loaded by the auto_review gateway service.";
+              };
+
+              package = lib.mkOption {
+                type = lib.types.package;
+                default = programCfg.package;
+                defaultText = lib.literalExpression "config.programs.auto-review.package";
+                description = "auto_review package used by the gateway service.";
+              };
+            };
+          };
+
+          config = lib.mkMerge [
+            (lib.mkIf programCfg.enable {
+              environment.systemPackages = [ programCfg.package ];
+            })
+
+            (lib.mkIf gatewayCfg.enable {
+              systemd.services.auto-review-gateway = {
+                description = "auto_review gateway";
+                wantedBy = [ "multi-user.target" ];
+                after = [ "network-online.target" ];
+                wants = [ "network-online.target" ];
+                environment.AR_GATEWAY_BARE = "true";
+                serviceConfig = {
+                  ExecStart = "${gatewayCfg.package}/bin/auto-review gateway";
+                  StateDirectory = "auto_review";
+                } // lib.optionalAttrs (gatewayCfg.environmentFile != null) {
+                  EnvironmentFile = gatewayCfg.environmentFile;
+                };
+              };
+            })
+          ];
+        };
+    in
     flake-utils.lib.eachDefaultSystem (
       system:
       let
@@ -508,6 +570,67 @@
 
             touch "$out"
           '';
+          auto-review-nixos-module-contract =
+            let
+              lib = nixpkgs.lib;
+              evalAutoReviewModule = extraModules:
+                lib.nixosSystem {
+                  inherit system;
+                  modules = [
+                    self.nixosModules.default
+                    { nixpkgs.pkgs = pkgs; }
+                    { system.stateVersion = "26.05"; }
+                  ] ++ extraModules;
+                };
+
+              defaultSystem = evalAutoReviewModule [ ];
+              programOnlySystem = evalAutoReviewModule [
+                { programs.auto-review.enable = true; }
+              ];
+              gatewaySystem = evalAutoReviewModule [
+                {
+                  services.auto-review.gateway.enable = true;
+                  services.auto-review.gateway.environmentFile = "/run/secrets/auto-review-gateway.env";
+                }
+              ];
+
+              gatewayService = gatewaySystem.config.systemd.services.auto-review-gateway;
+              gatewayServiceConfig = gatewayService.serviceConfig;
+              gatewayEnvironment = gatewayService.environment;
+              gatewayExecStart = lib.concatStringsSep " " (lib.toList gatewayServiceConfig.ExecStart);
+              gatewayExecStartText = builtins.unsafeDiscardStringContext gatewayExecStart;
+              expectedGatewayCommand = builtins.unsafeDiscardStringContext "${self.packages.${system}.default}/bin/auto-review gateway";
+              gatewayEnvironmentFiles = lib.toList gatewayServiceConfig.EnvironmentFile;
+              gatewayStateDirectories = lib.toList gatewayServiceConfig.StateDirectory;
+
+              contract =
+                assert lib.asserts.assertMsg
+                  (!defaultSystem.config.services.auto-review.gateway.enable)
+                  "services.auto-review.gateway.enable must default to false";
+                assert lib.asserts.assertMsg
+                  (builtins.elem self.packages.${system}.default programOnlySystem.config.environment.systemPackages)
+                  "programs.auto-review.enable must install the auto-review package";
+                assert lib.asserts.assertMsg
+                  (!(programOnlySystem.config.systemd.services ? auto-review-gateway))
+                  "programs.auto-review.enable must not enable the gateway service";
+                assert lib.asserts.assertMsg
+                  (lib.hasInfix expectedGatewayCommand gatewayExecStartText)
+                  "gateway service ExecStart must launch auto-review gateway from the configured package";
+                assert lib.asserts.assertMsg
+                  (builtins.elem "/run/secrets/auto-review-gateway.env" gatewayEnvironmentFiles)
+                  "gateway service must include the configured EnvironmentFile";
+                assert lib.asserts.assertMsg
+                  (builtins.elem "auto_review" gatewayStateDirectories)
+                  "gateway service must declare StateDirectory=auto_review";
+                assert lib.asserts.assertMsg
+                  ((gatewayEnvironment.AR_GATEWAY_BARE or null) == "true")
+                  "gateway service must set AR_GATEWAY_BARE=true for the bare systemd deployment path";
+                true;
+            in
+            pkgs.runCommand "auto-review-nixos-module-contract" { inherit contract; } ''
+              set -eu
+              touch "$out"
+            '';
           ar-gateway-embedded-oci-config-contract = pkgs.runCommand "ar-gateway-embedded-oci-config-contract" {
             rootfsBundle = self.packages.${system}.ar-gateway-embedded-oci-rootfs;
             nativeBuildInputs = with pkgs; [ jq ];
@@ -653,5 +776,11 @@
           ar-gateway-image = self.packages.${system}.ar-gateway-image;
         };
       }
-    );
+    )
+    // {
+      nixosModules = {
+        default = autoReviewNixosModule;
+        auto-review = autoReviewNixosModule;
+      };
+    };
 }
