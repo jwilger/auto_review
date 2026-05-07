@@ -2338,6 +2338,80 @@ PY
   fi
 }
 
+test_publish_workflow_handles_release_signing_key_in_private_tempdir() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+step_match = re.search(r'- name: Build and verify Linux binary release artifacts(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
+if not step_match:
+    print('publish workflow is missing the binary artifact build/signing step')
+    sys.exit(1)
+
+step = step_match.group('body')
+if 'umask 077' not in step:
+    errors.append('binary signing step must set umask 077 before writing signing material')
+
+tempdir_match = re.search(r'(?P<var>[A-Za-z_][A-Za-z0-9_]*)="?\$\(mktemp -d\)"?', step)
+tempdir_var = tempdir_match.group('var') if tempdir_match else None
+if tempdir_var is None:
+    errors.append('binary signing step must create a private temporary directory with mktemp -d')
+else:
+    trap_patterns = [
+        rf"trap\s+'rm -rf \"\${tempdir_var}\"'\s+EXIT",
+        rf'trap\s+"rm -rf \\\"\${tempdir_var}\\\""\s+EXIT',
+        rf"trap\s+'rm -rf \"\${{{tempdir_var}}}\"'\s+EXIT",
+        rf'trap\s+"rm -rf \\\"\${{{tempdir_var}}}\\\""\s+EXIT',
+    ]
+    trap_match = next((re.search(pattern, step) for pattern in trap_patterns if re.search(pattern, step)), None)
+    sign_index = step.find('ssh-keygen -Y sign')
+    if trap_match is None:
+        errors.append('binary signing step must install a trap that runs rm -rf "$signing_dir" on EXIT')
+    elif sign_index == -1 or trap_match.start() > sign_index:
+        errors.append('binary signing step must install the signing directory cleanup trap before signing')
+    key_path_patterns = [
+        rf'signing_key="\${tempdir_var}/[^"\n]+"',
+        rf'signing_key="\${{{tempdir_var}}}/[^"\n]+"',
+    ]
+    if not any(re.search(pattern, step) for pattern in key_path_patterns):
+        errors.append('binary signing step must store the private key inside the private temporary directory')
+
+if 'chmod 600 "$signing_key"' not in step:
+    errors.append('binary signing step must chmod 600 the private signing key file')
+if 'printf \'%s\\n\' "$RELEASE_SIGNING_KEY" > "$signing_key"' not in step and 'printf "%s\\n" "$RELEASE_SIGNING_KEY" > "$signing_key"' not in step:
+    errors.append('binary signing step must write RELEASE_SIGNING_KEY only to the private signing key file')
+
+artifact_leak_patterns = [
+    r'RELEASE_SIGNING_KEY[^\n]*release-artifacts',
+    r'release-artifacts[^\n]*RELEASE_SIGNING_KEY',
+    r'private[-_]key',
+    r'id_(?:ed25519|rsa)',
+]
+for pattern in artifact_leak_patterns:
+    if re.search(pattern, step, re.I):
+        errors.append('binary signing step must not place RELEASE_SIGNING_KEY/private key material under release-artifacts')
+        break
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow handles release signing key in a private temporary directory"
+  else
+    fail "publish workflow handles release signing key in a private temporary directory ($output)"
+  fi
+}
+
 test_publish_workflow_allows_intentional_release_tooling_changes_before_token_publish() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
@@ -2605,6 +2679,7 @@ test_publish_workflow_supports_manual_dispatch_from_release_merge_sha
 test_publish_workflow_derives_and_promotes_release_candidate_sha
 test_publish_workflow_attaches_binary_archives_checksums_signatures_and_provenance
 test_publish_workflow_verifies_generated_binary_artifacts_before_release_upload
+test_publish_workflow_handles_release_signing_key_in_private_tempdir
 test_publish_workflow_allows_intentional_release_tooling_changes_before_token_publish
 test_release_docs_account_for_final_binary_assets_and_publish_token_scope
 test_release_tooling_tests_are_wired_into_nix_flake_check

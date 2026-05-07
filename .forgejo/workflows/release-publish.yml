@@ -124,8 +124,10 @@ jobs:
             printf 'missing RELEASE_AARCH64_NIX_BUILDER repository variable for Linux aarch64 binary builds\n' >&2
             exit 1
           fi
-          signing_key="$(mktemp)"
-          trap 'rm -f "$signing_key"' EXIT
+          umask 077
+          signing_dir="$(mktemp -d)"
+          trap 'rm -rf "$signing_dir"' EXIT
+          signing_key="$signing_dir/release-signing-key"
           printf '%s\n' "$RELEASE_SIGNING_KEY" > "$signing_key"
           chmod 600 "$signing_key"
           mkdir -p release-artifacts
