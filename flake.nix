@@ -167,7 +167,7 @@
         # the default package so `nix build` produces a deployable
         # artefact.
         packages = rec {
-          ar-cli = craneLib.buildPackage (
+          ar-cli-unwrapped = craneLib.buildPackage (
             commonArgs
             // {
               inherit cargoArtifacts;
@@ -211,7 +211,7 @@
           ar-gateway-embedded-oci-rootfs = pkgs.runCommand "embedded-gateway-oci-rootfs" {
             rootfsClosure = pkgs.closureInfo {
               rootPaths = [
-                ar-cli
+                ar-cli-unwrapped
                 pkgs.cacert
                 pkgs.git
               ];
@@ -223,6 +223,14 @@
                 user = {
                   uid = 65532;
                   gid = 65532;
+                };
+                noNewPrivileges = true;
+                capabilities = {
+                  bounding = [ ];
+                  effective = [ ];
+                  inheritable = [ ];
+                  permitted = [ ];
+                  ambient = [ ];
                 };
                 args = [
                   "/bin/auto-review"
@@ -259,12 +267,49 @@
                   options = [
                     "nosuid"
                     "nodev"
-                    "mode=0700"
-                    "uid=65532"
-                    "gid=65532"
+                  "mode=0700"
+                  "uid=65532"
+                  "gid=65532"
+                ];
+              }
+            ];
+              linux = {
+                namespaces = [
+                  { type = "pid"; }
+                  { type = "network"; }
+                  { type = "mount"; }
+                  { type = "ipc"; }
+                  { type = "uts"; }
+                  { type = "cgroup"; }
+                ];
+                maskedPaths = [
+                  "/proc/acpi"
+                  "/proc/asound"
+                  "/proc/kcore"
+                  "/proc/keys"
+                  "/proc/latency_stats"
+                  "/proc/scsi"
+                  "/proc/timer_list"
+                  "/proc/timer_stats"
+                  "/sys/firmware"
+                ];
+                readonlyPaths = [
+                  "/proc/bus"
+                  "/proc/fs"
+                  "/proc/irq"
+                  "/proc/sys"
+                  "/proc/sysrq-trigger"
+                  "/sys"
+                ];
+                resources = {
+                  devices = [
+                    {
+                      allow = false;
+                      access = "rwm";
+                    }
                   ];
-                }
-              ];
+                };
+              };
             };
             passAsFile = [ "ociConfig" ];
           } ''
@@ -272,7 +317,7 @@
             while IFS= read -r storePath; do
               cp -a "$storePath" "$out/rootfs/nix/store/"
             done < "$rootfsClosure/store-paths"
-            ln -s "${ar-cli}/bin/auto-review" "$out/rootfs/bin/auto-review"
+            ln -s "${ar-cli-unwrapped}/bin/auto-review" "$out/rootfs/bin/auto-review"
             ln -s "${pkgs.git}/bin/git" "$out/rootfs/bin/git"
             ln -s "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" "$out/rootfs/etc/ssl/certs/ca-bundle.crt"
             printf 'auto_review:x:65532:65532:auto_review:/var/lib/auto_review:/sbin/nologin\n' > "$out/rootfs/etc/passwd"
@@ -280,6 +325,14 @@
             printf 'hosts: files dns\n' > "$out/rootfs/etc/nsswitch.conf"
             : > "$out/rootfs/etc/resolv.conf"
             cp "$ociConfigPath" "$out/config.json"
+          '';
+          ar-cli = pkgs.runCommand "ar-cli" {
+            nativeBuildInputs = [ pkgs.makeWrapper ];
+          } ''
+            mkdir -p "$out/bin"
+            makeWrapper "${ar-cli-unwrapped}/bin/auto-review" "$out/bin/auto-review" \
+              --set-default AR_GATEWAY_EMBEDDED_OCI_BUNDLE_PATH "${ar-gateway-embedded-oci-rootfs}" \
+              --set-default AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH "${pkgs.youki}/bin/youki"
           '';
           default = self.packages.${system}.ar-cli;
         };
@@ -425,6 +478,72 @@
               buildPhaseCargoCommand = "cargo deny check licenses bans sources";
             }
           );
+          auto-review-packaged-gateway-launcher-contract = pkgs.runCommand "auto-review-packaged-gateway-launcher-contract" {
+            autoReviewPackage = self.packages.${system}.default;
+            nativeBuildInputs = with pkgs; [ gnugrep ];
+          } ''
+            set -eu
+
+            executable="$autoReviewPackage/bin/auto-review"
+            missing=0
+
+            if ! grep -aE 'AR_GATEWAY_EMBEDDED_OCI_BUNDLE_PATH=.*/nix/store/' "$executable" >/dev/null; then
+              printf 'missing wrapper contract: AR_GATEWAY_EMBEDDED_OCI_BUNDLE_PATH must be set to an absolute packaged OCI bundle path\n' >&2
+              missing=1
+            fi
+
+            if ! grep -aE 'AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH=.*/nix/store/' "$executable" >/dev/null; then
+              printf 'missing wrapper contract: AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH must be set to an absolute packaged runtime path\n' >&2
+              missing=1
+            fi
+
+            if ! grep -aE "/nix/store/[^[:space:]\"']*/bin/youki" "$executable" >/dev/null; then
+              printf 'missing wrapper contract: packaged auto-review must reference a Nix-store youki runtime path instead of requiring host youki\n' >&2
+              missing=1
+            fi
+
+            if [ "$missing" -ne 0 ]; then
+              exit 1
+            fi
+
+            touch "$out"
+          '';
+          ar-gateway-embedded-oci-config-contract = pkgs.runCommand "ar-gateway-embedded-oci-config-contract" {
+            rootfsBundle = self.packages.${system}.ar-gateway-embedded-oci-rootfs;
+            nativeBuildInputs = with pkgs; [ jq ];
+          } ''
+            set -eu
+
+            config="$rootfsBundle/config.json"
+
+            jq -e '.process.noNewPrivileges == true' "$config" >/dev/null
+            jq -e '
+              .process.capabilities.bounding == [] and
+              .process.capabilities.effective == [] and
+              .process.capabilities.inheritable == [] and
+              .process.capabilities.permitted == [] and
+              .process.capabilities.ambient == []
+            ' "$config" >/dev/null
+
+            for namespace in pid network mount ipc uts cgroup; do
+              jq -e --arg namespace "$namespace" 'any(.linux.namespaces[]; .type == $namespace)' "$config" >/dev/null
+            done
+
+            jq -e '
+              any(.linux.maskedPaths[]; . == "/proc/kcore") and
+              any(.linux.maskedPaths[]; . == "/proc/keys") and
+              any(.linux.maskedPaths[]; . == "/sys/firmware") and
+              any(.linux.readonlyPaths[]; . == "/proc/sys") and
+              any(.linux.readonlyPaths[]; . == "/sys")
+            ' "$config" >/dev/null
+
+            jq -e '
+              any(.mounts[]; .destination == "/tmp" and .type == "tmpfs" and (.options | index("mode=1777"))) and
+              any(.mounts[]; .destination == "/var/lib/auto_review" and .type == "tmpfs" and (.options | index("mode=0700")))
+            ' "$config" >/dev/null
+
+            touch "$out"
+          '';
           ar-gateway-embedded-oci-rootfs-contents = pkgs.runCommand "ar-gateway-embedded-oci-rootfs-contents" {
             rootfsBundle = self.packages.${system}.ar-gateway-embedded-oci-rootfs;
           } ''
