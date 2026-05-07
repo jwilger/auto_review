@@ -506,6 +506,7 @@ pub(crate) struct StatusSummary {
     pub bot_login: String,
     pub learnings: String,
     pub history: String,
+    pub runtime_isolation: RuntimeIsolationSummary,
     pub poller_enabled: bool,
     pub readiness_enabled: bool,
     pub jobs_dispatched_total: u64,
@@ -518,6 +519,62 @@ pub(crate) struct StatusSummary {
     pub webhook_rate_limited_total: u64,
     pub poll_cycles_total: u64,
     pub success_rate: Option<f64>,
+}
+
+#[derive(Debug, Clone, serde::Serialize)]
+pub(crate) struct RuntimeIsolationSummary {
+    pub kind: String,
+    pub label: String,
+    pub detail: String,
+}
+
+impl RuntimeIsolationSummary {
+    fn oci_default() -> Self {
+        Self {
+            kind: "oci_default".to_string(),
+            label: "packaged OCI container isolation".to_string(),
+            detail: "Gateway uses embedded OCI container-equivalent isolation by default."
+                .to_string(),
+        }
+    }
+
+    fn explicit_bare() -> Self {
+        Self {
+            kind: "explicit_bare".to_string(),
+            label: "bare gateway mode".to_string(),
+            detail: explicit_bare_gateway_mode_warning().to_string(),
+        }
+    }
+
+    fn unsupported_platform() -> Self {
+        Self {
+            kind: "unsupported_platform".to_string(),
+            label: "unsupported platform".to_string(),
+            detail:
+                "Embedded OCI isolation is unavailable on this platform; run in bare mode or provide external isolation."
+                    .to_string(),
+        }
+    }
+
+    fn external_container() -> Self {
+        Self {
+            kind: "external_container".to_string(),
+            label: "external container isolation".to_string(),
+            detail: "Gateway is already inside an externally provided container boundary."
+                .to_string(),
+        }
+    }
+
+    fn from_info(info: &serde_json::Value) -> Self {
+        let Some(posture) = info.get("runtime_isolation") else {
+            return Self::oci_default();
+        };
+        Self {
+            kind: posture["kind"].as_str().unwrap_or("unknown").to_string(),
+            label: posture["label"].as_str().unwrap_or("unknown").to_string(),
+            detail: posture["detail"].as_str().unwrap_or("unknown").to_string(),
+        }
+    }
 }
 
 impl StatusSummary {
@@ -575,6 +632,7 @@ impl StatusSummary {
             bot_login: info["bot_login"].as_str().unwrap_or("unknown").to_string(),
             learnings: info["learnings"].as_str().unwrap_or("unknown").to_string(),
             history: info["history"].as_str().unwrap_or("unknown").to_string(),
+            runtime_isolation: RuntimeIsolationSummary::from_info(info),
             poller_enabled: info["poller_enabled"].as_bool().unwrap_or(false),
             readiness_enabled: info["readiness_enabled"].as_bool().unwrap_or(false),
             jobs_dispatched_total: parsed
@@ -606,49 +664,70 @@ impl StatusSummary {
     }
 
     fn print(&self, base: &str) {
-        println!("auto_review status — {base}");
-        println!("  version          {}", self.version);
-        println!("  bot login        {}", self.bot_login);
-        println!("  learnings        {}", self.learnings);
-        println!("  history          {}", self.history);
-        println!(
-            "  poller           {}",
-            if self.poller_enabled {
-                "running"
-            } else {
-                "disabled"
-            }
-        );
-        println!(
-            "  readiness probe  {}",
-            if self.readiness_enabled {
-                "enabled"
-            } else {
-                "fallback to /healthz"
-            }
-        );
-        println!();
-        println!("Review pipeline:");
-        println!("  jobs dispatched  {}", self.jobs_dispatched_total);
-        println!("  succeeded        {}", self.reviews_succeeded_total);
-        println!("  failed           {}", self.reviews_failed_total);
-        println!("  skipped          {}", self.reviews_skipped_total);
-        match self.success_rate {
-            Some(r) => println!("  success rate     {:.1}%", r * 100.0),
-            None => println!("  success rate     — (no completions yet)"),
-        }
-        println!();
-        println!("Webhook intake (rejection counters):");
-        println!(
-            "  signature fails  {}",
-            self.webhook_signature_failures_total
-        );
-        println!("  payload fails    {}", self.webhook_payload_failures_total);
-        println!("  rate-limited     {}", self.webhook_rate_limited_total);
-        println!();
-        println!("Poller:");
-        println!("  cycles total     {}", self.poll_cycles_total);
+        print!("{}", self.render_for_operator(base));
     }
+
+    fn render_for_operator(&self, base: &str) -> String {
+        let poller = if self.poller_enabled {
+            "running"
+        } else {
+            "disabled"
+        };
+        let readiness = if self.readiness_enabled {
+            "enabled"
+        } else {
+            "fallback to /healthz"
+        };
+        let success_rate = match self.success_rate {
+            Some(r) => format!("{:.1}%", r * 100.0),
+            None => "— (no completions yet)".to_string(),
+        };
+        format!(
+            "auto_review status — {base}\n  version          {version}\n  bot login        {bot_login}\n  learnings        {learnings}\n  history          {history}\n  poller           {poller}\n  readiness probe  {readiness}\n\nRuntime isolation:\n  posture          {posture}\n  detail           {posture_detail}\n\nReview pipeline:\n  jobs dispatched  {jobs}\n  succeeded        {succeeded}\n  failed           {failed}\n  skipped          {skipped}\n  success rate     {success_rate}\n\nWebhook intake (rejection counters):\n  signature fails  {signature_failures}\n  payload fails    {payload_failures}\n  rate-limited     {rate_limited}\n\nPoller:\n  cycles total     {poll_cycles}\n",
+            version = self.version,
+            bot_login = self.bot_login,
+            learnings = self.learnings,
+            history = self.history,
+            posture = self.runtime_isolation.label,
+            posture_detail = self.runtime_isolation.detail,
+            jobs = self.jobs_dispatched_total,
+            succeeded = self.reviews_succeeded_total,
+            failed = self.reviews_failed_total,
+            skipped = self.reviews_skipped_total,
+            signature_failures = self.webhook_signature_failures_total,
+            payload_failures = self.webhook_payload_failures_total,
+            rate_limited = self.webhook_rate_limited_total,
+            poll_cycles = self.poll_cycles_total,
+        )
+    }
+}
+
+fn classify_local_runtime_isolation_posture(
+    bare: Option<&str>,
+    external_isolation: Option<&str>,
+) -> Result<RuntimeIsolationSummary> {
+    if std::env::consts::OS != "linux" {
+        return Ok(RuntimeIsolationSummary::unsupported_platform());
+    }
+    if external_isolation == Some("container") {
+        return Ok(RuntimeIsolationSummary::external_container());
+    }
+    match bare.map(str::trim).map(str::to_ascii_lowercase) {
+        None => Ok(RuntimeIsolationSummary::oci_default()),
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => {
+            Ok(RuntimeIsolationSummary::explicit_bare())
+        }
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => {
+            Ok(RuntimeIsolationSummary::oci_default())
+        }
+        Some(_) => anyhow::bail!(
+            "AR_GATEWAY_BARE has an unrecognized value; use true/false, yes/no, on/off, or 1/0"
+        ),
+    }
+}
+
+fn explicit_bare_gateway_mode_warning() -> &'static str {
+    "Warning: bare gateway mode selected; only application-level controls are active, not container-equivalent isolation."
 }
 
 /// Lightweight Prometheus-text-format parser. Extracts every line
@@ -778,6 +857,11 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
         },
         None => report.skip("webhook-secret", "set --webhook-secret to enable"),
     }
+
+    let bare = std::env::var("AR_GATEWAY_BARE").ok();
+    let external_isolation = std::env::var("AR_GATEWAY_EXTERNAL_ISOLATION").ok();
+    report
+        .add_runtime_isolation_posture_from_env(bare.as_deref(), external_isolation.as_deref())?;
 
     // Git: required for the workspace clone phase. Without it, every
     // review fails at prepare_workspace with a confusing
@@ -998,6 +1082,34 @@ impl DoctorReport {
             status: CheckStatus::Skip,
             detail: detail.into(),
         });
+    }
+    #[cfg(test)]
+    fn add_runtime_isolation_posture(&mut self, bare: Option<&str>) -> Result<()> {
+        self.add_runtime_isolation_posture_from_env(bare, None)
+    }
+    fn add_runtime_isolation_posture_from_env(
+        &mut self,
+        bare: Option<&str>,
+        external_isolation: Option<&str>,
+    ) -> Result<()> {
+        let posture = classify_local_runtime_isolation_posture(bare, external_isolation)?;
+        if posture.kind == "explicit_bare" {
+            self.warn("runtime-isolation", posture.detail);
+        } else if posture.kind == "oci_default" {
+            self.warn(
+                "runtime-isolation",
+                format!(
+                    "{}; gateway will attempt embedded OCI isolation, but prerequisites are not verified by doctor",
+                    posture.label
+                ),
+            );
+        } else {
+            self.pass(
+                "runtime-isolation",
+                format!("{}; {}", posture.label, posture.detail),
+            );
+        }
+        Ok(())
     }
     fn has_failures(&self) -> bool {
         self.results.iter().any(|r| r.status == CheckStatus::Fail)
@@ -1360,6 +1472,59 @@ mod tests {
         doctor(args)
             .await
             .expect("weak secret should warn, not fail");
+    }
+
+    #[test]
+    fn doctor_report_warns_when_local_posture_is_explicit_bare() {
+        let mut report = DoctorReport::new();
+
+        report.add_runtime_isolation_posture(Some("true")).unwrap();
+
+        let posture = report
+            .results
+            .iter()
+            .find(|result| result.name == "runtime-isolation")
+            .expect("doctor should include local runtime isolation posture");
+        assert_eq!(posture.status, CheckStatus::Warn);
+        assert!(
+            posture.detail.contains("bare gateway mode"),
+            "bare-mode posture should name the selected mode: {posture:?}"
+        );
+        assert!(
+            posture
+                .detail
+                .contains("only application-level controls are active"),
+            "bare-mode posture should warn about the limited local controls: {posture:?}"
+        );
+        assert!(
+            !posture
+                .detail
+                .contains("container-equivalent isolation is active"),
+            "doctor must not claim explicit bare mode has container-equivalent isolation: \
+             {posture:?}"
+        );
+    }
+
+    #[test]
+    fn doctor_report_warns_when_default_runtime_isolation_is_not_verified() {
+        let mut report = DoctorReport::new();
+
+        report.add_runtime_isolation_posture(None).unwrap();
+
+        let posture = report
+            .results
+            .iter()
+            .find(|result| result.name == "runtime-isolation")
+            .expect("doctor should include local runtime isolation posture");
+        assert_eq!(posture.status, CheckStatus::Warn);
+        assert!(
+            posture.detail.contains("will attempt"),
+            "default posture should describe the unverified runtime attempt: {posture:?}"
+        );
+        assert!(
+            posture.detail.contains("not verified"),
+            "default posture should say embedded OCI prerequisites are not verified: {posture:?}"
+        );
     }
 
     #[test]
@@ -1881,9 +2046,71 @@ auto_review_reviews_completed_count 10
         assert!((summary.success_rate.unwrap() - 0.8).abs() < 1e-9);
     }
 
+    #[test]
+    fn status_summary_compute_renders_info_runtime_isolation_posture() {
+        let version = serde_json::json!({"version": "0.1.0"});
+        let info = serde_json::json!({
+            "bot_login": "auto_review",
+            "learnings": "sqlite",
+            "history": "sqlite",
+            "poller_enabled": true,
+            "readiness_enabled": true,
+            "runtime_isolation": {
+                "kind": "explicit_bare",
+                "label": "bare gateway mode",
+                "detail": "Warning: bare gateway mode selected; only application-level controls are active, not container-equivalent isolation."
+            }
+        });
+
+        let summary = StatusSummary::compute(&version, &info, "");
+
+        assert_eq!(summary.runtime_isolation.kind, "explicit_bare");
+        assert_eq!(summary.runtime_isolation.label, "bare gateway mode");
+        assert!(summary
+            .runtime_isolation
+            .detail
+            .contains("only application-level controls are active"));
+        let json = serde_json::to_value(&summary).unwrap();
+        assert_eq!(json["runtime_isolation"]["kind"], "explicit_bare");
+        assert_eq!(json["runtime_isolation"]["label"], "bare gateway mode");
+    }
+
+    #[test]
+    fn status_summary_operator_rendering_includes_runtime_isolation_posture() {
+        let version = serde_json::json!({"version": "0.1.0"});
+        let info = serde_json::json!({
+            "bot_login": "auto_review",
+            "learnings": "sqlite",
+            "history": "sqlite",
+            "poller_enabled": true,
+            "readiness_enabled": true,
+            "runtime_isolation": {
+                "kind": "explicit_bare",
+                "label": "bare gateway mode",
+                "detail": "Warning: bare gateway mode selected; only application-level controls are active, not container-equivalent isolation."
+            }
+        });
+
+        let summary = StatusSummary::compute(&version, &info, "");
+        let rendered = summary.render_for_operator("http://gateway.example");
+
+        assert!(
+            rendered.contains("Runtime isolation"),
+            "operator status output should include a runtime isolation section: {rendered}"
+        );
+        assert!(
+            rendered.contains("bare gateway mode"),
+            "operator status output should render the /info runtime isolation label: {rendered}"
+        );
+        assert!(
+            rendered.contains("only application-level controls are active"),
+            "operator status output should render the posture warning detail: {rendered}"
+        );
+    }
+
     #[tokio::test]
     async fn end_to_end_status_against_real_gateway() {
-        use ar_gateway::{build_router, AppState, GatewayInfo};
+        use ar_gateway::{build_router, AppState, GatewayInfo, RuntimeIsolationPostureInfo};
         use ar_orchestrator::NoOpDispatcher;
 
         let info = Arc::new(GatewayInfo {
@@ -1899,6 +2126,7 @@ auto_review_reviews_completed_count 10
             reasoning_model: "test-model".into(),
             poller_enabled: true,
             readiness_enabled: true,
+            runtime_isolation: RuntimeIsolationPostureInfo::oci_default(),
         });
         let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)).with_info(info));
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
