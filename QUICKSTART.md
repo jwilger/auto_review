@@ -92,9 +92,11 @@ directly inside your private network).
 
 During the single-binary OCI rollout, direct binary startup fails closed unless
 the embedded launcher is available or you explicitly opt out with `--bare` (or
-`AR_GATEWAY_BARE=true`). Bare mode logs that only application-level controls are
-active and is not container-equivalent isolation. The published container image
-marks its external container boundary automatically.
+`AR_GATEWAY_BARE=true`). The bare command is intended for local evaluation and
+for operators who build `auto_review` into their own custom VM images or
+container images. Bare mode logs that only application-level controls are active
+and is not container-equivalent isolation. The published container image marks
+its external container boundary automatically.
 
 Store the same `AR_CI_REVIEW_TOKEN` value as a CI secret (for example,
 `AUTO_REVIEW_ACTION_TOKEN`) so your workflow can call `POST /reviews/ci` after

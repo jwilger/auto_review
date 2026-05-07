@@ -89,10 +89,10 @@
                   && pkgs.lib.hasSuffix ".yml" path)
               || strPath == "${toString ./.}/.forgejo/pull_request_template.md"
               || strPath == "${toString ./.}/.kilo/command/prepare-forgejo-pr.md"
-              || strPath == "${toString ./.}/.kilo/skills/rust-workspace-engineering/SKILL.md"
-              || strPath == "${toString ./.}/docs/OPERATIONS.md"
-             || strPath == "${toString ./.}/docs/THREAT-MODEL.md"
-             || strPath == "${toString ./.}/deploy/systemd/auto_review.env.example";
+               || strPath == "${toString ./.}/.kilo/skills/rust-workspace-engineering/SKILL.md"
+                || strPath == "${toString ./.}/docs/OPERATIONS.md"
+               || strPath == "${toString ./.}/docs/THREAT-MODEL.md"
+               || strPath == "${toString ./.}/deploy/systemd/auto_review.env.example";
         };
 
         commonArgs = {

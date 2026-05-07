@@ -76,7 +76,8 @@ What an attacker would target, and what protects each:
 | Other repos the bot can write to       | Cross-repo blast radius                         | Bot PAT scoping; per-repo `enabled: false`   |
 | Learnings store (SQLite)               | LLM-prompt injection vector if poisoned         | Append-only; chat command surface gated to repo collaborators |
 | Release preparation PAT                | Can prepare release PR metadata                 | Forgejo Actions secret `RELEASE_PREPARE_TOKEN`; release preparation PAT blast radius is to prepare release PR branches and release PRs only in `jwilger/auto_review` |
-| Release publishing PAT                 | Can publish release images and Forgejo Releases | Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`; release publishing PAT blast radius is to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review` |
+| Release publishing PAT                 | Can publish release images, future binary release assets, provenance metadata, and Forgejo Releases | Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`; release publishing PAT blast radius is to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway`, attach future Linux binary assets/checksums/signatures/SBOM-provenance metadata after issue #121 lands, and create Forgejo Releases only in `jwilger/auto_review` |
+| Binary release assets and provenance   | Direct-download operators rely on archive integrity and origin | Issue #121 must publish Linux archives with SHA-256 checksums, signatures, SBOM/provenance metadata, and verification instructions before binary assets are treated as shipped |
 | Release signing key                    | Signs release PR commits                        | Forgejo Actions secret `RELEASE_SIGNING_KEY`; dedicated release bot Forgejo user |
 | Staged embedded OCI `config.json`       | Temporarily contains allowlisted gateway secrets for the inner process | Created under owner-only staging, populated from an explicit allowlist, runtime env cleared, diagnostics redact values, cleaned after runtime exit |
 
@@ -236,7 +237,7 @@ Actions secret `RELEASE_PREPARE_TOKEN` can prepare release PR branches
 and release PRs only in `jwilger/auto_review`; the protected
 Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`, paired with
 the release bot identity in repository variable `RELEASE_BOT_NAME`, can publish container images
-to `git.johnwilger.com/jwilger/auto_review/ar-gateway`, including release candidate tags, and create Forgejo Releases only in `jwilger/auto_review`.
+to `git.johnwilger.com/jwilger/auto_review/ar-gateway`, including release candidate tags, and create Forgejo Releases only in `jwilger/auto_review`. After issue #121 lands, the same release-publish boundary will also cover Linux binary archives, checksums, signatures, SBOM/provenance metadata, and verification instructions attached to Forgejo Releases.
 The release signing key is attached to a dedicated release bot Forgejo user and
 exposed only to release preparation so git can sign release PR commits. Release
 automation computes a single root release version from conventional commits,
@@ -244,7 +245,7 @@ checks the selected bump with `cargo semver-checks`, updates only root release
 metadata, builds the release candidate Docker image with `nix build .#ar-gateway-image` after the release metadata commit, publishes candidate image tags for the release PR head SHA and release-candidate tag, creates or updates a prerelease Forgejo Release entry for the release-candidate tag, and uses `tea` to open the Forgejo release PR. Publish only runs for
 release PRs merged into `main`, promotes the candidate image to the release version and `latest` tags, publishes only `git.johnwilger.com/jwilger/auto_review/ar-gateway` to the Forgejo package registry and creates the matching Forgejo Release entry, and refuses token-bearing publication when the merged release PR changed files outside expected root release metadata: `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`.
 *Residual risk:* **Release preparation PAT blast radius** is limited to forged
-release branches/PR metadata in the project repository. **Release publishing PAT blast radius** is limited to forged package images, including candidate tags, in the project registry and forged release entries in the project repository.
+release branches/PR metadata in the project repository. **Release publishing PAT blast radius** is limited to forged package images, including candidate tags, in the project registry; forged release entries in the project repository; and, after issue #121 implements binary publication, forged Linux binary archives, checksums, signatures, SBOM/provenance metadata, and verification text attached to those Forgejo Releases.
 Rotate the Actions secret if workflow logs, runner state, or Forgejo secrets are
 suspected of exposure.
 

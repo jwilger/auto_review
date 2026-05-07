@@ -25,6 +25,9 @@ numbers, "today") before posting.
 >   dropping anything the diff doesn't corroborate.
 > - Posts a single review with inline comments and an overall
 >   summary.
+> - Ships one operator command, `auto-review`, with grouped CLI
+>   subcommands for gateway startup, auth, webhook management,
+>   diagnostics, one-shot reviews, and maintenance.
 >
 > **What it deliberately doesn't do:** auto-merge, auto-approve,
 > or auto-close. Every suggestion is advisory; humans stay in
@@ -39,6 +42,12 @@ numbers, "today") before posting.
 > **CI owns deterministic checks.** auto_review does not execute
 > bundled linters in the gateway; projects keep objective pass/fail
 > gates in Forgejo Actions and trigger semantic review afterwards.
+>
+> **Deploy:** container-first for production. The Docker/OCI image runs
+> the same `auto-review gateway` entrypoint as the direct binary while
+> supplying the recommended production isolation boundary. Direct
+> binary installs use embedded OCI by default on supported Linux hosts;
+> bare mode is an explicit opt-out, not the silent default.
 >
 > **What makes this different from PR-Agent:** verification
 > agent (drops hallucinated findings before they hit your PR),
@@ -100,8 +109,9 @@ numbers, "today") before posting.
 > outbound calls are to the LLM provider you configure.
 >
 > **Deploy:** `docker compose up` next to your Forgejo
-> instance. `auto-review auth init` mints the bot user, registers
-> the webhook, and bootstraps `.auto_review.yaml`.
+> instance for the container-first production deployment. The same
+> single `auto-review` CLI is available inside the image and for
+> direct binary diagnostics.
 >
 > Repo: `<repo URL>`
 >
@@ -151,6 +161,13 @@ with CI-triggered reviews and local LLMs`
 >   (`nix flake check`) run identical derivations; the rust
 >   nightly snapshot is pinned by `flake.lock` so the whole
 >   stack is hermetic.
+>
+> - **Single operator CLI.** The shipped command is `auto-review`:
+>   `auto-review gateway`, `auto-review auth`, `auto-review webhook`,
+>   `auto-review ops`, and the other grouped subcommands share one
+>   binary. Container-first production deployment remains the
+>   recommended path; direct binary gateway startup uses embedded OCI
+>   on supported Linux hosts unless bare mode is explicitly selected.
 >
 > AGPL-3.0-or-later. `<repo URL>`.
 
