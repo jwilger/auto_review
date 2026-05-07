@@ -60,7 +60,7 @@ PR author┤ Forgejo (HTTPS)   │───────────────�
 | Forgejo API ← bot PAT             | Scoped: `write:repository`, `write:issue`, `read:user`       |
 | Forgejo API ← Release preparation PAT | Forgejo Actions secret `RELEASE_PREPARE_TOKEN`, scoped to prepare release PR branches and release PRs only in `jwilger/auto_review` |
 | Forgejo package registry and Releases API ← Release publishing PAT | Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`, scoped to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review` |
-| Forgejo Actions → Release signing key | Forgejo Actions secret `RELEASE_SIGNING_KEY`, scoped to release PR commit signing by the release bot |
+| Forgejo Actions → Release signing key | Forgejo Actions secret `RELEASE_SIGNING_KEY`, scoped to release PR commit signing and `SHA256SUMS` artifact signing by the release bot |
 
 ## Asset Inventory
 
@@ -76,9 +76,9 @@ What an attacker would target, and what protects each:
 | Other repos the bot can write to       | Cross-repo blast radius                         | Bot PAT scoping; per-repo `enabled: false`   |
 | Learnings store (SQLite)               | LLM-prompt injection vector if poisoned         | Append-only; chat command surface gated to repo collaborators |
 | Release preparation PAT                | Can prepare release PR metadata                 | Forgejo Actions secret `RELEASE_PREPARE_TOKEN`; release preparation PAT blast radius is to prepare release PR branches and release PRs only in `jwilger/auto_review` |
-| Release publishing PAT                 | Can publish release images, future binary release assets, provenance metadata, and Forgejo Releases | Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`; release publishing PAT blast radius is to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway`, attach future Linux binary assets/checksums/signatures/SBOM-provenance metadata after issue #121 lands, and create Forgejo Releases only in `jwilger/auto_review` |
-| Binary release assets and provenance   | Direct-download operators rely on archive integrity and origin | Issue #121 must publish Linux archives with SHA-256 checksums, signatures, SBOM/provenance metadata, and verification instructions before binary assets are treated as shipped |
-| Release signing key                    | Signs release PR commits                        | Forgejo Actions secret `RELEASE_SIGNING_KEY`; dedicated release bot Forgejo user |
+| Release publishing PAT                 | Can publish release images, Linux binary archives, provenance metadata, and Forgejo Releases | Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`; release publishing PAT blast radius is to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway`, attach Linux x86_64 and Linux aarch64 `auto-review` binary release assets/checksums/signatures/SBOM-provenance metadata, and create Forgejo Releases only in `jwilger/auto_review` |
+| Binary release assets and provenance   | Direct-download operators rely on archive integrity and origin | Linux archives ship with SHA-256 checksums, SSH signatures, SBOM/provenance metadata, release notes verification commands such as `sha256sum -c SHA256SUMS` and `ssh-keygen -Y verify -f allowed-signers -I <release-bot-email> -n file -s SHA256SUMS.sig < SHA256SUMS`, and an explicit `RELEASE_AARCH64_NIX_BUILDER` remote-builder requirement for the Linux aarch64 package output |
+| Release signing key                    | Signs release PR commits and checksum manifests | Forgejo Actions secret `RELEASE_SIGNING_KEY`; dedicated release bot Forgejo user |
 | Staged embedded OCI `config.json`       | Temporarily contains allowlisted gateway secrets for the inner process | Created under owner-only staging, populated from an explicit allowlist, runtime env cleared, diagnostics redact values, cleaned after runtime exit |
 
 ## Attacker Profiles
@@ -237,17 +237,35 @@ Actions secret `RELEASE_PREPARE_TOKEN` can prepare release PR branches
 and release PRs only in `jwilger/auto_review`; the protected
 Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`, paired with
 the release bot identity in repository variable `RELEASE_BOT_NAME`, can publish container images
-to `git.johnwilger.com/jwilger/auto_review/ar-gateway`, including release candidate tags, and create Forgejo Releases only in `jwilger/auto_review`. After issue #121 lands, the same release-publish boundary will also cover Linux binary archives, checksums, signatures, SBOM/provenance metadata, and verification instructions attached to Forgejo Releases.
+to `git.johnwilger.com/jwilger/auto_review/ar-gateway`, including release candidate tags, attach Linux binary archives/checksums/signatures/SBOM/provenance metadata, and create Forgejo Releases only in `jwilger/auto_review`.
 The release signing key is attached to a dedicated release bot Forgejo user and
-exposed only to release preparation so git can sign release PR commits. Release
+exposed to release preparation for git-signed release PR commits and to release publish for SSH-signed `SHA256SUMS` checksum manifests. Release
 automation computes a single root release version from conventional commits,
 checks the selected bump with `cargo semver-checks`, updates only root release
 metadata, builds the release candidate Docker image with `nix build .#ar-gateway-image` after the release metadata commit, publishes candidate image tags for the release PR head SHA and release-candidate tag, creates or updates a prerelease Forgejo Release entry for the release-candidate tag, and uses `tea` to open the Forgejo release PR. Publish only runs for
-release PRs merged into `main`, promotes the candidate image to the release version and `latest` tags, publishes only `git.johnwilger.com/jwilger/auto_review/ar-gateway` to the Forgejo package registry and creates the matching Forgejo Release entry, and refuses token-bearing publication when the merged release PR changed files outside expected root release metadata: `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`.
+release PRs merged into `main`, requires `RELEASE_AARCH64_NIX_BUILDER` for the Linux aarch64 package output, builds and verifies the Linux binary archives and metadata before token-bearing publication, promotes the candidate image to the release version and `latest` tags, publishes only `git.johnwilger.com/jwilger/auto_review/ar-gateway` to the Forgejo package registry and creates the matching Forgejo Release entry with Linux binary archives and metadata, and refuses token-bearing publication when the merged release PR changed files outside expected root release metadata and intentional release tooling files: `Cargo.toml`, `Cargo.lock`, and `CHANGELOG.md`; `.forgejo/workflows/release-prepare.yml`, `.forgejo/workflows/release-publish.yml`, `scripts/release`, and `tests/release_tooling_test.sh` are also allowed for intentional release workflow/script/test changes.
 *Residual risk:* **Release preparation PAT blast radius** is limited to forged
-release branches/PR metadata in the project repository. **Release publishing PAT blast radius** is limited to forged package images, including candidate tags, in the project registry; forged release entries in the project repository; and, after issue #121 implements binary publication, forged Linux binary archives, checksums, signatures, SBOM/provenance metadata, and verification text attached to those Forgejo Releases.
+release branches/PR metadata in the project repository. **Release publishing PAT blast radius** is limited to forged package images, including candidate tags, in the project registry; forged release entries in the project repository; and forged Linux binary archives, checksums, signatures, SBOM/provenance metadata, and verification text attached to those Forgejo Releases.
 Rotate the Actions secret if workflow logs, runner state, or Forgejo secrets are
 suspected of exposure.
+
+### T5b. Release aarch64 remote builder compromise
+
+*Attacker:* A4 or an attacker with access to the configured Nix remote builder.
+*Path:* The publish workflow requires `RELEASE_AARCH64_NIX_BUILDER` so a generic
+x86_64 Docker runner can produce the Linux aarch64 archive. A compromised or
+misconfigured remote builder could return a malicious aarch64 `auto-review`
+binary that is then checksummed, signed, and attached to the Forgejo Release.
+*Mitigation:* Treat the configured aarch64 Nix builder as part of the trusted
+release build boundary. Operators must run it under the same hardening and
+access-control policy as the Forgejo release runner, restrict the builder to
+trusted release jobs, and rotate release assets if builder integrity is in doubt.
+The publish workflow records the Nix output path and release merge commit in
+the provenance document and signs `SHA256SUMS` only after both Linux archives are
+built and checksum-verified, so release consumers can identify exactly which
+artifact set was approved by the release bot key.
+*Residual risk:* Nix remote-builder trust is out of scope for the gateway
+runtime; release operators own builder provisioning, isolation, and audit logs.
 
 ### T6. Learnings-store poisoning
 

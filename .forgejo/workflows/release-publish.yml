@@ -60,6 +60,8 @@ jobs:
             case "$changed_file" in
               Cargo.toml|Cargo.lock|CHANGELOG.md)
                 ;;
+              .forgejo/workflows/release-prepare.yml|.forgejo/workflows/release-publish.yml|scripts/release|tests/release_tooling_test.sh)
+                ;;
               .forgejo/workflows/*|scripts/*)
                 printf 'refusing token-bearing publish for release PR file: %s\n' "$changed_file" >&2
                 exit 1
@@ -102,6 +104,154 @@ jobs:
             RELEASE_CANDIDATE_SHA="$(git rev-parse "$RELEASE_MERGE_SHA^2")"
           fi
           printf 'RELEASE_CANDIDATE_SHA=%s\n' "$RELEASE_CANDIDATE_SHA" >> "$GITHUB_ENV"
+      - name: Build and verify Linux binary release artifacts
+        env:
+          RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
+          RELEASE_AARCH64_NIX_BUILDER: ${{ vars.RELEASE_AARCH64_NIX_BUILDER }}
+          RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
+          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
+            printf 'missing RELEASE_SIGNING_KEY\n' >&2
+            exit 1
+          fi
+          if [ -z "${RELEASE_BOT_EMAIL:-}" ]; then
+            printf 'missing RELEASE_BOT_EMAIL repository variable\n' >&2
+            exit 1
+          fi
+          if [ -z "${RELEASE_AARCH64_NIX_BUILDER:-}" ]; then
+            printf 'missing RELEASE_AARCH64_NIX_BUILDER repository variable for Linux aarch64 binary builds\n' >&2
+            exit 1
+          fi
+          signing_key="$(mktemp)"
+          trap 'rm -f "$signing_key"' EXIT
+          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$signing_key"
+          chmod 600 "$signing_key"
+          mkdir -p release-artifacts
+          x86_out="$(nix build .#packages.x86_64-linux.default --print-out-paths --no-link)"
+          aarch64_out="$(nix build --builders "$RELEASE_AARCH64_NIX_BUILDER" .#packages.aarch64-linux.default --print-out-paths --no-link)"
+          cp "$x86_out/bin/auto-review" release-artifacts/auto-review
+          tar -C release-artifacts -czf release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz auto-review
+          cp "$aarch64_out/bin/auto-review" release-artifacts/auto-review
+          tar -C release-artifacts -czf release-artifacts/auto-review-$RELEASE_VERSION-linux-aarch64.tar.gz auto-review
+          rm release-artifacts/auto-review
+          (
+            cd release-artifacts
+            sha256sum auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz auto-review-$RELEASE_VERSION-linux-aarch64.tar.gz > SHA256SUMS
+            python3 - "$RELEASE_VERSION" "$RELEASE_MERGE_SHA" "$x86_out" "$aarch64_out" <<'PY'
+          import datetime
+          import hashlib
+          import json
+          import pathlib
+          import sys
+
+          version, source, x86_out, aarch64_out = sys.argv[1:]
+          generated_at = datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat()
+          archives = [
+              ("linux-x86_64", f"auto-review-{version}-linux-x86_64.tar.gz", x86_out),
+              ("linux-aarch64", f"auto-review-{version}-linux-aarch64.tar.gz", aarch64_out),
+          ]
+
+          def file_digest(path, algorithm):
+              digest = hashlib.new(algorithm)
+              with pathlib.Path(path).open("rb") as handle:
+                  for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                      digest.update(chunk)
+              return digest.hexdigest()
+
+          def sha256(path):
+              return file_digest(path, "sha256")
+
+          def sha1(path):
+              return file_digest(path, "sha1")
+
+          def package_verification_code(file_sha1s):
+              joined = "".join(sorted(file_sha1s))
+              return hashlib.sha1(joined.encode("utf-8")).hexdigest()
+
+          files = [
+              {
+                  "SPDXID": f"SPDXRef-File-auto-review-{target.replace('_', '-')}",
+                  "fileName": archive,
+                  "checksums": [
+                      {"algorithm": "SHA1", "checksumValue": sha1(archive)},
+                      {"algorithm": "SHA256", "checksumValue": sha256(archive)},
+                  ],
+                  "licenseConcluded": "NOASSERTION",
+                  "licenseInfoInFiles": ["NOASSERTION"],
+                  "copyrightText": "NOASSERTION",
+                  "artifactOf": [{"name": "auto-review", "versionInfo": version}],
+              }
+              for target, archive, _ in archives
+          ]
+          file_sha1s = [next(checksum["checksumValue"] for checksum in item["checksums"] if checksum["algorithm"] == "SHA1") for item in files]
+          sbom = {
+              "spdxVersion": "SPDX-2.3",
+              "dataLicense": "CC0-1.0",
+              "SPDXID": "SPDXRef-DOCUMENT",
+              "name": f"auto-review-{version}-binary-release",
+              "documentNamespace": f"https://git.johnwilger.com/jwilger/auto_review/releases/v{version}/sbom",
+              "creationInfo": {
+                  "created": generated_at,
+                  "creators": ["Tool: auto_review-release-workflow", "Organization: jwilger/auto_review"],
+              },
+              "packages": [
+                  {
+                      "SPDXID": "SPDXRef-Package-auto-review",
+                      "name": "auto-review",
+                      "versionInfo": version,
+                      "downloadLocation": f"https://git.johnwilger.com/jwilger/auto_review/releases/tag/v{version}",
+                      "filesAnalyzed": True,
+                      "packageVerificationCode": {"packageVerificationCodeValue": package_verification_code(file_sha1s)},
+                      "licenseConcluded": "NOASSERTION",
+                      "licenseDeclared": "NOASSERTION",
+                      "copyrightText": "NOASSERTION",
+                  }
+              ],
+              "files": files,
+              "relationships": [
+                  {"spdxElementId": "SPDXRef-DOCUMENT", "relationshipType": "DESCRIBES", "relatedSpdxElement": "SPDXRef-Package-auto-review"},
+                  *[
+                      {"spdxElementId": "SPDXRef-Package-auto-review", "relationshipType": "CONTAINS", "relatedSpdxElement": item["SPDXID"]}
+                      for item in files
+                  ],
+              ],
+          }
+          pathlib.Path(f"auto-review-{version}-sbom.spdx.json").write_text(json.dumps(sbom, indent=2, sort_keys=True) + "\n")
+
+          provenance = {
+              "_type": "https://in-toto.io/Statement/v1",
+              "subject": [
+                  {"name": archive, "digest": {"sha256": sha256(archive)}}
+                  for _, archive, _ in archives
+              ],
+              "predicateType": "https://slsa.dev/provenance/v1",
+              "predicate": {
+                  "buildDefinition": {
+                      "buildType": "https://git.johnwilger.com/jwilger/auto_review/.forgejo/workflows/release-publish.yml@v1",
+                      "externalParameters": {"releaseVersion": version, "releaseMergeSha": source},
+                      "internalParameters": {},
+                      "resolvedDependencies": [
+                          {"uri": "git+https://git.johnwilger.com/jwilger/auto_review", "digest": {"gitCommit": source}},
+                          {"uri": "nix-store:" + x86_out, "name": "packages.x86_64-linux.default"},
+                          {"uri": "nix-store:" + aarch64_out, "name": "packages.aarch64-linux.default"},
+                      ],
+                  },
+                  "runDetails": {
+                      "builder": {"id": "https://git.johnwilger.com/jwilger/auto_review/actions/release-publish"},
+                      "metadata": {"invocationId": source, "startedOn": generated_at, "finishedOn": generated_at},
+                  },
+              },
+          }
+          pathlib.Path(f"auto-review-{version}-provenance.json").write_text(json.dumps(provenance, indent=2, sort_keys=True) + "\n")
+          PY
+            nix develop --command ssh-keygen -Y sign -f "$signing_key" -n file SHA256SUMS
+            nix develop --command ssh-keygen -y -f "$signing_key" > release-signing-key.pub
+            printf '%s %s\n' "$RELEASE_BOT_EMAIL" "$(cat release-signing-key.pub)" > allowed-signers
+            sha256sum -c SHA256SUMS
+            nix develop --command ssh-keygen -Y verify -f allowed-signers -I "$RELEASE_BOT_EMAIL" -n file -s SHA256SUMS.sig < SHA256SUMS
+          )
       - name: Publish Docker image to Forgejo package registry
         env:
           RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
@@ -133,6 +283,7 @@ jobs:
         env:
           GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
           GITEA_SERVER_URL: https://git.johnwilger.com
+          RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
           RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
@@ -140,6 +291,8 @@ jobs:
           # Generate notes from the finalized CHANGELOG.md ## [$RELEASE_VERSION] section.
           awk "/^## \\[$RELEASE_VERSION\\]/{emit=1; next} /^## \\[/{if (emit) exit} emit {print}" CHANGELOG.md > "$RELEASE_NOTES_FILE"
           printf '\nDocker image: git.johnwilger.com/jwilger/auto_review/ar-gateway:%s\n' "$RELEASE_VERSION" >> "$RELEASE_NOTES_FILE"
+          printf '\nLinux binary archives:\n- auto-review-%s-linux-x86_64.tar.gz\n- auto-review-%s-linux-aarch64.tar.gz\n' "$RELEASE_VERSION" "$RELEASE_VERSION" >> "$RELEASE_NOTES_FILE"
+          printf '\nVerify downloads before use:\n```bash\nsha256sum -c SHA256SUMS\nssh-keygen -Y verify -f allowed-signers -I %s -n file -s SHA256SUMS.sig < SHA256SUMS\n```\n' "$RELEASE_BOT_EMAIL" >> "$RELEASE_NOTES_FILE"
           tea_login="auto_review-release-publish-${GITHUB_RUN_ID:-$$}"
           nix develop --command tea login add --name "$tea_login" --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
           nix develop --command tea release create \
@@ -149,3 +302,15 @@ jobs:
             --target "$RELEASE_MERGE_SHA" \
             --title "v$RELEASE_VERSION" \
             --note-file "$RELEASE_NOTES_FILE"
+          nix develop --command tea releases assets create \
+            --login "$tea_login" \
+            --repo jwilger/auto_review \
+            v$RELEASE_VERSION \
+            release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz \
+            release-artifacts/auto-review-$RELEASE_VERSION-linux-aarch64.tar.gz \
+            release-artifacts/SHA256SUMS \
+            release-artifacts/SHA256SUMS.sig \
+            release-artifacts/release-signing-key.pub \
+            release-artifacts/allowed-signers \
+            release-artifacts/auto-review-$RELEASE_VERSION-sbom.spdx.json \
+            release-artifacts/auto-review-$RELEASE_VERSION-provenance.json

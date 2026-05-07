@@ -202,6 +202,7 @@
             tea
             python3
             jq
+            openssh
             skopeo
             kubernetes-helm
             pkg-config
