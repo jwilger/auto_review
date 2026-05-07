@@ -5,12 +5,19 @@ For self-hosters who run the gateway directly on a Linux host
 [`docker-compose.yml`](../docker-compose.yml) as the third
 deploy option.
 
+The Docker/OCI image is still the recommended production deployment because it
+provides an external container boundary. This unit is for direct binary hosts:
+it runs `auto-review gateway` under systemd hardening and sets
+`AR_GATEWAY_BARE=true` in the example env file to explicitly opt out of the
+embedded OCI launcher. Bare systemd mode has application-level controls plus
+systemd hardening only; it is not container-equivalent isolation.
+
 ## Install
 
 ```bash
-# 1. Build the unified binary.
-cargo build --release -p ar-cli
-sudo install -m 0755 target/release/auto-review /usr/local/bin/auto-review
+# 1. Build the unified binary with the pinned Nix toolchain.
+nix build .#ar-cli
+sudo install -m 0755 result/bin/auto-review /usr/local/bin/auto-review
 
 # 2. Create a dedicated unprivileged user.
 sudo useradd --system --no-create-home --shell /usr/sbin/nologin auto_review
@@ -65,6 +72,10 @@ Deterministic linters/tests/builds now run in CI before the semantic review
 trigger; the gateway unit only needs to protect clone/context/LLM review work
 (see [docs/THREAT-MODEL.md](../../docs/THREAT-MODEL.md) §T1).
 
+Because this direct-host unit opts out of the embedded OCI default, the hardening
+below is defense-in-depth around a bare process rather than a replacement for the
+recommended Docker production boundary.
+
 ## Per-host customisation
 
 Use a systemd drop-in rather than editing the shipped unit so
@@ -94,9 +105,9 @@ LimitNOFILE=16384
 
 ```bash
 git -C /opt/auto_review pull
-cargo build --release -p ar-cli
+nix build .#ar-cli
 auto-review config validate /etc/auto_review/    # if applicable
-sudo install -m 0755 target/release/auto-review /usr/local/bin/auto-review
+sudo install -m 0755 result/bin/auto-review /usr/local/bin/auto-review
 sudo systemctl restart auto_review.service
 sudo systemctl status auto_review.service
 ```

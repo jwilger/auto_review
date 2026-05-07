@@ -45,6 +45,21 @@ disables caching, but typical values are 10-30s).
 
 ## 0. Pre-deploy and post-deploy validation
 
+## 0a. Deployment posture for the single `auto-review` binary
+
+The recommended production deployment remains the Docker/OCI image. It runs the
+same `auto-review` binary as direct installs, but the image supplies an external
+container boundary and marks that posture with
+`AR_GATEWAY_EXTERNAL_ISOLATION=container`.
+
+Direct binary use is supported for local diagnostics, evaluation, and operators
+who intentionally manage the host boundary themselves. On supported Linux hosts,
+`auto-review gateway` defaults to the embedded OCI launcher. If embedded OCI
+setup is unavailable, startup fails closed unless the operator explicitly opts out
+with `auto-review gateway --bare` or `AR_GATEWAY_BARE=true`. That opt-out leaves
+only application-level controls active and must not be treated as
+container-equivalent isolation.
+
 Before exposing a freshly-deployed gateway to Forgejo:
 
 ```bash
