@@ -754,10 +754,9 @@ test_release_workflows_install_or_reuse_nix_like_ci_before_nix_develop() {
   assert_file_contains_before "$prepare_workflow" 'Install or reuse Nix' 'nix develop' "release PR preparation workflow installs Nix before nix develop"
 
   assert_file_contains "$publish_workflow" 'Install or reuse Nix' "publish workflow installs or reuses Nix like CI"
-  assert_file_contains "$publish_workflow" 'command -v nix' "publish workflow verifies Nix is already available on the native runner"
-  assert_file_not_contains "$publish_workflow" 'https://install.determinate.systems/nix' "publish workflow does not install Nix on the native runner"
-  assert_file_not_contains "$publish_workflow" 'groupadd -r nixbld' "publish workflow does not mutate native runner users or groups"
-  assert_file_contains_before "$publish_workflow" 'Install or reuse Nix' 'nix develop' "publish workflow verifies Nix before nix develop"
+  assert_file_contains "$publish_workflow" 'https://install.determinate.systems/nix' "publish workflow uses the CI Nix installer path"
+  assert_file_contains "$publish_workflow" 'echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"' "publish workflow persists the Nix path for later steps"
+  assert_file_contains_before "$publish_workflow" 'Install or reuse Nix' 'nix develop' "publish workflow installs Nix before nix develop"
 }
 
 test_prepare_workflow_builds_and_publishes_release_candidate_images() {
@@ -2240,11 +2239,6 @@ required_release_assets = {
         'auto-review-${RELEASE_VERSION}-linux-x86_64.tar.gz',
         'x86_64-unknown-linux',
     ],
-    'Linux aarch64 auto-review binary archive': [
-        'auto-review-$RELEASE_VERSION-linux-aarch64.tar.gz',
-        'auto-review-${RELEASE_VERSION}-linux-aarch64.tar.gz',
-        'aarch64-unknown-linux',
-    ],
     'SHA-256 checksum manifest': ['SHA256SUMS', 'sha256sum'],
     'signature files': ['.sig', 'sign-blob', 'minisign', 'cosign sign-blob'],
     'SBOM metadata': ['sbom', 'SBOM', 'cyclonedx', 'spdx', 'syft'],
@@ -2261,7 +2255,6 @@ if not any(marker in asset_upload_section for marker in asset_attachment_markers
 for required in [
     'auto-review',
     'linux-x86_64',
-    'linux-aarch64',
     'SHA256SUMS',
     '.sig',
     'sbom',
@@ -2300,7 +2293,6 @@ before_release = workflow.split(release_marker, 1)[0] if release_marker in workf
 required_before_release = [
     'sha256sum -c SHA256SUMS',
     'linux-x86_64',
-    'linux-aarch64',
     '.sig',
     'sbom',
     'provenance',
@@ -2319,7 +2311,7 @@ if not any(re.search(pattern, before_release) for pattern in signature_verify_pa
     errors.append('generated binary signatures must be verified before Forgejo upload')
 
 artifact_build_index = min(
-    (index for index in [before_release.find('linux-x86_64'), before_release.find('linux-aarch64')] if index != -1),
+    (index for index in [before_release.find('linux-x86_64')] if index != -1),
     default=-1,
 )
 checksum_verify_index = before_release.find('sha256sum -c SHA256SUMS')
@@ -2424,7 +2416,7 @@ PY
   fi
 }
 
-test_publish_workflow_builds_linux_artifacts_on_native_runner() {
+test_publish_workflow_builds_x86_64_linux_artifacts_in_docker() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
@@ -2442,8 +2434,8 @@ if not job_match:
     sys.exit(1)
 
 job = job_match.group('body')
-if not re.search(r'(?m)^    runs-on:\s*\[native, nix\]\s*$', job):
-    errors.append('release-publish job must require native and nix runner labels so local aarch64 extra-platform builds use the pre-provisioned NixOS host binfmt/QEMU instead of a docker container or non-Nix native runner')
+if not re.search(r'(?m)^    runs-on:\s*docker\s*$', job):
+    errors.append('release-publish job must run in a Docker container instead of directly on a native host runner')
 
 step_match = re.search(r'- name: Build and verify Linux binary release artifacts(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
 if not step_match:
@@ -2457,14 +2449,10 @@ platform_config = step.find('extra-platforms = x86_64-linux aarch64-linux')
 
 if first_x86_build == -1:
     errors.append('binary artifact step must build the x86_64-linux package')
-if first_aarch64_build == -1:
-    errors.append('binary artifact step must build the aarch64-linux package')
-if platform_config == -1:
-    errors.append('binary artifact step must keep both Linux artifact platforms enabled for native-runner builds')
-elif first_x86_build != -1 and platform_config > first_x86_build:
-    errors.append('NIX_CONFIG extra-platforms must be exported before the first Linux artifact build')
-elif first_aarch64_build != -1 and platform_config > first_aarch64_build:
-    errors.append('NIX_CONFIG extra-platforms must be exported before the aarch64 Linux artifact build')
+if first_aarch64_build != -1:
+    errors.append('binary artifact step must not attempt native aarch64-linux builds from the Docker release runner')
+if platform_config != -1:
+    errors.append('binary artifact step must not enable extra-platforms for Docker release builds')
 
 if errors:
     print('; '.join(errors))
@@ -2473,9 +2461,9 @@ PY
 )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "publish workflow builds Linux binary artifacts on the native runner"
+    pass "publish workflow builds x86_64 Linux binary artifacts in Docker"
   else
-    fail "publish workflow builds Linux binary artifacts on the native runner ($output)"
+    fail "publish workflow builds x86_64 Linux binary artifacts in Docker ($output)"
   fi
 }
 
@@ -2578,7 +2566,6 @@ errors = []
 
 concept_patterns = {
     'Linux x86_64 binary archive': r'(?is)(?:Linux[^\n]{0,80}x86_64|x86_64[^\n]{0,80}Linux)[^\n]{0,120}(?:archive|tarball|download|asset)',
-    'Linux aarch64 binary archive': r'(?is)(?:Linux[^\n]{0,80}aarch64|aarch64[^\n]{0,80}Linux)[^\n]{0,120}(?:archive|tarball|download|asset)',
     'auto-review binary release asset': r'(?is)auto-review[^\n]{0,120}(?:binary|archive|tarball|download|asset)',
     'SHA-256 checksum concept': r'(?is)(?:SHA-256|sha256|SHA256SUMS)',
     'signature concept': r'(?is)(?:signature|\.sig|sign-blob|minisign|gpg --verify)',
@@ -2747,7 +2734,7 @@ test_publish_workflow_derives_and_promotes_release_candidate_sha
 test_publish_workflow_attaches_binary_archives_checksums_signatures_and_provenance
 test_publish_workflow_verifies_generated_binary_artifacts_before_release_upload
 test_publish_workflow_handles_release_signing_key_in_private_tempdir
-test_publish_workflow_builds_linux_artifacts_on_native_runner
+test_publish_workflow_builds_x86_64_linux_artifacts_in_docker
 test_publish_workflow_allows_intentional_release_tooling_changes_before_token_publish
 test_release_docs_account_for_final_binary_assets_and_publish_token_scope
 test_release_tooling_tests_are_wired_into_nix_flake_check

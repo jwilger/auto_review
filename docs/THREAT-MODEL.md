@@ -76,8 +76,8 @@ What an attacker would target, and what protects each:
 | Other repos the bot can write to       | Cross-repo blast radius                         | Bot PAT scoping; per-repo `enabled: false`   |
 | Learnings store (SQLite)               | LLM-prompt injection vector if poisoned         | Append-only; chat command surface gated to repo collaborators |
 | Release preparation PAT                | Can prepare release PR metadata                 | Forgejo Actions secret `RELEASE_PREPARE_TOKEN`; release preparation PAT blast radius is to prepare release PR branches and release PRs only in `jwilger/auto_review` |
-| Release publishing PAT                 | Can publish release images, Linux binary archives, provenance metadata, and Forgejo Releases | Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`; release publishing PAT blast radius is to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway`, attach Linux x86_64 and Linux aarch64 `auto-review` binary release assets/checksums/signatures/SBOM-provenance metadata, and create Forgejo Releases only in `jwilger/auto_review` |
-| Binary release assets and provenance   | Direct-download operators rely on archive integrity and origin | Linux archives ship with SHA-256 checksums, SSH signatures, SBOM/provenance metadata, release notes verification commands such as `sha256sum -c SHA256SUMS` and `ssh-keygen -Y verify -f allowed-signers -I <release-bot-email> -n file -s SHA256SUMS.sig < SHA256SUMS`, and local release-runner builds for both Linux package outputs |
+| Release publishing PAT                 | Can publish release images, Linux binary archives, provenance metadata, and Forgejo Releases | Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`; release publishing PAT blast radius is to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway`, attach the Linux x86_64 `auto-review` binary release asset/checksums/signatures/SBOM-provenance metadata, and create Forgejo Releases only in `jwilger/auto_review` |
+| Binary release assets and provenance   | Direct-download operators rely on archive integrity and origin | Linux x86_64 archives ship with SHA-256 checksums, SSH signatures, SBOM/provenance metadata, release notes verification commands such as `sha256sum -c SHA256SUMS` and `ssh-keygen -Y verify -f allowed-signers -I <release-bot-email> -n file -s SHA256SUMS.sig < SHA256SUMS`, and Docker-runner builds for the Linux x86_64 package output |
 | Release signing key                    | Signs release PR commits and checksum manifests | Forgejo Actions secret `RELEASE_SIGNING_KEY`; dedicated release bot Forgejo user |
 | Staged embedded OCI `config.json`       | Temporarily contains allowlisted gateway secrets for the inner process | Created under owner-only staging, populated from an explicit allowlist, runtime env cleared, diagnostics redact values, cleaned after runtime exit |
 
@@ -253,20 +253,17 @@ suspected of exposure.
 
 *Attacker:* A4 or an attacker with access to the release runner's local build
 environment.
-*Path:* The publish workflow builds the Linux aarch64 archive locally by adding
-`aarch64-linux` to Nix `extra-platforms`, so the release runner's QEMU/binfmt
-configuration participates in the trusted build boundary. A compromised or
-misconfigured release runner could produce a malicious or invalid aarch64
-`auto-review` binary that is then checksummed, signed, and attached to the
-Forgejo Release.
-*Mitigation:* Treat the release runner, including its QEMU/binfmt support, as
-part of the trusted release build boundary. Operators must run it under the same
-hardening and access-control policy as other token-bearing release jobs, restrict
-the runner to trusted release jobs, and rotate release assets if runner integrity
-is in doubt.
+*Path:* Cross-architecture Linux aarch64 builds require a trusted Linux aarch64
+builder or trusted emulation setup. Treating an ad-hoc native runner's QEMU/binfmt
+configuration as part of the trusted release boundary would let a compromised or
+misconfigured runner produce a malicious or invalid aarch64 `auto-review` binary
+that is then checksummed, signed, and attached to the Forgejo Release.
+*Mitigation:* The publish workflow currently builds release artifacts in Docker
+and only attaches the Linux x86_64 archive. Linux aarch64 binary archives are
+deferred until a dedicated Linux aarch64 build runner is available.
 The publish workflow records the Nix output path and release merge commit in
-the provenance document and signs `SHA256SUMS` only after both Linux archives are
-built and checksum-verified, so release consumers can identify exactly which
+the provenance document and signs `SHA256SUMS` only after the Linux x86_64 archive
+is built and checksum-verified, so release consumers can identify exactly which
 artifact set was approved by the release bot key.
 *Residual risk:* Release-runner trust is out of scope for the gateway runtime;
 release operators own runner provisioning, isolation, and audit logs.

@@ -11,19 +11,36 @@ on:
 
 jobs:
   release-publish:
-    runs-on: [native, nix]
+    runs-on: docker
     if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && startsWith(github.event.pull_request.head.ref, 'release/v') == true || (github.event_name == 'workflow_dispatch' && inputs.release_merge_sha != '') }}
     environment: release-publish
     steps:
       - name: Install or reuse Nix
         run: |
           set -euo pipefail
-          if command -v nix > /dev/null 2>&1; then
-            echo "Nix already present at $(command -v nix)"
+          NIX_BIN_DIR="/nix/var/nix/profiles/default/bin"
+          if [ -x "$NIX_BIN_DIR/nix" ]; then
+            echo "Nix already present at $NIX_BIN_DIR (volume cache hit)"
           else
-            printf 'Nix is not on PATH for this native NixOS runner. Fix the runner service environment so nix is available; this workflow will not install Nix or run sudo.\n' >&2
-            exit 1
+            echo "Installing Nix (cold start or fresh volume)"
+            curl --proto '=https' --tlsv1.2 -sSf -L \
+              https://install.determinate.systems/nix \
+              | sh -s -- install linux \
+                --init none \
+                --no-confirm \
+                --extra-conf "experimental-features = nix-command flakes" \
+                --extra-conf "accept-flake-config = true"
           fi
+          if ! getent group nixbld > /dev/null; then
+            groupadd -r nixbld
+          fi
+          for i in $(seq 1 32); do
+            if ! id -u "nixbld$i" > /dev/null 2>&1; then
+              useradd -r -g nixbld -G nixbld -d /var/empty \
+                -s /usr/sbin/nologin -c "Nix build user $i" "nixbld$i"
+            fi
+          done
+          echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
@@ -112,30 +129,24 @@ jobs:
           printf '%s\n' "$RELEASE_SIGNING_KEY" > "$signing_key"
           chmod 600 "$signing_key"
           mkdir -p release-artifacts
-          NIX_CONFIG="$(printf '%s\nextra-platforms = x86_64-linux aarch64-linux' "${NIX_CONFIG:-}")"
-          export NIX_CONFIG
           x86_out="$(nix build .#packages.x86_64-linux.default --print-out-paths --no-link)"
-          aarch64_out="$(nix build .#packages.aarch64-linux.default --print-out-paths --no-link)"
           cp "$x86_out/bin/auto-review" release-artifacts/auto-review
           tar -C release-artifacts -czf release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz auto-review
-          cp "$aarch64_out/bin/auto-review" release-artifacts/auto-review
-          tar -C release-artifacts -czf release-artifacts/auto-review-$RELEASE_VERSION-linux-aarch64.tar.gz auto-review
           rm release-artifacts/auto-review
           (
             cd release-artifacts
-            sha256sum auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz auto-review-$RELEASE_VERSION-linux-aarch64.tar.gz > SHA256SUMS
-            python3 - "$RELEASE_VERSION" "$RELEASE_MERGE_SHA" "$x86_out" "$aarch64_out" <<'PY'
+            sha256sum auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz > SHA256SUMS
+            python3 - "$RELEASE_VERSION" "$RELEASE_MERGE_SHA" "$x86_out" <<'PY'
           import datetime
           import hashlib
           import json
           import pathlib
           import sys
 
-          version, source, x86_out, aarch64_out = sys.argv[1:]
+          version, source, x86_out = sys.argv[1:]
           generated_at = datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat()
           archives = [
               ("linux-x86_64", f"auto-review-{version}-linux-x86_64.tar.gz", x86_out),
-              ("linux-aarch64", f"auto-review-{version}-linux-aarch64.tar.gz", aarch64_out),
           ]
 
           def file_digest(path, algorithm):
@@ -220,7 +231,6 @@ jobs:
                       "resolvedDependencies": [
                           {"uri": "git+https://git.johnwilger.com/jwilger/auto_review", "digest": {"gitCommit": source}},
                           {"uri": "nix-store:" + x86_out, "name": "packages.x86_64-linux.default"},
-                          {"uri": "nix-store:" + aarch64_out, "name": "packages.aarch64-linux.default"},
                       ],
                   },
                   "runDetails": {
@@ -276,7 +286,7 @@ jobs:
           # Generate notes from the finalized CHANGELOG.md ## [$RELEASE_VERSION] section.
           awk "/^## \\[$RELEASE_VERSION\\]/{emit=1; next} /^## \\[/{if (emit) exit} emit {print}" CHANGELOG.md > "$RELEASE_NOTES_FILE"
           printf '\nDocker image: git.johnwilger.com/jwilger/auto_review/ar-gateway:%s\n' "$RELEASE_VERSION" >> "$RELEASE_NOTES_FILE"
-          printf '\nLinux binary archives:\n- auto-review-%s-linux-x86_64.tar.gz\n- auto-review-%s-linux-aarch64.tar.gz\n' "$RELEASE_VERSION" "$RELEASE_VERSION" >> "$RELEASE_NOTES_FILE"
+          printf '\nLinux binary archive:\n- auto-review-%s-linux-x86_64.tar.gz\n' "$RELEASE_VERSION" >> "$RELEASE_NOTES_FILE"
           printf '\nVerify downloads before use:\n```bash\nsha256sum -c SHA256SUMS\nssh-keygen -Y verify -f allowed-signers -I %s -n file -s SHA256SUMS.sig < SHA256SUMS\n```\n' "$RELEASE_BOT_EMAIL" >> "$RELEASE_NOTES_FILE"
           tea_login="auto_review-release-publish-${GITHUB_RUN_ID:-$$}"
           nix develop --command tea login add --name "$tea_login" --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
@@ -292,7 +302,6 @@ jobs:
             --repo jwilger/auto_review \
             v$RELEASE_VERSION \
             release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz \
-            release-artifacts/auto-review-$RELEASE_VERSION-linux-aarch64.tar.gz \
             release-artifacts/SHA256SUMS \
             release-artifacts/SHA256SUMS.sig \
             release-artifacts/release-signing-key.pub \

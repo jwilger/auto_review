@@ -72,7 +72,7 @@ jobs:
 
   semantic-review:
     name: auto_review semantic review
-    runs-on: [native, nix]
+    runs-on: docker
     needs: flake-check
     if: ${{ github.event_name == 'pull_request' }}
     env:
@@ -86,48 +86,11 @@ jobs:
 
       - name: Request auto_review review
         if: ${{ env.AUTO_REVIEW_GATEWAY_URL != '' && env.AUTO_REVIEW_ACTION_TOKEN != '' && env.AUTO_REVIEW_GATEWAY_URL != github.server_url }}
-        shell: bash
         run: |
           set -euo pipefail
           json_payload='{"owner":"${{ github.repository_owner }}","repo":"${{ github.event.repository.name }}","pr_number":${{ github.event.pull_request.number }},"head_sha":"${{ github.event.pull_request.head.sha }}"}'
-          review_url="${AUTO_REVIEW_GATEWAY_URL%/}/reviews/ci"
-          case "$review_url" in
-            http://*) ;;
-            *)
-              echo "native semantic-review supports http:// gateway URLs only; configure AUTO_REVIEW_GATEWAY_URL for the host-local gateway" >&2
-              exit 1
-              ;;
-          esac
-
-          target="${review_url#http://}"
-          host_port="${target%%/*}"
-          request_path="/${target#*/}"
-          host="${host_port%%:*}"
-          port="${host_port#*:}"
-          if [ "$port" = "$host_port" ]; then
-            port=80
-          fi
-
-          exec 3<>"/dev/tcp/$host/$port"
-          printf 'POST %s HTTP/1.1\r\n' "$request_path" >&3
-          printf 'Host: %s\r\n' "$host_port" >&3
-          printf 'Authorization: Bearer %s\r\n' "$AUTO_REVIEW_ACTION_TOKEN" >&3
-          printf 'Content-Type: application/json\r\n' >&3
-          printf 'Content-Length: %s\r\n' "${#json_payload}" >&3
-          printf 'Connection: close\r\n\r\n' >&3
-          printf '%s' "$json_payload" >&3
-
-          if ! IFS= read -r -t 30 status_line <&3; then
-            echo "auto_review review request failed: no HTTP response from gateway" >&2
-            exit 1
-          fi
-          status_line="${status_line%$'\r'}"
-          status_code="${status_line#* }"
-          status_code="${status_code%% *}"
-          if [ "${status_code#2}" = "$status_code" ]; then
-            printf 'auto_review review request failed: %s\n' "$status_line" >&2
-            while IFS= read -r -t 1 response_line <&3; do
-              printf '%s\n' "${response_line%$'\r'}" >&2
-            done
-            exit 1
-          fi
+          curl -fsS --connect-timeout 5 --max-time 30 -X POST \
+            -H "Authorization: Bearer $AUTO_REVIEW_ACTION_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "$json_payload" \
+            "${AUTO_REVIEW_GATEWAY_URL%/}/reviews/ci"
