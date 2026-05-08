@@ -107,7 +107,6 @@ jobs:
       - name: Build and verify Linux binary release artifacts
         env:
           RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
-          RELEASE_AARCH64_NIX_BUILDER: ${{ vars.RELEASE_AARCH64_NIX_BUILDER }}
           RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
@@ -120,10 +119,6 @@ jobs:
             printf 'missing RELEASE_BOT_EMAIL repository variable\n' >&2
             exit 1
           fi
-          if [ -z "${RELEASE_AARCH64_NIX_BUILDER:-}" ]; then
-            printf 'missing RELEASE_AARCH64_NIX_BUILDER repository variable for Linux aarch64 binary builds\n' >&2
-            exit 1
-          fi
           umask 077
           signing_dir="$(mktemp -d)"
           trap 'rm -rf "$signing_dir"' EXIT TERM INT
@@ -132,7 +127,9 @@ jobs:
           chmod 600 "$signing_key"
           mkdir -p release-artifacts
           x86_out="$(nix build .#packages.x86_64-linux.default --print-out-paths --no-link)"
-          aarch64_out="$(nix build --builders "$RELEASE_AARCH64_NIX_BUILDER" .#packages.aarch64-linux.default --print-out-paths --no-link)"
+          NIX_CONFIG="$(printf '%s\nextra-platforms = aarch64-linux' "${NIX_CONFIG:-}")"
+          export NIX_CONFIG
+          aarch64_out="$(nix build .#packages.aarch64-linux.default --print-out-paths --no-link)"
           cp "$x86_out/bin/auto-review" release-artifacts/auto-review
           tar -C release-artifacts -czf release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz auto-review
           cp "$aarch64_out/bin/auto-review" release-artifacts/auto-review
