@@ -361,6 +361,60 @@ PY
   fi
 }
 
+test_ci_pr_package_cleanup_installs_default_profile_tools_before_checks() {
+  local ci_workflow output status
+  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+
+  output="$(python3 - "$ci_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+job_match = re.search(r'(?ms)^  cleanup-pr-packages:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
+if not job_match:
+    print('CI workflow is missing the cleanup-pr-packages job')
+    sys.exit(1)
+job = job_match.group('body')
+
+resolver_match = re.search(r'(?ms)^      - name: Resolve trusted cleanup tools\n(?P<body>.*?)(?=^      - |^  [a-zA-Z0-9_-]+:|\Z)', job)
+if not resolver_match:
+    print('cleanup-pr-packages job is missing the trusted cleanup tool resolver step')
+    sys.exit(1)
+
+resolver = resolver_match.group('body')
+default_profile_tools = set(re.findall(r'/nix/var/nix/profiles/default/bin/([A-Za-z0-9._+-]+)', resolver))
+required_tools = {'jq', 'curl', 'cat'}
+checked_required_tools = required_tools & default_profile_tools
+
+first_check = re.search(r'\[\s+-x\s+"\$[A-Z_]+"\s+\]', resolver)
+if checked_required_tools and first_check:
+    before_checks = job[:resolver_match.start()] + resolver[:first_check.start()]
+    installs_profile_tools = re.search(
+        r'(?:nix\s+profile\s+install|nix-env\s+-i)'
+        r'(?=[\s\S]*\bjq\b)'
+        r'(?=[\s\S]*\bcurl\b)'
+        r'(?=[\s\S]*\b(?:coreutils|cat)\b)',
+        before_checks,
+    )
+    if not installs_profile_tools:
+        errors.append('cleanup-pr-packages must install trusted cleanup tools (jq, curl, coreutils/cat) into the Nix profile before checking default-profile paths')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "CI PR package cleanup installs default-profile tools before checking them"
+  else
+    fail "CI PR package cleanup installs default-profile tools before checking them ($output)"
+  fi
+}
+
 test_ci_pr_description_update_preserves_author_body_with_managed_artifact_block() {
   local ci_workflow output status
   ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
@@ -419,6 +473,370 @@ PY
     pass "CI PR description update preserves author body with a managed artifact-links block"
   else
     fail "CI PR description update preserves author body with a managed artifact-links block ($output)"
+  fi
+}
+
+test_ci_pr_package_cleanup_runs_on_main_push_and_discovers_stale_pr_versions() {
+  local ci_workflow output status
+  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+
+  output="$(python3 - "$ci_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+push_block_match = re.search(
+    r'(?ms)^on:\s*\n[\s\S]*?^  push:\s*\n(?P<body>[\s\S]*?)(?=^  [a-zA-Z_]+:|^permissions:|^jobs:|\Z)',
+    workflow,
+)
+push_inline_main = re.search(r'(?m)^  push:\s*\[[^\]]*main[^\]]*\]', workflow)
+has_push = bool(push_block_match or re.search(r'(?m)^  push:\s*(?:\n|\[)', workflow))
+push_main = bool(push_inline_main)
+if push_block_match:
+    push_body = push_block_match.group('body')
+    push_main = push_main or bool(re.search(r'(?m)^    branches:\s*(?:\[[^\]]*\bmain\b[^\]]*\]|\n(?:      -\s*main\s*\n?)+)', push_body))
+
+if not has_push:
+    errors.append('CI workflow must run PR package cleanup from push events on main so squash/merge paths clean stale PR packages')
+elif not push_main:
+    errors.append('CI workflow push cleanup trigger must be limited to the main branch')
+
+jobs = {
+    match.group('name'): match.group('body')
+    for match in re.finditer(r'(?ms)^  (?P<name>[a-zA-Z0-9_-]+):\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
+}
+if 'cleanup-pr-packages' not in jobs:
+    print('; '.join(errors + ['CI workflow is missing the cleanup-pr-packages job']))
+    sys.exit(1)
+
+push_cleanup_jobs = {}
+for name, body in jobs.items():
+    header = body.split('    steps:', 1)[0]
+    cleanup_related = re.search(r'cleanup|delete[\s\S]{0,80}packages|stale[\s\S]{0,80}packages', name + '\n' + body, re.I)
+    push_scoped = re.search(r'github\.event_name\s*==\s*[\'\"]push[\'\"]|github\.ref\s*==\s*[\'\"]refs/heads/main[\'\"]|GITHUB_REF|refs/heads/main', header)
+    if cleanup_related and push_scoped:
+        push_cleanup_jobs[name] = body
+
+if not push_cleanup_jobs:
+    errors.append('cleanup must have a push-to-main stale PR package cleanup path separate from the pull_request-number cleanup path')
+
+push_cleanup_text = '\n'.join(push_cleanup_jobs.values())
+docker_lists_versions = any(re.search(pattern, push_cleanup_text) for pattern in [
+    r'/api/packages/jwilger/(?:container|docker)/[^\s"\']+/versions',
+    r'tea\s+api[\s\S]{0,240}/packages/jwilger/(?:container|docker)/[^\s"\']+/versions',
+])
+generic_lists_versions = any(re.search(pattern, push_cleanup_text) for pattern in [
+    r'/api/packages/jwilger/generic/[^\s"\']+/versions',
+    r'tea\s+api[\s\S]{0,240}/packages/jwilger/generic/[^\s"\']+/versions',
+])
+discovers_pr_prefixed_versions = any(re.search(pattern, push_cleanup_text) for pattern in [
+    r'pr-\[0-9\]\+-',
+    r'pr-\([0-9]\+\)-',
+    r'pr-\(\[0-9\]\+\)-',
+    r'pr-[\^]?\[0-9\]\+?-',
+    r'pr-\d\+-',
+    r'capture\([\'\"]pr-(?:\\d\+|\[0-9\]\+?|\(\?<pr_number>)',
+    r'match\([\'\"]pr-(?:\\d\+|\[0-9\]\+?)',
+    r'grep\s+-E[^\n]*pr-\[0-9\]\+-',
+    r'sed\s+-E[^\n]*pr-\([0-9]+\)-',
+])
+
+if not (docker_lists_versions and generic_lists_versions and discovers_pr_prefixed_versions):
+    errors.append('push-to-main cleanup must enumerate stale PR package versions from PR-prefixed package metadata rather than relying on github.event.pull_request.number')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "CI PR package cleanup runs on main push and discovers stale PR package versions"
+  else
+    fail "CI PR package cleanup runs on main push and discovers stale PR package versions ($output)"
+  fi
+}
+
+test_ci_pr_context_jobs_do_not_run_on_push_events() {
+  local ci_workflow output status
+  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+
+  output="$(python3 - "$ci_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+jobs = {
+    match.group('name'): match.group('body')
+    for match in re.finditer(r'(?ms)^  (?P<name>[a-zA-Z0-9_-]+):\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
+}
+
+for job_name in ['pr-artifact-build', 'pr-packages']:
+    body = jobs.get(job_name)
+    if body is None:
+        errors.append(f'CI workflow is missing the {job_name} job')
+        continue
+    header = body.split('    steps:', 1)[0]
+    if 'github.event.pull_request.' not in body:
+        errors.append(f'{job_name} regression test expected the job to reference github.event.pull_request context')
+        continue
+    has_pull_request_gate = re.search(r'github\.event_name\s*==\s*[\'\"]pull_request[\'\"]', header)
+    has_closed_exclusion = re.search(r'github\.event\.action\s*!=\s*[\'\"]closed[\'\"]', header)
+    allowed_pr_actions = {'opened', 'synchronize', 'reopened'}
+    action_comparisons = set(re.findall(r'github\.event\.action\s*==\s*[\'\"]([^\'\"]+)[\'\"]', header))
+    action_allowlist = allowed_pr_actions.issubset(action_comparisons) and 'closed' not in action_comparisons
+    contains_allowlist = (
+        re.search(r'contains\([\s\S]{0,240}github\.event\.action', header)
+        and all(action in header for action in allowed_pr_actions)
+        and 'closed' not in header
+    )
+    has_not_closed_gate = has_closed_exclusion or action_allowlist or contains_allowlist
+    if not has_pull_request_gate:
+        errors.append(f'{job_name} references github.event.pull_request.* and must be gated to github.event_name == pull_request so it cannot run on push events')
+    if not has_not_closed_gate:
+        errors.append(f'{job_name} references github.event.pull_request.* and must exclude closed PR events, either with != closed or an opened/synchronize/reopened allow-list')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "CI PR-context package jobs do not run on push events"
+  else
+    fail "CI PR-context package jobs do not run on push events ($output)"
+  fi
+}
+
+test_ci_flake_check_does_not_run_on_push_events() {
+  local ci_workflow output status
+  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+
+  output="$(python3 - "$ci_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+job_match = re.search(r'(?ms)^  flake-check:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
+if not job_match:
+    print('CI workflow is missing the flake-check job')
+    sys.exit(1)
+
+job = job_match.group('body')
+header = job.split('    steps:', 1)[0]
+has_non_push_gate = re.search(r'github\.event_name\s*==\s*[\'\"]pull_request[\'\"]', header) or re.search(r'github\.event_name\s*!=\s*[\'\"]push[\'\"]', header)
+has_closed_exclusion = re.search(r'github\.event\.action\s*!=\s*[\'\"]closed[\'\"]', header)
+allowed_pr_actions = {'opened', 'synchronize', 'reopened'}
+action_comparisons = set(re.findall(r'github\.event\.action\s*==\s*[\'\"]([^\'\"]+)[\'\"]', header))
+action_allowlist = allowed_pr_actions.issubset(action_comparisons) and 'closed' not in action_comparisons
+contains_allowlist = (
+    re.search(r'contains\([\s\S]{0,240}github\.event\.action', header)
+    and all(action in header for action in allowed_pr_actions)
+    and 'closed' not in header
+)
+has_non_closed_gate = has_closed_exclusion or action_allowlist or contains_allowlist
+
+if not has_non_push_gate:
+    errors.append('flake-check must be gated so the push-to-main stale cleanup trigger does not rerun full CI')
+if not has_non_closed_gate:
+    errors.append('flake-check must remain gated to non-closed PR events')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "CI flake-check does not run on push events"
+  else
+    fail "CI flake-check does not run on push events ($output)"
+  fi
+}
+
+test_ci_push_stale_cleanup_confirms_pr_is_merged_before_delete() {
+  local ci_workflow output status
+  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+
+  output="$(python3 - "$ci_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+jobs = {
+    match.group('name'): match.group('body')
+    for match in re.finditer(r'(?ms)^  (?P<name>[a-zA-Z0-9_-]+):\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
+}
+
+push_cleanup_jobs = {}
+for name, body in jobs.items():
+    header = body.split('    steps:', 1)[0]
+    cleanup_related = re.search(r'cleanup|delete[\s\S]{0,80}packages|stale[\s\S]{0,80}packages', name + '\n' + body, re.I)
+    push_scoped = re.search(r'github\.event_name\s*==\s*[\'\"]push[\'\"]|github\.ref\s*==\s*[\'\"]refs/heads/main[\'\"]|GITHUB_EVENT_NAME|GITHUB_REF|refs/heads/main', body if cleanup_related else header)
+    if cleanup_related and push_scoped:
+        push_cleanup_jobs[name] = body
+
+push_cleanup_text = '\n'.join(push_cleanup_jobs.values())
+if not push_cleanup_text:
+    errors.append('push-to-main stale cleanup path must exist before open-PR deletion guard can be verified')
+else:
+    derives_pr_number_from_version = any(re.search(pattern, push_cleanup_text) for pattern in [
+        r'capture\([\'\"]\^?pr-(?:\\d\+|\[0-9\]\+?|\(\?<pr_number>)',
+        r'match\([\'\"]\^?pr-(?:\\d\+|\[0-9\]\+?)',
+        r'sed\s+-E[^\n]*pr-\([0-9]+\)-',
+        r'grep\s+-Eo?[^\n]*pr-\[0-9\]\+-',
+        r'pr_number=.*\$\{?version\}?',
+        r'PR_NUMBER=.*\$\{?version\}?',
+    ])
+    queries_pr_by_number = any(re.search(pattern, push_cleanup_text) for pattern in [
+        r'/api/v1/repos/jwilger/auto_review/pulls/\$\{?[A-Za-z_][A-Za-z0-9_]*\}?',
+        r'/api/v1/repos/[^\s"\']+/[^\s"\']+/pulls/\$\{?[A-Za-z_][A-Za-z0-9_]*\}?',
+        r'tea\s+api[\s\S]{0,240}/pulls/\$\{?[A-Za-z_][A-Za-z0-9_]*\}?',
+    ])
+    confirms_merged = any(re.search(pattern, push_cleanup_text) for pattern in [
+        r'\.merged\s*==\s*true',
+        r'\.merged[\s\S]{0,120}true',
+        r'"merged"[\s\S]{0,120}true',
+    ])
+    if not (derives_pr_number_from_version and queries_pr_by_number and confirms_merged):
+        errors.append('push-to-main stale cleanup must derive the PR number from each PR-prefixed package version and confirm that PR is merged before deleting its versions')
+
+    pr_is_merged_match = re.search(
+        r'(?ms)^\s*pr_is_merged\(\) \{(?P<body>.*?)^\s*\}\s*^\s*deletion_failures=',
+        push_cleanup_text,
+    )
+    if not pr_is_merged_match:
+        errors.append('push-to-main cleanup must keep the PR merge lookup isolated in a pr_is_merged helper')
+    else:
+        pr_helper = pr_is_merged_match.group('body')
+        if not re.search(r'pr_number="\$1"|local\s+pr_number="\$1"', pr_helper):
+            errors.append('pr_is_merged must query the PR number passed by each discovered package version')
+        if not re.search(r'/pulls/\$pr_number|/pulls/\$\{pr_number\}', pr_helper):
+            errors.append('pr_is_merged must query Forgejo for the specific discovered PR number')
+        if not re.search(r'\bjq\b|\$\{?JQ\}?', pr_helper):
+            errors.append('pr_is_merged must parse the Forgejo PR response with the trusted JSON parser')
+        if not re.search(r'\.merged\s*==\s*true', pr_helper):
+            errors.append('pr_is_merged must require the Forgejo PR response merged field to be true')
+        if not re.search(r'404\)[\s\S]{0,80}return\s+1', pr_helper):
+            errors.append('pr_is_merged must reject missing PRs instead of allowing deletion')
+        if not re.search(r'\*\)[\s\S]{0,180}deletion_failures=\$\(\(\s*deletion_failures\s*\+\s*1\s*\)\)[\s\S]{0,80}return\s+1', pr_helper):
+            errors.append('pr_is_merged must fail closed and record lookup failures for non-2xx PR API responses')
+
+    push_branch_match = re.search(r'(?ms)if \[ "\$\{GITHUB_EVENT_NAME:-\}" = "push" \]; then(?P<body>.*?)^\s*else$', push_cleanup_text)
+    if not push_branch_match:
+        errors.append('push-to-main cleanup branch must be structurally distinct from pull_request cleanup')
+    else:
+        push_branch = push_branch_match.group('body')
+        guarded_delete_calls = re.findall(r'pr_is_merged\s+"\$pr_number"\s+&&\s+delete_package', push_branch)
+        if len(guarded_delete_calls) < 2:
+            errors.append('each push cleanup delete path must be guarded by pr_is_merged "$pr_number" immediately before delete_package')
+        for delete_line in re.findall(r'(?m)^.*delete_package .*$', push_branch):
+            if 'pr_is_merged "$pr_number" && delete_package' not in delete_line:
+                errors.append('push cleanup delete is not immediately guarded by pr_is_merged: ' + delete_line.strip())
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "CI push stale cleanup confirms PR is merged before deleting versions"
+  else
+    fail "CI push stale cleanup confirms PR is merged before deleting versions ($output)"
+  fi
+}
+
+test_ci_push_stale_cleanup_matches_container_and_generic_version_schemes() {
+  local ci_workflow output status
+  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+
+  output="$(python3 - "$ci_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+jobs = {
+    match.group('name'): match.group('body')
+    for match in re.finditer(r'(?ms)^  (?P<name>[a-zA-Z0-9_-]+):\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
+}
+
+push_cleanup_jobs = {}
+for name, body in jobs.items():
+    header = body.split('    steps:', 1)[0]
+    cleanup_related = re.search(r'cleanup|delete[\s\S]{0,80}packages|stale[\s\S]{0,80}packages', name + '\n' + body, re.I)
+    push_scoped = re.search(r'github\.event_name\s*==\s*[\'\"]push[\'\"]|github\.ref\s*==\s*[\'\"]refs/heads/main[\'\"]|GITHUB_EVENT_NAME|GITHUB_REF|refs/heads/main', body if cleanup_related else header)
+    if cleanup_related and push_scoped:
+        push_cleanup_jobs[name] = body
+
+push_cleanup_text = '\n'.join(push_cleanup_jobs.values())
+if not push_cleanup_text:
+    errors.append('push-to-main stale cleanup path must exist before version-scheme matching can be verified')
+else:
+    container_fragments = [
+        match.group(0)
+        for match in re.finditer(r'.{0,800}ar-gateway-pr.{0,1400}', push_cleanup_text, re.I | re.S)
+    ]
+    generic_fragments = [
+        match.group(0)
+        for match in re.finditer(r'.{0,800}auto-review-pr.{0,1400}', push_cleanup_text, re.I | re.S)
+    ]
+    container_text = '\n'.join(container_fragments)
+    generic_text = '\n'.join(generic_fragments)
+
+    container_matches_published_scheme = any(re.search(pattern, container_text) for pattern in [
+        r'\^pr-\[0-9\]\+-',
+        r'\^pr-[^\n"\']*\[0-9\][^\n"\']*-',
+        r'pr-\$\{?[A-Za-z_][A-Za-z0-9_]*\}?-',
+    ])
+    generic_matches_published_scheme = any(re.search(pattern, generic_text) for pattern in [
+        r'\^\[0-9\]\+-',
+        r'\^[^\n"\']*\[0-9\][^\n"\']*-',
+        r'capture\([\'\"]\^?\(\?<pr_number>\[0-9\]',
+        r'match\([\'\"]\^?\[0-9\]',
+    ])
+    generic_filters_pr_prefixed_only = bool(re.search(r'\^pr-\[0-9\]\+-|\^pr-[^\n"\']*\[0-9\][^\n"\']*-', generic_text))
+    generic_derives_pr_number_without_pr_prefix = any(re.search(pattern, generic_text) for pattern in [
+        r'capture\([\'\"]\^?\(\?<pr_number>\[0-9\]',
+        r'match\([\'\"]\^?\[0-9\]',
+        r'sed\s+-E[^\n]*\^\(\[0-9\]\+\)-',
+        r'sed\s+-E[^\n]*\^\(\[0-9\]\{1,\}',
+        r'cut\s+-d[\'\"]-[\'\"]\s+-f\s*1',
+        r'\$\{version%%-\*\}',
+    ])
+    if not container_matches_published_scheme:
+        errors.append('push cleanup must discover container versions published as pr-<PR>-<sha>')
+    if not generic_matches_published_scheme or generic_filters_pr_prefixed_only:
+        errors.append('push cleanup must discover generic binary versions published as <PR>-<sha>, not only pr-<PR>-<sha>')
+    if not generic_derives_pr_number_without_pr_prefix:
+        errors.append('push cleanup must derive PR numbers from generic <PR>-<sha> versions')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "CI push stale cleanup matches container and generic version schemes"
+  else
+    fail "CI push stale cleanup matches container and generic version schemes ($output)"
   fi
 }
 
@@ -590,5 +1008,11 @@ run_tests \
   test_ci_pr_package_artifact_handoff_avoids_v4_artifact_actions \
   test_ci_pr_package_tool_resolution_prepares_nix_before_default_profile_checks \
   test_ci_pr_package_tool_resolution_installs_default_profile_tools_before_checks \
+  test_ci_pr_package_cleanup_installs_default_profile_tools_before_checks \
   test_ci_pr_description_update_preserves_author_body_with_managed_artifact_block \
+  test_ci_pr_package_cleanup_runs_on_main_push_and_discovers_stale_pr_versions \
+  test_ci_pr_context_jobs_do_not_run_on_push_events \
+  test_ci_flake_check_does_not_run_on_push_events \
+  test_ci_push_stale_cleanup_confirms_pr_is_merged_before_delete \
+  test_ci_push_stale_cleanup_matches_container_and_generic_version_schemes \
   test_ci_pr_package_cleanup_tolerates_missing_docker_and_generic_packages

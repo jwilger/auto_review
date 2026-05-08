@@ -1,9 +1,8 @@
 name: CI
 
-# Only PRs trigger CI: main is branch-protected and requires a PR,
-# so any merge has already passed CI on the PR. Re-running on push
-# to main would be redundant and burn cache cycles for no signal.
 on:
+  push:
+    branches: [main]
   pull_request:
     types: [opened, synchronize, reopened, closed]
 
@@ -13,7 +12,7 @@ permissions:
 jobs:
   flake-check:
     name: Nix flake check
-    if: ${{ github.event.action != 'closed' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
     # `docker` is a confirmed-registered label on this Forgejo
     # instance: commits with `runs-on: docker` create tasks (the
     # b216906 attempt produced run #97). The earlier
@@ -101,7 +100,7 @@ jobs:
     name: Build PR package artifacts
     runs-on: docker
     needs: flake-check
-    if: ${{ github.event.action != 'closed' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -165,7 +164,7 @@ jobs:
     name: Publish PR-scoped packages
     runs-on: docker
     needs: pr-artifact-build
-    if: ${{ github.event.action != 'closed' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
@@ -311,7 +310,7 @@ jobs:
   cleanup-pr-packages:
     name: Delete merged PR packages
     runs-on: docker
-    if: ${{ github.event.pull_request.merged == true }}
+    if: ${{ github.event.pull_request.merged == true || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
@@ -340,6 +339,10 @@ jobs:
                 -s /usr/sbin/nologin -c "Nix build user $i" "nixbld$i"
             fi
           done
+          PATH="$NIX_BIN_DIR:$PATH" nix profile install \
+            nixpkgs#jq \
+            nixpkgs#curl \
+            nixpkgs#coreutils
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
 
       - name: Resolve trusted cleanup tools
@@ -361,6 +364,7 @@ jobs:
           RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
         run: |
           set -euo pipefail
+          unset BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES PYTHONPATH PERL5LIB RUBYLIB NODE_OPTIONS
           delete_package() {
             url="$1"
             http_code="$(${CURL} -sS -o /tmp/auto-review-delete-package-response -w "%{http_code}" -X DELETE -u "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" "$url")"
@@ -387,15 +391,44 @@ jobs:
                 ;;
             esac
           }
+          pr_is_merged() {
+            pr_number="$1"
+            http_code="$(${CURL} -sS -o /tmp/auto-review-pr-response -w "%{http_code}" -u "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" "https://git.johnwilger.com/api/v1/repos/jwilger/auto_review/pulls/$pr_number")"
+            case "$http_code" in
+              2*) "${JQ}" -e '.merged == true' /tmp/auto-review-pr-response > /dev/null ;;
+              404) return 1 ;;
+              *)
+                printf 'PR lookup failed with HTTP %s for PR %s\n' "$http_code" "$pr_number" >&2
+                "${CAT}" /tmp/auto-review-pr-response >&2
+                deletion_failures=$((deletion_failures + 1))
+                return 1
+                ;;
+            esac
+          }
           deletion_failures=0
-          while IFS= read -r ar_gateway_pr_version; do # ar-gateway-pr container versions
-            version="$ar_gateway_pr_version"
-            [ -n "$version" ] && delete_package "https://git.johnwilger.com/api/packages/jwilger/container/ar-gateway-pr/$version"
-          done < <(list_package_versions "https://git.johnwilger.com/api/packages/jwilger/container/ar-gateway-pr/versions?limit=100" | /nix/var/nix/profiles/default/bin/jq -r --arg pr_prefix "pr-$PR_NUMBER-" '.[]? | (.name // .version // "") | select(startswith($pr_prefix))')
-          while IFS= read -r auto_review_pr_version; do # auto-review-pr generic versions
-            version="$auto_review_pr_version"
-            [ -n "$version" ] && delete_package "https://git.johnwilger.com/api/packages/jwilger/generic/auto-review-pr/$version"
-          done < <(list_package_versions "https://git.johnwilger.com/api/packages/jwilger/generic/auto-review-pr/versions?limit=100" | /nix/var/nix/profiles/default/bin/jq -r --arg pr_prefix "$PR_NUMBER-" '.[]? | (.name // .version // "") | select(startswith($pr_prefix))')
+          if [ "${GITHUB_EVENT_NAME:-}" = "push" ]; then
+            while IFS= read -r ar_gateway_pr_version; do # ar-gateway-pr container versions
+              version="$ar_gateway_pr_version"
+              pr_number="${version#pr-}"
+              pr_number="${pr_number%%-*}"
+              container_prefix="pr-${pr_number}-"
+              [ -n "$version" ] && [ "${version#"$container_prefix"}" != "$version" ] && pr_is_merged "$pr_number" && delete_package "https://git.johnwilger.com/api/packages/jwilger/container/ar-gateway-pr/$version"
+            done < <(list_package_versions "https://git.johnwilger.com/api/packages/jwilger/container/ar-gateway-pr/versions?limit=100" | "${JQ}" -r '.[]? | (.name // .version // "") | select(test("^" + "pr-[0-9]+-"))')
+            while IFS= read -r auto_review_pr_version; do # auto-review-pr generic versions
+              version="$auto_review_pr_version"
+              pr_number="${version%%-*}"
+              [ -n "$version" ] && pr_is_merged "$pr_number" && delete_package "https://git.johnwilger.com/api/packages/jwilger/generic/auto-review-pr/$version"
+            done < <(list_package_versions "https://git.johnwilger.com/api/packages/jwilger/generic/auto-review-pr/versions?limit=100" | "${JQ}" -r '.[]? | (.name // .version // "") | select(test("^[0-9]+-"))')
+          else
+            while IFS= read -r ar_gateway_pr_version; do # ar-gateway-pr container versions
+              version="$ar_gateway_pr_version"
+              [ -n "$version" ] && delete_package "https://git.johnwilger.com/api/packages/jwilger/container/ar-gateway-pr/$version"
+            done < <(list_package_versions "https://git.johnwilger.com/api/packages/jwilger/container/ar-gateway-pr/versions?limit=100" | /nix/var/nix/profiles/default/bin/jq -r --arg pr_prefix "pr-$PR_NUMBER-" '.[]? | (.name // .version // "") | select(startswith($pr_prefix))')
+            while IFS= read -r auto_review_pr_version; do # auto-review-pr generic versions
+              version="$auto_review_pr_version"
+              [ -n "$version" ] && delete_package "https://git.johnwilger.com/api/packages/jwilger/generic/auto-review-pr/$version"
+            done < <(list_package_versions "https://git.johnwilger.com/api/packages/jwilger/generic/auto-review-pr/versions?limit=100" | /nix/var/nix/profiles/default/bin/jq -r --arg pr_prefix "$PR_NUMBER-" '.[]? | (.name // .version // "") | select(startswith($pr_prefix))')
+          fi
           if [ "$deletion_failures" -ne 0 ]; then
             exit 1
           fi
