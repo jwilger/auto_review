@@ -67,7 +67,10 @@
       "**/*.pem": "deny",
       "*": "allow"
     },
-    "external_directory": "ask"
+    "external_directory": "ask",
+    "forgejo_*": {
+      "*": "allow"
+    }
   },
   "compaction": {
     "auto": true,
