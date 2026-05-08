@@ -63,7 +63,7 @@ jobs:
             case "$changed_file" in
               Cargo.toml|Cargo.lock|CHANGELOG.md)
                 ;;
-              .forgejo/workflows/release-prepare.yml|.forgejo/workflows/release-publish.yml|scripts/release|tests/release_tooling_test.sh)
+              .forgejo/workflows/release-prepare.yml|.forgejo/workflows/release-publish.yml|scripts/release|tests/release_tooling_test.sh|tests/release_tooling/*.sh)
                 ;;
               .forgejo/workflows/*|scripts/*)
                 printf 'refusing token-bearing publish for release PR file: %s\n' "$changed_file" >&2
@@ -97,16 +97,6 @@ jobs:
           PY
           )"
           printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
-      - name: Derive release candidate SHA
-        env:
-          RELEASE_CANDIDATE_SHA: ${{ github.event.pull_request.head.sha }}
-          RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
-        run: |
-          set -euo pipefail
-          if [ -z "${RELEASE_CANDIDATE_SHA:-}" ]; then
-            RELEASE_CANDIDATE_SHA="$(git rev-parse "$RELEASE_MERGE_SHA^2")"
-          fi
-          printf 'RELEASE_CANDIDATE_SHA=%s\n' "$RELEASE_CANDIDATE_SHA" >> "$GITHUB_ENV"
       - name: Build and verify Linux binary release artifacts
         env:
           RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
@@ -247,6 +237,40 @@ jobs:
             sha256sum -c SHA256SUMS
             nix develop --command ssh-keygen -Y verify -f allowed-signers -I "$RELEASE_BOT_EMAIL" -n file -s SHA256SUMS.sig < SHA256SUMS
           )
+      - name: Build Docker image after merge
+        run: |
+          set -euo pipefail
+          nix develop --command nix build .#ar-gateway-image
+      - name: Resolve trusted release publication tools
+        run: |
+          set -euo pipefail
+          SKOPEO=/nix/var/nix/profiles/default/bin/skopeo
+          TEA=/nix/var/nix/profiles/default/bin/tea
+          JQ=/nix/var/nix/profiles/default/bin/jq
+          CURL=/nix/var/nix/profiles/default/bin/curl
+          AWK=/nix/var/nix/profiles/default/bin/awk
+          SED=/nix/var/nix/profiles/default/bin/sed
+          MKTEMP=/nix/var/nix/profiles/default/bin/mktemp
+          CAT=/nix/var/nix/profiles/default/bin/cat
+          MKDIR=/nix/var/nix/profiles/default/bin/mkdir
+          [ -x "$SKOPEO" ]
+          [ -x "$TEA" ]
+          [ -x "$JQ" ]
+          [ -x "$CURL" ]
+          [ -x "$AWK" ]
+          [ -x "$SED" ]
+          [ -x "$MKTEMP" ]
+          [ -x "$CAT" ]
+          [ -x "$MKDIR" ]
+          printf 'SKOPEO=%s\n' "$SKOPEO" >> "$GITHUB_ENV"
+          printf 'TEA=%s\n' "$TEA" >> "$GITHUB_ENV"
+          printf 'JQ=%s\n' "$JQ" >> "$GITHUB_ENV"
+          printf 'CURL=%s\n' "$CURL" >> "$GITHUB_ENV"
+          printf 'AWK=%s\n' "$AWK" >> "$GITHUB_ENV"
+          printf 'SED=%s\n' "$SED" >> "$GITHUB_ENV"
+          printf 'MKTEMP=%s\n' "$MKTEMP" >> "$GITHUB_ENV"
+          printf 'CAT=%s\n' "$CAT" >> "$GITHUB_ENV"
+          printf 'MKDIR=%s\n' "$MKDIR" >> "$GITHUB_ENV"
       - name: Publish Docker image to Forgejo package registry
         env:
           RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
@@ -254,8 +278,8 @@ jobs:
           RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
-          mkdir -p "$HOME/.config/containers"
-          cat > "$HOME/.config/containers/policy.json" <<'EOF'
+          "$MKDIR" -p "$HOME/.config/containers"
+          "$CAT" > "$HOME/.config/containers/policy.json" <<'EOF'
           {
             "default": [
               {
@@ -272,8 +296,8 @@ jobs:
             printf 'missing RELEASE_BOT_NAME repository variable\n' >&2
             exit 1
           fi
-          nix develop --command skopeo copy --src-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA" "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_VERSION"
-          nix develop --command skopeo copy --src-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_CANDIDATE_SHA" "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:latest"
+          "$SKOPEO" copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_VERSION"
+          "$SKOPEO" copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:./result "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:latest"
       - name: Create Forgejo Release
         env:
           GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
@@ -282,22 +306,22 @@ jobs:
           RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
-          RELEASE_NOTES_FILE="$(mktemp)"
+          RELEASE_NOTES_FILE="$($MKTEMP)"
           # Generate notes from the finalized CHANGELOG.md ## [$RELEASE_VERSION] section.
-          awk "/^## \\[$RELEASE_VERSION\\]/{emit=1; next} /^## \\[/{if (emit) exit} emit {print}" CHANGELOG.md > "$RELEASE_NOTES_FILE"
+          "$AWK" "/^## \\[$RELEASE_VERSION\\]/{emit=1; next} /^## \\[/{if (emit) exit} emit {print}" CHANGELOG.md > "$RELEASE_NOTES_FILE"
           printf '\nDocker image: git.johnwilger.com/jwilger/auto_review/ar-gateway:%s\n' "$RELEASE_VERSION" >> "$RELEASE_NOTES_FILE"
           printf '\nLinux binary archive:\n- auto-review-%s-linux-x86_64.tar.gz\n' "$RELEASE_VERSION" >> "$RELEASE_NOTES_FILE"
           printf '\nVerify downloads before use:\n```bash\nsha256sum -c SHA256SUMS\nssh-keygen -Y verify -f allowed-signers -I %s -n file -s SHA256SUMS.sig < SHA256SUMS\n```\n' "$RELEASE_BOT_EMAIL" >> "$RELEASE_NOTES_FILE"
           tea_login="auto_review-release-publish-${GITHUB_RUN_ID:-$$}"
-          nix develop --command tea login add --name "$tea_login" --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
-          nix develop --command tea release create \
+          "$TEA" login add --name "$tea_login" --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
+          "$TEA" release create \
             --login "$tea_login" \
             --repo jwilger/auto_review \
             --tag v$RELEASE_VERSION \
             --target "$RELEASE_MERGE_SHA" \
             --title "v$RELEASE_VERSION" \
             --note-file "$RELEASE_NOTES_FILE"
-          nix develop --command tea releases assets create \
+          "$TEA" releases assets create \
             --login "$tea_login" \
             --repo jwilger/auto_review \
             v$RELEASE_VERSION \
