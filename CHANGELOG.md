@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.8.1] - 2026-05-08
+
+### Fixed
+
+- *(release)* defer Forgejo releases until merge (#164)
+- *(release)* clean PR packages after merge (#166)
+
 ## [0.8.0] - 2026-05-08
 
 ### Fixed
