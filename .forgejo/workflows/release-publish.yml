@@ -11,7 +11,7 @@ on:
 
 jobs:
   release-publish:
-    runs-on: docker
+    runs-on: native
     if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && startsWith(github.event.pull_request.head.ref, 'release/v') == true || (github.event_name == 'workflow_dispatch' && inputs.release_merge_sha != '') }}
     environment: release-publish
     steps:

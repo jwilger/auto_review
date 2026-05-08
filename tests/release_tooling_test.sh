@@ -2423,7 +2423,7 @@ PY
   fi
 }
 
-test_publish_workflow_configures_linux_artifact_platforms_before_builds() {
+test_publish_workflow_builds_linux_artifacts_on_native_runner() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
@@ -2434,6 +2434,15 @@ import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text()
 errors = []
+
+job_match = re.search(r'(?ms)^  release-publish:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
+if not job_match:
+    print('publish workflow is missing the release-publish job')
+    sys.exit(1)
+
+job = job_match.group('body')
+if not re.search(r'(?m)^    runs-on:\s*native\s*$', job):
+    errors.append('release-publish job must run on the native runner so local aarch64 extra-platform builds can use host binfmt/QEMU instead of a docker container')
 
 step_match = re.search(r'- name: Build and verify Linux binary release artifacts(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
 if not step_match:
@@ -2450,7 +2459,7 @@ if first_x86_build == -1:
 if first_aarch64_build == -1:
     errors.append('binary artifact step must build the aarch64-linux package')
 if platform_config == -1:
-    errors.append('binary artifact step must declare both Linux artifact platforms in NIX_CONFIG')
+    errors.append('binary artifact step must keep both Linux artifact platforms enabled for native-runner builds')
 elif first_x86_build != -1 and platform_config > first_x86_build:
     errors.append('NIX_CONFIG extra-platforms must be exported before the first Linux artifact build')
 elif first_aarch64_build != -1 and platform_config > first_aarch64_build:
@@ -2463,9 +2472,9 @@ PY
 )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "publish workflow configures Linux artifact platforms before building archives"
+    pass "publish workflow builds Linux binary artifacts on the native runner"
   else
-    fail "publish workflow configures Linux artifact platforms before building archives ($output)"
+    fail "publish workflow builds Linux binary artifacts on the native runner ($output)"
   fi
 }
 
@@ -2737,7 +2746,7 @@ test_publish_workflow_derives_and_promotes_release_candidate_sha
 test_publish_workflow_attaches_binary_archives_checksums_signatures_and_provenance
 test_publish_workflow_verifies_generated_binary_artifacts_before_release_upload
 test_publish_workflow_handles_release_signing_key_in_private_tempdir
-test_publish_workflow_configures_linux_artifact_platforms_before_builds
+test_publish_workflow_builds_linux_artifacts_on_native_runner
 test_publish_workflow_allows_intentional_release_tooling_changes_before_token_publish
 test_release_docs_account_for_final_binary_assets_and_publish_token_scope
 test_release_tooling_tests_are_wired_into_nix_flake_check
