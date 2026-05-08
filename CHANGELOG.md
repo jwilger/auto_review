@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.6.0] - 2026-05-08
+
+### Fixed
+
+- *(release)* build artifacts on native runner (#155)
+
+### Other
+
+- release v0.5.0 (#154)
+
 ## [0.5.0] - 2026-05-08
 
 ### Fixed
