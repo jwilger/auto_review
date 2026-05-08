@@ -20,7 +20,6 @@ test_publish_workflow_validates_provenance_and_changed_files_before_publish_toke
 
   assert_file_contains "$publish_workflow" 'Validate release provenance and changed files' "publish workflow has a no-token provenance validation step"
   assert_file_contains "$publish_workflow" 'RELEASE_BASE_SHA: ${{ github.event.pull_request.base.sha }}' "publish workflow records the release PR base SHA for provenance checks"
-  assert_file_contains "$publish_workflow" 'RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}' "publish workflow records the release merge SHA for provenance checks"
   assert_file_contains "$publish_workflow" 'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"' "publish workflow derives changed files from the merged release PR"
   assert_file_contains "$publish_workflow" 'case "$changed_file" in' "publish workflow evaluates each changed file before publishing"
   assert_file_contains "$publish_workflow" 'Cargo.toml|Cargo.lock|CHANGELOG.md)' "publish workflow allows release metadata files before publishing"
@@ -160,7 +159,6 @@ test_publish_workflow_executes_from_merge_commit_sha_before_publish_token() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  assert_file_contains "$publish_workflow" 'ref: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}' "publish workflow checks out the release merge commit"
   output="$(python3 - "$publish_workflow" <<'PY'
 import pathlib
 import sys
@@ -650,10 +648,7 @@ if not any(path in expected_manual_paths for path in manual_paths):
     print("release-publish job workflow_dispatch path must be exactly github.event_name == 'workflow_dispatch' && inputs.release_merge_sha != ''")
     sys.exit(1)
 
-release_sha = "${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}"
 required_markers = [
-    f"ref: {release_sha}",
-    f"RELEASE_MERGE_SHA: {release_sha}",
     "environment: release-publish",
     'git switch -C main "$RELEASE_MERGE_SHA"',
     'Publish Docker image to Forgejo package registry',
@@ -740,6 +735,63 @@ PY
     pass "publish workflow supports protected manual dispatch from a release merge SHA"
   else
     fail "publish workflow supports protected manual dispatch from a release merge SHA ($output)"
+  fi
+}
+
+test_publish_workflow_keeps_dispatch_input_out_of_pull_request_paths() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+if "workflow_dispatch:" not in workflow or "release_merge_sha:" not in workflow:
+    errors.append("publish workflow must still expose release_merge_sha for workflow_dispatch reruns")
+
+job_match = re.search(r'(?ms)^  release-publish:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
+if not job_match:
+    print("publish workflow is missing the release-publish job")
+    sys.exit(1)
+job = job_match.group('body')
+
+steps = re.findall(r'(?ms)^      - (?P<step>.*?)(?=^      - |^  [a-zA-Z0-9_-]+:|\Z)', job)
+if not steps:
+    errors.append("publish workflow release-publish job is missing steps")
+
+pull_request_merge_steps = [step for step in steps if "github.event.pull_request.merge_commit_sha" in step]
+if not pull_request_merge_steps:
+    errors.append("pull_request release path must use github.event.pull_request.merge_commit_sha directly")
+for step in pull_request_merge_steps:
+    first_line = step.splitlines()[0].strip()
+    if "inputs.release_merge_sha" in step:
+        errors.append(f"pull_request merge commit step must not reference inputs.release_merge_sha: {first_line}")
+
+dispatch_steps = [step for step in steps if "inputs.release_merge_sha" in step]
+if not dispatch_steps:
+    errors.append("workflow_dispatch release path must still consume inputs.release_merge_sha")
+for step in dispatch_steps:
+    first_line = step.splitlines()[0].strip()
+    has_dispatch_gate = "github.event_name == 'workflow_dispatch'" in step or 'github.event_name == "workflow_dispatch"' in step
+    if not has_dispatch_gate:
+        errors.append(f"workflow_dispatch input step must be gated to workflow_dispatch only: {first_line}")
+    if "github.event.pull_request" in step:
+        errors.append(f"workflow_dispatch input step must not also depend on pull_request context: {first_line}")
+
+if errors:
+    print("; ".join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow keeps workflow_dispatch input out of pull_request release paths"
+  else
+    fail "publish workflow keeps workflow_dispatch input out of pull_request release paths ($output)"
   fi
 }
 
@@ -1358,6 +1410,7 @@ run_tests \
   test_publish_workflow_publishes_nix_docker_image_to_forgejo_registry \
   test_publish_workflow_requires_trusted_release_environment \
   test_publish_workflow_supports_manual_dispatch_from_release_merge_sha \
+  test_publish_workflow_keeps_dispatch_input_out_of_pull_request_paths \
   test_publish_workflow_uses_trusted_tools_after_publish_token_exposure \
   test_publish_workflow_builds_and_publishes_release_image_after_merge \
   test_publish_workflow_attaches_binary_archives_checksums_signatures_and_provenance \

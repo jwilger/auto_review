@@ -42,16 +42,41 @@ jobs:
           done
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
+        name: Checkout merged release PR commit
+        if: ${{ github.event_name == 'pull_request' }}
         with:
-          ref: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
+          ref: ${{ github.event.pull_request.merge_commit_sha }}
           persist-credentials: false
           fetch-depth: 0
-      - name: Validate release provenance and changed files
+      - uses: actions/checkout@v4
+        name: Checkout dispatched release merge commit
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        with:
+          ref: ${{ inputs.release_merge_sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Export merged release PR context
+        if: ${{ github.event_name == 'pull_request' }}
         env:
           FORGEJO_PULL_REQUEST_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}
           FORGEJO_PULL_REQUEST_HEAD_BRANCH: ${{ github.event.pull_request.head.ref }}
           RELEASE_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
+          RELEASE_MERGE_SHA: ${{ github.event.pull_request.merge_commit_sha }}
+        run: |
+          set -euo pipefail
+          printf 'FORGEJO_PULL_REQUEST_BASE_BRANCH=%s\n' "$FORGEJO_PULL_REQUEST_BASE_BRANCH" >> "$GITHUB_ENV"
+          printf 'FORGEJO_PULL_REQUEST_HEAD_BRANCH=%s\n' "$FORGEJO_PULL_REQUEST_HEAD_BRANCH" >> "$GITHUB_ENV"
+          printf 'RELEASE_BASE_SHA=%s\n' "$RELEASE_BASE_SHA" >> "$GITHUB_ENV"
+          printf 'RELEASE_MERGE_SHA=%s\n' "$RELEASE_MERGE_SHA" >> "$GITHUB_ENV"
+      - name: Export dispatched release context
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha }}
+        run: |
+          set -euo pipefail
+          printf 'RELEASE_BASE_SHA=\n' >> "$GITHUB_ENV"
+          printf 'RELEASE_MERGE_SHA=%s\n' "$RELEASE_MERGE_SHA" >> "$GITHUB_ENV"
+      - name: Validate release provenance and changed files
         run: |
           set -euo pipefail
           if [[ -z "$RELEASE_BASE_SHA" ]]; then
@@ -76,8 +101,6 @@ jobs:
             esac
           done
       - name: Attach merge commit to main
-        env:
-          RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
           git switch -C main "$RELEASE_MERGE_SHA"
@@ -99,7 +122,6 @@ jobs:
           printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
       - name: Build and verify Linux binary release artifacts
         env:
-          RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
           RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
         run: |
@@ -275,7 +297,6 @@ jobs:
         env:
           RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
           RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
-          RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
           "$MKDIR" -p "$HOME/.config/containers"
@@ -303,7 +324,6 @@ jobs:
           GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
           GITEA_SERVER_URL: https://git.johnwilger.com
           RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
-          RELEASE_MERGE_SHA: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}
         run: |
           set -euo pipefail
           RELEASE_NOTES_FILE="$($MKTEMP)"
