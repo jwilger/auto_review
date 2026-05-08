@@ -11,33 +11,19 @@ on:
 
 jobs:
   release-publish:
-    runs-on: native
+    runs-on: [native, nix]
     if: ${{ github.event.pull_request.merged == true && github.event.pull_request.base.ref == 'main' && startsWith(github.event.pull_request.head.ref, 'release/v') == true || (github.event_name == 'workflow_dispatch' && inputs.release_merge_sha != '') }}
     environment: release-publish
     steps:
       - name: Install or reuse Nix
         run: |
           set -euo pipefail
-          NIX_BIN_DIR="/nix/var/nix/profiles/default/bin"
-          if [ ! -x "$NIX_BIN_DIR/nix" ]; then
-            curl --proto '=https' --tlsv1.2 -sSf -L \
-              https://install.determinate.systems/nix \
-              | sh -s -- install linux \
-                --init none \
-                --no-confirm \
-                --extra-conf "experimental-features = nix-command flakes" \
-                --extra-conf "accept-flake-config = true"
+          if command -v nix > /dev/null 2>&1; then
+            echo "Nix already present at $(command -v nix)"
+          else
+            printf 'Nix is not on PATH for this native NixOS runner. Fix the runner service environment so nix is available; this workflow will not install Nix or run sudo.\n' >&2
+            exit 1
           fi
-          if ! getent group nixbld > /dev/null; then
-            groupadd -r nixbld
-          fi
-          for i in $(seq 1 32); do
-            if ! id -u "nixbld$i" > /dev/null 2>&1; then
-              useradd -r -g nixbld -G nixbld -d /var/empty \
-                -s /usr/sbin/nologin -c "Nix build user $i" "nixbld$i"
-            fi
-          done
-          echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.release_merge_sha || github.event.pull_request.merge_commit_sha }}

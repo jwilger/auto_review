@@ -754,9 +754,10 @@ test_release_workflows_install_or_reuse_nix_like_ci_before_nix_develop() {
   assert_file_contains_before "$prepare_workflow" 'Install or reuse Nix' 'nix develop' "release PR preparation workflow installs Nix before nix develop"
 
   assert_file_contains "$publish_workflow" 'Install or reuse Nix' "publish workflow installs or reuses Nix like CI"
-  assert_file_contains "$publish_workflow" 'https://install.determinate.systems/nix' "publish workflow uses the CI Nix installer path"
-  assert_file_contains "$publish_workflow" 'echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"' "publish workflow persists the Nix path for later steps"
-  assert_file_contains_before "$publish_workflow" 'Install or reuse Nix' 'nix develop' "publish workflow installs Nix before nix develop"
+  assert_file_contains "$publish_workflow" 'command -v nix' "publish workflow verifies Nix is already available on the native runner"
+  assert_file_not_contains "$publish_workflow" 'https://install.determinate.systems/nix' "publish workflow does not install Nix on the native runner"
+  assert_file_not_contains "$publish_workflow" 'groupadd -r nixbld' "publish workflow does not mutate native runner users or groups"
+  assert_file_contains_before "$publish_workflow" 'Install or reuse Nix' 'nix develop' "publish workflow verifies Nix before nix develop"
 }
 
 test_prepare_workflow_builds_and_publishes_release_candidate_images() {
@@ -2441,8 +2442,8 @@ if not job_match:
     sys.exit(1)
 
 job = job_match.group('body')
-if not re.search(r'(?m)^    runs-on:\s*native\s*$', job):
-    errors.append('release-publish job must run on the native runner so local aarch64 extra-platform builds can use host binfmt/QEMU instead of a docker container')
+if not re.search(r'(?m)^    runs-on:\s*\[native, nix\]\s*$', job):
+    errors.append('release-publish job must require native and nix runner labels so local aarch64 extra-platform builds use the pre-provisioned NixOS host binfmt/QEMU instead of a docker container or non-Nix native runner')
 
 step_match = re.search(r'- name: Build and verify Linux binary release artifacts(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
 if not step_match:
