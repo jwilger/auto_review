@@ -70,11 +70,15 @@ That keeps production deployment container-first while allowing an operator to
 attach to the running image and execute the same grouped `auto-review` diagnostic
 or maintenance commands inside the container.
 
-Also attach downloadable Linux binaries to each release. The first supported
+Also attach downloadable Linux binaries to each release. The intended supported
 binary targets are:
 
 - Linux `x86_64`
 - Linux `aarch64`
+
+[ADR-0007](./ADR-0007-x86_64-only-binary-releases.md) temporarily narrows the
+published release artifacts to Linux `x86_64` until a proper Linux `aarch64`
+build runner or equivalent trusted build solution is available.
 
 Binary releases must include full provenance from the first supported release:
 

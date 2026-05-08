@@ -67,10 +67,13 @@ The embedded rootfs must be minimal. Include only what the gateway runtime needs
 Do not include shell/coreutils/debug extras in the default embedded rootfs. If a
 future debug image or support bundle is needed, decide that separately.
 
-The first supported direct-download targets are Linux `x86_64` and Linux
-`aarch64`, matching [ADR-0005](./ADR-0005-single-public-executable.md). Non-Linux
+The intended direct-download targets are Linux `x86_64` and Linux `aarch64`,
+matching [ADR-0005](./ADR-0005-single-public-executable.md). Non-Linux
 single-binary gateway releases are out of scope for the first implementation
 because the accepted default isolation model is Linux/OCI-specific.
+[ADR-0007](./ADR-0007-x86_64-only-binary-releases.md) temporarily narrows the
+published release artifacts to Linux `x86_64` until a proper Linux `aarch64`
+build runner or equivalent trusted build solution is available.
 
 Runtime posture must be visible:
 
