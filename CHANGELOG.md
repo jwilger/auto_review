@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.5.0] - 2026-05-08
+
+### Fixed
+
+- *(release)* configure artifact build platforms (#153)
+
+### Other
+
+- release v0.4.0 (#152)
+
 ## [0.4.0] - 2026-05-08
 
 ### Fixed
