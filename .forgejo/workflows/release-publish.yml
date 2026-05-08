@@ -126,9 +126,9 @@ jobs:
           printf '%s\n' "$RELEASE_SIGNING_KEY" > "$signing_key"
           chmod 600 "$signing_key"
           mkdir -p release-artifacts
-          x86_out="$(nix build .#packages.x86_64-linux.default --print-out-paths --no-link)"
-          NIX_CONFIG="$(printf '%s\nextra-platforms = aarch64-linux' "${NIX_CONFIG:-}")"
+          NIX_CONFIG="$(printf '%s\nextra-platforms = x86_64-linux aarch64-linux' "${NIX_CONFIG:-}")"
           export NIX_CONFIG
+          x86_out="$(nix build .#packages.x86_64-linux.default --print-out-paths --no-link)"
           aarch64_out="$(nix build .#packages.aarch64-linux.default --print-out-paths --no-link)"
           cp "$x86_out/bin/auto-review" release-artifacts/auto-review
           tar -C release-artifacts -czf release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz auto-review
