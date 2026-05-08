@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.4.0] - 2026-05-08
+
+### Fixed
+
+- *(release)* allow local aarch64 builds (#151)
+
+### Other
+
+- release v0.3.0 (#126)
+- *(kilo)* allow Forgejo MCP tools (#146)
+
 ## [0.3.0] - 2026-05-07
 
 ### Added
