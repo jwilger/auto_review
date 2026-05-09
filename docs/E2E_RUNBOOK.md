@@ -23,10 +23,18 @@ the CI review endpoint, and the install / PAT / hook-registration flow.
   process locally with `qwen2.5-coder:7b` pulled. The runbook
   works with any OpenAI-compatible endpoint.
 - The `auto-review` binary built. Either:
-  - `nix build .#ar-cli` (recommended; flake-pinned toolchain), then
+  - `nix build .` (recommended; flake-pinned toolchain), then
     refer to `./result/bin/auto-review`.
   - `nix develop --command cargo build --release --workspace`,
     then refer to `./target/release/auto-review`.
+
+Set a helper variable for the rest of the runbook:
+
+```bash
+BIN=./result/bin/auto-review
+# or: BIN=./target/release/auto-review
+CI_TOKEN=$(openssl rand -hex 32)
+```
 
 ## 1. Boot Forgejo
 
@@ -147,10 +155,10 @@ Forgejo container on Docker Desktop. On Linux, use the host LAN IP.)
 FORGEJO_BASE_URL=http://localhost:3000 \
 AR_FORGEJO_TOKEN="$PAT" \
 WEBHOOK_SECRET=shared-secret \
-AR_CI_REVIEW_TOKEN=e2e-action-token \
+AR_CI_REVIEW_TOKEN="$CI_TOKEN" \
 LLM_BASE_URL=http://localhost:11434 \
 LLM_REASONING_MODEL=qwen2.5-coder:7b \
-./target/release/auto-review gateway --bare
+"$BIN" gateway --bare
 ```
 
 The E2E runbook uses explicit bare mode because it starts the direct binary on
@@ -186,7 +194,7 @@ prerequisites pass:
 
 ```bash
 curl -f -X POST http://localhost:8080/reviews/ci \
-  -H "Authorization: Bearer e2e-action-token" \
+  -H "Authorization: Bearer $CI_TOKEN" \
   -H "Content-Type: application/json" \
   -d "{\"owner\":\"auto_review_bot\",\"repo\":\"e2e-target\",\"pr_number\":$PR_NUMBER,\"head_sha\":\"$HEAD_SHA\"}"
 ```

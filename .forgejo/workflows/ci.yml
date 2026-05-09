@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
 
       # Idempotent Nix install: when the runner host mounts `/nix`
-      # as a persistent volume (see deploy/forgejo-runner/README.md),
+      # as a persistent volume (see docs/DEPLOYMENT.md#forgejo-runner-nix-cache),
       # subsequent runs find Nix already present and skip the
       # installer. First run on a fresh volume installs from the
       # upstream determinate.systems script; the volume retains

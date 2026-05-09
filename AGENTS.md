@@ -68,11 +68,12 @@ Deterministic linters/tests/builds run in CI before semantic review. Runtime wor
 | `ar-llm` | provider trait and tier-based router |
 | `ar-prompts` | prompt templates and JSON schemas |
 | `ar-review` | review, verify, self-heal, RAG context, repo config |
-| `ar-cli` | operator subcommands |
+| `ar-cli` | `auto-review` operator command and gateway entrypoint |
 | `ar-chat` | chat command handling |
 | `ar-index` | tree-sitter symbols, embeddings, co-change graph, learnings store |
 
-Each crate has its own `README.md`; open the crate docs before changing public behavior.
+Crate-level documentation is centralized in `docs/CRATES.md`; open it before
+changing public behavior. The CLI command reference lives in `docs/CLI.md`.
 
 ## Development Discipline
 
@@ -105,5 +106,6 @@ Each crate has its own `README.md`; open the crate docs before changing public b
 - `docs/THREAT-MODEL.md`
 - `docs/OPERATIONS.md`
 - `docs/USER-GUIDE.md`
-- `QUICKSTART.md`
+- `docs/QUICKSTART.md`
+- `docs/DEPLOYMENT.md`
 - `deploy/systemd/auto_review.env.example`

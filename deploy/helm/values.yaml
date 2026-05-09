@@ -1,7 +1,7 @@
 # Default values for the auto-review Helm chart.
 
 image:
-  repository: codeberg.org/jwilger/auto_review
+  repository: git.johnwilger.com/jwilger/auto_review/ar-gateway
   tag: ""  # defaults to .Chart.AppVersion
   pullPolicy: IfNotPresent
 

@@ -15,7 +15,7 @@ Use Nix and the pinned Rust toolchain. Prefer focused checks during RGR and `nix
 - Use `?`, `anyhow::Context`, or explicit error variants.
 - Use `read_non_empty_env(name)` and `parse_env::<T>(name)` in `ar-gateway/src/main.rs`.
 - Cap provider error bodies with `ar_llm::cap_for_error` or equivalent helpers.
-- Keep crate boundaries aligned with `AGENTS.md` and crate `README.md` files.
+- Keep crate boundaries aligned with `AGENTS.md` and `docs/CRATES.md`.
 
 ## Tests
 

@@ -2,100 +2,146 @@
 
 A self-hosted, AI-driven pull-request reviewer for [Forgejo](https://forgejo.org/).
 
-`auto_review` aims for functional parity with closed-source AI reviewers
-(CodeRabbit, Greptile, Cursor BugBot) while running entirely on infrastructure
-you control, with optional support for fully local LLMs.
+`auto_review` gives Forgejo operators a sovereignty-friendly alternative to
+closed-source AI reviewers: it runs on infrastructure you control, supports local
+or cloud OpenAI-compatible LLM endpoints, waits for your CI checks, reviews PRs
+semantically, verifies findings before posting, and talks to authors through
+`@auto_review` chat commands.
 
-## Status
+## TL;DR: install and run
 
-**Alpha.** End-to-end review pipeline works: webhook intake plus CI-gated
-review dispatch → LLM triage (skip lockfile-only PRs, route trivial files away from the
-reasoning model) → shallow-clone → tree-sitter + embedding
-RAG context + persistent learnings memory → reasoning-tier LLM
-with strict-JSON-schema output and self-heal validation → cheap-
-tier verifier drops unfounded findings → post inline review
-comments + commit status. The `@auto_review` chat handler accepts
-`help`, `remember <text>`, `forget <id>`, `re-review`,
-`autofix`, `docstring`, `tests`, and free-form questions
-answered by the cheap-tier model. The `bench`
-CLI subcommand replays PR fixtures through the LLM-review path
-for regression tracking and model comparison. CLI helpers mint
-the bot's PAT and register the webhook on a repo.
+1. Install or build the single public command:
 
-Build, dev, and CI all run through one `flake.nix` so local
-work and CI exercise identical derivations bit-for-bit
-(see [CONTRIBUTING.md](./CONTRIBUTING.md) for the dev setup,
-or `nix flake check` for the same gates CI runs).
+   ```sh
+   git clone https://git.johnwilger.com/jwilger/auto_review
+   cd auto_review
+   nix build .
+   export AUTO_REVIEW="$PWD/result/bin/auto-review"
+   ```
 
-To deploy: see [QUICKSTART.md](./QUICKSTART.md). To run on an
-ongoing basis (rotation, upgrades, alerts, repo config),
-see [docs/OPERATIONS.md](./docs/OPERATIONS.md). If you're a
-PR author whose changes are reviewed by an `auto_review`
-deployment and you want to know what the bot does and how to
-talk to it, see [docs/USER-GUIDE.md](./docs/USER-GUIDE.md).
-If you've found a security issue, see
-[SECURITY.md](./SECURITY.md) for the disclosure process. For background,
-the [feasibility study](./docs/FEASIBILITY.md) lays out the broader
-plan; [ADR-0001](./docs/ADR-0001-architecture.md) captures the
-architecture decision; the [threat model](./docs/THREAT-MODEL.md)
-enumerates attacker profiles, trust boundaries, and per-class
-mitigations (read this before exposing the bot to drive-by PRs).
-[ADR-0002](./docs/ADR-0002-sandbox.md) records the retired linter
-sandbox decision and completed issue #46 rescope; [ADR-0003](./docs/ADR-0003-observability.md)
-documents the metrics / readiness / runtime-introspection design;
-[ADR-0004](./docs/ADR-0004-vector-store.md) explains why
-embeddings persist via SQLite today rather than LanceDB.
+   Release downloads are also published as Linux `x86_64` archives with
+   checksums, signatures, SBOM, and provenance metadata.
 
-What's still on the roadmap: real-world verification on a
-production Forgejo instance with real PR traffic; a larger
-labelled-corpus benchmark (5 fixtures ship today across SQLi /
-command injection / hardcoded secrets / path traversal / XSS,
-but a production-quality precision-recall sweep needs more); a
-LanceDB-backed vector store as a drop-in for the SQLite path
-(documented in ADR-0004) when a deployment outgrows
-brute-force cosine. The runtime no longer bundles or runs linters;
-deterministic linters/tests/builds belong in CI, which can trigger
-semantic review after required checks pass.
+2. Create a Forgejo bot user, add it to the repos it reviews, and mint its PAT:
 
-## Architecture (one-paragraph)
+   ```sh
+   $AUTO_REVIEW auth init \
+     --forgejo-url https://forgejo.example.com \
+     --username auto-review
+   ```
 
-A Forgejo webhook lands at the **gateway**, which HMAC-verifies low-cost PR
-intake and chat commands. Normal semantic review dispatch comes from the
-CI-triggered `/reviews/ci` endpoint after required checks pass; explicit
-`@auto_review re-review` commands can force a review. The **orchestrator** then
-runs a per-PR review pipeline:
-clone → triage → context curation
-(tree-sitter symbols + in-memory cosine-similarity over the
-learnings store) → review generation → verification (drop unfounded
-findings) → severity-floor filter → post review.
-LLM workspace tools are read-only and constrained to the clone root; CI owns
-deterministic tool execution. LLM calls go through a pluggable provider abstraction
-that today ships an OpenAI-compatible client (works against hosted
-OpenAI, Ollama, vLLM, OpenRouter, Together, Groq, etc.).
+3. Configure the gateway environment:
+
+   ```sh
+   FORGEJO_BASE_URL=https://forgejo.example.com
+   AR_FORGEJO_TOKEN=<bot PAT>
+   WEBHOOK_SECRET=<openssl rand -hex 32>
+   AR_CI_REVIEW_TOKEN=<openssl rand -hex 32>
+   LLM_BASE_URL=http://localhost:11434
+   LLM_REASONING_MODEL=qwen2.5-coder:32b
+   ```
+
+4. Run the gateway. Production is container-first:
+
+   ```sh
+   podman run -d --name auto-review \
+     --env-file /etc/auto_review/auto_review.env \
+     -p 127.0.0.1:8080:8080 \
+     -v auto-review-state:/var/lib/auto_review \
+     git.johnwilger.com/jwilger/auto_review/ar-gateway:latest
+   ```
+
+   For local evaluation with the direct binary:
+
+   ```sh
+   $AUTO_REVIEW gateway --bare
+   ```
+
+5. Register a repo webhook and add the Forgejo Actions CI trigger shown in
+   [Quickstart](./docs/QUICKSTART.md).
+
+Full setup: [Quickstart](./docs/QUICKSTART.md). Deployment options:
+[Deployment](./docs/DEPLOYMENT.md). Day-2 operation:
+[Operations](./docs/OPERATIONS.md). PR-author guide:
+[User Guide](./docs/USER-GUIDE.md). Security posture:
+[Threat Model](./docs/THREAT-MODEL.md).
+
+## Current status
+
+**Beta.** `auto_review` has been successfully reviewing its own PRs for some
+time. The end-to-end review pipeline works:
+
+```text
+Forgejo webhook / CI trigger
+  -> gateway HMAC + token validation
+  -> shallow clone
+  -> triage + RAG context + learnings
+  -> reasoning-tier LLM strict JSON output
+  -> self-heal + cheap-tier verification
+  -> severity floor
+  -> inline review comments + commit status
+```
+
+The gateway accepts low-cost PR webhooks for intake and chat bookkeeping. Normal
+semantic reviews are dispatched by `POST /reviews/ci` after repository-selected
+CI prerequisites pass. Explicit `@auto_review re-review` can force a review.
+
+The chat handler supports `help`, `remember <text>`, `forget <id>`, `re-review`,
+`autofix`, `docstring`, `tests`, and free-form questions. The `bench` command
+replays labelled fixtures for regression tracking and model comparison.
+
+What is not in the runtime: bundled linters, repo-controlled test/build
+execution, or LLM-issued shell commands. Deterministic linters/tests/builds
+belong in CI before the semantic-review trigger.
+
+## Architecture in one paragraph
+
+A Forgejo webhook lands at the gateway, which HMAC-verifies PR intake and chat
+commands. The optional CI endpoint verifies a bearer token and re-checks the PR
+head SHA before dispatch. The orchestrator runs clone → triage → context curation
+(tree-sitter symbols, embeddings, co-change context, learnings) → review
+generation → verifier → severity filtering → Forgejo review/status posting. LLM
+workspace tools are read-only and path-confined. LLM calls go through a tiered
+OpenAI-compatible provider abstraction that works with hosted OpenAI-compatible
+providers, Ollama, vLLM, OpenRouter, Together, Groq, and similar endpoints.
+
+## Documentation map
+
+- [Quickstart](./docs/QUICKSTART.md) — shortest install-and-run path.
+- [Deployment](./docs/DEPLOYMENT.md) — container image, Nix/NixOS, systemd,
+  Helm, Forgejo Actions, Prometheus, Grafana, and runner-cache notes.
+- [Operations](./docs/OPERATIONS.md) — health checks, metrics, failures,
+  rotation, history/learnings maintenance, upgrades.
+- [User Guide](./docs/USER-GUIDE.md) — what PR authors see and how they talk to
+  the bot.
+- [CLI Reference](./docs/CLI.md) — grouped `auto-review` command surface.
+- [Benchmarks](./docs/BENCHMARKS.md) — fixture replay and labelled corpus
+  scoring.
+- [Crate Map](./docs/CRATES.md) — workspace crate responsibilities.
+- [Threat Model](./docs/THREAT-MODEL.md) and [ADRs](./docs/) — security and
+  design rationale.
 
 ## Crates
 
 | Crate | Purpose |
 |---|---|
-| `ar-gateway` | HTTP webhook intake; HMAC verification; CI/chat-triggered job dispatch |
-| `ar-orchestrator` | Per-PR state machine; activity dispatch |
+| `ar-gateway` | HTTP webhook intake, HMAC verification, CI/chat dispatch, ops endpoints |
+| `ar-orchestrator` | Per-PR state machine, job dispatch, review history, lifecycle observations |
 | `ar-forgejo` | Forgejo REST client |
-| `ar-llm` | LLM provider trait + implementations |
-| `ar-index` | Tree-sitter parsers + embeddings + co-change graph + learnings store |
+| `ar-llm` | LLM provider trait and tier router |
+| `ar-index` | Tree-sitter symbols, embeddings, co-change graph, learnings store |
 | `ar-prompts` | Prompt templates and JSON schemas |
 | `ar-review` | Review pipeline activities |
-| `ar-chat` | Agentic `@auto_review` chat handler |
-| `ar-cli` | Operator CLI; see `crates/ar-cli/README.md` |
+| `ar-chat` | `@auto_review` chat handling |
+| `ar-cli` | `auto-review` operator command |
 
 ## License
 
-AGPL-3.0-or-later. The intent is to keep this codebase open: anyone can
-self-host, modify, or fork, but a hosted-service operator must publish their
-modifications. See `LICENSE`.
+AGPL-3.0-or-later. See [LICENSE](./LICENSE).
 
 ## Acknowledgements
 
 Architectural lineage from public CodeRabbit engineering writing and from
 [Qodo PR-Agent](https://github.com/qodo-ai/pr-agent) (Apache-2.0). Specific
-prompt patterns and the `__new hunk__` / `__old hunk__` diff format are
-adapted from PR-Agent under attribution.
+prompt patterns and the `__new hunk__` / `__old hunk__` diff format are adapted
+from PR-Agent under attribution.

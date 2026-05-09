@@ -412,7 +412,7 @@ pub struct ValidateConfigArgs {
 #[derive(clap::Args, Debug)]
 pub struct BenchArgs {
     /// One or more fixture file paths or directories. Each fixture is
-    /// a JSON file with the shape documented in `bench/README.md`.
+    /// a JSON file with the shape documented in `docs/BENCHMARKS.md`.
     /// When a directory is given, every `*.json` file in it is loaded.
     #[arg(required = true)]
     pub fixtures: Vec<std::path::PathBuf>,
@@ -1263,16 +1263,16 @@ mod tests {
     }
 
     /// Cross-file contract test: every subcommand `Cli` exposes
-    /// must appear in `crates/ar-cli/README.md`. Adding a new
-    /// subcommand without documenting it in the per-crate README
-    /// is the kind of drift that's invisible until an operator
-    /// goes looking for the feature and fails to find it.
+    /// must appear in `docs/CLI.md`. Adding a new subcommand
+    /// without documenting it in the central CLI reference is the
+    /// kind of drift that's invisible until an operator goes
+    /// looking for the feature and fails to find it.
     #[test]
     fn readme_documents_every_subcommand() {
         use clap::CommandFactory;
         let cmd = Cli::command();
         let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
-        let readme_path = manifest.join("README.md");
+        let readme_path = manifest.join("../../docs/CLI.md");
         let body = std::fs::read_to_string(&readme_path)
             .unwrap_or_else(|e| panic!("read {}: {e}", readme_path.display()));
         let mut missing = Vec::new();
@@ -1288,7 +1288,7 @@ mod tests {
         }
         assert!(
             missing.is_empty(),
-            "subcommands missing from ar-cli/README.md: {missing:?}"
+            "subcommands missing from docs/CLI.md: {missing:?}"
         );
     }
 

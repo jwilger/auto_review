@@ -205,8 +205,5 @@ triggers. If CI-trigger failures need Prometheus alerting later, add dedicated
   `webhook_rate_limited_total`).
 - [`docs/OPERATIONS.md`](OPERATIONS.md) — how operators use the
   endpoints day-to-day.
-- [`deploy/prometheus/auto_review.rules.yaml`](../deploy/prometheus/auto_review.rules.yaml)
-  — recording rules + alerting rules grounded in these
-  counters.
-- [`deploy/grafana/auto_review.dashboard.json`](../deploy/grafana/auto_review.dashboard.json)
-  — operator dashboard.
+- [`docs/DEPLOYMENT.md`](DEPLOYMENT.md#prometheus-and-grafana) — installing the
+  Prometheus rules and Grafana dashboard shipped under `deploy/`.

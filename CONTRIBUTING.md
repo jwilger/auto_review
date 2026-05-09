@@ -93,12 +93,9 @@ everyone (and CI) picks up the same versions.
 See `docs/ADR-0001-architecture.md` for the high-level decision,
 `docs/ADR-0002-sandbox.md` for the superseded linter-sandbox decision,
 `docs/ADR-0003-observability.md` for the metrics / readiness /
-runtime-introspection design, and `docs/FEASIBILITY.md` for the
-longer reasoning. The crate layout:
+runtime-introspection design, and `docs/CRATES.md` for the crate map.
 
-Each crate has its own `README.md` documenting public surface,
-module breakdown, and key tests — open the crate directory for
-the navigation aid. The summary table:
+Crate-level navigation is centralized in `docs/CRATES.md`. The summary table:
 
 | Crate | Responsibility |
 |---|---|
@@ -108,7 +105,7 @@ the navigation aid. The summary table:
 | `ar-llm` | Provider trait + tier-based Router |
 | `ar-prompts` | Prompt templates + JSON schemas + validation |
 | `ar-review` | Pipeline activities (review, verify, self-heal, RAG context, repo config) |
-| `ar-cli` | Operator CLI (init / register-webhook / review-once / bench / doctor / status / 16 more — see crate README) |
+| `ar-cli` | Operator CLI (`auto-review`; see `docs/CLI.md`) |
 | `ar-chat` | Agentic `@auto_review` chat handler (7 specific commands + freeform fallback) |
 | `ar-index` | Tree-sitter symbols, embeddings, co-change graph, learnings store |
 
@@ -161,9 +158,9 @@ templates.
      paths, `tempfile::tempdir()` for filesystem paths, in-memory
      DB stores for storage paths.
 
-Document the new subcommand in `OPERATIONS.md` (if operator-
-facing) or `CONTRIBUTING.md` (if developer-facing) and add a row
-to `ar-cli/README.md`'s subcommand inventory.
+Document the new subcommand in `docs/CLI.md`, and in `docs/OPERATIONS.md` if it
+changes operator workflows. The CLI contract test fails when a top-level command
+is missing from `docs/CLI.md`.
 
 ## Adding a new chat command
 
@@ -201,9 +198,9 @@ existing 8 commands.
    - Handler tests with `wiremock`-stubbed Forgejo and a
      `CannedProvider` for any LLM call.
 
-Document the new command in `docs/USER-GUIDE.md` (the table of
-chat commands with one-line descriptions) and `ar-chat/README.md`
-(the public-surface table).
+Document the new command in `docs/USER-GUIDE.md` (the table of chat commands
+with one-line descriptions) and update `docs/CRATES.md` if the public surface
+summary changes.
 
 ## Commit messages
 

@@ -1,6 +1,6 @@
 # Operations Runbook
 
-Day-2 operations for `auto_review` after the [QUICKSTART](../QUICKSTART.md)
+Day-2 operations for `auto_review` after the [Quickstart](./QUICKSTART.md)
 walks you through the first deploy. Audience: the on-call engineer or
 operator running the bot.
 
@@ -25,7 +25,47 @@ keep it healthy.
 
 ---
 
-## 0a. Kubernetes probes
+## 0. Pre-deploy and post-deploy validation
+
+Before exposing a freshly-deployed gateway to Forgejo:
+
+```bash
+# Confirms PAT validity, LLM reachability, git availability,
+# secret strength, and runtime-isolation posture.
+auto-review ops doctor
+
+# Confirms the webhook intake path works end-to-end.
+auto-review webhook test \
+    --gateway-url https://reviewer.example.com \
+    --webhook-secret "$WEBHOOK_SECRET"
+
+# Live operational snapshot: /version + /info + /metrics.
+auto-review ops status --gateway-url https://reviewer.example.com
+```
+
+These commands are fast and idempotent. `doctor` exits non-zero when any check
+fails; `webhook test` exits non-zero when the gateway returns non-2xx.
+
+## 0.1 Deployment posture
+
+The recommended production deployment remains the Docker/OCI image. It runs the
+same `auto-review` binary as direct installs, but the image supplies an external
+container boundary and marks that posture with
+`AR_GATEWAY_EXTERNAL_ISOLATION=container`.
+
+Direct binary use is supported for local diagnostics, evaluation, and operators
+who intentionally manage the host boundary themselves. On supported Linux hosts,
+`auto-review gateway` defaults to the embedded OCI launcher. If embedded OCI
+setup is unavailable, startup fails closed unless the operator explicitly opts
+out with `auto-review gateway --bare` or `AR_GATEWAY_BARE=true`. That opt-out
+leaves only application-level controls active and must not be treated as
+container-equivalent isolation.
+
+Install details for container image, Nix/NixOS, systemd, Kubernetes/Helm,
+Forgejo Actions, Prometheus, Grafana, and runner cache setup live in
+[Deployment](./DEPLOYMENT.md).
+
+## 0.2 Kubernetes probes
 
 If you deploy via the bundled Helm chart, both probes are
 already wired:
@@ -43,67 +83,13 @@ correct k8s semantics for transient downstream failures.
 Tune the cache with `AR_READINESS_TTL_SECS` (set to 0 effectively
 disables caching, but typical values are 10-30s).
 
-## 0. Pre-deploy and post-deploy validation
-
-## 0a. Deployment posture for the single `auto-review` binary
-
-The recommended production deployment remains the Docker/OCI image. It runs the
-same `auto-review` binary as direct installs, but the image supplies an external
-container boundary and marks that posture with
-`AR_GATEWAY_EXTERNAL_ISOLATION=container`.
-
-Direct binary use is supported for local diagnostics, evaluation, and operators
-who intentionally manage the host boundary themselves, including operators who
-build `auto_review` into their own custom VM images or container images. On
-supported Linux hosts, `auto-review gateway` defaults to the embedded OCI
-launcher. If embedded OCI setup is unavailable, startup fails closed unless the
-operator explicitly opts out with `auto-review gateway --bare` or
-`AR_GATEWAY_BARE=true`. That opt-out leaves only application-level controls
-active and must not be treated as container-equivalent isolation.
-
-Before exposing a freshly-deployed gateway to Forgejo:
-
-```bash
-# Confirms PAT validity, LLM reachability, and secret entropy
-# all in one shot. Reads env vars so a configured deploy needs
-# no args.
-auto-review ops doctor
-
-# Confirms the webhook intake path works end-to-end.
-auto-review webhook test \
-    --gateway-url https://reviewer.example.com \
-    --webhook-secret "$WEBHOOK_SECRET"
-
-# Live operational snapshot: runtime config + key counters +
-# success rate. Run from anywhere with HTTP access to the
-# gateway; complements `doctor` (deps) and `test-webhook`
-# (intake) with the live-state view.
-auto-review ops status --gateway-url https://reviewer.example.com
-```
-
-Both commands are fast and idempotent — drop them into your
-deploy script and your "did the upgrade break anything?"
-runbook. `doctor` exits non-zero when any check fails;
-`test-webhook` exits non-zero when the gateway returns non-2xx.
-
-## 0b. CI-triggered semantic reviews
+## 0.3 CI-triggered semantic reviews
 
 The normal semantic-review trigger can be driven by Forgejo Actions after
 your deterministic checks pass. Enable the gateway endpoint by setting a
 strong `AR_CI_REVIEW_TOKEN` (generate it independently from
 `WEBHOOK_SECRET`) and storing the same value as an Actions secret, for
 example `AUTO_REVIEW_ACTION_TOKEN`.
-
-Release automation uses separate credentials with separate blast radii. Configure the release preparation credential as Forgejo Actions secret `RELEASE_PREPARE_TOKEN`; its release preparation PAT blast radius is to prepare release PR branches and release PRs only in `jwilger/auto_review` for trusted `main` push runs.
-Create a dedicated release bot Forgejo user for release PR commits. Add its public SSH signing key to that account, store the private key as Forgejo Actions secret `RELEASE_SIGNING_KEY`, and set repository variables `RELEASE_BOT_NAME` and `RELEASE_BOT_EMAIL` to the bot identity attached to the signing key. Release publish also uses that SSH signing key with `ssh-keygen -Y sign` to sign `SHA256SUMS` and uploads the public key plus allowed signers file for verification.
-Configure the release publishing credential as Forgejo Actions secret `RELEASE_PUBLISH_TOKEN` owned by the same release bot named in `RELEASE_BOT_NAME`. Its release publishing PAT blast radius is to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review`; the Forgejo Release scope includes the Linux x86_64 `auto-review` binary archive release asset plus SHA-256 checksums, signatures, SBOM, and provenance metadata. The publish workflow builds the Linux x86_64 binary archive in the Docker runner; Linux aarch64 binary archives are deferred until a dedicated Linux aarch64 build runner is available. The PR package publishing credential model keeps `RELEASE_PUBLISH_TOKEN` out of checkout/build steps and exposes it only to PR artifact publication and managed PR body edit steps. CI publishes PR Docker images under a package name distinct from final releases, publishes PR binary downloads as Forgejo generic packages, updates the PR description with those package links, and will delete PR Docker and binary packages after the PR merges. Final publication builds and verifies the Linux binary archive first, builds the Docker image after the release PR merges to main, publishes the release version and `latest` image tags from the merged release image archive, publishes the final binary release assets, and includes verification commands in the release notes:
-
-```bash
-sha256sum -c SHA256SUMS
-ssh-keygen -Y verify -f allowed-signers -I <release-bot-email> -n file -s SHA256SUMS.sig < SHA256SUMS
-```
-
-Keep release credentials out of the gateway systemd environment.
 
 Projects choose their own prerequisites in workflow YAML. A review job should
 depend on required checks and then use the project action wrapper, which calls
@@ -176,21 +162,42 @@ queues a forced review at the current PR head and replies that it intentionally
 bypasses CI gating, so authors can distinguish it from the normal
 waiting-for-CI/action-triggered lifecycle.
 
+## 0.4 Project release automation credentials
+
+This section is for maintainers of `jwilger/auto_review`, not for normal gateway
+operators. Keep release credentials out of the gateway systemd environment and
+out of deployment env files.
+
+Configure the release preparation credential as Forgejo Actions secret `RELEASE_PREPARE_TOKEN`. Its release preparation PAT blast radius is to prepare release PR branches and release PRs only in `jwilger/auto_review` for trusted `main` push runs.
+
+Create a dedicated release bot Forgejo user for release PR commits. Add its
+public SSH signing key to that account, store the private key as Forgejo Actions secret `RELEASE_SIGNING_KEY`, and set repository variables `RELEASE_BOT_NAME` and `RELEASE_BOT_EMAIL` to the bot identity attached to the signing key. Release publish also uses that SSH signing key to sign `SHA256SUMS`.
+
+Configure the release publishing credential as Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`, owned by the same release bot named in `RELEASE_BOT_NAME`. Its release publishing PAT blast radius is to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review`; it also covers publish PR Docker/container package, delete PR Docker/container package, publish generic package, delete generic package, and managed PR body/description edit for artifact links.
+
+The PR package publishing credential model keeps `RELEASE_PUBLISH_TOKEN` out of checkout/build steps and exposes it only after artifacts exist. CI publishes PR Docker images under a package name distinct from final releases, publishes PR binary downloads as Forgejo generic packages, updates the PR description with those links, and will delete PR Docker and binary packages after the PR merges.
+
+Final release publication builds and verifies the Linux x86_64 binary archive,
+publishes the release image tags from the merged release image archive, attaches
+the final binary assets, and includes verification commands in the release notes:
+
+```bash
+sha256sum -c SHA256SUMS
+ssh-keygen -Y verify -f allowed-signers -I <release-bot-email> -n file -s SHA256SUMS.sig < SHA256SUMS
+```
+
 ## 1. Daily / weekly checks
 
 If you run Prometheus, drop in [`deploy/prometheus/auto_review.rules.yaml`](../deploy/prometheus/auto_review.rules.yaml)
 for pre-baked recording + alerting rules covering signature
 failures, payload-decode failures, success rate, poller stall,
-review latency p95, and per-class failure spikes. See
-[`deploy/prometheus/README.md`](../deploy/prometheus/README.md)
-for tuning notes and Alertmanager routing.
+review latency p95, and per-class failure spikes. Installation and tuning notes
+are in [Deployment](./DEPLOYMENT.md#prometheus-and-grafana).
 
 If you run Grafana, import
 [`deploy/grafana/auto_review.dashboard.json`](../deploy/grafana/auto_review.dashboard.json)
 for a five-row dashboard covering the funnel, review outcomes,
-skip paths, webhook intake, and chat surface. See
-[`deploy/grafana/README.md`](../deploy/grafana/README.md) for
-import steps.
+skip paths, webhook intake, and chat surface.
 
 
 
@@ -376,17 +383,17 @@ preparation, semantic LLM review, verification, and posting. Host CPU/memory
 pressure now usually means too many concurrent reviews, large workspaces, or
 slow LLM calls rather than runaway linter execution.
 
-Run the gateway inside your deployment isolation boundary (for example a
-container, VM, or service manager sandbox). The project exposes a Nix-built OCI
-image as `.#ar-gateway-image`; the image runs as uid/gid 65532 and binds
-`0.0.0.0:8080` inside the container.
+Run the gateway inside your deployment isolation boundary (for example the
+published container image, a VM, or a deliberately hardened service-manager
+sandbox). The project exposes a Nix-built OCI image as `.#ar-gateway-image`; the
+image runs as uid/gid 65532 and binds `0.0.0.0:8080` inside the container.
 
-The flake also exposes the installable binary as `.#ar-cli`/the default package.
-Use `nix build .#ar-cli` when constructing custom VM images, custom container
-images, or direct systemd hosts; use `nix build .#ar-gateway-image` when you want
-the project image artifact. Native NixOS module support is not shipped yet, so
-NixOS operators should currently either run the OCI image or package the binary
-into their own module/service definition.
+The default Nix package installs the `auto-review` binary. Use `nix build .`
+when constructing custom VM images, custom container images, or direct systemd
+hosts; use `nix build .#ar-gateway-image` when you want the project image
+artifact. A NixOS module is available for direct-host deployments, but the
+container image remains the recommended production boundary. See
+[Deployment](./DEPLOYMENT.md#nix-and-nixos).
 
 For local development against the same image shape:
 
@@ -621,12 +628,10 @@ Semver: pre-1.0, minor versions can break configuration. Always
 read the [CHANGELOG](../CHANGELOG.md) before bumping.
 
 ```bash
-# Build the new version
+# Build the new version with the pinned Nix toolchain
 git -C /opt/auto_review pull
-cargo build --release -p ar-cli
-
-# Validate config still parses (some keys may have moved)
-auto-review config validate /etc/auto_review/
+nix build /opt/auto_review -o /tmp/auto-review-result
+sudo install -m 0755 /tmp/auto-review-result/bin/auto-review /usr/local/bin/auto-review
 
 # Restart
 sudo systemctl restart auto_review.service
@@ -637,12 +642,11 @@ auto-review ops doctor
 ```
 
 The systemd unit ships under
-[`deploy/systemd/`](../deploy/systemd/) — if you're on systemd and
-haven't installed it, follow that README first.
+`deploy/systemd/`; the install walkthrough lives in
+[Deployment](./DEPLOYMENT.md#systemd-direct-host-service).
 
-If the new version fails to start, the old binary is still on disk
-at `target/release/auto-review.bak` (manual; we do not auto-back-up).
-Roll back, file an issue.
+If the new version fails to start, restore the previous binary from your release
+artifact or host backup, restart, and file an issue.
 
 ## 9.1 Forgejo review-comment resolution gap
 
