@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.8.2] - 2026-05-08
+
+### Fixed
+
+- *(release)* isolate publish dispatch inputs (#167)
+
+### Other
+
+- release v0.8.1 (#165)
+
 ## [0.8.1] - 2026-05-08
 
 ### Fixed
