@@ -1277,20 +1277,36 @@ for description, candidates in required_release_assets.items():
     if not any(candidate in workflow for candidate in candidates):
         errors.append(f'missing {description}')
 
-asset_attachment_markers = ['--asset', '--attachment', 'release assets create', 'release create']
-if not any(marker in asset_upload_section for marker in asset_attachment_markers):
-    errors.append('Forgejo release creation or following asset-upload step must attach binary archives, checksums, signatures, SBOM, and provenance metadata')
+release_create_lines = []
+collecting_release_create = False
+for line in release_step.splitlines():
+    if 'release create' in line and not collecting_release_create:
+        collecting_release_create = True
+    if collecting_release_create:
+        release_create_lines.append(line)
+        if not line.rstrip().endswith('\\'):
+            break
+release_create_command = '\n'.join(release_create_lines)
+
+if not release_create_command:
+    errors.append('Create Forgejo Release step must include a tea release create command')
+elif not any(marker in release_create_command for marker in ['--asset', '--attachment']):
+    errors.append('tea release create must attach release artifacts as part of release creation instead of using a later asset-upload command')
+
+if re.search(r'(?m)\breleases?\s+assets\s+create\b', asset_upload_section):
+    errors.append('publish workflow must not rely on a separate tea releases assets create command after release creation')
 
 for required in [
-    'auto-review',
-    'linux-x86_64',
+    'auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz',
     'SHA256SUMS',
-    '.sig',
-    'sbom',
-    'provenance',
+    'SHA256SUMS.sig',
+    'release-signing-key.pub',
+    'allowed-signers',
+    'sbom.spdx.json',
+    'provenance.json',
 ]:
-    if required not in asset_upload_section:
-        errors.append(f'Forgejo release asset upload flow is missing marker after release creation: {required}')
+    if required not in release_create_command:
+        errors.append(f'tea release create is missing atomic asset attachment marker: {required}')
 
 if errors:
     print('; '.join(errors))
