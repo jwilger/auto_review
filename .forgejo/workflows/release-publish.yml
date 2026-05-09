@@ -385,15 +385,11 @@ jobs:
             --tag v$RELEASE_VERSION \
             --target "$RELEASE_MERGE_SHA" \
             --title "v$RELEASE_VERSION" \
-            --note-file "$RELEASE_NOTES_FILE"
-          "$TEA" releases assets create \
-            --login "$tea_login" \
-            --repo jwilger/auto_review \
-            v$RELEASE_VERSION \
-            release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz \
-            release-artifacts/SHA256SUMS \
-            release-artifacts/SHA256SUMS.sig \
-            release-artifacts/release-signing-key.pub \
-            release-artifacts/allowed-signers \
-            release-artifacts/auto-review-$RELEASE_VERSION-sbom.spdx.json \
-            release-artifacts/auto-review-$RELEASE_VERSION-provenance.json
+            --note-file "$RELEASE_NOTES_FILE" \
+            --asset release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz \
+            --asset release-artifacts/SHA256SUMS \
+            --asset release-artifacts/SHA256SUMS.sig \
+            --asset release-artifacts/release-signing-key.pub \
+            --asset release-artifacts/allowed-signers \
+            --asset release-artifacts/auto-review-$RELEASE_VERSION-sbom.spdx.json \
+            --asset release-artifacts/auto-review-$RELEASE_VERSION-provenance.json
