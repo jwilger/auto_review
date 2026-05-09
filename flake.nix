@@ -397,6 +397,73 @@
               --set-default AR_GATEWAY_EMBEDDED_OCI_BUNDLE_PATH "${ar-gateway-embedded-oci-rootfs}" \
               --set-default AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH "${pkgs.youki}/bin/youki"
           '';
+          ar-cli-portable-release-root = pkgs.runCommand "auto-review-linux-x86_64-release-root" {
+            nativeBuildInputs = [ pkgs.patchelf ];
+            runtimeClosure = pkgs.closureInfo {
+              rootPaths = [
+                ar-cli-unwrapped
+                ar-gateway-embedded-oci-rootfs
+                pkgs.youki
+              ];
+            };
+          } ''
+            set -eu
+
+            mkdir -p "$out/bin" "$out/lib" "$out/nix/store"
+            while IFS= read -r storePath; do
+              cp -a "$storePath" "$out/nix/store/"
+            done < "$runtimeClosure/store-paths"
+            for sharedObject in "$out"/nix/store/*/lib/*.so* "$out"/nix/store/*/lib64/*.so*; do
+              if [ -e "$sharedObject" ]; then
+                cp -L "$sharedObject" "$out/lib/$(basename "$sharedObject")"
+                chmod 0644 "$out/lib/$(basename "$sharedObject")"
+              fi
+            done
+
+            interpreter="$(patchelf --print-interpreter "${ar-cli-unwrapped}/bin/auto-review")"
+            cp "$out${pkgs.youki}/bin/youki" "$out/bin/.youki-real"
+            chmod 0755 "$out/bin/.youki-real"
+            patchelf \
+              --set-interpreter /lib64/ld-linux-x86-64.so.2 \
+              --set-rpath '$ORIGIN/../lib' \
+              "$out/bin/.youki-real"
+            cat > "$out/auto-review" <<EOF
+#!/usr/bin/env sh
+set -eu
+
+root=\$(CDPATH= cd -- "\$(dirname -- "\$0")" && pwd)
+library_path=
+for lib_dir in "\$root"/nix/store/*/lib "\$root"/nix/store/*/lib64; do
+  if [ -d "\$lib_dir" ]; then
+    if [ -z "\$library_path" ]; then
+      library_path="\$lib_dir"
+    else
+      library_path="\$library_path:\$lib_dir"
+    fi
+  fi
+done
+
+export AR_GATEWAY_EMBEDDED_OCI_BUNDLE_PATH="''${AR_GATEWAY_EMBEDDED_OCI_BUNDLE_PATH:-\$root${ar-gateway-embedded-oci-rootfs}}"
+export AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH="''${AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH:-\$root/bin/youki}"
+
+exec "\$root$interpreter" --library-path "\$library_path" "\$root${ar-cli-unwrapped}/bin/auto-review" "\$@"
+EOF
+            chmod 0755 "$out/auto-review"
+            cat > "$out/bin/youki" <<EOF
+#!/usr/bin/env sh
+set -eu
+
+root=\$(CDPATH= cd -- "\$(dirname -- "\$0")/.." && pwd)
+export LD_LIBRARY_PATH="\$root/lib''${LD_LIBRARY_PATH:+:\$LD_LIBRARY_PATH}"
+exec "\$root/bin/.youki-real" "\$@"
+EOF
+            chmod 0755 "$out/bin/youki"
+            test -x "$out$interpreter"
+            test -x "$out${ar-cli-unwrapped}/bin/auto-review"
+            test -x "$out${pkgs.youki}/bin/youki"
+            test -x "$out/bin/youki"
+            test -d "$out${ar-gateway-embedded-oci-rootfs}"
+          '';
           default = self.packages.${system}.ar-cli;
         };
 

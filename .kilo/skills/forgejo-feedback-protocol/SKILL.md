@@ -28,6 +28,8 @@ Forgejo threads replies by review, path, and diff position. For an inline reply,
 }
 ```
 
+Begin the `body` with an @-mention of the original comment author, using `@<comment.user.login>`, so the reviewer being answered is notified and the thread remains attributable.
+
 Do not use prose line numbers from the comment body as `new_position`.
 
 ## Top-Level Comments

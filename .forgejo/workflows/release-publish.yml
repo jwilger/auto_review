@@ -182,14 +182,12 @@ jobs:
           printf '%s\n' "$RELEASE_SIGNING_KEY" > "$signing_key"
           chmod 600 "$signing_key"
           mkdir -p release-artifacts
-          x86_out="$(nix build .#packages.x86_64-linux.default --print-out-paths --no-link)"
-          cp "$x86_out/bin/auto-review" release-artifacts/auto-review
-          tar -C release-artifacts -czf release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz auto-review
-          rm release-artifacts/auto-review
+          x86_release_root="$(nix build .#packages.x86_64-linux.ar-cli-portable-release-root --print-out-paths --no-link)"
+          tar -C "$x86_release_root" -czf release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz auto-review bin nix
           (
             cd release-artifacts
             sha256sum auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz > SHA256SUMS
-            python3 - "$RELEASE_VERSION" "$RELEASE_MERGE_SHA" "$x86_out" <<'PY'
+            python3 - "$RELEASE_VERSION" "$RELEASE_MERGE_SHA" "$x86_release_root" <<'PY'
           import datetime
           import hashlib
           import json
@@ -283,7 +281,7 @@ jobs:
                       "internalParameters": {},
                       "resolvedDependencies": [
                           {"uri": "git+https://git.johnwilger.com/jwilger/auto_review", "digest": {"gitCommit": source}},
-                          {"uri": "nix-store:" + x86_out, "name": "packages.x86_64-linux.default"},
+                          {"uri": "nix-store:" + x86_out, "name": "packages.x86_64-linux.ar-cli-portable-release-root"},
                       ],
                   },
                   "runDetails": {

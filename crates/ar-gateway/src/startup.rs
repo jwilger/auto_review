@@ -326,13 +326,48 @@ fn prepare_embedded_oci_gateway_with_inputs(
         EmbeddedOciGatewayInputs<'_>,
     ) -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic>,
 ) -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic> {
-    validate_packaged_nix_store_path("bundle", inputs.bundle_path)?;
-    validate_packaged_nix_store_path("runtime", inputs.runtime_path)?;
+    validate_packaged_oci_input_paths(inputs)?;
 
     launch(inputs)
 }
 
-fn validate_packaged_nix_store_path(
+fn validate_packaged_oci_input_paths(
+    inputs: EmbeddedOciGatewayInputs<'_>,
+) -> std::result::Result<(), OciSetupDiagnostic> {
+    validate_packaged_path_shape("bundle", inputs.bundle_path)?;
+    validate_packaged_path_shape("runtime", inputs.runtime_path)?;
+
+    if inputs.bundle_path.starts_with(PACKAGED_NIX_STORE_PREFIX)
+        && inputs.runtime_path.starts_with(PACKAGED_NIX_STORE_PREFIX)
+    {
+        return Ok(());
+    }
+
+    if let Some(release_root) = portable_release_root_for_bundle(inputs.bundle_path) {
+        let runtime_launcher = release_root.join("bin").join("youki");
+        if inputs.runtime_path == runtime_launcher {
+            return Ok(());
+        }
+    }
+
+    Err(OciSetupDiagnostic::new(
+        "packaged OCI bundle and runtime paths must be package-resolved under /nix/store or a matching portable release root",
+    ))
+}
+
+fn portable_release_root_for_bundle(bundle_path: &Path) -> Option<&Path> {
+    let nix_dir = bundle_path.ancestors().find_map(|ancestor| {
+        let nix_dir = ancestor.parent()?;
+        (ancestor.file_name().is_some_and(|name| name == "store")
+            && nix_dir.file_name().is_some_and(|name| name == "nix"))
+        .then_some(nix_dir)
+    })?;
+
+    let release_root = nix_dir.parent()?;
+    (release_root != Path::new("/")).then_some(release_root)
+}
+
+fn validate_packaged_path_shape(
     kind: &str,
     path: &Path,
 ) -> std::result::Result<(), OciSetupDiagnostic> {
@@ -345,12 +380,6 @@ fn validate_packaged_nix_store_path(
     if !path.is_absolute() {
         return Err(OciSetupDiagnostic::new(format!(
             "packaged OCI {kind} path must be absolute and package-resolved under {PACKAGED_NIX_STORE_PREFIX}"
-        )));
-    }
-
-    if !path.starts_with(PACKAGED_NIX_STORE_PREFIX) {
-        return Err(OciSetupDiagnostic::new(format!(
-            "packaged OCI {kind} path must be package-resolved under {PACKAGED_NIX_STORE_PREFIX}"
         )));
     }
 
@@ -1643,6 +1672,33 @@ mod tests {
         });
 
         assert!(launched.get(), "fake OCI launcher should be invoked");
+        assert_eq!(outcome, GatewayLaunchOutcome::OuterLauncherFinished);
+    }
+
+    #[test]
+    fn embedded_oci_gateway_accepts_portable_release_root_relocated_bundle_and_launcher() {
+        let launched = std::cell::Cell::new(false);
+        let portable_inputs = EmbeddedOciGatewayInputs {
+            bundle_path: Path::new("/tmp/extracted/nix/store/test-ar-gateway-embedded-oci-rootfs"),
+            runtime_path: Path::new("/tmp/extracted/bin/youki"),
+        };
+
+        let outcome = prepare_embedded_oci_gateway_with_inputs(portable_inputs, |inputs| {
+            launched.set(true);
+            assert_eq!(inputs.bundle_path, portable_inputs.bundle_path);
+            assert_eq!(inputs.runtime_path, portable_inputs.runtime_path);
+            Ok(GatewayLaunchOutcome::OuterLauncherFinished)
+        })
+        .unwrap_or_else(|diagnostic| {
+            panic!(
+                "portable release-root relocated OCI inputs plus fake launcher success should return OuterLauncherFinished, got setup diagnostic: {diagnostic:?}"
+            )
+        });
+
+        assert!(
+            launched.get(),
+            "portable release-root youki launcher should be invoked"
+        );
         assert_eq!(outcome, GatewayLaunchOutcome::OuterLauncherFinished);
     }
 

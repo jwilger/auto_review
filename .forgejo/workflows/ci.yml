@@ -144,10 +144,8 @@ jobs:
           EOF
           nix develop --command nix build .#ar-gateway-image
           cp -L result pr-publication-artifacts/ar-gateway-image.tar
-          x86_out="$(nix build .#packages.x86_64-linux.default --print-out-paths --no-link)"
-          cp "$x86_out/bin/auto-review" pr-artifacts/auto-review
-          tar -C pr-artifacts -czf "pr-artifacts/auto-review-pr-$PR_NUMBER-$PR_HEAD_SHA-linux-x86_64.tar.gz" auto-review
-          rm pr-artifacts/auto-review
+          x86_release_root="$(nix build .#packages.x86_64-linux.ar-cli-portable-release-root --print-out-paths --no-link)"
+          tar -C "$x86_release_root" -czf "pr-artifacts/auto-review-pr-$PR_NUMBER-$PR_HEAD_SHA-linux-x86_64.tar.gz" auto-review bin nix
           (cd pr-artifacts && sha256sum "auto-review-pr-$PR_NUMBER-$PR_HEAD_SHA-linux-x86_64.tar.gz" > SHA256SUMS)
           cp pr-artifacts/auto-review-pr-$PR_NUMBER-$PR_HEAD_SHA-linux-x86_64.tar.gz pr-publication-artifacts/
           cp pr-artifacts/SHA256SUMS pr-publication-artifacts/

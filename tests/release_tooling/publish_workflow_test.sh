@@ -1488,12 +1488,42 @@ if not step_match:
     sys.exit(1)
 
 step = step_match.group('body')
-first_x86_build = step.find('.#packages.x86_64-linux.default')
+x86_binary_packages = [
+    '.#packages.x86_64-linux.default',
+    '.#packages.x86_64-linux.ar-cli-portable-release-root',
+]
+first_x86_build = min(
+    (position for package in x86_binary_packages if (position := step.find(package)) != -1),
+    default=-1,
+)
 first_aarch64_build = step.find('.#packages.aarch64-linux.default')
 platform_config = step.find('extra-platforms = x86_64-linux aarch64-linux')
+x86_release_root_assignment = step.find(
+    'x86_release_root="$(nix build .#packages.x86_64-linux.ar-cli-portable-release-root --print-out-paths --no-link)"'
+)
+x86_release_root_archive = step.find('tar -C "$x86_release_root"')
+x86_release_root_metadata = step.find('python3 - "$RELEASE_VERSION" "$RELEASE_MERGE_SHA" "$x86_release_root"')
 
 if first_x86_build == -1:
-    errors.append('binary artifact step must build the x86_64-linux package')
+    errors.append('binary artifact step must build an x86_64-linux binary package')
+if x86_release_root_assignment == -1:
+    errors.append('binary artifact step must assign x86_release_root from the portable x86 release package build')
+if x86_release_root_archive == -1:
+    errors.append('binary artifact step must archive from the x86_release_root path')
+if x86_release_root_metadata == -1:
+    errors.append('binary artifact step must pass x86_release_root to release metadata generation')
+if (
+    x86_release_root_assignment != -1
+    and x86_release_root_archive != -1
+    and x86_release_root_archive < x86_release_root_assignment
+):
+    errors.append('binary artifact step must set x86_release_root before archiving from it')
+if (
+    x86_release_root_assignment != -1
+    and x86_release_root_metadata != -1
+    and x86_release_root_metadata < x86_release_root_assignment
+):
+    errors.append('binary artifact step must set x86_release_root before metadata generation uses it')
 if first_aarch64_build != -1:
     errors.append('binary artifact step must not attempt native aarch64-linux builds from the Docker release runner')
 if platform_config != -1:
@@ -1607,6 +1637,95 @@ PY
   fi
 }
 
+test_linux_binary_archives_do_not_package_nix_wrappers_without_closure() {
+  local publish_workflow ci_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+
+  output="$(python3 - "$publish_workflow" "$ci_workflow" <<'PY'
+import pathlib
+import re
+import shlex
+import sys
+
+workflows = {
+    'release publish': pathlib.Path(sys.argv[1]).read_text(),
+    'CI PR artifacts': pathlib.Path(sys.argv[2]).read_text(),
+}
+errors = []
+
+def tar_payloads_after_archive(command_line):
+    try:
+        tokens = shlex.split(command_line)
+    except ValueError:
+        return None
+
+    if not tokens or tokens[0] != 'tar':
+        return None
+
+    archive_index = None
+    index = 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token == '-f':
+            archive_index = index + 1
+            break
+        if token.startswith('--file='):
+            archive_index = index
+            break
+        if token == '--file':
+            archive_index = index + 1
+            break
+        if token.startswith('-') and 'f' in token and not token.startswith('--'):
+            archive_index = index + 1
+            break
+        index += 1
+
+    if archive_index is None or archive_index >= len(tokens):
+        return None
+    archive = tokens[archive_index]
+    if 'linux-x86_64.tar.gz' not in archive:
+        return None
+    return tokens[archive_index + 1:]
+
+for label, workflow in workflows.items():
+    for step_match in re.finditer(r'(?ms)^      - (?P<step>.*?)(?=^      - |^  [a-zA-Z0-9_-]+:|\Z)', workflow):
+        step = step_match.group('step')
+        if 'linux-x86_64.tar.gz' not in step or 'x86_out' not in step:
+            continue
+
+        stages_wrapped_binary = re.search(
+            r'\bcp(?:\s+-[A-Za-z]+)?\s+["\']?\$x86_out/bin/auto-review["\']?\s+[^\n]*auto-review',
+            step,
+        )
+        tar_payloads = [
+            payloads
+            for line in step.splitlines()
+            if (payloads := tar_payloads_after_archive(line.strip())) is not None
+        ]
+        archives_only_binary = any(
+            [payload.strip('./') for payload in payloads] == ['auto-review']
+            for payloads in tar_payloads
+        )
+        if stages_wrapped_binary and archives_only_binary:
+            first_line = step.strip().splitlines()[0] if step.strip() else '<unnamed step>'
+            errors.append(
+                f'{label} packages $x86_out/bin/auto-review directly into the linux-x86_64 archive without a runtime closure: {first_line}'
+            )
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "Linux binary archives avoid Nix wrapper-only payloads"
+  else
+    fail "Linux binary archives avoid Nix wrapper-only payloads ($output)"
+  fi
+}
+
 run_tests \
   test_publish_workflow_triggers_on_main_push_or_manual_dispatch_only \
   test_publish_workflow_does_not_persist_push_commit_message_to_github_env \
@@ -1627,4 +1746,5 @@ run_tests \
   test_publish_workflow_verifies_generated_binary_artifacts_before_release_upload \
   test_publish_workflow_handles_release_signing_key_in_private_tempdir \
   test_publish_workflow_builds_x86_64_linux_artifacts_in_docker \
-  test_publish_workflow_allows_intentional_release_tooling_changes_before_token_publish
+  test_publish_workflow_allows_intentional_release_tooling_changes_before_token_publish \
+  test_linux_binary_archives_do_not_package_nix_wrappers_without_closure

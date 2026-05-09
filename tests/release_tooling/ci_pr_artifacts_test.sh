@@ -204,6 +204,7 @@ def evaluates_untrusted_pr(body):
         or re.search(r'\bcargo\s+(?:build|test|run|nextest|clippy)\b', body)
         or '.#ar-gateway-image' in body
         or '.#packages.x86_64-linux.default' in body
+        or '.#packages.x86_64-linux.ar-cli-portable-release-root' in body
     )
 
 def upload_artifact(body):
@@ -223,6 +224,26 @@ def publishes_or_updates_pr_artifacts(body):
         )
         and not re.search(r'\b(?:DELETE|-X DELETE|--method DELETE)\b', body)
     )
+
+build_step_match = re.search(r'- name: Build PR Docker image and binary package(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
+if not build_step_match:
+    errors.append('CI workflow must include a PR binary artifact build step')
+else:
+    build_step = build_step_match.group('body')
+    x86_release_root_assignment = build_step.find(
+        'x86_release_root="$(nix build .#packages.x86_64-linux.ar-cli-portable-release-root --print-out-paths --no-link)"'
+    )
+    x86_release_root_archive = build_step.find('tar -C "$x86_release_root"')
+    if x86_release_root_assignment == -1:
+        errors.append('CI PR binary artifact step must assign x86_release_root from the portable x86 release package build')
+    if x86_release_root_archive == -1:
+        errors.append('CI PR binary artifact step must archive from the x86_release_root path')
+    if (
+        x86_release_root_assignment != -1
+        and x86_release_root_archive != -1
+        and x86_release_root_archive < x86_release_root_assignment
+    ):
+        errors.append('CI PR binary artifact step must set x86_release_root before archiving from it')
 
 build_jobs = {name: body for name, body in jobs.items() if evaluates_untrusted_pr(body) and not has_token(body)}
 token_jobs = {name: body for name, body in jobs.items() if has_token(body) and publishes_or_updates_pr_artifacts(body)}
@@ -246,7 +267,7 @@ if build_jobs and token_jobs:
     if not any(download_artifact(body) for body in token_jobs.values()):
         errors.append('token-bearing publication/update job must consume inert artifacts with download-artifact')
 
-required_builds = ['.#ar-gateway-image', '.#packages.x86_64-linux.default']
+required_builds = ['.#ar-gateway-image', '.#packages.x86_64-linux.ar-cli-portable-release-root']
 build_text = '\n'.join(build_jobs.values())
 for marker in required_builds:
     if marker not in build_text:
