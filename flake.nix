@@ -96,8 +96,8 @@
         # - workspace-root configuration files cargo-deny needs
         # - JSON schemas referenced via `include_str!` from
         #   ar-prompts (review/triage/verification)
-        # - per-crate README.md files (ar-cli's contract test reads
-        #   its own README to verify every subcommand is documented)
+        # - docs/*.md files (ar-cli's contract test reads docs/CLI.md
+        #   to verify every subcommand is documented)
         # - bench/fixtures/*.json (ar-cli's bench parser fixtures
         #   doubles as schema-drift contract test)
         src = pkgs.lib.cleanSourceWith {
@@ -116,7 +116,7 @@
              || pkgs.lib.hasInfix "/.cargo/" strPath
             || (pkgs.lib.hasInfix "/ar-prompts/schemas/" strPath
                 && pkgs.lib.hasSuffix ".json" path)
-            || (pkgs.lib.hasInfix "/crates/" strPath && baseName == "README.md")
+            || (pkgs.lib.hasInfix "/docs/" strPath && pkgs.lib.hasSuffix ".md" strPath)
             || (pkgs.lib.hasInfix "/bench/fixtures/" strPath
                 && pkgs.lib.hasSuffix ".json" path)
             # Deploy assets the gateway's contract tests cross-check

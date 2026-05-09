@@ -6,11 +6,10 @@ Accepted (2026-04-30).
 
 ## Context
 
-The review pipeline embeds repo symbols and runs nearest-neighbour
-search to seed an LLM's review context. The feasibility study
-(docs/FEASIBILITY.md §6) called for **LanceDB** as the vector
-store on the basis that it's open-source, embedded, written in
-Rust, and what CodeRabbit themselves use.
+The review pipeline embeds repo symbols and runs nearest-neighbour search to
+seed an LLM's review context. Early planning called for **LanceDB** as the
+vector store because it is open-source, embedded, written in Rust, and used by
+CodeRabbit's public architecture.
 
 Architecturally, the pipeline depends only on the
 `ar_index::VectorStore` trait. The original plan was to ship an
@@ -82,4 +81,4 @@ into LanceDB → drop the SQLite file). Trigger to revisit:
 
 - `crates/ar-index/src/vector_store.rs` — the trait
 - `crates/ar-index/src/sqlite_vector_store.rs` — this impl
-- docs/FEASIBILITY.md §6 — original LanceDB plan
+- ADR-0001 — overall review-pipeline architecture

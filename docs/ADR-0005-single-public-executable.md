@@ -128,8 +128,8 @@ Do not introduce GitHub-only release workflows.
   gateway` and contains the same `auto-review` binary operators can exec.
 - Release-tooling tests for binary asset names, checksums, signatures,
   provenance/SBOM files, and Forgejo Release notes.
-- `QUICKSTART.md`, `docs/OPERATIONS.md`, systemd docs, E2E runbook, CLI README,
-  and release announcement docs updated after the commands and artifacts exist.
+- `docs/QUICKSTART.md`, `docs/DEPLOYMENT.md`, `docs/OPERATIONS.md`, E2E
+  runbook, and `docs/CLI.md` updated after the commands and artifacts exist.
 
 ## Alternatives considered
 

@@ -13,6 +13,8 @@ permission:
 
 You review operator-facing documentation and deployment changes for `auto_review`.
 
-Check `docs/OPERATIONS.md`, `QUICKSTART.md`, `deploy/systemd/auto_review.env.example`, `CHANGELOG.md`, and related files for consistency with behavior and configuration changes. Report findings first.
+Check `docs/QUICKSTART.md`, `docs/DEPLOYMENT.md`, `docs/OPERATIONS.md`,
+`deploy/systemd/auto_review.env.example`, `CHANGELOG.md`, and related files for
+consistency with behavior and configuration changes. Report findings first.
 
 Do not edit files.

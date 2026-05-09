@@ -17,8 +17,8 @@ load-bearing properties:
    before `auto_review` performs semantic review.
 2. Two-tier model routing (cheap model for triage/summarize, reasoning
    model for review). ~50% cost win.
-3. Repo-wide context via tree-sitter symbol extraction + LanceDB vector
-   embeddings + co-change graph + persistent "learnings" memory.
+3. Repo-wide context via tree-sitter symbol extraction + vector embeddings +
+   co-change graph + persistent "learnings" memory.
 4. Avoid executing repo-controlled deterministic tooling in the reviewer
    runtime. Failure to isolate that class was exploitable: Kudelski achieved
    RCE via Rubocop running outside the jail.
@@ -33,16 +33,16 @@ persist learnings separately. CI owns deterministic linters/tests/builds;
 `auto_review` clones workspaces for RAG and agentic verification, then runs the
 semantic review pipeline after the CI trigger.
 Provide an LLM provider abstraction that defaults to local Ollama and
-supports OpenAI / Anthropic / vLLM / OpenRouter via the same trait.
+currently ships an OpenAI-compatible provider for hosted OpenAI-compatible APIs,
+Ollama, vLLM, OpenRouter, Together, Groq, and similar endpoints.
 
 ## Consequences
 
 - Rust raises the bar for new contributors but pays off in the sandbox
   and orchestration layers, where memory safety and predictable
   concurrency directly reduce attack surface.
-- LanceDB embedded means one fewer service to operate, at the cost of
-  having to swap if we later need horizontally-scaled retrieval. The
-  `VectorStore` abstraction in `ar-index` keeps this swap cheap.
+- SQLite is the persistent vector-store default today; ADR-0004 records the
+  LanceDB-ready abstraction and the trigger for revisiting ANN storage.
 - Removing bundled linter execution reduces reviewer-host attack surface and
   shifts deterministic tool hardening to CI; remaining sandbox needs are tracked
   separately in issue #46.
@@ -50,7 +50,7 @@ supports OpenAI / Anthropic / vLLM / OpenRouter via the same trait.
   profile that works offline — a key differentiator for the Forgejo
   audience.
 
-## Out of scope (per feasibility study §15)
+## Out of scope
 
 - Multi-tenant SaaS (no Forgejo App identity).
 - GitLab / Bitbucket adapters.
