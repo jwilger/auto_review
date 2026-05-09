@@ -3,8 +3,8 @@ name: Clean PR packages
 on:
   pull_request:
     types: [closed]
-  push:
-    branches: [main]
+  schedule:
+    - cron: '17 3 * * *'
 
 permissions:
   contents: read
@@ -13,7 +13,7 @@ jobs:
   cleanup-pr-packages:
     name: Delete packages for merged PRs
     runs-on: docker
-    if: ${{ github.event.pull_request.merged == true || (github.event_name == 'push' && github.ref == 'refs/heads/main') }}
+    if: ${{ github.event.pull_request.merged == true || github.event_name == 'schedule' }}
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
@@ -92,7 +92,7 @@ jobs:
             : > "$versions_file"
             while :; do
               case "$package_type:$package_name" in
-                container:ar-gateway-pr) url="https://git.johnwilger.com/api/v1/packages/jwilger?type=container&q=ar-gateway-pr&limit=100&page=${page}" ;;
+                container:auto_review/ar-gateway-pr) url="https://git.johnwilger.com/api/v1/packages/jwilger?type=container&q=auto_review/ar-gateway-pr&limit=100&page=${page}" ;;
                 generic:auto-review-pr) url="https://git.johnwilger.com/api/v1/packages/jwilger?type=generic&q=auto-review-pr&limit=100&page=${page}" ;;
                 *) return 1 ;;
               esac
@@ -133,19 +133,19 @@ jobs:
           [ "$JQ" = /nix/var/nix/profiles/default/bin/jq ]
           container_versions_file="$(${MKTEMP})"
           generic_versions_file="$(${MKTEMP})"
-          if ! list_package_versions "container" "ar-gateway-pr" "$container_versions_file"; then
+          if ! list_package_versions "container" "auto_review/ar-gateway-pr" "$container_versions_file"; then
             deletion_failures=$((deletion_failures + 1))
           fi
           if ! list_package_versions "generic" "auto-review-pr" "$generic_versions_file"; then
             deletion_failures=$((deletion_failures + 1))
           fi
-          if [ "${GITHUB_EVENT_NAME:-}" = "push" ]; then
+          if [ "${GITHUB_EVENT_NAME:-}" = "schedule" ]; then
             while IFS= read -r ar_gateway_pr_version; do # ar-gateway-pr container versions
               version="$ar_gateway_pr_version"
               pr_number="${version#pr-}"
               pr_number="${pr_number%%-*}"
               container_prefix="pr-${pr_number}-"
-              [ -n "$version" ] && [ "${version#"$container_prefix"}" != "$version" ] && pr_is_merged "$pr_number" && delete_package "https://git.johnwilger.com/api/v1/packages/jwilger/container/ar-gateway-pr/$version"
+              [ -n "$version" ] && [ "${version#"$container_prefix"}" != "$version" ] && pr_is_merged "$pr_number" && delete_package "https://git.johnwilger.com/api/v1/packages/jwilger/container/auto_review%2Far-gateway-pr/$version"
             done < "$container_versions_file"
             while IFS= read -r auto_review_pr_version; do # auto-review-pr generic versions
               version="$auto_review_pr_version"
@@ -155,7 +155,7 @@ jobs:
           else
             while IFS= read -r ar_gateway_pr_version; do # ar-gateway-pr container versions
               version="$ar_gateway_pr_version"
-              [ -n "$version" ] && [ "${version#"pr-$PR_NUMBER-"}" != "$version" ] && delete_package "https://git.johnwilger.com/api/v1/packages/jwilger/container/ar-gateway-pr/$version"
+              [ -n "$version" ] && [ "${version#"pr-$PR_NUMBER-"}" != "$version" ] && delete_package "https://git.johnwilger.com/api/v1/packages/jwilger/container/auto_review%2Far-gateway-pr/$version"
             done < "$container_versions_file"
             while IFS= read -r auto_review_pr_version; do # auto-review-pr generic versions
               version="$auto_review_pr_version"

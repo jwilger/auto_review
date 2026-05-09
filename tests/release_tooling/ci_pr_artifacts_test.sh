@@ -33,7 +33,7 @@ else:
         errors.append('CI workflow must not run on pull_request.closed; PR package cleanup belongs in pr-package-cleanup.yml')
 
 if re.search(r'(?m)^  push:\s*(?:\n|\[)', workflow):
-    errors.append('CI workflow must not run on push; push-main cleanup belongs in pr-package-cleanup.yml')
+    errors.append('CI workflow must not run on push; PR package cleanup belongs in pr-package-cleanup.yml')
 
 required_pr_context = [
     'github.event.pull_request.number',
@@ -130,9 +130,13 @@ else:
     pull_request_match = re.search(r'(?ms)^  pull_request:\s*\n(?P<body>.*?)(?=^  [a-zA-Z_]+:|^permissions:|^jobs:|\Z)', cleanup)
     if not pull_request_match or 'closed' not in pull_request_match.group('body'):
         errors.append('PR package cleanup workflow must own pull_request.closed cleanup')
-    push_match = re.search(r'(?ms)^  push:\s*\n(?P<body>.*?)(?=^  [a-zA-Z_]+:|^permissions:|^jobs:|\Z)', cleanup)
-    if not push_match or not re.search(r'(?m)^    branches:\s*(?:\[[^\]]*\bmain\b[^\]]*\]|\n(?:      -\s*main\s*\n?)+)', push_match.group('body')):
-        errors.append('PR package cleanup workflow must own push.main stale cleanup')
+    if re.search(r'(?m)^  push:\s*(?:\n|\[)', cleanup):
+        errors.append('PR package cleanup workflow must not run stale cleanup on push.main')
+    schedule_match = re.search(r'(?ms)^  schedule:\s*\n(?P<body>.*?)(?=^  [a-zA-Z_]+:|^permissions:|^jobs:|\Z)', cleanup)
+    if not schedule_match:
+        errors.append('PR package cleanup workflow must run broad stale cleanup on a nightly schedule')
+    elif not re.search(r'cron:\s*["\']?[^"\'\n]*\*[^"\'\n]*["\']?', schedule_match.group('body')):
+        errors.append('PR package cleanup scheduled stale cleanup must declare a cron entry')
     if 'name: Delete packages for merged PRs' not in cleanup:
         errors.append('PR package cleanup job must be named Delete packages for merged PRs')
 
@@ -541,7 +545,7 @@ PY
   fi
 }
 
-test_ci_pr_package_cleanup_runs_on_main_push_and_discovers_stale_pr_versions() {
+test_ci_pr_package_cleanup_runs_nightly_and_discovers_stale_pr_versions() {
   local cleanup_workflow output status
   cleanup_workflow="$ROOT/.forgejo/workflows/pr-package-cleanup.yml"
 
@@ -557,21 +561,17 @@ if not workflow_path.exists():
 workflow = workflow_path.read_text()
 errors = []
 
-push_block_match = re.search(
-    r'(?ms)^on:\s*\n[\s\S]*?^  push:\s*\n(?P<body>[\s\S]*?)(?=^  [a-zA-Z_]+:|^permissions:|^jobs:|\Z)',
+if re.search(r'(?m)^  push:\s*(?:\n|\[)', workflow):
+    errors.append('PR package cleanup workflow must not run stale all-merged-PR cleanup on push to main')
+
+schedule_match = re.search(
+    r'(?ms)^on:\s*\n[\s\S]*?^  schedule:\s*\n(?P<body>[\s\S]*?)(?=^  [a-zA-Z_]+:|^permissions:|^jobs:|\Z)',
     workflow,
 )
-push_inline_main = re.search(r'(?m)^  push:\s*\[[^\]]*main[^\]]*\]', workflow)
-has_push = bool(push_block_match or re.search(r'(?m)^  push:\s*(?:\n|\[)', workflow))
-push_main = bool(push_inline_main)
-if push_block_match:
-    push_body = push_block_match.group('body')
-    push_main = push_main or bool(re.search(r'(?m)^    branches:\s*(?:\[[^\]]*\bmain\b[^\]]*\]|\n(?:      -\s*main\s*\n?)+)', push_body))
-
-if not has_push:
-    errors.append('PR package cleanup workflow must run cleanup from push events on main so squash/merge paths clean stale PR packages')
-elif not push_main:
-    errors.append('PR package cleanup workflow push cleanup trigger must be limited to the main branch')
+if not schedule_match:
+    errors.append('PR package cleanup workflow must run broad stale all-merged-PR cleanup on a nightly schedule')
+elif not re.search(r'cron:\s*["\']?[^"\'\n]*\*[^"\'\n]*["\']?', schedule_match.group('body')):
+    errors.append('PR package cleanup nightly stale cleanup must declare a cron entry')
 
 jobs = {
     match.group('name'): match.group('body')
@@ -581,37 +581,39 @@ if 'cleanup-pr-packages' not in jobs:
     print('; '.join(errors + ['PR package cleanup workflow is missing the cleanup-pr-packages job']))
     sys.exit(1)
 
-push_cleanup_jobs = {}
+broad_cleanup_jobs = {}
 for name, body in jobs.items():
     header = body.split('    steps:', 1)[0]
     cleanup_related = re.search(r'cleanup|delete[\s\S]{0,80}packages|stale[\s\S]{0,80}packages', name + '\n' + body, re.I)
-    push_scoped = re.search(r'github\.event_name\s*==\s*[\'\"]push[\'\"]|github\.ref\s*==\s*[\'\"]refs/heads/main[\'\"]|GITHUB_REF|refs/heads/main', header)
-    if cleanup_related and push_scoped:
-        push_cleanup_jobs[name] = body
+    if cleanup_related:
+        if re.search(r'github\.event_name\s*==\s*[\'\"]push[\'\"]|github\.ref\s*==\s*[\'\"]refs/heads/main[\'\"]|GITHUB_REF|refs/heads/main', header):
+            errors.append(f'cleanup job {name} must not permit stale cleanup on push to main')
+        if re.search(r'github\.event_name\s*==\s*[\'\"]schedule[\'\"]|github\.event_name\s*!=\s*[\'\"]pull_request[\'\"]|github\.event\.schedule|GITHUB_EVENT_NAME', header + '\n' + body):
+            broad_cleanup_jobs[name] = body
 
-if not push_cleanup_jobs:
-    errors.append('cleanup must have a push-to-main stale PR package cleanup path separate from the pull_request-number cleanup path')
+if not broad_cleanup_jobs:
+    errors.append('cleanup must have a scheduled nightly stale PR package cleanup path separate from the pull_request-number cleanup path')
 
-push_cleanup_text = '\n'.join(push_cleanup_jobs.values())
-docker_lists_versions = any(re.search(pattern, push_cleanup_text) for pattern in [
-    r'/api/v1/packages/jwilger\?[^\s"\']*type=container[^\s"\']*[&?]q=ar-gateway-pr',
-    r'/api/v1/packages/jwilger\?[^\s"\']*q=ar-gateway-pr[^\s"\']*[&?]type=container',
-    r'list_package_versions\s+["\']container["\']\s+["\']ar-gateway-pr["\']\s+["\']?\$container_versions_file',
+broad_cleanup_text = '\n'.join(broad_cleanup_jobs.values())
+docker_lists_versions = any(re.search(pattern, broad_cleanup_text) for pattern in [
+    r'/api/v1/packages/jwilger\?[^\s"\']*type=container[^\s"\']*[&?]q=auto_review/ar-gateway-pr',
+    r'/api/v1/packages/jwilger\?[^\s"\']*q=auto_review/ar-gateway-pr[^\s"\']*[&?]type=container',
+    r'list_package_versions\s+["\']container["\']\s+["\']auto_review/ar-gateway-pr["\']\s+["\']?\$container_versions_file',
 ])
-generic_lists_versions = any(re.search(pattern, push_cleanup_text) for pattern in [
+generic_lists_versions = any(re.search(pattern, broad_cleanup_text) for pattern in [
     r'/api/v1/packages/jwilger\?[^\s"\']*type=generic[^\s"\']*[&?]q=auto-review-pr',
     r'/api/v1/packages/jwilger\?[^\s"\']*q=auto-review-pr[^\s"\']*[&?]type=generic',
     r'list_package_versions\s+["\']generic["\']\s+["\']auto-review-pr["\']\s+["\']?\$generic_versions_file',
 ])
-reads_discovered_version_files = all(re.search(pattern, push_cleanup_text) for pattern in [
+reads_discovered_version_files = all(re.search(pattern, broad_cleanup_text) for pattern in [
     r'done\s*<\s*"\$container_versions_file"',
     r'done\s*<\s*"\$generic_versions_file"',
 ])
-derives_pr_numbers_from_versions = all(re.search(pattern, push_cleanup_text) for pattern in [
+derives_pr_numbers_from_versions = all(re.search(pattern, broad_cleanup_text) for pattern in [
     r'pr_number="\$\{version#pr-\}"[\s\S]{0,120}pr_number="\$\{pr_number%%-\*\}"',
     r'pr_number="\$\{version%%-\*\}"',
 ])
-discovers_pr_prefixed_versions = any(re.search(pattern, push_cleanup_text) for pattern in [
+discovers_pr_prefixed_versions = any(re.search(pattern, broad_cleanup_text) for pattern in [
     r'pr-\[0-9\]\+-',
     r'pr-\([0-9]\+\)-',
     r'pr-\(\[0-9\]\+\)-',
@@ -626,7 +628,7 @@ discovers_pr_prefixed_versions = any(re.search(pattern, push_cleanup_text) for p
 ])
 
 if not (docker_lists_versions and generic_lists_versions and reads_discovered_version_files and derives_pr_numbers_from_versions and discovers_pr_prefixed_versions):
-    errors.append('push-to-main cleanup must enumerate stale PR package versions from Forgejo REST package metadata rather than relying on github.event.pull_request.number')
+    errors.append('scheduled nightly cleanup must enumerate stale PR package versions from Forgejo REST package metadata rather than relying on github.event.pull_request.number')
 
 if errors:
     print('; '.join(errors))
@@ -635,9 +637,9 @@ PY
 )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "CI PR package cleanup runs on main push and discovers stale PR package versions"
+    pass "CI PR package cleanup runs nightly and discovers stale PR package versions"
   else
-    fail "CI PR package cleanup runs on main push and discovers stale PR package versions ($output)"
+    fail "CI PR package cleanup runs nightly and discovers stale PR package versions ($output)"
   fi
 }
 
@@ -713,7 +715,7 @@ for action in ['opened', 'synchronize', 'reopened']:
 if 'closed' in trigger_text:
     errors.append('CI workflow trigger must exclude pull_request.closed so flake-check does not rerun for cleanup-only closures')
 if re.search(r'(?m)^  push:\s*(?:\n|\[)', workflow):
-    errors.append('CI workflow trigger must exclude push so flake-check does not rerun for push-main cleanup')
+    errors.append('CI workflow trigger must exclude push so flake-check does not rerun for PR package cleanup')
 
 if errors:
     print('; '.join(errors))
@@ -728,7 +730,7 @@ PY
   fi
 }
 
-test_ci_push_stale_cleanup_confirms_pr_is_merged_before_delete() {
+test_ci_nightly_stale_cleanup_confirms_pr_is_merged_before_delete() {
   local cleanup_workflow output status
   cleanup_workflow="$ROOT/.forgejo/workflows/pr-package-cleanup.yml"
 
@@ -749,19 +751,21 @@ jobs = {
     for match in re.finditer(r'(?ms)^  (?P<name>[a-zA-Z0-9_-]+):\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
 }
 
-push_cleanup_jobs = {}
+broad_cleanup_jobs = {}
 for name, body in jobs.items():
     header = body.split('    steps:', 1)[0]
     cleanup_related = re.search(r'cleanup|delete[\s\S]{0,80}packages|stale[\s\S]{0,80}packages', name + '\n' + body, re.I)
-    push_scoped = re.search(r'github\.event_name\s*==\s*[\'\"]push[\'\"]|github\.ref\s*==\s*[\'\"]refs/heads/main[\'\"]|GITHUB_EVENT_NAME|GITHUB_REF|refs/heads/main', body if cleanup_related else header)
-    if cleanup_related and push_scoped:
-        push_cleanup_jobs[name] = body
+    if cleanup_related:
+        if re.search(r'github\.event_name\s*==\s*[\'\"]push[\'\"]|github\.ref\s*==\s*[\'\"]refs/heads/main[\'\"]|GITHUB_REF|refs/heads/main', header):
+            errors.append(f'cleanup job {name} must not permit stale cleanup on push to main')
+        if re.search(r'github\.event_name\s*==\s*[\'\"]schedule[\'\"]|github\.event_name\s*!=\s*[\'\"]pull_request[\'\"]|github\.event\.schedule|GITHUB_EVENT_NAME', body if cleanup_related else header):
+            broad_cleanup_jobs[name] = body
 
-push_cleanup_text = '\n'.join(push_cleanup_jobs.values())
-if not push_cleanup_text:
-    errors.append('push-to-main stale cleanup path must exist before open-PR deletion guard can be verified')
+broad_cleanup_text = '\n'.join(broad_cleanup_jobs.values())
+if not broad_cleanup_text:
+    errors.append('scheduled nightly stale cleanup path must exist before open-PR deletion guard can be verified')
 else:
-    derives_pr_number_from_version = any(re.search(pattern, push_cleanup_text) for pattern in [
+    derives_pr_number_from_version = any(re.search(pattern, broad_cleanup_text) for pattern in [
         r'capture\([\'\"]\^?pr-(?:\\d\+|\[0-9\]\+?|\(\?<pr_number>)',
         r'match\([\'\"]\^?pr-(?:\\d\+|\[0-9\]\+?)',
         r'sed\s+-E[^\n]*pr-\([0-9]+\)-',
@@ -769,25 +773,25 @@ else:
         r'pr_number=.*\$\{?version\}?',
         r'PR_NUMBER=.*\$\{?version\}?',
     ])
-    queries_pr_by_number = any(re.search(pattern, push_cleanup_text) for pattern in [
+    queries_pr_by_number = any(re.search(pattern, broad_cleanup_text) for pattern in [
         r'/api/v1/repos/jwilger/auto_review/pulls/\$\{?[A-Za-z_][A-Za-z0-9_]*\}?',
         r'/api/v1/repos/[^\s"\']+/[^\s"\']+/pulls/\$\{?[A-Za-z_][A-Za-z0-9_]*\}?',
         r'tea\s+api[\s\S]{0,240}/pulls/\$\{?[A-Za-z_][A-Za-z0-9_]*\}?',
     ])
-    confirms_merged = any(re.search(pattern, push_cleanup_text) for pattern in [
+    confirms_merged = any(re.search(pattern, broad_cleanup_text) for pattern in [
         r'\.merged\s*==\s*true',
         r'\.merged[\s\S]{0,120}true',
         r'"merged"[\s\S]{0,120}true',
     ])
     if not (derives_pr_number_from_version and queries_pr_by_number and confirms_merged):
-        errors.append('push-to-main stale cleanup must derive the PR number from each PR-prefixed package version and confirm that PR is merged before deleting its versions')
+        errors.append('scheduled nightly stale cleanup must derive the PR number from each PR-prefixed package version and confirm that PR is merged before deleting its versions')
 
     pr_is_merged_match = re.search(
         r'(?ms)^\s*pr_is_merged\(\) \{(?P<body>.*?)^\s*\}\s*^\s*deletion_failures=',
-        push_cleanup_text,
+        broad_cleanup_text,
     )
     if not pr_is_merged_match:
-        errors.append('push-to-main cleanup must keep the PR merge lookup isolated in a pr_is_merged helper')
+        errors.append('scheduled nightly cleanup must keep the PR merge lookup isolated in a pr_is_merged helper')
     else:
         pr_helper = pr_is_merged_match.group('body')
         if not re.search(r'pr_number="\$1"|local\s+pr_number="\$1"', pr_helper):
@@ -803,17 +807,17 @@ else:
         if not re.search(r'\*\)[\s\S]{0,180}deletion_failures=\$\(\(\s*deletion_failures\s*\+\s*1\s*\)\)[\s\S]{0,80}return\s+1', pr_helper):
             errors.append('pr_is_merged must fail closed and record lookup failures for non-2xx PR API responses')
 
-    push_branch_match = re.search(r'(?ms)if \[ "\$\{GITHUB_EVENT_NAME:-\}" = "push" \]; then(?P<body>.*?)^\s*else$', push_cleanup_text)
-    if not push_branch_match:
-        errors.append('push-to-main cleanup branch must be structurally distinct from pull_request cleanup')
+    scheduled_branch_match = re.search(r'(?ms)if \[ "\$\{GITHUB_EVENT_NAME:-\}" = "schedule" \]; then(?P<body>.*?)^\s*else$', broad_cleanup_text)
+    if not scheduled_branch_match:
+        errors.append('scheduled nightly cleanup branch must be structurally distinct from pull_request cleanup')
     else:
-        push_branch = push_branch_match.group('body')
-        guarded_delete_calls = re.findall(r'pr_is_merged\s+"\$pr_number"\s+&&\s+delete_package', push_branch)
+        scheduled_branch = scheduled_branch_match.group('body')
+        guarded_delete_calls = re.findall(r'pr_is_merged\s+"\$pr_number"\s+&&\s+delete_package', scheduled_branch)
         if len(guarded_delete_calls) < 2:
-            errors.append('each push cleanup delete path must be guarded by pr_is_merged "$pr_number" immediately before delete_package')
-        for delete_line in re.findall(r'(?m)^.*delete_package .*$', push_branch):
+            errors.append('each scheduled cleanup delete path must be guarded by pr_is_merged "$pr_number" immediately before delete_package')
+        for delete_line in re.findall(r'(?m)^.*delete_package .*$', scheduled_branch):
             if 'pr_is_merged "$pr_number" && delete_package' not in delete_line:
-                errors.append('push cleanup delete is not immediately guarded by pr_is_merged: ' + delete_line.strip())
+                errors.append('scheduled cleanup delete is not immediately guarded by pr_is_merged: ' + delete_line.strip())
 
 if errors:
     print('; '.join(errors))
@@ -822,13 +826,13 @@ PY
 )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "CI push stale cleanup confirms PR is merged before deleting versions"
+    pass "CI nightly stale cleanup confirms PR is merged before deleting versions"
   else
-    fail "CI push stale cleanup confirms PR is merged before deleting versions ($output)"
+    fail "CI nightly stale cleanup confirms PR is merged before deleting versions ($output)"
   fi
 }
 
-test_ci_push_stale_cleanup_matches_container_and_generic_version_schemes() {
+test_ci_nightly_stale_cleanup_matches_container_and_generic_version_schemes() {
   local cleanup_workflow output status
   cleanup_workflow="$ROOT/.forgejo/workflows/pr-package-cleanup.yml"
 
@@ -849,25 +853,27 @@ jobs = {
     for match in re.finditer(r'(?ms)^  (?P<name>[a-zA-Z0-9_-]+):\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
 }
 
-push_cleanup_jobs = {}
+broad_cleanup_jobs = {}
 for name, body in jobs.items():
     header = body.split('    steps:', 1)[0]
     cleanup_related = re.search(r'cleanup|delete[\s\S]{0,80}packages|stale[\s\S]{0,80}packages', name + '\n' + body, re.I)
-    push_scoped = re.search(r'github\.event_name\s*==\s*[\'\"]push[\'\"]|github\.ref\s*==\s*[\'\"]refs/heads/main[\'\"]|GITHUB_EVENT_NAME|GITHUB_REF|refs/heads/main', body if cleanup_related else header)
-    if cleanup_related and push_scoped:
-        push_cleanup_jobs[name] = body
+    if cleanup_related:
+        if re.search(r'github\.event_name\s*==\s*[\'\"]push[\'\"]|github\.ref\s*==\s*[\'\"]refs/heads/main[\'\"]|GITHUB_REF|refs/heads/main', header):
+            errors.append(f'cleanup job {name} must not permit stale cleanup on push to main')
+        if re.search(r'github\.event_name\s*==\s*[\'\"]schedule[\'\"]|github\.event_name\s*!=\s*[\'\"]pull_request[\'\"]|github\.event\.schedule|GITHUB_EVENT_NAME', body if cleanup_related else header):
+            broad_cleanup_jobs[name] = body
 
-push_cleanup_text = '\n'.join(push_cleanup_jobs.values())
-if not push_cleanup_text:
-    errors.append('push-to-main stale cleanup path must exist before version-scheme matching can be verified')
+broad_cleanup_text = '\n'.join(broad_cleanup_jobs.values())
+if not broad_cleanup_text:
+    errors.append('scheduled nightly stale cleanup path must exist before version-scheme matching can be verified')
 else:
     container_fragments = [
         match.group(0)
-        for match in re.finditer(r'.{0,800}ar-gateway-pr.{0,1400}', push_cleanup_text, re.I | re.S)
+        for match in re.finditer(r'.{0,800}ar-gateway-pr.{0,1400}', broad_cleanup_text, re.I | re.S)
     ]
     generic_fragments = [
         match.group(0)
-        for match in re.finditer(r'.{0,800}auto-review-pr.{0,1400}', push_cleanup_text, re.I | re.S)
+        for match in re.finditer(r'.{0,800}auto-review-pr.{0,1400}', broad_cleanup_text, re.I | re.S)
     ]
     container_text = '\n'.join(container_fragments)
     generic_text = '\n'.join(generic_fragments)
@@ -898,11 +904,11 @@ else:
         r'\$\{version%%-\*\}',
     ])
     if not container_matches_published_scheme:
-        errors.append('push cleanup must discover container versions published as pr-<PR>-<sha>')
+        errors.append('scheduled cleanup must discover container versions published as pr-<PR>-<sha>')
     if not generic_matches_published_scheme or generic_filters_pr_prefixed_only:
-        errors.append('push cleanup must discover generic binary versions published as <PR>-<sha>, not only pr-<PR>-<sha>')
+        errors.append('scheduled cleanup must discover generic binary versions published as <PR>-<sha>, not only pr-<PR>-<sha>')
     if not generic_derives_pr_number_without_pr_prefix:
-        errors.append('push cleanup must derive PR numbers from generic <PR>-<sha> versions')
+        errors.append('scheduled cleanup must derive PR numbers from generic <PR>-<sha> versions')
 
 if errors:
     print('; '.join(errors))
@@ -911,9 +917,9 @@ PY
 )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "CI push stale cleanup matches container and generic version schemes"
+    pass "CI nightly stale cleanup matches container and generic version schemes"
   else
-    fail "CI push stale cleanup matches container and generic version schemes ($output)"
+    fail "CI nightly stale cleanup matches container and generic version schemes ($output)"
   fi
 }
 
@@ -958,7 +964,7 @@ if legacy_list_urls:
     errors.append('cleanup must not list packages with legacy /api/packages/.../versions endpoints: ' + '; '.join(sorted(set(legacy_list_urls))))
 
 rest_list_requirements = {
-    'container ar-gateway-pr': [r'/api/v1/packages/jwilger\?[^\s"\']*type=container', r'[?&]q=ar-gateway-pr(?:[&"\']|$)', r'[?&]limit=100(?:[&"\']|$)', r'[?&]page=\$?\{?[A-Za-z_][A-Za-z0-9_]*\}?'],
+    'container auto_review/ar-gateway-pr': [r'/api/v1/packages/jwilger\?[^\s"\']*type=container', r'[?&]q=auto_review/ar-gateway-pr(?:[&"\']|$)', r'[?&]limit=100(?:[&"\']|$)', r'[?&]page=\$?\{?[A-Za-z_][A-Za-z0-9_]*\}?'],
     'generic auto-review-pr': [r'/api/v1/packages/jwilger\?[^\s"\']*type=generic', r'[?&]q=auto-review-pr(?:[&"\']|$)', r'[?&]limit=100(?:[&"\']|$)', r'[?&]page=\$?\{?[A-Za-z_][A-Za-z0-9_]*\}?'],
 }
 for label, patterns in rest_list_requirements.items():
@@ -966,7 +972,7 @@ for label, patterns in rest_list_requirements.items():
         errors.append(f'cleanup must list {label} packages through /api/v1/packages/jwilger?type=<type>&q=<name>&limit=100&page=<page>')
 
 delete_requirements = {
-    'container ar-gateway-pr': r'/api/v1/packages/jwilger/container/ar-gateway-pr/\$\{?version\}?',
+    'container auto_review/ar-gateway-pr': r'/api/v1/packages/jwilger/container/auto_review%2Far-gateway-pr/\$\{?version\}?',
     'generic auto-review-pr': r'/api/v1/packages/jwilger/generic/auto-review-pr/\$\{?version\}?',
 }
 for label, pattern in delete_requirements.items():
@@ -982,13 +988,13 @@ pull_request_branch = re.search(r'(?ms)^\s*else\n(?P<body>.*?)^\s*fi\n\s*if \[ "
 if pull_request_branch and not all(marker in pull_request_branch.group('body') for marker in ['pr-$PR_NUMBER-', '$PR_NUMBER-']):
     errors.append('pull_request cleanup must keep filtering listed container and generic versions by PR number before deletion')
 
-push_branch = re.search(r'(?ms)if \[ "\$\{GITHUB_EVENT_NAME:-\}" = "push" \]; then(?P<body>.*?)^\s*else$', step)
-if push_branch:
-    push_text = push_branch.group('body')
-    if len(re.findall(r'pr_is_merged\s+"\$pr_number"\s+&&\s+delete_package', push_text)) < 2:
-        errors.append('push-to-main cleanup must keep confirming each discovered PR is merged before deleting container and generic versions')
+scheduled_branch = re.search(r'(?ms)if \[ "\$\{GITHUB_EVENT_NAME:-\}" = "schedule" \]; then(?P<body>.*?)^\s*else$', step)
+if scheduled_branch:
+    scheduled_text = scheduled_branch.group('body')
+    if len(re.findall(r'pr_is_merged\s+"\$pr_number"\s+&&\s+delete_package', scheduled_text)) < 2:
+        errors.append('scheduled nightly cleanup must keep confirming each discovered PR is merged before deleting container and generic versions')
 else:
-    errors.append('push-to-main cleanup branch must remain distinct from pull_request cleanup')
+    errors.append('scheduled nightly cleanup branch must remain distinct from pull_request cleanup')
 
 if errors:
     print('; '.join(errors))
@@ -1000,6 +1006,54 @@ PY
     pass "CI PR package cleanup uses Forgejo REST listing and parent-scope list failures"
   else
     fail "CI PR package cleanup uses Forgejo REST listing and parent-scope list failures ($output)"
+  fi
+}
+
+test_ci_pr_package_cleanup_targets_forgejo_container_package_name() {
+  local cleanup_workflow output status
+  cleanup_workflow="$ROOT/.forgejo/workflows/pr-package-cleanup.yml"
+
+  output="$(python3 - "$cleanup_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow_path = pathlib.Path(sys.argv[1])
+if not workflow_path.exists():
+    print('PR package cleanup workflow is missing at .forgejo/workflows/pr-package-cleanup.yml')
+    sys.exit(1)
+workflow = workflow_path.read_text()
+errors = []
+
+job_match = re.search(r'(?ms)^  cleanup-pr-packages:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
+if not job_match:
+    print('CI workflow is missing the cleanup-pr-packages job')
+    sys.exit(1)
+job = job_match.group('body')
+
+step_match = re.search(r'(?ms)^      - name: Delete PR Docker and generic binary packages\n(?P<body>.*?)(?=^      - |\Z)', job)
+if not step_match:
+    print('cleanup-pr-packages job is missing the package deletion step')
+    sys.exit(1)
+step = step_match.group('body')
+
+lists_actual_name = re.search(r'/api/v1/packages/jwilger\?[^\s"\']*type=container[^\s"\']*[&?]q=auto_review/ar-gateway-pr', step) or re.search(r'/api/v1/packages/jwilger\?[^\s"\']*q=auto_review/ar-gateway-pr[^\s"\']*[&?]type=container', step)
+filters_actual_name = 'auto_review/ar-gateway-pr' in step
+deletes_encoded_name = '/api/v1/packages/jwilger/container/auto_review%2Far-gateway-pr/' in step
+
+if not (lists_actual_name and filters_actual_name and deletes_encoded_name):
+    errors.append('container cleanup must list/filter Forgejo package name auto_review/ar-gateway-pr and DELETE /api/v1/packages/jwilger/container/auto_review%2Far-gateway-pr/$version, not ar-gateway-pr')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "CI PR package cleanup targets Forgejo container package name"
+  else
+    fail "CI PR package cleanup targets Forgejo container package name ($output)"
   fi
 }
 
@@ -1092,10 +1146,10 @@ for tool, variable in [('curl', 'CURL'), ('cat', 'CAT')]:
 version_requirements = {
     'PR Docker/container package': {
         'list': [
-            r'/api/v1/packages/jwilger\?[^\s"\']*type=container[^\s"\']*[&?]q=ar-gateway-pr',
-            r'/api/v1/packages/jwilger\?[^\s"\']*q=ar-gateway-pr[^\s"\']*[&?]type=container',
+            r'/api/v1/packages/jwilger\?[^\s"\']*type=container[^\s"\']*[&?]q=auto_review/ar-gateway-pr',
+            r'/api/v1/packages/jwilger\?[^\s"\']*q=auto_review/ar-gateway-pr[^\s"\']*[&?]type=container',
         ],
-        'scope': [r'ar-gateway-pr', r'container', r'docker'],
+        'scope': [r'auto_review/ar-gateway-pr', r'container', r'docker'],
     },
     'PR generic binary package': {
         'list': [
@@ -1178,10 +1232,11 @@ run_tests \
   test_ci_pr_package_tool_resolution_installs_default_profile_tools_before_checks \
   test_ci_pr_package_cleanup_installs_default_profile_tools_before_checks \
   test_ci_pr_description_update_preserves_author_body_with_managed_artifact_block \
-  test_ci_pr_package_cleanup_runs_on_main_push_and_discovers_stale_pr_versions \
+  test_ci_pr_package_cleanup_runs_nightly_and_discovers_stale_pr_versions \
   test_ci_pr_context_jobs_do_not_run_on_push_events \
   test_ci_flake_check_does_not_run_on_push_events \
-  test_ci_push_stale_cleanup_confirms_pr_is_merged_before_delete \
-  test_ci_push_stale_cleanup_matches_container_and_generic_version_schemes \
+  test_ci_nightly_stale_cleanup_confirms_pr_is_merged_before_delete \
+  test_ci_nightly_stale_cleanup_matches_container_and_generic_version_schemes \
   test_ci_pr_package_cleanup_uses_forgejo_rest_listing_and_parent_scope_failures \
+  test_ci_pr_package_cleanup_targets_forgejo_container_package_name \
   test_ci_pr_package_cleanup_tolerates_missing_docker_and_generic_packages
