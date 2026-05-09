@@ -114,8 +114,10 @@ PY
   assert_file_not_contains "$prepare_workflow" 'gh ' "release PR preparation workflow does not invoke GitHub tooling"
 
   assert_file_exists "$publish_workflow" "publish-on-merge workflow exists"
-  assert_file_contains "$publish_workflow" 'pull_request' "publish workflow listens for pull request events"
-  assert_file_contains "$publish_workflow" 'closed' "publish workflow runs when release PRs close"
+  assert_file_contains "$publish_workflow" 'push:' "publish workflow listens for pushes to main"
+  assert_file_contains "$publish_workflow" 'branches: [main]' "publish workflow runs after release metadata lands on main"
+  assert_file_contains "$publish_workflow" 'workflow_dispatch:' "publish workflow supports manual dispatch with an explicit release merge SHA"
+  assert_file_not_contains "$publish_workflow" 'pull_request' "publish workflow no longer waits for release PR close events"
   assert_file_contains "$publish_workflow" 'nix develop' "publish workflow enters the Nix development environment before project tooling"
   assert_file_contains "$publish_workflow" 'nix build .#ar-gateway-image' "publish workflow builds the release Docker image only after the release PR merges to main"
   assert_file_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway' "publish workflow targets the Forgejo package registry image repository"

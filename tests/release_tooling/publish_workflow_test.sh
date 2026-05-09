@@ -6,12 +6,129 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 source "$SCRIPT_DIR/lib.sh"
 RELEASE_TOOLING_SUITE_NAME="release tooling: publish workflow"
 
-test_publish_workflow_requires_release_pr_base_branch_main() {
-  local publish_workflow
+test_publish_workflow_triggers_on_main_push_or_manual_dispatch_only() {
+  local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  assert_file_contains "$publish_workflow" "github.event.pull_request.base.ref == 'main'" "publish workflow only runs for release PRs merged into main"
-  assert_file_contains "$publish_workflow" 'FORGEJO_PULL_REQUEST_BASE_BRANCH: ${{ github.event.pull_request.base.ref }}' "publish workflow exposes base branch to release tooling"
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+if re.search(r'(?m)^  pull_request:\s*(?:\n|\[)', workflow):
+    errors.append('publish workflow must not trigger on pull_request.closed because it creates skipped runs for ordinary non-release PRs')
+
+push_match = re.search(r'(?ms)^  push:\s*\n(?P<body>.*?)(?=^  [a-zA-Z_]+:|^jobs:|\Z)', workflow)
+push_inline = re.search(r'(?m)^  push:\s*\[[^\]]*main[^\]]*\]', workflow)
+if not (push_match or push_inline):
+    errors.append('publish workflow must trigger on push to main so release publication follows the merged release commit')
+elif push_match and not re.search(r'(?m)^    branches:\s*(?:\[[^\]]*\bmain\b[^\]]*\]|\n(?:      -\s*main\s*\n?)+)', push_match.group('body')):
+    errors.append('publish workflow push trigger must be limited to main')
+
+if not re.search(r'(?ms)^  workflow_dispatch:\s*\n[\s\S]*release_merge_sha:', workflow):
+    errors.append('publish workflow must preserve workflow_dispatch with release_merge_sha input for manual recovery')
+
+push_main_guard_patterns = [
+    r'github\.event_name\s*==\s*[\'\"]push[\'\"][\s\S]{0,240}github\.ref\s*==\s*[\'\"]refs/heads/main[\'\"]',
+    r'github\.ref\s*==\s*[\'\"]refs/heads/main[\'\"][\s\S]{0,240}github\.event_name\s*==\s*[\'\"]push[\'\"]',
+]
+if not any(re.search(pattern, workflow) for pattern in push_main_guard_patterns):
+    errors.append('publish workflow must guard push-triggered publication to main push events')
+
+token_index = workflow.find('RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}')
+pre_token = workflow[:token_index] if token_index != -1 else workflow
+release_decision_patterns = [
+    r'(RELEASE_PUBLISH_APPROVED|SHOULD_PUBLISH_RELEASE|release_publish_approved|should_publish_release)[\s\S]{0,800}(GITHUB_OUTPUT|GITHUB_ENV)',
+    r'(GITHUB_OUTPUT|GITHUB_ENV)[\s\S]{0,800}(RELEASE_PUBLISH_APPROVED|SHOULD_PUBLISH_RELEASE|release_publish_approved|should_publish_release)',
+    r'(release[-_ ]?(?:commit|publish|guard|decision|eligible)|should[-_ ]?publish|publish[-_ ]?release)[\s\S]{0,800}(exit\s+0|false|skip|not a release)',
+]
+has_push_release_decision = any(re.search(pattern, pre_token, re.I) for pattern in release_decision_patterns)
+has_push_release_inputs = 'github.event.before' in pre_token and 'github.sha' in pre_token
+if not (has_push_release_decision and has_push_release_inputs):
+    errors.append('publish workflow must make an explicit pre-token release-commit decision for push events so ordinary main pushes do not reach publish-token steps')
+
+release_message_sources = [
+    'github.event.head_commit.message',
+    'RELEASE_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}',
+    'PUSH_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}',
+]
+has_release_message_source = any(source in pre_token for source in release_message_sources)
+pre_token_without_comments = '\n'.join(
+    line for line in pre_token.splitlines()
+    if not line.lstrip().startswith('#')
+)
+release_prefix_patterns = [
+    r'startsWith\(\s*github\.event\.head_commit\.message\s*,\s*[\'\"]chore: release v[\'\"]\s*\)',
+    r'\[\[\s*[\'\"]?\$\{?(?:RELEASE_COMMIT_MESSAGE|PUSH_COMMIT_MESSAGE)\}?[\'\"]?\s*==\s*[\'\"]chore: release v[\'\"]\*\s*\]\]',
+    r'case\s+[\'\"]?\$\{?(?:RELEASE_COMMIT_MESSAGE|PUSH_COMMIT_MESSAGE)\}?[\'\"]?\s+in[\s\S]{0,240}[\'\"]chore: release v[\'\"]\*\)',
+]
+has_contains_only_check = re.search(r'contains\(\s*github\.event\.head_commit\.message\s*,\s*[\'\"]chore: release v[\'\"]\s*\)', pre_token_without_comments)
+has_release_prefix_check = any(re.search(pattern, pre_token_without_comments, re.I) for pattern in release_prefix_patterns)
+if not (has_release_message_source and has_release_prefix_check):
+    errors.append('publish workflow push release guard must use starts-with/prefix semantics on github.event.head_commit.message (or exported env equivalent), e.g. chore: release v*, before token-bearing publication')
+if has_contains_only_check:
+    errors.append('publish workflow push release guard must not use contains-style matching for chore: release v; it must be a prefix check')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow triggers on main push or manual dispatch only"
+  else
+    fail "publish workflow triggers on main push or manual dispatch only ($output)"
+  fi
+}
+
+test_publish_workflow_does_not_persist_push_commit_message_to_github_env() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+token_index = workflow.find('RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}')
+pre_token = workflow[:token_index] if token_index != -1 else workflow
+pre_token_without_comments = '\n'.join(
+    line for line in pre_token.splitlines()
+    if not line.lstrip().startswith('#')
+)
+
+uses_push_head_message = 'github.event.head_commit.message' in pre_token_without_comments
+if not uses_push_head_message:
+    errors.append('publish workflow push path must still reference github.event.head_commit.message before token exposure')
+
+for line_number, line in enumerate(workflow.splitlines(), start=1):
+    if 'GITHUB_ENV' not in line:
+        continue
+    persists_push_message_value = (
+        re.search(r'(?<![A-Z0-9_])(?:RELEASE_COMMIT_MESSAGE|PUSH_COMMIT_MESSAGE)=', line)
+        or 'github.event.head_commit.message' in line
+    )
+    if persists_push_message_value:
+        errors.append(f'publish workflow must not persist the potentially multiline push commit message to GITHUB_ENV: line {line_number}: {line.strip()}')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow does not persist push commit message to GITHUB_ENV"
+  else
+    fail "publish workflow does not persist push commit message to GITHUB_ENV ($output)"
+  fi
 }
 
 test_publish_workflow_validates_provenance_and_changed_files_before_publish_token() {
@@ -19,7 +136,8 @@ test_publish_workflow_validates_provenance_and_changed_files_before_publish_toke
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
   assert_file_contains "$publish_workflow" 'Validate release provenance and changed files' "publish workflow has a no-token provenance validation step"
-  assert_file_contains "$publish_workflow" 'RELEASE_BASE_SHA: ${{ github.event.pull_request.base.sha }}' "publish workflow records the release PR base SHA for provenance checks"
+  assert_file_contains "$publish_workflow" 'RELEASE_BASE_SHA: ${{ github.event.before }}' "publish workflow records the push before SHA for provenance checks"
+  assert_file_contains "$publish_workflow" 'RELEASE_MERGE_SHA: ${{ github.sha }}' "publish workflow derives the release merge SHA from push event context"
   assert_file_contains "$publish_workflow" 'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"' "publish workflow derives changed files from the merged release PR"
   assert_file_contains "$publish_workflow" 'case "$changed_file" in' "publish workflow evaluates each changed file before publishing"
   assert_file_contains "$publish_workflow" 'Cargo.toml|Cargo.lock|CHANGELOG.md)' "publish workflow allows release metadata files before publishing"
@@ -73,6 +191,7 @@ required = {
     'Cargo.lock': False,
     'CHANGELOG.md': False,
 }
+
 for sample in required:
     required[sample] = any(fnmatch.fnmatchcase(sample, pattern) for pattern in patterns)
 
@@ -99,6 +218,67 @@ PY
   assert_file_contains "$publish_workflow" 'refusing token-bearing publish for release PR file:' "publish workflow fails closed for unexpected release PR files"
   assert_file_contains_before "$publish_workflow" 'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"' 'Publish Docker image to Forgejo package registry' "publish workflow validates changed files before publishing the image with the publish token"
   assert_file_contains_before "$publish_workflow" '.forgejo/workflows/*|scripts/*)' 'Publish Docker image to Forgejo package registry' "publish workflow rejects script and workflow changes before publishing the image with the publish token"
+}
+
+test_publish_workflow_uses_push_sha_without_dispatch_inputs_on_push_path() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+push_context_candidates = []
+for step_match in re.finditer(r'(?ms)^      - (?P<body>.*?)(?=^      - |\Z)', workflow):
+    step = step_match.group('body')
+    if 'github.sha' in step or 'github.event.before' in step or "github.event_name == 'push'" in step or 'github.event_name == "push"' in step:
+        push_context_candidates.append(step)
+
+push_context = '\n'.join(push_context_candidates)
+if not push_context:
+    errors.append('publish workflow must derive release context from push event data for push-to-main releases')
+else:
+    if "github.event_name == 'push'" not in push_context and 'github.event_name == "push"' not in push_context:
+        errors.append('pushed release context must be gated to push events')
+    if 'RELEASE_MERGE_SHA: ${{ github.sha }}' not in push_context:
+        errors.append('pushed release context must derive RELEASE_MERGE_SHA from github.sha')
+    if 'RELEASE_BASE_SHA: ${{ github.event.before }}' not in push_context:
+        errors.append('pushed release context must derive RELEASE_BASE_SHA from github.event.before')
+    if 'inputs.release_merge_sha' in push_context:
+        errors.append('pushed release context must not read inputs.release_merge_sha')
+
+for step_match in re.finditer(r'(?ms)^      - (?P<body>.*?)(?=^      - |\Z)', workflow):
+    step = step_match.group('body')
+    if 'inputs.release_merge_sha' not in step:
+        continue
+    gated_to_dispatch = "github.event_name == 'workflow_dispatch'" in step or 'github.event_name == "workflow_dispatch"' in step
+    if not gated_to_dispatch:
+        first_line = step.strip().splitlines()[0] if step.strip() else '<unnamed step>'
+        errors.append(f'non-dispatch publish path must not use inputs.release_merge_sha: {first_line}')
+
+validation_marker = 'Validate release provenance and changed files'
+if validation_marker not in workflow:
+    errors.append('publish workflow must validate provenance before token-bearing publish')
+else:
+    validation_section = workflow.split(validation_marker, 1)[1].split('Publish Docker image to Forgejo package registry', 1)[0]
+    if 'RELEASE_MERGE_SHA' not in validation_section or 'git rev-parse HEAD' not in validation_section:
+        errors.append('publish workflow must validate the checked-out push/dispatch commit against RELEASE_MERGE_SHA before token-bearing publish')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow uses push SHA without dispatch inputs on push path"
+  else
+    fail "publish workflow uses push SHA without dispatch inputs on push path ($output)"
+  fi
 }
 
 test_publish_workflow_uses_release_pr_merge_sha_not_a_recomputed_version() {
@@ -622,11 +802,11 @@ paths = [path.strip(" ()") for path in condition.split("||")]
 if len(paths) < 2:
     print("release-publish job condition must admit manual dispatch through a separate || path")
     sys.exit(1)
-trusted_pr_paths = [
+trusted_push_paths = [
     path for path in paths
-    if "github.event.pull_request.merged == true" in path
-    and "github.event.pull_request.base.ref == 'main'" in path
-    and "startsWith(github.event.pull_request.head.ref, 'release/v')" in path
+    if "github.event_name == 'push'" in path
+    and "github.ref == 'refs/heads/main'" in path
+    and "inputs.release_merge_sha" not in path
 ]
 manual_paths = [
     path for path in paths
@@ -634,8 +814,8 @@ manual_paths = [
     and "inputs.release_merge_sha" in path
     and "pull_request" not in path
 ]
-if not trusted_pr_paths:
-    print("release-publish job condition is missing trusted merged release PR path")
+if not trusted_push_paths:
+    print("release-publish job condition is missing trusted push-to-main release path")
     sys.exit(1)
 if not manual_paths:
     print("release-publish job condition is missing separate workflow_dispatch path gated by non-empty inputs.release_merge_sha")
@@ -738,7 +918,7 @@ PY
   fi
 }
 
-test_publish_workflow_keeps_dispatch_input_out_of_pull_request_paths() {
+test_publish_workflow_keeps_dispatch_input_out_of_non_dispatch_paths() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
@@ -763,13 +943,13 @@ steps = re.findall(r'(?ms)^      - (?P<step>.*?)(?=^      - |^  [a-zA-Z0-9_-]+:|
 if not steps:
     errors.append("publish workflow release-publish job is missing steps")
 
-pull_request_merge_steps = [step for step in steps if "github.event.pull_request.merge_commit_sha" in step]
-if not pull_request_merge_steps:
-    errors.append("pull_request release path must use github.event.pull_request.merge_commit_sha directly")
-for step in pull_request_merge_steps:
+push_merge_steps = [step for step in steps if "github.sha" in step]
+if not push_merge_steps:
+    errors.append("push release path must use github.sha directly as the release merge SHA")
+for step in push_merge_steps:
     first_line = step.splitlines()[0].strip()
     if "inputs.release_merge_sha" in step:
-        errors.append(f"pull_request merge commit step must not reference inputs.release_merge_sha: {first_line}")
+        errors.append(f"push merge commit step must not reference inputs.release_merge_sha: {first_line}")
 
 dispatch_steps = [step for step in steps if "inputs.release_merge_sha" in step]
 if not dispatch_steps:
@@ -779,8 +959,8 @@ for step in dispatch_steps:
     has_dispatch_gate = "github.event_name == 'workflow_dispatch'" in step or 'github.event_name == "workflow_dispatch"' in step
     if not has_dispatch_gate:
         errors.append(f"workflow_dispatch input step must be gated to workflow_dispatch only: {first_line}")
-    if "github.event.pull_request" in step:
-        errors.append(f"workflow_dispatch input step must not also depend on pull_request context: {first_line}")
+    if "github.event.pull_request" in step or "github.sha" in step or "github.event.before" in step:
+        errors.append(f"workflow_dispatch input step must not also depend on push or pull_request context: {first_line}")
 
 if errors:
     print("; ".join(errors))
@@ -789,9 +969,9 @@ PY
 )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "publish workflow keeps workflow_dispatch input out of pull_request release paths"
+    pass "publish workflow keeps workflow_dispatch input out of non-dispatch release paths"
   else
-    fail "publish workflow keeps workflow_dispatch input out of pull_request release paths ($output)"
+    fail "publish workflow keeps workflow_dispatch input out of non-dispatch release paths ($output)"
   fi
 }
 
@@ -957,6 +1137,18 @@ for step in steps:
     if not has_publish_token:
         continue
     token_steps.append(name)
+    if name not in {'Publish Docker image to Forgejo package registry', 'Create Forgejo Release'}:
+        errors.append(f'RELEASE_PUBLISH_TOKEN must be confined to final publish/release steps, not {name}')
+    step_header = step.split('        run:', 1)[0]
+    guarded_by_release_decision = (
+        re.search(r'(?m)^\s*if:\s*.*(?:release|publish|eligible|approved|should)', step_header, re.I)
+        and (
+            re.search(r'(?m)^\s*if:\s*.*workflow_dispatch', step_header)
+            or re.search(r'(?m)^\s*if:\s*.*(?:true|success|passed|approved|eligible)', step_header, re.I)
+        )
+    )
+    if not guarded_by_release_decision:
+        errors.append(f'token-bearing step must be unreachable unless workflow_dispatch or the push release-commit guard approved publication: {name}')
     for forbidden_label, pattern in {
         'nix develop': r'\bnix\s+develop\b',
         'nix run .#': r'\bnix\s+run\s+\.#',
@@ -1400,8 +1592,10 @@ PY
 }
 
 run_tests \
-  test_publish_workflow_requires_release_pr_base_branch_main \
+  test_publish_workflow_triggers_on_main_push_or_manual_dispatch_only \
+  test_publish_workflow_does_not_persist_push_commit_message_to_github_env \
   test_publish_workflow_validates_provenance_and_changed_files_before_publish_token \
+  test_publish_workflow_uses_push_sha_without_dispatch_inputs_on_push_path \
   test_publish_workflow_uses_release_pr_merge_sha_not_a_recomputed_version \
   test_publish_workflow_executes_from_merge_commit_sha_before_publish_token \
   test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_image_publish \
@@ -1410,7 +1604,7 @@ run_tests \
   test_publish_workflow_publishes_nix_docker_image_to_forgejo_registry \
   test_publish_workflow_requires_trusted_release_environment \
   test_publish_workflow_supports_manual_dispatch_from_release_merge_sha \
-  test_publish_workflow_keeps_dispatch_input_out_of_pull_request_paths \
+  test_publish_workflow_keeps_dispatch_input_out_of_non_dispatch_paths \
   test_publish_workflow_uses_trusted_tools_after_publish_token_exposure \
   test_publish_workflow_builds_and_publishes_release_image_after_merge \
   test_publish_workflow_attaches_binary_archives_checksums_signatures_and_provenance \

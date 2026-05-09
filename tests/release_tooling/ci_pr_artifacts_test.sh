@@ -20,8 +20,20 @@ errors = []
 
 if 'pull_request' not in workflow:
     errors.append('CI workflow must run for pull_request events so every PR gets artifacts')
-if not re.search(r'(?ms)pull_request:\s*(?:\n\s+types:\s*\[[^\]]*(?:opened|synchronize|reopened)[^\]]*\]|\n\s+types:\s*\n(?:\s+-\s*(?:opened|synchronize|reopened)\s*\n){3})', workflow):
-    errors.append('CI workflow must explicitly publish artifacts for opened, synchronize, and reopened PR events')
+pull_request_match = re.search(r'(?ms)^  pull_request:\s*\n(?P<body>.*?)(?=^  [a-zA-Z_]+:|^permissions:|^jobs:|\Z)', workflow)
+pull_request_inline = re.search(r'(?m)^  pull_request:\s*\[[^\]]+\]', workflow)
+if not (pull_request_match or pull_request_inline):
+    errors.append('CI workflow must explicitly declare pull_request trigger types')
+else:
+    trigger_text = pull_request_inline.group(0) if pull_request_inline else pull_request_match.group('body')
+    for action in ['opened', 'synchronize', 'reopened']:
+        if action not in trigger_text:
+            errors.append(f'CI workflow pull_request trigger must include {action}')
+    if 'closed' in trigger_text:
+        errors.append('CI workflow must not run on pull_request.closed; PR package cleanup belongs in pr-package-cleanup.yml')
+
+if re.search(r'(?m)^  push:\s*(?:\n|\[)', workflow):
+    errors.append('CI workflow must not run on push; push-main cleanup belongs in pr-package-cleanup.yml')
 
 required_pr_context = [
     'github.event.pull_request.number',
@@ -63,13 +75,10 @@ for marker in ['Docker image', 'binary download']:
     if marker not in workflow:
         errors.append(f'PR description update must include {marker} links')
 
-cleanup_markers = ['DELETE', '/api/packages/', 'tea api --method DELETE', 'curl -X DELETE']
-if 'closed' not in workflow:
-    errors.append('CI workflow must run on closed PR events to remove package-hosted PR artifacts after merge')
-if "github.event.pull_request.merged == true" not in workflow:
-    errors.append('CI cleanup must be gated to merged PRs')
-if not any(marker in workflow for marker in cleanup_markers):
-    errors.append('CI workflow must delete PR Docker and generic binary packages after the PR merges')
+cleanup_markers = ['cleanup-pr-packages:', 'Delete PR Docker and generic binary packages', 'DELETE', '-X DELETE']
+for marker in cleanup_markers:
+    if marker in workflow:
+        errors.append(f'CI workflow must not own PR package cleanup after workflow split: {marker}')
 
 for forbidden in ['tea release create', 'tea releases assets create', '--prerelease', 'git tag -a']:
     if forbidden in workflow:
@@ -85,6 +94,58 @@ PY
     pass "CI workflow publishes and cleans PR Docker and binary packages without Forgejo Releases"
   else
     fail "CI workflow publishes and cleans PR Docker and binary packages without Forgejo Releases ($output)"
+  fi
+}
+
+test_ci_and_cleanup_workflows_have_clear_triggers_and_job_names() {
+  local ci_workflow cleanup_workflow output status
+  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+  cleanup_workflow="$ROOT/.forgejo/workflows/pr-package-cleanup.yml"
+
+  output="$(python3 - "$ci_workflow" "$cleanup_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+ci = pathlib.Path(sys.argv[1]).read_text()
+cleanup_path = pathlib.Path(sys.argv[2])
+errors = []
+
+required_ci_job_names = [
+    'name: Verify PR with nix flake check',
+    'name: Request auto_review semantic review',
+    'name: Build PR artifacts (no token)',
+    'name: Publish PR artifact packages',
+]
+for marker in required_ci_job_names:
+    if marker not in ci:
+        errors.append(f'CI workflow must use clearer job name: {marker}')
+
+if not cleanup_path.exists():
+    errors.append('PR package cleanup workflow must exist at .forgejo/workflows/pr-package-cleanup.yml')
+else:
+    cleanup = cleanup_path.read_text()
+    if not re.search(r'(?m)^name:\s*Clean PR packages\s*$', cleanup):
+        errors.append('PR package cleanup workflow must be clearly named Clean PR packages')
+    pull_request_match = re.search(r'(?ms)^  pull_request:\s*\n(?P<body>.*?)(?=^  [a-zA-Z_]+:|^permissions:|^jobs:|\Z)', cleanup)
+    if not pull_request_match or 'closed' not in pull_request_match.group('body'):
+        errors.append('PR package cleanup workflow must own pull_request.closed cleanup')
+    push_match = re.search(r'(?ms)^  push:\s*\n(?P<body>.*?)(?=^  [a-zA-Z_]+:|^permissions:|^jobs:|\Z)', cleanup)
+    if not push_match or not re.search(r'(?m)^    branches:\s*(?:\[[^\]]*\bmain\b[^\]]*\]|\n(?:      -\s*main\s*\n?)+)', push_match.group('body')):
+        errors.append('PR package cleanup workflow must own push.main stale cleanup')
+    if 'name: Delete packages for merged PRs' not in cleanup:
+        errors.append('PR package cleanup job must be named Delete packages for merged PRs')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "CI and PR cleanup workflows have clear triggers and job names"
+  else
+    fail "CI and PR cleanup workflows have clear triggers and job names ($output)"
   fi
 }
 
@@ -362,15 +423,19 @@ PY
 }
 
 test_ci_pr_package_cleanup_installs_default_profile_tools_before_checks() {
-  local ci_workflow output status
-  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+  local cleanup_workflow output status
+  cleanup_workflow="$ROOT/.forgejo/workflows/pr-package-cleanup.yml"
 
-  output="$(python3 - "$ci_workflow" <<'PY'
+  output="$(python3 - "$cleanup_workflow" <<'PY'
 import pathlib
 import re
 import sys
 
-workflow = pathlib.Path(sys.argv[1]).read_text()
+workflow_path = pathlib.Path(sys.argv[1])
+if not workflow_path.exists():
+    print('PR package cleanup workflow is missing at .forgejo/workflows/pr-package-cleanup.yml')
+    sys.exit(1)
+workflow = workflow_path.read_text()
 errors = []
 
 job_match = re.search(r'(?ms)^  cleanup-pr-packages:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
@@ -477,15 +542,19 @@ PY
 }
 
 test_ci_pr_package_cleanup_runs_on_main_push_and_discovers_stale_pr_versions() {
-  local ci_workflow output status
-  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+  local cleanup_workflow output status
+  cleanup_workflow="$ROOT/.forgejo/workflows/pr-package-cleanup.yml"
 
-  output="$(python3 - "$ci_workflow" <<'PY'
+  output="$(python3 - "$cleanup_workflow" <<'PY'
 import pathlib
 import re
 import sys
 
-workflow = pathlib.Path(sys.argv[1]).read_text()
+workflow_path = pathlib.Path(sys.argv[1])
+if not workflow_path.exists():
+    print('PR package cleanup workflow is missing at .forgejo/workflows/pr-package-cleanup.yml')
+    sys.exit(1)
+workflow = workflow_path.read_text()
 errors = []
 
 push_block_match = re.search(
@@ -500,16 +569,16 @@ if push_block_match:
     push_main = push_main or bool(re.search(r'(?m)^    branches:\s*(?:\[[^\]]*\bmain\b[^\]]*\]|\n(?:      -\s*main\s*\n?)+)', push_body))
 
 if not has_push:
-    errors.append('CI workflow must run PR package cleanup from push events on main so squash/merge paths clean stale PR packages')
+    errors.append('PR package cleanup workflow must run cleanup from push events on main so squash/merge paths clean stale PR packages')
 elif not push_main:
-    errors.append('CI workflow push cleanup trigger must be limited to the main branch')
+    errors.append('PR package cleanup workflow push cleanup trigger must be limited to the main branch')
 
 jobs = {
     match.group('name'): match.group('body')
     for match in re.finditer(r'(?ms)^  (?P<name>[a-zA-Z0-9_-]+):\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
 }
 if 'cleanup-pr-packages' not in jobs:
-    print('; '.join(errors + ['CI workflow is missing the cleanup-pr-packages job']))
+    print('; '.join(errors + ['PR package cleanup workflow is missing the cleanup-pr-packages job']))
     sys.exit(1)
 
 push_cleanup_jobs = {}
@@ -525,12 +594,22 @@ if not push_cleanup_jobs:
 
 push_cleanup_text = '\n'.join(push_cleanup_jobs.values())
 docker_lists_versions = any(re.search(pattern, push_cleanup_text) for pattern in [
-    r'/api/packages/jwilger/(?:container|docker)/[^\s"\']+/versions',
-    r'tea\s+api[\s\S]{0,240}/packages/jwilger/(?:container|docker)/[^\s"\']+/versions',
+    r'/api/v1/packages/jwilger\?[^\s"\']*type=container[^\s"\']*[&?]q=ar-gateway-pr',
+    r'/api/v1/packages/jwilger\?[^\s"\']*q=ar-gateway-pr[^\s"\']*[&?]type=container',
+    r'list_package_versions\s+["\']container["\']\s+["\']ar-gateway-pr["\']\s+["\']?\$container_versions_file',
 ])
 generic_lists_versions = any(re.search(pattern, push_cleanup_text) for pattern in [
-    r'/api/packages/jwilger/generic/[^\s"\']+/versions',
-    r'tea\s+api[\s\S]{0,240}/packages/jwilger/generic/[^\s"\']+/versions',
+    r'/api/v1/packages/jwilger\?[^\s"\']*type=generic[^\s"\']*[&?]q=auto-review-pr',
+    r'/api/v1/packages/jwilger\?[^\s"\']*q=auto-review-pr[^\s"\']*[&?]type=generic',
+    r'list_package_versions\s+["\']generic["\']\s+["\']auto-review-pr["\']\s+["\']?\$generic_versions_file',
+])
+reads_discovered_version_files = all(re.search(pattern, push_cleanup_text) for pattern in [
+    r'done\s*<\s*"\$container_versions_file"',
+    r'done\s*<\s*"\$generic_versions_file"',
+])
+derives_pr_numbers_from_versions = all(re.search(pattern, push_cleanup_text) for pattern in [
+    r'pr_number="\$\{version#pr-\}"[\s\S]{0,120}pr_number="\$\{pr_number%%-\*\}"',
+    r'pr_number="\$\{version%%-\*\}"',
 ])
 discovers_pr_prefixed_versions = any(re.search(pattern, push_cleanup_text) for pattern in [
     r'pr-\[0-9\]\+-',
@@ -538,14 +617,16 @@ discovers_pr_prefixed_versions = any(re.search(pattern, push_cleanup_text) for p
     r'pr-\(\[0-9\]\+\)-',
     r'pr-[\^]?\[0-9\]\+?-',
     r'pr-\d\+-',
+    r'container_prefix="pr-\$\{pr_number\}-"',
+    r'\$\{version#"\$container_prefix"\}',
     r'capture\([\'\"]pr-(?:\\d\+|\[0-9\]\+?|\(\?<pr_number>)',
     r'match\([\'\"]pr-(?:\\d\+|\[0-9\]\+?)',
     r'grep\s+-E[^\n]*pr-\[0-9\]\+-',
     r'sed\s+-E[^\n]*pr-\([0-9]+\)-',
 ])
 
-if not (docker_lists_versions and generic_lists_versions and discovers_pr_prefixed_versions):
-    errors.append('push-to-main cleanup must enumerate stale PR package versions from PR-prefixed package metadata rather than relying on github.event.pull_request.number')
+if not (docker_lists_versions and generic_lists_versions and reads_discovered_version_files and derives_pr_numbers_from_versions and discovers_pr_prefixed_versions):
+    errors.append('push-to-main cleanup must enumerate stale PR package versions from Forgejo REST package metadata rather than relying on github.event.pull_request.number')
 
 if errors:
     print('; '.join(errors))
@@ -576,31 +657,23 @@ jobs = {
     match.group('name'): match.group('body')
     for match in re.finditer(r'(?ms)^  (?P<name>[a-zA-Z0-9_-]+):\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
 }
-
 for job_name in ['pr-artifact-build', 'pr-packages']:
     body = jobs.get(job_name)
     if body is None:
         errors.append(f'CI workflow is missing the {job_name} job')
-        continue
-    header = body.split('    steps:', 1)[0]
-    if 'github.event.pull_request.' not in body:
+    elif 'github.event.pull_request.' not in body:
         errors.append(f'{job_name} regression test expected the job to reference github.event.pull_request context')
-        continue
-    has_pull_request_gate = re.search(r'github\.event_name\s*==\s*[\'\"]pull_request[\'\"]', header)
-    has_closed_exclusion = re.search(r'github\.event\.action\s*!=\s*[\'\"]closed[\'\"]', header)
-    allowed_pr_actions = {'opened', 'synchronize', 'reopened'}
-    action_comparisons = set(re.findall(r'github\.event\.action\s*==\s*[\'\"]([^\'\"]+)[\'\"]', header))
-    action_allowlist = allowed_pr_actions.issubset(action_comparisons) and 'closed' not in action_comparisons
-    contains_allowlist = (
-        re.search(r'contains\([\s\S]{0,240}github\.event\.action', header)
-        and all(action in header for action in allowed_pr_actions)
-        and 'closed' not in header
-    )
-    has_not_closed_gate = has_closed_exclusion or action_allowlist or contains_allowlist
-    if not has_pull_request_gate:
-        errors.append(f'{job_name} references github.event.pull_request.* and must be gated to github.event_name == pull_request so it cannot run on push events')
-    if not has_not_closed_gate:
-        errors.append(f'{job_name} references github.event.pull_request.* and must exclude closed PR events, either with != closed or an opened/synchronize/reopened allow-list')
+
+pull_request_match = re.search(r'(?ms)^  pull_request:\s*\n(?P<body>.*?)(?=^  [a-zA-Z_]+:|^permissions:|^jobs:|\Z)', workflow)
+pull_request_inline = re.search(r'(?m)^  pull_request:\s*\[[^\]]+\]', workflow)
+trigger_text = pull_request_inline.group(0) if pull_request_inline else (pull_request_match.group('body') if pull_request_match else '')
+for action in ['opened', 'synchronize', 'reopened']:
+    if action not in trigger_text:
+        errors.append(f'CI workflow trigger must include pull_request.{action} for PR-context jobs')
+if 'closed' in trigger_text:
+    errors.append('CI workflow trigger must exclude pull_request.closed so PR-context jobs never run on closed events')
+if re.search(r'(?m)^  push:\s*(?:\n|\[)', workflow):
+    errors.append('CI workflow trigger must exclude push so PR-context jobs never run on push events')
 
 if errors:
     print('; '.join(errors))
@@ -627,29 +700,20 @@ import sys
 workflow = pathlib.Path(sys.argv[1]).read_text()
 errors = []
 
-job_match = re.search(r'(?ms)^  flake-check:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
-if not job_match:
+if not re.search(r'(?ms)^  flake-check:\n', workflow):
     print('CI workflow is missing the flake-check job')
     sys.exit(1)
 
-job = job_match.group('body')
-header = job.split('    steps:', 1)[0]
-has_non_push_gate = re.search(r'github\.event_name\s*==\s*[\'\"]pull_request[\'\"]', header) or re.search(r'github\.event_name\s*!=\s*[\'\"]push[\'\"]', header)
-has_closed_exclusion = re.search(r'github\.event\.action\s*!=\s*[\'\"]closed[\'\"]', header)
-allowed_pr_actions = {'opened', 'synchronize', 'reopened'}
-action_comparisons = set(re.findall(r'github\.event\.action\s*==\s*[\'\"]([^\'\"]+)[\'\"]', header))
-action_allowlist = allowed_pr_actions.issubset(action_comparisons) and 'closed' not in action_comparisons
-contains_allowlist = (
-    re.search(r'contains\([\s\S]{0,240}github\.event\.action', header)
-    and all(action in header for action in allowed_pr_actions)
-    and 'closed' not in header
-)
-has_non_closed_gate = has_closed_exclusion or action_allowlist or contains_allowlist
-
-if not has_non_push_gate:
-    errors.append('flake-check must be gated so the push-to-main stale cleanup trigger does not rerun full CI')
-if not has_non_closed_gate:
-    errors.append('flake-check must remain gated to non-closed PR events')
+pull_request_match = re.search(r'(?ms)^  pull_request:\s*\n(?P<body>.*?)(?=^  [a-zA-Z_]+:|^permissions:|^jobs:|\Z)', workflow)
+pull_request_inline = re.search(r'(?m)^  pull_request:\s*\[[^\]]+\]', workflow)
+trigger_text = pull_request_inline.group(0) if pull_request_inline else (pull_request_match.group('body') if pull_request_match else '')
+for action in ['opened', 'synchronize', 'reopened']:
+    if action not in trigger_text:
+        errors.append(f'CI workflow trigger must include pull_request.{action} for flake-check')
+if 'closed' in trigger_text:
+    errors.append('CI workflow trigger must exclude pull_request.closed so flake-check does not rerun for cleanup-only closures')
+if re.search(r'(?m)^  push:\s*(?:\n|\[)', workflow):
+    errors.append('CI workflow trigger must exclude push so flake-check does not rerun for push-main cleanup')
 
 if errors:
     print('; '.join(errors))
@@ -665,15 +729,19 @@ PY
 }
 
 test_ci_push_stale_cleanup_confirms_pr_is_merged_before_delete() {
-  local ci_workflow output status
-  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+  local cleanup_workflow output status
+  cleanup_workflow="$ROOT/.forgejo/workflows/pr-package-cleanup.yml"
 
-  output="$(python3 - "$ci_workflow" <<'PY'
+  output="$(python3 - "$cleanup_workflow" <<'PY'
 import pathlib
 import re
 import sys
 
-workflow = pathlib.Path(sys.argv[1]).read_text()
+workflow_path = pathlib.Path(sys.argv[1])
+if not workflow_path.exists():
+    print('PR package cleanup workflow is missing at .forgejo/workflows/pr-package-cleanup.yml')
+    sys.exit(1)
+workflow = workflow_path.read_text()
 errors = []
 
 jobs = {
@@ -761,15 +829,19 @@ PY
 }
 
 test_ci_push_stale_cleanup_matches_container_and_generic_version_schemes() {
-  local ci_workflow output status
-  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+  local cleanup_workflow output status
+  cleanup_workflow="$ROOT/.forgejo/workflows/pr-package-cleanup.yml"
 
-  output="$(python3 - "$ci_workflow" <<'PY'
+  output="$(python3 - "$cleanup_workflow" <<'PY'
 import pathlib
 import re
 import sys
 
-workflow = pathlib.Path(sys.argv[1]).read_text()
+workflow_path = pathlib.Path(sys.argv[1])
+if not workflow_path.exists():
+    print('PR package cleanup workflow is missing at .forgejo/workflows/pr-package-cleanup.yml')
+    sys.exit(1)
+workflow = workflow_path.read_text()
 errors = []
 
 jobs = {
@@ -804,10 +876,15 @@ else:
         r'\^pr-\[0-9\]\+-',
         r'\^pr-[^\n"\']*\[0-9\][^\n"\']*-',
         r'pr-\$\{?[A-Za-z_][A-Za-z0-9_]*\}?-',
+        r'container_prefix="pr-\$\{pr_number\}-"',
+        r'\$\{version#"\$container_prefix"\}',
     ])
     generic_matches_published_scheme = any(re.search(pattern, generic_text) for pattern in [
         r'\^\[0-9\]\+-',
         r'\^[^\n"\']*\[0-9\][^\n"\']*-',
+        r'\$\{version#"\$pr_number-"\}',
+        r'\$\{version#"\$\{pr_number\}-"\}',
+        r'\$\{version#"\$PR_NUMBER-"\}',
         r'capture\([\'\"]\^?\(\?<pr_number>\[0-9\]',
         r'match\([\'\"]\^?\[0-9\]',
     ])
@@ -840,16 +917,106 @@ PY
   fi
 }
 
-test_ci_pr_package_cleanup_tolerates_missing_docker_and_generic_packages() {
-  local ci_workflow output status
-  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+test_ci_pr_package_cleanup_uses_forgejo_rest_listing_and_parent_scope_failures() {
+  local cleanup_workflow output status
+  cleanup_workflow="$ROOT/.forgejo/workflows/pr-package-cleanup.yml"
 
-  output="$(python3 - "$ci_workflow" <<'PY'
+  output="$(python3 - "$cleanup_workflow" <<'PY'
 import pathlib
 import re
 import sys
 
-workflow = pathlib.Path(sys.argv[1]).read_text()
+workflow_path = pathlib.Path(sys.argv[1])
+if not workflow_path.exists():
+    print('PR package cleanup workflow is missing at .forgejo/workflows/pr-package-cleanup.yml')
+    sys.exit(1)
+workflow = workflow_path.read_text()
+errors = []
+
+job_match = re.search(r'(?ms)^  cleanup-pr-packages:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
+if not job_match:
+    print('CI workflow is missing the cleanup-pr-packages job')
+    sys.exit(1)
+job = job_match.group('body')
+
+step_match = re.search(r'(?ms)^      - name: Delete PR Docker and generic binary packages\n(?P<body>.*?)(?=^      - |\Z)', job)
+if not step_match:
+    print('cleanup-pr-packages job is missing the package deletion step')
+    sys.exit(1)
+step = step_match.group('body')
+
+def has(pattern, text=step):
+    return re.search(pattern, text) is not None
+
+list_helper_match = re.search(r'(?ms)^\s*list_package_versions\(\) \{(?P<body>.*?)^\s*\}', step)
+list_helper = list_helper_match.group('body') if list_helper_match else ''
+if not list_helper_match:
+    errors.append('cleanup must keep package listing in a list_package_versions helper')
+
+legacy_list_urls = re.findall(r'/api/packages/jwilger/(?:container|docker|generic)/[^\s"\']+/versions(?:\?[^\s"\']*)?', step)
+if legacy_list_urls:
+    errors.append('cleanup must not list packages with legacy /api/packages/.../versions endpoints: ' + '; '.join(sorted(set(legacy_list_urls))))
+
+rest_list_requirements = {
+    'container ar-gateway-pr': [r'/api/v1/packages/jwilger\?[^\s"\']*type=container', r'[?&]q=ar-gateway-pr(?:[&"\']|$)', r'[?&]limit=100(?:[&"\']|$)', r'[?&]page=\$?\{?[A-Za-z_][A-Za-z0-9_]*\}?'],
+    'generic auto-review-pr': [r'/api/v1/packages/jwilger\?[^\s"\']*type=generic', r'[?&]q=auto-review-pr(?:[&"\']|$)', r'[?&]limit=100(?:[&"\']|$)', r'[?&]page=\$?\{?[A-Za-z_][A-Za-z0-9_]*\}?'],
+}
+for label, patterns in rest_list_requirements.items():
+    if not all(has(pattern) for pattern in patterns):
+        errors.append(f'cleanup must list {label} packages through /api/v1/packages/jwilger?type=<type>&q=<name>&limit=100&page=<page>')
+
+delete_requirements = {
+    'container ar-gateway-pr': r'/api/v1/packages/jwilger/container/ar-gateway-pr/\$\{?version\}?',
+    'generic auto-review-pr': r'/api/v1/packages/jwilger/generic/auto-review-pr/\$\{?version\}?',
+}
+for label, pattern in delete_requirements.items():
+    if not has(pattern):
+        errors.append(f'cleanup must delete {label} package versions through /api/v1/packages/jwilger/<type>/<name>/$version')
+
+if 'deletion_failures=$((deletion_failures + 1))' in list_helper or 'deletion_failures=$(( deletion_failures + 1 ))' in list_helper:
+    errors.append('list_package_versions must return failure for the parent shell to count instead of incrementing deletion_failures inside the helper')
+if re.search(r'done\s*<\s*<\(\s*list_package_versions[\s\S]{0,240}\|', step):
+    errors.append('cleanup must not rely on list_package_versions inside process-substitution pipelines because list failures are hidden from the parent shell')
+
+pull_request_branch = re.search(r'(?ms)^\s*else\n(?P<body>.*?)^\s*fi\n\s*if \[ "\$deletion_failures"', step)
+if pull_request_branch and not all(marker in pull_request_branch.group('body') for marker in ['pr-$PR_NUMBER-', '$PR_NUMBER-']):
+    errors.append('pull_request cleanup must keep filtering listed container and generic versions by PR number before deletion')
+
+push_branch = re.search(r'(?ms)if \[ "\$\{GITHUB_EVENT_NAME:-\}" = "push" \]; then(?P<body>.*?)^\s*else$', step)
+if push_branch:
+    push_text = push_branch.group('body')
+    if len(re.findall(r'pr_is_merged\s+"\$pr_number"\s+&&\s+delete_package', push_text)) < 2:
+        errors.append('push-to-main cleanup must keep confirming each discovered PR is merged before deleting container and generic versions')
+else:
+    errors.append('push-to-main cleanup branch must remain distinct from pull_request cleanup')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "CI PR package cleanup uses Forgejo REST listing and parent-scope list failures"
+  else
+    fail "CI PR package cleanup uses Forgejo REST listing and parent-scope list failures ($output)"
+  fi
+}
+
+test_ci_pr_package_cleanup_tolerates_missing_docker_and_generic_packages() {
+  local cleanup_workflow output status
+  cleanup_workflow="$ROOT/.forgejo/workflows/pr-package-cleanup.yml"
+
+  output="$(python3 - "$cleanup_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow_path = pathlib.Path(sys.argv[1])
+if not workflow_path.exists():
+    print('PR package cleanup workflow is missing at .forgejo/workflows/pr-package-cleanup.yml')
+    sys.exit(1)
+workflow = workflow_path.read_text()
 errors = []
 
 job_match = re.search(r'(?ms)^  cleanup-pr-packages:\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
@@ -925,15 +1092,15 @@ for tool, variable in [('curl', 'CURL'), ('cat', 'CAT')]:
 version_requirements = {
     'PR Docker/container package': {
         'list': [
-            r'/api/packages/jwilger/(?:container|docker)/[^\s"\']+/versions',
-            r'tea\s+api[\s\S]{0,240}/packages/jwilger/(?:container|docker)/[^\s"\']+/versions',
+            r'/api/v1/packages/jwilger\?[^\s"\']*type=container[^\s"\']*[&?]q=ar-gateway-pr',
+            r'/api/v1/packages/jwilger\?[^\s"\']*q=ar-gateway-pr[^\s"\']*[&?]type=container',
         ],
         'scope': [r'ar-gateway-pr', r'container', r'docker'],
     },
     'PR generic binary package': {
         'list': [
-            r'/api/packages/jwilger/generic/[^\s"\']+/versions',
-            r'tea\s+api[\s\S]{0,240}/packages/jwilger/generic/[^\s"\']+/versions',
+            r'/api/v1/packages/jwilger\?[^\s"\']*type=generic[^\s"\']*[&?]q=auto-review-pr',
+            r'/api/v1/packages/jwilger\?[^\s"\']*q=auto-review-pr[^\s"\']*[&?]type=generic',
         ],
         'scope': [r'auto-review-pr', r'generic'],
     },
@@ -1004,6 +1171,7 @@ PY
 
 run_tests \
   test_ci_workflow_publishes_pr_docker_and_binary_packages_updates_pr_body_and_deletes_on_merge \
+  test_ci_and_cleanup_workflows_have_clear_triggers_and_job_names \
   test_ci_pr_package_publication_is_token_isolated_from_untrusted_builds \
   test_ci_pr_package_artifact_handoff_avoids_v4_artifact_actions \
   test_ci_pr_package_tool_resolution_prepares_nix_before_default_profile_checks \
@@ -1015,4 +1183,5 @@ run_tests \
   test_ci_flake_check_does_not_run_on_push_events \
   test_ci_push_stale_cleanup_confirms_pr_is_merged_before_delete \
   test_ci_push_stale_cleanup_matches_container_and_generic_version_schemes \
+  test_ci_pr_package_cleanup_uses_forgejo_rest_listing_and_parent_scope_failures \
   test_ci_pr_package_cleanup_tolerates_missing_docker_and_generic_packages
