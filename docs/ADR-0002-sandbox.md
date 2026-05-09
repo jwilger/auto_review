@@ -65,7 +65,7 @@ split by capability:
 Consequently, there is no global sandbox image requirement for gateway startup
 and no sandbox field in `/info`.
 If a future feature adds repo-controlled command execution (for example, running
-tests for an `@auto_review tests` command instead of only proposing scaffolds),
+tests for an `@auto-review tests` command instead of only proposing scaffolds),
 that feature must be gated explicitly with its own required sandbox/runtime
 configuration and must fail closed when the isolation backend is unavailable.
 

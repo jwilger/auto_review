@@ -5,7 +5,7 @@
 //! The `issue_comment` webhook covers top-level PR comments but not
 //! these threaded replies. So: a periodic background task that, for
 //! every PR we've already reviewed, lists the PR's review comments
-//! and dispatches any new `@auto_review` mentions through the chat
+//! and dispatches any new `@auto-review` mentions through the chat
 //! handler.
 //!
 //! Cursor: per-(repo, pr) highest-seen comment id. Forgejo issues
@@ -244,16 +244,22 @@ impl ChatPoller {
             // mention us. Case-insensitive to match Forgejo's
             // username semantics and the parser's own
             // case-insensitive prefix check — otherwise a comment
-            // saying "@AUTO_REVIEW help" would be filtered out
+            // saying "@AUTO-REVIEW help" would be filtered out
             // here even though the parser would accept it.
             // Bytewise windows() so we don't allocate a lowercased
             // copy of every comment body.
             let needle = format!("@{}", self.bot_name);
             let needle_bytes = needle.as_bytes();
+            let compatibility_needle = (*self.bot_name == "auto-review").then_some(b"@auto_review");
             let body_bytes = c.body.as_bytes();
             if body_bytes
                 .windows(needle_bytes.len())
                 .any(|w| w.eq_ignore_ascii_case(needle_bytes))
+                || compatibility_needle.is_some_and(|alias| {
+                    body_bytes
+                        .windows(alias.len())
+                        .any(|w| w.eq_ignore_ascii_case(alias))
+                })
             {
                 if claim_chat_comment(&self.cursors, key.clone(), c.id).await {
                     to_dispatch.push(c.id);
@@ -422,6 +428,25 @@ mod tests {
             dispatcher,
             "auto_review",
             "auto_review",
+        )
+    }
+
+    async fn hyphenated_identity_poller_for(
+        server: &MockServer,
+        history: Arc<InMemoryReviewHistory>,
+        dispatcher: Arc<dyn JobDispatcher>,
+    ) -> ChatPoller {
+        let forgejo = Arc::new(ForgejoClient::new(&server.uri(), "tok").expect("client"));
+        let llm = Arc::new(Router::new());
+        let learnings: Arc<dyn LearningsStore> = Arc::new(InMemoryLearningsStore::new());
+        ChatPoller::new(
+            forgejo,
+            llm,
+            learnings,
+            history,
+            dispatcher,
+            "auto-review",
+            "auto-review",
         )
     }
 
@@ -837,6 +862,68 @@ mod tests {
         assert_eq!(poller.cursor_for(&k).await, Some(11));
         // But no dispatch occurred — we filtered the bot out.
         assert!(dispatcher.seen.lock().unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn hyphenated_bot_identity_poller_dispatches_temporary_alias_and_filters_self_comments() {
+        let server = MockServer::start().await;
+        let history = Arc::new(InMemoryReviewHistory::new());
+        let k = key("alice", "widgets", 1);
+        history.record(&k, "deadbeef").await.unwrap();
+
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .up_to_n_times(1)
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": 10, "body": "@auto-review re-review", "user": {"login": "auto-review"}},
+                {"id": 11, "body": "@auto_review re-review", "user": {"login": "bob"}}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/alice/widgets/pulls/1"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 1,
+                "title": "x",
+                "body": "",
+                "draft": false,
+                "head": {"ref": "t", "sha": "newsha"},
+                "base": {"ref": "main", "sha": "ms"}
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/1/comments"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 99})))
+            .mount(&server)
+            .await;
+
+        let dispatcher = Arc::new(RecordingDispatcher {
+            seen: StdMutex::new(Vec::new()),
+        });
+        let dispatcher_dyn: Arc<dyn JobDispatcher> = dispatcher.clone();
+        let poller = hyphenated_identity_poller_for(&server, history, dispatcher_dyn).await;
+
+        poller.run_once_for_tests().await.expect("seed");
+        poller
+            .run_once_for_tests()
+            .await
+            .expect("dispatch user mention");
+
+        assert_eq!(poller.cursor_for(&k).await, Some(11));
+        let seen = dispatcher.seen.lock().unwrap();
+        assert_eq!(
+            seen.len(),
+            1,
+            "poller must ignore the hyphenated bot's own comment and dispatch the user-authored temporary @auto_review alias while configured as auto-review"
+        );
+        assert_eq!(seen[0].head_sha, "newsha");
+        assert!(seen[0].force);
     }
 
     #[tokio::test]

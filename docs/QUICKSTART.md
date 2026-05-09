@@ -187,7 +187,7 @@ Common optional env vars:
 | `LLM_CHEAP_MODEL` | — | Triage / verifier tier |
 | `LLM_EMBEDDING_MODEL` | — | Enables RAG context retrieval |
 | `AR_GATEWAY_BIND` | `0.0.0.0:8080` | Listen address |
-| `AR_BOT_LOGIN` | `auto_review` | Forgejo username for self-loop detection |
+| `AR_BOT_LOGIN` | `auto-review` | Forgejo username for self-loop detection |
 | `AR_BOT_NAME` | `=AR_BOT_LOGIN` | Mention handle |
 | `AR_LEARNINGS_DB` | — | SQLite learnings path; unset is in-memory |
 | `AR_HISTORY_DB` | — | SQLite review-history path; unset is in-memory |
