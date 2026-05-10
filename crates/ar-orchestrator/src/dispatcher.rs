@@ -484,53 +484,63 @@ pub async fn run_review_job(
         &job,
     )
     .await;
-    let (ignored_paths, guidelines, repo_context, raw_diff, workspace) = match prep_outcome {
-        Ok(WorkspacePrepOutput {
-            skipped_by_config: true,
-            ..
-        }) => {
-            tracing::info!(
-                repo = format!("{}/{}", job.owner, job.repo),
-                pr = job.pr_number,
-                "skipping review: disabled by .auto_review.yaml"
-            );
-            let _ = forgejo
-                .post_commit_status(
-                    &job.owner,
-                    &job.repo,
-                    &job.head_sha,
-                    &CommitStatus {
-                        state: CommitStatusState::Success,
-                        target_url: String::new(),
-                        description: "auto_review: disabled by repo config".into(),
-                        context: STATUS_CONTEXT.into(),
-                    },
+    let (ignored_paths, guidelines, repo_context, raw_diff, workspace, pr_metadata_check) =
+        match prep_outcome {
+            Ok(WorkspacePrepOutput {
+                skipped_by_config: true,
+                ..
+            }) => {
+                tracing::info!(
+                    repo = format!("{}/{}", job.owner, job.repo),
+                    pr = job.pr_number,
+                    "skipping review: disabled by .auto_review.yaml"
+                );
+                let _ = forgejo
+                    .post_commit_status(
+                        &job.owner,
+                        &job.repo,
+                        &job.head_sha,
+                        &CommitStatus {
+                            state: CommitStatusState::Success,
+                            target_url: String::new(),
+                            description: "auto_review: disabled by repo config".into(),
+                            context: STATUS_CONTEXT.into(),
+                        },
+                    )
+                    .await;
+                observe(ReviewObservation::Skipped {
+                    reason: "disabled_by_config",
+                });
+                return;
+            }
+            Ok(WorkspacePrepOutput {
+                ignored_paths,
+                guidelines,
+                repo_context,
+                raw_diff,
+                workspace,
+                pr_metadata_check,
+                ..
+            }) => (
+                ignored_paths,
+                guidelines,
+                repo_context,
+                raw_diff,
+                workspace,
+                pr_metadata_check,
+            ),
+            Err(e) => {
+                tracing::warn!(error = %e, "workspace/context prep failed; continuing without workspace context");
+                (
+                    GlobSet::empty(),
+                    String::new(),
+                    String::new(),
+                    String::new(),
+                    None,
+                    true,
                 )
-                .await;
-            observe(ReviewObservation::Skipped {
-                reason: "disabled_by_config",
-            });
-            return;
-        }
-        Ok(WorkspacePrepOutput {
-            ignored_paths,
-            guidelines,
-            repo_context,
-            raw_diff,
-            workspace,
-            ..
-        }) => (ignored_paths, guidelines, repo_context, raw_diff, workspace),
-        Err(e) => {
-            tracing::warn!(error = %e, "workspace/context prep failed; continuing without workspace context");
-            (
-                GlobSet::empty(),
-                String::new(),
-                String::new(),
-                String::new(),
-                None,
-            )
-        }
-    };
+            }
+        };
 
     // The agentic verifier needs the cloned workspace to inspect.
     // Operators opt in by setting AR_AGENTIC_VERIFIER=1; without it,
@@ -593,6 +603,7 @@ pub async fn run_review_job(
         previous_review_sha: incremental_diff.as_ref().and(last_reviewed_sha.as_deref()),
         verify_mode,
         workspace_path,
+        pr_metadata_check,
     })
     .await;
 
@@ -685,6 +696,7 @@ struct WorkspacePrepOutput {
     /// failed during workspace/context prep (we degrade-but-continue;
     /// the pipeline will refetch and likely also fail consistently).
     raw_diff: String,
+    pr_metadata_check: bool,
     /// Held by the orchestrator until the review pipeline finishes
     /// so the agentic verifier (when enabled) can inspect the
     /// cloned working tree. `None` when workspace prep exited
@@ -711,6 +723,7 @@ async fn prepare_workspace_context(
             skipped_by_config: true,
             ignored_paths,
             guidelines,
+            pr_metadata_check: config.pr_metadata_check,
             repo_context: String::new(),
             raw_diff: String::new(),
             workspace: None,
@@ -757,6 +770,7 @@ async fn prepare_workspace_context(
         guidelines,
         repo_context,
         raw_diff,
+        pr_metadata_check: config.pr_metadata_check,
         workspace: Some(workspace),
     })
 }

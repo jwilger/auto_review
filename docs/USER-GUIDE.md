@@ -108,6 +108,9 @@ status without reviewing.
 # Top-level switch. False = the bot skips reviewing this repo.
 enabled: true
 
+# Qualitative PR metadata gate. False skips the Cheap-tier title/body check.
+pr_metadata_check: true
+
 # Free-form text injected into the LLM system prompt as
 # "repository conventions". Use for project-specific rules.
 guidelines: |

@@ -7,6 +7,11 @@
 # status and return without calling the LLM.
 enabled: true
 
+# Qualitative PR metadata check. When true, auto_review asks the Cheap-tier
+# model whether the PR title/body are specific enough before merge; when false,
+# that pre-merge metadata check is skipped for this repo.
+pr_metadata_check: true
+
 # Free-form text injected into the LLM system prompt as authoritative
 # project conventions. Use sparingly — every byte costs tokens, and the
 # model already follows reasonable defaults. Examples of good content:

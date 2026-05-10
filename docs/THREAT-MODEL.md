@@ -322,10 +322,21 @@ the LLM only sees the first N bytes.
 markdown that instructs Forgejo or the next reviewer to act on the
 attacker's behalf.
 *Mitigation:* The bot's API calls are constructed in
-`ar_forgejo::Client`, not by the LLM. The model can choose
-*content* of comments but cannot alter the API verb or target. PR
-authors can safely ignore the bot's recommendations — the bot does
-not auto-merge, auto-approve, or auto-close.
+`ar_forgejo::Client`, not by the LLM. The reasoning model can choose
+*content* of comments but cannot alter the API verb or target. The
+cheap-tier PR metadata gate is the one intentional exception: its
+schema-constrained `{passed, rationale, offending_text}` decision can
+promote the review event to `REQUEST_CHANGES` when repo config leaves
+`pr_metadata_check` enabled. That prompt frames PR title/body as
+untrusted attacker-controlled data, tells the model to ignore
+instructions embedded in them, and requires verbatim offending-text
+quotes so humans can see the trigger. PR authors can still resolve a
+false block by editing the PR metadata or disabling the gate in repo
+config; the bot does not auto-merge, auto-approve, or auto-close.
+*Residual risk:* the metadata gate may false-block a PR if prompt
+injection or model judgment causes an incorrect failed result. The
+blast radius is a review-body `REQUEST_CHANGES` event, not arbitrary
+Forgejo API access.
 
 ## Out of Scope
 
@@ -352,8 +363,12 @@ threat-model claims fail CI when a regression slips in:
   (prompt-injection ⇒ schema allow-list), T7 (oversized diff
   cap), T8 (single-file flat-truncation fallback), and T9
   (confused-deputy via Forgejo API: schema rejects unknown
-  fields, severity is closed-enum, review event is derived from
-  finding severity not LLM input).
+  fields, severity is closed-enum, and normal review events are
+  derived from finding severity rather than LLM-selected event
+  fields). `crates/ar-review/src/pipeline.rs` tests cover the
+  explicit PR metadata gate exception: prompt-injection framing,
+  issue-criteria anchoring, verbatim offending-text quotes, and the
+  opt-out path that suppresses the cheap-tier metadata decision.
 - `crates/ar-review/tests/red_team_workspace_tools.rs` — covers
   T4 (LLM tool calls escape workspace): symlink escape, chained
   symlinks, empty paths, pathological regex.
