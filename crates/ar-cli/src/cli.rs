@@ -1262,11 +1262,9 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
-    /// Cross-file contract test: every subcommand `Cli` exposes
-    /// must appear in `docs/CLI.md`. Adding a new subcommand
-    /// without documenting it in the central CLI reference is the
-    /// kind of drift that's invisible until an operator goes
-    /// looking for the feature and fails to find it.
+    /// Cross-file public-surface contract test: every subcommand `Cli` exposes
+    /// must appear in `docs/CLI.md`. This intentionally checks only the
+    /// machine-discoverable subcommand names, not operator prose wording.
     #[test]
     fn readme_documents_every_subcommand() {
         use clap::CommandFactory;

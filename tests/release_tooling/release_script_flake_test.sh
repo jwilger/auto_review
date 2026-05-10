@@ -248,24 +248,6 @@ CHANGELOG
   fi
 }
 
-test_pr_guidance_delegates_changelog_notes_to_release_prepare() {
-  local pr_template agents skill prepare_command
-  pr_template="$ROOT/.forgejo/pull_request_template.md"
-  agents="$ROOT/AGENTS.md"
-  skill="$ROOT/.kilo/skills/rust-workspace-engineering/SKILL.md"
-  prepare_command="$ROOT/.kilo/command/prepare-forgejo-pr.md"
-
-  assert_file_not_contains "$pr_template" 'CHANGELOG.md updated (under `[Unreleased]`)' "PR template no longer requires per-PR Unreleased changelog edits"
-  assert_file_not_contains "$agents" 'CHANGELOG.md` under `[Unreleased]`' "AGENTS no longer requires per-PR Unreleased changelog edits"
-  assert_file_not_contains "$skill" 'CHANGELOG.md` under `[Unreleased]`' "Rust workspace skill no longer requires per-PR Unreleased changelog edits"
-  assert_file_not_contains "$prepare_command" 'CHANGELOG.md` needs an `[Unreleased]` entry' "prepare-forgejo-pr command no longer checks for per-PR Unreleased changelog edits"
-
-  assert_file_has_line_containing_all "$pr_template" "PR template says release notes come from conventional commits" 'release PR' 'conventional commits'
-  assert_file_has_line_containing_all "$agents" "AGENTS says release PR generates changelog notes from conventional commits" 'release PR' 'conventional commits'
-  assert_file_has_line_containing_all "$skill" "Rust workspace skill says release PR generates changelog notes from conventional commits" 'release PR' 'conventional commits'
-  assert_file_has_line_containing_all "$prepare_command" "prepare-forgejo-pr command says release PR generates changelog notes from conventional commits" 'release PR' 'conventional commits'
-}
-
 test_publish_dry_run_requires_merged_release_pr_signal() {
   local workdir unmerged_output unmerged_status merged_output merged_status
   workdir="$(mktemp -d)"
@@ -450,10 +432,6 @@ test_release_tooling_tests_are_wired_into_nix_flake_check() {
   assert_file_contains "$flake" 'skopeo' "nix flake/dev shell/check exposes skopeo for registry image publication"
   assert_file_contains "$flake" 'cargo-semver-checks' "nix flake/dev shell/check exposes cargo-semver-checks for release planning"
   assert_file_contains "$flake" '/tests/' "nix flake source includes release tooling tests"
-  assert_file_contains "$flake" 'AGENTS.md' "nix flake source includes contributor guidance checked by release tooling tests"
-  assert_file_contains "$flake" '.forgejo/pull_request_template.md' "nix flake source includes PR template checked by release tooling tests"
-  assert_file_contains "$flake" '.kilo/command/prepare-forgejo-pr.md' "nix flake source includes PR command guidance checked by release tooling tests"
-  assert_file_contains "$flake" '.kilo/skills/rust-workspace-engineering/SKILL.md' "nix flake source includes Rust workspace skill checked by release tooling tests"
 }
 
 test_release_plz_config_is_removed_and_workspace_crates_stay_private() {
@@ -476,7 +454,6 @@ run_tests \
   test_prepare_non_dry_run_updates_cargo_lock_workspace_package_versions \
   test_prepare_generates_release_notes_from_conventional_commits_since_previous_tag \
   test_prepare_does_not_duplicate_existing_release_section_when_previous_tag_is_missing \
-  test_pr_guidance_delegates_changelog_notes_to_release_prepare \
   test_publish_dry_run_requires_merged_release_pr_signal \
   test_publish_non_dry_run_uses_scoped_forgejo_commands_with_fakes \
   test_publish_non_dry_run_pushes_tag_and_sends_changelog_notes \

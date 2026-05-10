@@ -160,7 +160,14 @@ templates.
 
 Document the new subcommand in `docs/CLI.md`, and in `docs/OPERATIONS.md` if it
 changes operator workflows. The CLI contract test fails when a top-level command
-is missing from `docs/CLI.md`.
+is missing from `docs/CLI.md`; that test is intentionally limited to the public
+CLI surface and must not expand into checking prose wording.
+
+For docs-only changes, do not add deterministic tests that assert exact wording
+or required phrases. Use human/operator review for prose. Keep tests for
+executable behavior, generated docs, public CLI/contracts, schemas, deployment
+artifacts, and security red-team boundaries, and explain any docs-reading
+contract at the test site.
 
 ## Adding a new chat command
 

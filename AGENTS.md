@@ -80,6 +80,7 @@ changing public behavior. The CLI command reference lives in `docs/CLI.md`.
 - TDD is mandatory. For behavior changes, use the specialist RGR agents: `rgr-test-author` for RED, `rgr-test-reviewer` before production edits, `rgr-diagnostic-implementer` for each minimum GREEN change, and `rgr-implementation-reviewer` before REFACTOR or broader verification.
 - Plans and todo lists for behavior work must be RGR-shaped, not component waterfalls.
 - Pure parsing and formatting helpers get adjacent `#[cfg(test)] mod tests`; HTTP integration tests use `wiremock`; LLM tests use `CannedProvider` or `ScriptedProvider` fakes.
+- Do not add deterministic tests that assert documentation wording for docs-only content. Keep tests for executable behavior, generated docs, public CLI/contracts, schemas, deployment artifacts, and security red-team boundaries; justify any docs-reading contract test near the test.
 - Commits must stay green and use `feat(scope):`, `fix(scope):`, `docs:`, `chore:`, `refactor:`, or `test:`. Bodies explain why.
 - Use `read_non_empty_env(name)` and `parse_env::<T>(name)` in `ar-gateway/src/main.rs` instead of raw env parsing.
 - Cap provider error bodies with `ar_llm::cap_for_error` or equivalent helpers.
