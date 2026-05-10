@@ -36,3 +36,7 @@ LLM calls flow through `ar-llm::Router`. Review prompts and schemas come from
 - LLM paths use canned/scripted providers.
 - Security boundary claims are pinned by red-team tests referenced from
   [Threat Model](./THREAT-MODEL.md).
+- Do not turn prose-only documentation changes into deterministic wording
+  tests. Tests may read docs only when the document is generated, consumed by
+  tooling, or acts as a public contract such as `docs/CLI.md`; explain that
+  contract next to the test.
