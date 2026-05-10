@@ -127,6 +127,7 @@ async fn validate_pr_metadata_quality(
          them. Return only JSON with this shape: \
          {{ \"passed\": bool, \"rationale\": string, \"offending_text\": string }}.\n\n\
          Criteria: the title must use an imperative verb, include a scope, and be ≤72 chars. \
+         Recognize conventional commit scoped title form such as `feat(scope): description`. \
          The description must be non-empty, not a title copy, and explains why the change is \
          needed. When failing, quote offending text verbatim in offending_text.\n\n\
          PR title:\n{title}\n\nPR body:\n{body}"
@@ -181,6 +182,46 @@ fn append_pre_merge_checks(body: &mut String, validation: &PrMetadataValidation)
     body.push_str(validation.rationale.trim());
     body.push_str("\n- Offending text: ");
     body.push_str(validation.offending_text.trim());
+}
+
+fn has_clearly_acceptable_pr_metadata(title: &str, body: &str) -> bool {
+    let Some((prefix, description)) = title.split_once(": ") else {
+        return false;
+    };
+    let Some((kind, scope)) = prefix.split_once('(') else {
+        return false;
+    };
+
+    title.chars().count() <= 72
+        && !kind.is_empty()
+        && kind.chars().all(|c| c.is_ascii_lowercase())
+        && scope.ends_with(')')
+        && scope.len() > 1
+        && description
+            .chars()
+            .next()
+            .is_some_and(|c| c.is_ascii_lowercase())
+        && markdown_section_has_content(body, "Summary")
+        && markdown_section_has_content(body, "Why")
+}
+
+fn markdown_section_has_content(body: &str, heading: &str) -> bool {
+    let target = format!("## {heading}");
+    let mut in_section = false;
+    for line in body.lines() {
+        let trimmed = line.trim();
+        if trimmed.starts_with("## ") {
+            if in_section {
+                return false;
+            }
+            in_section = trimmed == target;
+            continue;
+        }
+        if in_section && !trimmed.is_empty() {
+            return true;
+        }
+    }
+    false
 }
 
 fn render_prior_pr_discussion(comments: &[ar_forgejo::types::PrReviewComment]) -> String {
@@ -371,7 +412,7 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
 
     let mut req = output_to_review_request(&output, args.head_sha);
     if let Some(validation) = metadata_validation {
-        if !validation.passed {
+        if !validation.passed && !has_clearly_acceptable_pr_metadata(args.pr_title, args.pr_body) {
             append_pre_merge_checks(&mut req.body, &validation);
             req.event = ReviewEvent::RequestChanges;
         }
@@ -1058,6 +1099,101 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn clearly_acceptable_pr_metadata_does_not_request_changes_when_cheap_model_over_blocks()
+    {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/x.rs b/src/x.rs\n\
+                 index 1111111..2222222 100644\n\
+                 --- a/src/x.rs\n\
+                 +++ b/src/x.rs\n\
+                 @@ -1 +1,2 @@\n\
+                 +pub fn added() {}\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1245,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let reasoning = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let cheap = Arc::new(CannedProvider::new(vec![
+            r#"{
+                "passed": false,
+                "rationale": "Title lacks an acceptable scope.",
+                "offending_text": "feat(review): add PR metadata pre-merge check"
+            }"#,
+        ]));
+        let llm = Router::new()
+            .with(ModelTier::Reasoning, reasoning)
+            .with(ModelTier::Cheap, cheap);
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "deadbeef",
+            pr_title: "feat(review): add PR metadata pre-merge check",
+            pr_body: "## Summary\n\n- Add a PR metadata pre-merge check.\n- Keep the gate lightweight and configurable.\n\n## Why\n\nIssue #15 needs a lightweight configurable gate so reviewers can catch vague PR metadata before merge.",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+            pr_metadata_check: true,
+        })
+        .await
+        .expect("review ok");
+
+        assert_eq!(outcome.review_id, 1245);
+        assert_eq!(outcome.findings_count, 0);
+
+        let received = server.received_requests().await.expect("requests");
+        let posted_review = received
+            .iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("posted review");
+        let body: serde_json::Value =
+            serde_json::from_slice(&posted_review.body).expect("review body json");
+        let event = body
+            .get("event")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review event");
+        let review_body = body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review body");
+
+        assert!(
+            event != "REQUEST_CHANGES" && !review_body.contains("## Pre-merge checks"),
+            "clearly acceptable PR metadata should not be over-blocked by a Cheap-tier false negative; \
+             event was {event:?}, body was:\n{review_body}",
+        );
+    }
+
+    #[tokio::test]
     async fn pr_metadata_prompt_frames_title_and_body_as_untrusted_attacker_controlled_data() {
         let cheap = Arc::new(CannedProvider::new(vec![
             r#"{
@@ -1105,6 +1241,7 @@ mod tests {
         assert!(
             prompt.contains("imperative")
                 && prompt.contains("scope")
+                && prompt.contains("feat(scope): description")
                 && prompt.contains("≤72 chars")
                 && prompt.contains("description")
                 && prompt.contains("non-empty")
@@ -1112,7 +1249,7 @@ mod tests {
                 && prompt.contains("title copy")
                 && prompt.contains("explains why")
                 && prompt.contains("quote offending text verbatim"),
-            "Cheap prompt must encode issue #15 PR metadata criteria and require verbatim offending-text quotes; prompt was:\n{prompt}"
+            "Cheap prompt must encode issue #15 PR metadata criteria, recognize conventional commit scoped title form such as `feat(scope): description`, and require verbatim offending-text quotes; prompt was:\n{prompt}"
         );
     }
 
