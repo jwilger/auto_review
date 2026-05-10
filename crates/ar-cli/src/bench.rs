@@ -406,6 +406,7 @@ async fn run_one(path: &Path, llm: &LlmRouter, verifier_enabled: bool) -> Fixtur
         previous_review_sha: None,
         guidelines: &fixture.guidelines,
         repo_context: &fixture.repo_context,
+        prior_discussion: "",
     });
 
     let started = Instant::now();

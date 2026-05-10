@@ -158,6 +158,7 @@ async fn print_dry_run_prompt(
         previous_review_sha: None,
         guidelines: "",
         repo_context: "",
+        prior_discussion: "",
     });
     println!("{prompt}");
     Ok(())

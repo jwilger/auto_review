@@ -104,6 +104,49 @@ fn apply_severity_floor(output: &mut ar_prompts::ReviewOutput, min: ReviewSeveri
     }
 }
 
+fn render_prior_pr_discussion(comments: &[ar_forgejo::types::PrReviewComment]) -> String {
+    let mut out = String::new();
+    for comment in comments {
+        let body = comment
+            .body
+            .split_whitespace()
+            .collect::<Vec<_>>()
+            .join(" ");
+        if body.is_empty() {
+            continue;
+        }
+        out.push_str("- ");
+        if comment.user.login.is_empty() {
+            out.push_str("unknown");
+        } else {
+            out.push_str(&comment.user.login);
+        }
+        out.push_str(": ");
+        out.push_str(&body);
+        out.push('\n');
+    }
+    out
+}
+
+async fn load_prior_pr_discussion(
+    forgejo: &ForgejoClient,
+    owner: &str,
+    repo: &str,
+    pr_number: u64,
+) -> Result<Vec<ar_forgejo::types::PrReviewComment>, ReviewError> {
+    let mut comments = forgejo
+        .list_pr_review_comments(owner, repo, pr_number)
+        .await?;
+    for review in forgejo.list_pull_reviews(owner, repo, pr_number).await? {
+        comments.extend(
+            forgejo
+                .list_pull_review_comments(owner, repo, pr_number, review.id)
+                .await?,
+        );
+    }
+    Ok(comments)
+}
+
 /// All inputs to [`review_pull_request`]. Bundling them into a struct
 /// keeps the call sites readable and makes adding new context (RAG
 /// snippets, learnings, etc.) a one-line change instead of churning
@@ -182,6 +225,21 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         };
 
     let repo_full = format!("{}/{}", args.owner, args.repo);
+    let prior_discussion_comments = match load_prior_pr_discussion(
+        args.forgejo,
+        args.owner,
+        args.repo,
+        args.pr_number,
+    )
+    .await
+    {
+        Ok(comments) => comments,
+        Err(e) => {
+            tracing::warn!(error = %e, "prior PR discussion unavailable; continuing review without discussion history");
+            Vec::new()
+        }
+    };
+    let prior_discussion = render_prior_pr_discussion(&prior_discussion_comments);
     let prompt = render_review_prompt(&ReviewPromptInputs {
         repo_full_name: &repo_full,
         pr_number: args.pr_number,
@@ -192,6 +250,7 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         guidelines: args.guidelines,
         repo_context: args.repo_context,
         previous_review_sha: args.previous_review_sha,
+        prior_discussion: &prior_discussion,
     });
 
     // Track the post-floor / pre-verifier count so we can report how many
@@ -1070,6 +1129,191 @@ mod tests {
                 && prompt.contains("Δ since 8f3c2d1:")
                 && prompt.contains("leave `walkthrough` empty when nothing material changed"),
             "incremental compare-diff prompt should scope walkthrough guidance to the previous review SHA; prompt was:\n{prompt}",
+        );
+    }
+
+    #[tokio::test]
+    async fn review_prompt_includes_prior_pr_discussion_history_and_dedup_guidance() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1,2 @@\n pub fn old() {}\n+pub fn added() {}\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/lib.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/issues/7/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 11,
+                    "body": "@auto_review Please add a timeout when calling the upstream API.",
+                    "user": {"login": "reviewer-bot"}
+                },
+                {
+                    "id": 12,
+                    "body": "Added the timeout and cancellation path in src/lib.rs.",
+                    "user": {"login": "alice"}
+                }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1241,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let llm = router_with(provider.clone());
+
+        review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "deadbeef",
+            pr_title: "title",
+            pr_body: "body",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+        })
+        .await
+        .expect("review ok");
+
+        let prompt = provider
+            .last_user_prompt()
+            .expect("LLM should have been called");
+        assert!(
+            prompt.contains("Prior PR discussion")
+                && prompt.contains("reviewer-bot: @auto_review Please add a timeout")
+                && prompt.contains("alice: Added the timeout and cancellation path")
+                && prompt.contains("avoid re-raising addressed concerns")
+                && prompt.contains("unless new evidence remains"),
+            "review prompt should include prior review discussion and guidance to avoid re-raising addressed concerns; prompt was:\n{prompt}",
+        );
+    }
+
+    #[tokio::test]
+    async fn review_prompt_includes_inline_review_thread_history_from_pull_reviews() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1,2 @@\n pub fn old() {}\n+pub fn added() {}\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/lib.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/issues/7/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"id": 55, "state": "COMMENT"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews/55/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {
+                    "id": 551,
+                    "body": "@auto_review Please handle nil upstream responses on this line.",
+                    "path": "src/lib.rs",
+                    "line": 2,
+                    "user": {"login": "reviewer-bot"}
+                },
+                {
+                    "id": 552,
+                    "body": "Fixed the nil response guard inline; this thread is resolved.",
+                    "path": "src/lib.rs",
+                    "line": 2,
+                    "user": {"login": "alice"}
+                }
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1242,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let llm = router_with(provider.clone());
+
+        review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "deadbeef",
+            pr_title: "title",
+            pr_body: "body",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+        })
+        .await
+        .expect("review ok");
+
+        let prompt = provider
+            .last_user_prompt()
+            .expect("LLM should have been called");
+        assert!(
+            prompt.contains("Prior PR discussion")
+                && prompt.contains("reviewer-bot: @auto_review Please handle nil upstream responses")
+                && prompt.contains("alice: Fixed the nil response guard inline")
+                && prompt.contains("avoid re-raising addressed concerns")
+                && prompt.contains("unless new evidence remains"),
+            "review prompt should include inline review-thread comments and replies from pull reviews; prompt was:\n{prompt}",
         );
     }
 

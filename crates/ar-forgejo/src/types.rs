@@ -189,6 +189,13 @@ pub struct PullRequestRefSummary {
     pub sha: String,
 }
 
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct PullReviewSummary {
+    pub id: u64,
+    #[serde(default)]
+    pub state: String,
+}
+
 /// One inline review-thread comment on a pull request — what
 /// `Client::list_pr_review_comments` returns. The chat poller uses
 /// `id` as a monotonic cursor (Forgejo issues ids from a single

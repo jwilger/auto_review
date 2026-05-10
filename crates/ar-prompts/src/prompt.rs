@@ -19,6 +19,9 @@ pub struct ReviewPromptInputs<'a> {
     /// Commit SHA that was the head of the last completed review. When
     /// present, the prompt scopes review guidance to the delta since this SHA.
     pub previous_review_sha: Option<&'a str>,
+    /// Concise existing PR discussion, formatted by the review pipeline from
+    /// Forgejo comments. Empty when the PR has no useful discussion history.
+    pub prior_discussion: &'a str,
 }
 
 const SYSTEM_PROMPT: &str = "\
@@ -79,6 +82,10 @@ const GUIDELINES_MAX_BYTES: usize = 8_192;
 /// bound. 16 KiB lets us include a meaningful similar-code window
 /// without burning the full reasoning-tier context.
 const REPO_CONTEXT_MAX_BYTES: usize = 16_384;
+
+/// Cap on prior PR discussion context. Existing conversation is reviewer
+/// signal for avoiding duplicate feedback, but it must not crowd out the diff.
+const PRIOR_DISCUSSION_MAX_BYTES: usize = 8_192;
 
 /// Render the user-facing prompt the LLM will see. The system prompt is
 /// returned separately by [`system_prompt`].
@@ -149,6 +156,22 @@ pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
         out.push_str(":` and leave `walkthrough` empty when nothing material changed.\n");
     }
 
+    if !inputs.prior_discussion.is_empty() {
+        out.push_str("\nPrior PR discussion:\n");
+        push_capped(
+            &mut out,
+            inputs.prior_discussion,
+            PRIOR_DISCUSSION_MAX_BYTES,
+            "\n[prior PR discussion truncated]",
+        );
+        if !inputs.prior_discussion.ends_with('\n') {
+            out.push('\n');
+        }
+        out.push_str(
+            "- Use this history to avoid re-raising addressed concerns unless new evidence remains in the diff.\n",
+        );
+    }
+
     out.push_str(
         "\nCI coverage advisory:\n\
          - When repository context or changed CI files show a relevant missing CI linter/check, emit a finding recommending the specific check and naming the CI gate where it appears absent.\n\
@@ -204,6 +227,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             previous_review_sha: None,
+            prior_discussion: "",
         }
     }
 
@@ -252,6 +276,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             previous_review_sha: None,
+            prior_discussion: "",
         });
         assert!(p.contains("t"));
     }
@@ -269,6 +294,7 @@ mod tests {
             guidelines: "",
             repo_context: "Function `foo` is called by 14 callers in this repo.",
             previous_review_sha: None,
+            prior_discussion: "",
         });
         assert!(p.contains("Repository context"));
         assert!(p.contains("14 callers"));
@@ -293,6 +319,7 @@ mod tests {
             guidelines: "Always prefer total functions over partial.",
             repo_context: "",
             previous_review_sha: None,
+            prior_discussion: "",
         });
         assert!(p.contains("Repository guidelines"));
         assert!(p.contains("total functions"));
@@ -351,6 +378,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             previous_review_sha: None,
+            prior_discussion: "",
         };
         let p = render_review_prompt(&inputs);
         assert!(p.contains("[PR description truncated]"));
@@ -377,6 +405,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             previous_review_sha: None,
+            prior_discussion: "",
         };
         let p = render_review_prompt(&inputs);
         assert!(p.contains("[truncated]"));
@@ -398,6 +427,7 @@ mod tests {
             guidelines: &huge_guidelines,
             repo_context: "",
             previous_review_sha: None,
+            prior_discussion: "",
         };
         let p = render_review_prompt(&inputs);
         assert!(p.contains("[guidelines truncated]"));
@@ -418,6 +448,7 @@ mod tests {
             guidelines: "",
             repo_context: &huge_context,
             previous_review_sha: None,
+            prior_discussion: "",
         };
         let p = render_review_prompt(&inputs);
         assert!(p.contains("[repo context truncated]"));
@@ -437,6 +468,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             previous_review_sha: None,
+            prior_discussion: "",
         };
         let p = render_review_prompt(&inputs);
         assert!(p.contains("Closes #42 — thanks!"));
@@ -456,6 +488,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             previous_review_sha: Some("8f3c2d1e9a0b4c5d6e7f8a9b0c1d2e3f4a5b6c7d"),
+            prior_discussion: "",
         };
 
         let p = render_review_prompt(&inputs);
@@ -481,6 +514,7 @@ mod tests {
             guidelines: "",
             repo_context: "",
             previous_review_sha: None,
+            prior_discussion: "",
         };
 
         let p = render_review_prompt(&inputs);
