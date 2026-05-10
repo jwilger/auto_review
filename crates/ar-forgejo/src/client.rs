@@ -333,6 +333,51 @@ impl Client {
         Ok(all)
     }
 
+    /// List pull request review records.
+    pub async fn list_pull_reviews(
+        &self,
+        owner: &str,
+        repo: &str,
+        n: u64,
+    ) -> Result<Vec<crate::types::PullReviewSummary>, Error> {
+        let mut all = Vec::new();
+        for page in 1..=PAGINATION_MAX_PAGES {
+            let url = self.url(&format!(
+                "repos/{owner}/{repo}/pulls/{n}/reviews?page={page}&limit={PAGINATION_PAGE_SIZE}"
+            ))?;
+            let chunk: Vec<crate::types::PullReviewSummary> = json_get(&self.http, url).await?;
+            let chunk_len = chunk.len();
+            all.extend(chunk);
+            if chunk_len < PAGINATION_PAGE_SIZE as usize {
+                break;
+            }
+        }
+        Ok(all)
+    }
+
+    /// List comments attached to one pull request review.
+    pub async fn list_pull_review_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+        n: u64,
+        review_id: u64,
+    ) -> Result<Vec<crate::types::PrReviewComment>, Error> {
+        let mut all = Vec::new();
+        for page in 1..=PAGINATION_MAX_PAGES {
+            let url = self.url(&format!(
+                "repos/{owner}/{repo}/pulls/{n}/reviews/{review_id}/comments?page={page}&limit={PAGINATION_PAGE_SIZE}"
+            ))?;
+            let chunk: Vec<crate::types::PrReviewComment> = json_get(&self.http, url).await?;
+            let chunk_len = chunk.len();
+            all.extend(chunk);
+            if chunk_len < PAGINATION_PAGE_SIZE as usize {
+                break;
+            }
+        }
+        Ok(all)
+    }
+
     /// Fetch the Forgejo server's reported version string. Used as a
     /// cheap connectivity probe by readiness checks at gateway startup.
     pub async fn get_server_version(&self) -> Result<String, Error> {
