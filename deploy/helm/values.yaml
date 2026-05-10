@@ -27,7 +27,7 @@ config:
   learningsDb: ""        # e.g. "/data/learnings.sqlite"
   historyDb: ""          # e.g. "/data/review_history.sqlite"
   # Bot identity. Operators usually want a dedicated Forgejo user
-  # named something other than `auto_review` for clarity in PR
+  # named something other than the default `auto-review` for clarity in PR
   # threads. botLogin is what the bot authenticates as;
   # botName is the @<handle> users mention.
   botLogin: ""

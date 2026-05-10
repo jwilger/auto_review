@@ -376,6 +376,16 @@ mod tests {
         hex::encode(mac.finalize().into_bytes())
     }
 
+    async fn post_issue_comment(app: axum::Router, body: Vec<u8>) -> StatusCode {
+        let sig = sign("s", &body);
+        let req = Request::post("/webhooks/forgejo")
+            .header("x-forgejo-event", "issue_comment")
+            .header("x-forgejo-signature", sig)
+            .body(Body::from(body))
+            .unwrap();
+        app.oneshot(req).await.unwrap().status()
+    }
+
     fn pr_payload(action: &str, draft: bool) -> Vec<u8> {
         serde_json::to_vec(&serde_json::json!({
             "action": action,
@@ -396,6 +406,45 @@ mod tests {
             "sender": {"login": "u", "id": 1}
         }))
         .unwrap()
+    }
+
+    #[tokio::test]
+    async fn hyphenated_bot_identity_default_recognizes_public_top_level_mentions() {
+        let state = AppState::new("s", Arc::new(NoOpDispatcher));
+        let metrics = state.metrics.clone();
+        let app = build_router(state);
+
+        let status =
+            post_issue_comment(app, comment_payload("created", "@auto-review help", "bob")).await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(
+            metrics
+                .render()
+                .contains("auto_review_chat_commands_received_total 1\n"),
+            "default gateway state must treat @auto-review as the public bot mention"
+        );
+    }
+
+    #[tokio::test]
+    async fn hyphenated_bot_identity_default_ignores_self_authored_top_level_comments() {
+        let state = AppState::new("s", Arc::new(NoOpDispatcher));
+        let metrics = state.metrics.clone();
+        let app = build_router(state);
+
+        let status = post_issue_comment(
+            app,
+            comment_payload("created", "@auto_review help", "auto-review"),
+        )
+        .await;
+
+        assert_eq!(status, StatusCode::ACCEPTED);
+        assert!(
+            metrics
+                .render()
+                .contains("auto_review_chat_commands_received_total 0\n"),
+            "default gateway state must filter comments authored by the hyphenated Forgejo bot login before any compatible mention handling"
+        );
     }
 
     fn review_requested_pr_payload(requested_reviewer: &str, draft: bool, state: &str) -> Vec<u8> {
@@ -1477,9 +1526,9 @@ mod tests {
 
     #[tokio::test]
     async fn issue_comment_from_bot_self_is_ignored() {
-        // Sender matches the default bot_login (`auto_review`) —
+        // Sender matches the default bot_login (`auto-review`) —
         // must not act (would loop).
-        let body = comment_payload("created", "@auto_review help", "auto_review");
+        let body = comment_payload("created", "@auto-review help", "auto-review");
         let sig = sign("s", &body);
         let (status, _) = send(
             "s",

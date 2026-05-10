@@ -45,10 +45,10 @@ pub struct AppState {
     pub metrics: Arc<Metrics>,
     /// Forgejo username the bot authenticates as. Used for self-loop
     /// detection (don't act on the bot's own comments). Defaults to
-    /// `auto_review`.
+    /// `auto-review`.
     pub bot_login: Arc<String>,
     /// Mention-handle the bot listens for (`@<bot_name>`). Often the
-    /// same as `bot_login`. Defaults to `auto_review`.
+    /// same as `bot_login`. Defaults to `auto-review`.
     pub bot_name: Arc<String>,
     /// Optional probe target for the `/readyz` readiness endpoint.
     /// Holds the Forgejo client (already wired for chat/dispatch) and
@@ -224,8 +224,8 @@ impl AppState {
             dispatcher,
             chat: None,
             metrics: Arc::new(Metrics::new()),
-            bot_login: Arc::new("auto_review".into()),
-            bot_name: Arc::new("auto_review".into()),
+            bot_login: Arc::new("auto-review".into()),
+            bot_name: Arc::new("auto-review".into()),
             readiness: None,
             info: None,
             webhook_rate_limit: None,

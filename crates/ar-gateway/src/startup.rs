@@ -47,6 +47,18 @@ struct GatewayStartupConfig {
     llm_reasoning_model: String,
 }
 
+#[derive(Clone, Copy)]
+struct BotIdentityEnvValues<'a> {
+    login: Option<&'a str>,
+    name: Option<&'a str>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct EffectiveBotIdentity {
+    login: String,
+    name: String,
+}
+
 #[derive(Debug)]
 pub struct StartupOptions {
     pub bare: bool,
@@ -733,6 +745,36 @@ impl GatewayStartupConfig {
     }
 }
 
+fn resolve_bot_identity(values: BotIdentityEnvValues<'_>) -> Result<EffectiveBotIdentity> {
+    let bot_login = match values.login {
+        Some(v) if v.trim().is_empty() => {
+            anyhow::bail!(
+                "AR_BOT_LOGIN is set to an empty/whitespace value; \
+                 unset it to take the default (`auto-review`) or set \
+                 the bot's actual Forgejo login"
+            );
+        }
+        Some(v) => v.to_string(),
+        None => "auto-review".to_string(),
+    };
+    let bot_name = match values.name {
+        Some(v) if v.trim().is_empty() => {
+            anyhow::bail!(
+                "AR_BOT_NAME is set to an empty/whitespace value; \
+                 unset it to inherit AR_BOT_LOGIN or set the @-handle \
+                 users mention"
+            );
+        }
+        Some(v) => v.to_string(),
+        None => bot_login.clone(),
+    };
+
+    Ok(EffectiveBotIdentity {
+        login: bot_login,
+        name: bot_name,
+    })
+}
+
 pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -830,28 +872,14 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     // its own comments — a real loop bomb. AR_BOT_NAME is the
     // mention parser's `@<name>` token; an empty value would match
     // every `@` and fire on every PR thread mention, also bad.
-    let bot_login = match env::var("AR_BOT_LOGIN") {
-        Ok(v) if v.trim().is_empty() => {
-            anyhow::bail!(
-                "AR_BOT_LOGIN is set to an empty/whitespace value; \
-                 unset it to take the default (`auto_review`) or set \
-                 the bot's actual Forgejo login"
-            );
-        }
-        Ok(v) => v,
-        Err(_) => "auto_review".to_string(),
-    };
-    let bot_name = match env::var("AR_BOT_NAME") {
-        Ok(v) if v.trim().is_empty() => {
-            anyhow::bail!(
-                "AR_BOT_NAME is set to an empty/whitespace value; \
-                 unset it to inherit AR_BOT_LOGIN or set the @-handle \
-                 users mention"
-            );
-        }
-        Ok(v) => v,
-        Err(_) => bot_login.clone(),
-    };
+    let bot_login_env = env::var("AR_BOT_LOGIN").ok();
+    let bot_name_env = env::var("AR_BOT_NAME").ok();
+    let bot_identity = resolve_bot_identity(BotIdentityEnvValues {
+        login: bot_login_env.as_deref(),
+        name: bot_name_env.as_deref(),
+    })?;
+    let bot_login = bot_identity.login;
+    let bot_name = bot_identity.name;
 
     let forgejo =
         Arc::new(ForgejoClient::new(&forgejo_base, &forgejo_token).context("forgejo client")?);
@@ -1076,7 +1104,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
 
     let dispatcher = Arc::new(dispatcher_builder);
 
-    // Background poller for inline review-thread `@auto_review`
+    // Background poller for inline review-thread `@auto-review`
     // mentions. Forgejo doesn't fire pull_request_review_comment
     // webhooks reliably for thread replies (gitea#26023), so we
     // poll. Disabled when AR_POLL_INTERVAL_SECS=0.
@@ -1488,6 +1516,45 @@ mod tests {
             launcher_wiring[selector..].contains("external_isolation:"),
             "run_from_env must wire AR_GATEWAY_EXTERNAL_ISOLATION into GatewayLauncherEnvValues::external_isolation"
         );
+    }
+
+    #[test]
+    fn hyphenated_bot_identity_is_the_startup_default_for_poller_and_info() {
+        let identity = resolve_bot_identity(BotIdentityEnvValues {
+            login: None,
+            name: None,
+        })
+        .unwrap();
+
+        assert_eq!(identity.login, "auto-review");
+        assert_eq!(
+            identity.name, identity.login,
+            "AR_BOT_NAME should inherit the effective AR_BOT_LOGIN default when unset"
+        );
+    }
+
+    #[test]
+    fn explicit_hyphenated_bot_login_is_preserved_and_name_inherits_it() {
+        let identity = resolve_bot_identity(BotIdentityEnvValues {
+            login: Some("auto-review"),
+            name: None,
+        })
+        .unwrap();
+
+        assert_eq!(identity.login, "auto-review");
+        assert_eq!(identity.name, "auto-review");
+    }
+
+    #[test]
+    fn explicit_bot_name_can_override_login_for_mentions() {
+        let identity = resolve_bot_identity(BotIdentityEnvValues {
+            login: Some("forgejo-bot"),
+            name: Some("auto-review"),
+        })
+        .unwrap();
+
+        assert_eq!(identity.login, "forgejo-bot");
+        assert_eq!(identity.name, "auto-review");
     }
 
     #[test]

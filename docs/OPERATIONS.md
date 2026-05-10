@@ -157,7 +157,7 @@ reviews by default. That includes ordinary lifecycle events such as `opened` and
 `synchronize` as well as `review_requested`; use the CI workflow to decide which
 deterministic checks must pass before calling `POST /reviews/ci`.
 
-Explicit chat commands are the intentional bypass. `@auto_review re-review`
+Explicit chat commands are the intentional bypass. `@auto-review re-review`
 queues a forced review at the current PR head and replies that it intentionally
 bypasses CI gating, so authors can distinguish it from the normal
 waiting-for-CI/action-triggered lifecycle.

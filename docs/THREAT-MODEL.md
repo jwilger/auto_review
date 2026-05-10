@@ -90,7 +90,7 @@ contents, arbitrary repo files (lint configs, scripts), arbitrary
 PR title/body.
 
 **A2 — Authenticated collaborator.** Can additionally invoke
-`@auto_review` chat commands (`re-review`, `remember`, `forget`,
+`@auto-review` chat commands (`re-review`, `remember`, `forget`,
 `autofix`, `tests`, `docstring`). Goal: poison the learnings store
 to degrade future reviews, or push autofix patches that smuggle
 malicious code past human review.
@@ -277,7 +277,7 @@ release operators own runner provisioning, isolation, and audit logs.
 ### T6. Learnings-store poisoning
 
 *Attacker:* A2.
-*Path:* Repeatedly invoke `@auto_review remember <malicious text>`
+*Path:* Repeatedly invoke `@auto-review remember <malicious text>`
 to inject prompt-fragments that future reviews retrieve.
 *Mitigation:* Chat commands are gated to authenticated PR
 participants by Forgejo's permission model. Stored learnings are

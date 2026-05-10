@@ -1,40 +1,40 @@
-//! Parser for `@auto_review <command>` mentions in PR comments.
+//! Parser for `@auto-review <command>` mentions in PR comments.
 //!
 //! The webhook handler in `ar-gateway` calls into here to decide what
 //! a user's comment is asking for. Pure function; no I/O.
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatCommand {
-    /// `@auto_review remember <text>` — store a learning that biases
+    /// `@auto-review remember <text>` — store a learning that biases
     /// future reviews of this repo.
     Remember(String),
-    /// `@auto_review forget <id>` — drop a previously-remembered
+    /// `@auto-review forget <id>` — drop a previously-remembered
     /// learning by its numeric id.
     Forget(u64),
-    /// `@auto_review re-review` (or `rereview`, `review-again`) —
+    /// `@auto-review re-review` (or `rereview`, `review-again`) —
     /// re-run the full review on the current head SHA, ignoring any
     /// recorded review history.
     ReReview,
-    /// `@auto_review autofix` — ask the cheap-tier model to emit
+    /// `@auto-review autofix` — ask the cheap-tier model to emit
     /// inline patch suggestions for the diff. Each patch is posted
     /// as a Forgejo review comment with a `\`\`\`suggestion` block
     /// that the author can apply with one click.
     Autofix,
-    /// `@auto_review docstring` — find functions, methods, and
+    /// `@auto-review docstring` — find functions, methods, and
     /// classes in the diff that lack docstrings and propose them
     /// as inline `\`\`\`suggestion` patches. Same posting flow as
     /// [`Autofix`]; different system prompt.
     Docstrings,
-    /// `@auto_review tests` — find newly-added items in the diff
+    /// `@auto-review tests` — find newly-added items in the diff
     /// that lack test coverage and post a markdown comment with
     /// scaffolded test cases the author can copy into their test
     /// suite. Unlike [`Autofix`] / [`Docstrings`], tests usually
     /// live in a separate file, so we post a single issue comment
     /// rather than inline review-comment suggestions.
     TestScaffolds,
-    /// `@auto_review help` — print the supported commands.
+    /// `@auto-review help` — print the supported commands.
     Help,
-    /// `@auto_review <anything else>` — falls through to freeform
+    /// `@auto-review <anything else>` — falls through to freeform
     /// chat. The handler will pass `text` to the LLM.
     Freeform(String),
     /// The comment doesn't mention the bot at all (or mentions a
@@ -45,24 +45,30 @@ pub enum ChatCommand {
 /// Parse a comment body looking for `@<bot_name> <command>` on any
 /// line. The first matching line wins; subsequent lines are ignored.
 ///
-/// Mention matching is case-insensitive (`@AUTO_REVIEW` and
-/// `@auto_review` both reach a bot configured as `auto_review`).
+/// Mention matching is case-insensitive (`@AUTO-REVIEW` reaches a bot
+/// configured as `auto-review`). A bot configured as `auto-review` also
+/// accepts `@auto_review` as a temporary compatibility alias.
 /// Forgejo treats usernames as case-insensitive in its UI and links
 /// either form to the same user, so the parser has to follow suit
 /// or the bot would silently skip legitimate mentions.
 pub fn parse_chat_command(body: &str, bot_name: &str) -> ChatCommand {
     let mention = format!("@{bot_name}");
+    let compatibility_mention = (bot_name == "auto-review").then_some("@auto_review");
     for raw_line in body.lines() {
         let line = raw_line.trim();
-        // Case-insensitive prefix check so @Auto_Review matches
-        // @auto_review. The mention itself is ASCII (Forgejo
+        // Case-insensitive prefix check so @Auto-Review matches
+        // @auto-review. The mention itself is ASCII (Forgejo
         // usernames are restricted to ASCII alphanumerics + `-_.`),
         // so eq_ignore_ascii_case is the right semantic.
-        let after = match line.as_bytes().get(..mention.len()) {
-            Some(prefix) if prefix.eq_ignore_ascii_case(mention.as_bytes()) => {
-                &line[mention.len()..]
-            }
-            _ => continue,
+        let after = if let Some(after) = strip_mention(line, &mention) {
+            after
+        } else if let Some(alias) = compatibility_mention {
+            let Some(after) = strip_mention(line, alias) else {
+                continue;
+            };
+            after
+        } else {
+            continue;
         };
         // Require a separator after the mention (whitespace, punctuation,
         // or end-of-line). Avoids matching "@auto_reviewer" against
@@ -73,7 +79,7 @@ pub fn parse_chat_command(body: &str, bot_name: &str) -> ChatCommand {
             _ => {}
         }
         // Strip leading separators (`:` `,` `!` `?` `.`) and whitespace
-        // before classification so "@auto_review: help" and "@auto_review,
+        // before classification so "@auto-review: help" and "@auto-review,
         // help" route to Help, not Freeform(": help").
         let rest = after
             .trim_start_matches(|c: char| c.is_whitespace() || is_separator(c))
@@ -81,6 +87,13 @@ pub fn parse_chat_command(body: &str, bot_name: &str) -> ChatCommand {
         return classify(rest);
     }
     ChatCommand::NotMentioned
+}
+
+fn strip_mention<'a>(line: &'a str, mention: &str) -> Option<&'a str> {
+    line.as_bytes()
+        .get(..mention.len())
+        .filter(|prefix| prefix.eq_ignore_ascii_case(mention.as_bytes()))
+        .map(|_| &line[mention.len()..])
 }
 
 fn is_separator(c: char) -> bool {
@@ -294,5 +307,19 @@ mod tests {
     fn custom_bot_name_is_supported() {
         let cmd = parse_chat_command("@reviewer help", "reviewer");
         assert_eq!(cmd, ChatCommand::Help);
+    }
+
+    #[test]
+    fn hyphenated_bot_identity_accepts_public_mention_and_temporary_underscore_alias() {
+        assert_eq!(
+            parse_chat_command("@auto-review help", "auto-review"),
+            ChatCommand::Help,
+            "the public Forgejo bot identity is hyphenated and must be recognized"
+        );
+        assert_eq!(
+            parse_chat_command("@auto_review help", "auto-review"),
+            ChatCommand::Help,
+            "keep @auto_review as a temporary compatibility alias while deployments transition"
+        );
     }
 }
