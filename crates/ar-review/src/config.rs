@@ -29,6 +29,9 @@ pub struct RepoConfig {
     /// rendering.
     #[serde(default)]
     pub ignored_paths: Vec<String>,
+
+    #[serde(default = "default_true")]
+    pub pr_metadata_check: bool,
 }
 
 fn default_true() -> bool {
@@ -41,6 +44,7 @@ impl Default for RepoConfig {
             enabled: true,
             guidelines: String::new(),
             ignored_paths: Vec::new(),
+            pr_metadata_check: true,
         }
     }
 }
@@ -58,7 +62,12 @@ pub fn parse_repo_config(yaml: &str) -> Result<RepoConfig, serde_yaml::Error> {
 /// in sync with [`RepoConfig`] manually — the contract test
 /// `strict_allowlist_matches_struct_fields` in `config.rs` pins
 /// the relationship.
-const KNOWN_KEYS: &[&str] = &["enabled", "guidelines", "ignored_paths"];
+const KNOWN_KEYS: &[&str] = &[
+    "enabled",
+    "guidelines",
+    "ignored_paths",
+    "pr_metadata_check",
+];
 
 /// Strict parser: surfaces unknown top-level keys as errors so a
 /// typo like `enabld: true` (missing `e`) is caught at validation
@@ -168,6 +177,23 @@ mod tests {
         assert!(cfg.enabled);
         assert!(cfg.guidelines.is_empty());
         assert!(cfg.ignored_paths.is_empty());
+        let value = serde_yaml::to_value(&cfg).unwrap();
+        let map = value.as_mapping().unwrap();
+        let metadata_check = map
+            .get(serde_yaml::Value::String("pr_metadata_check".into()))
+            .and_then(serde_yaml::Value::as_bool);
+        assert_eq!(metadata_check, Some(true));
+    }
+
+    #[test]
+    fn parses_pr_metadata_check_false() {
+        let cfg = parse_repo_config("pr_metadata_check: false\n").expect("parse config");
+        let value = serde_yaml::to_value(&cfg).unwrap();
+        let map = value.as_mapping().unwrap();
+        let metadata_check = map
+            .get(serde_yaml::Value::String("pr_metadata_check".into()))
+            .and_then(serde_yaml::Value::as_bool);
+        assert_eq!(metadata_check, Some(false));
     }
 
     #[test]
@@ -293,10 +319,16 @@ ignored_paths:
 
     #[test]
     fn strict_parses_known_config_cleanly() {
-        let yaml = "enabled: true\nignored_paths:\n  - vendor/**\n";
+        let yaml = "enabled: true\npr_metadata_check: false\nignored_paths:\n  - vendor/**\n";
         let cfg = parse_repo_config_strict(yaml).expect("ok");
         assert!(cfg.enabled);
         assert_eq!(cfg.ignored_paths, vec!["vendor/**"]);
+        let value = serde_yaml::to_value(&cfg).unwrap();
+        let map = value.as_mapping().unwrap();
+        let metadata_check = map
+            .get(serde_yaml::Value::String("pr_metadata_check".into()))
+            .and_then(serde_yaml::Value::as_bool);
+        assert_eq!(metadata_check, Some(false));
     }
 
     #[test]
