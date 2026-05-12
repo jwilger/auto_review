@@ -11,7 +11,7 @@ on:
 
 jobs:
   release-publish:
-    runs-on: docker
+    runs-on: docker-release
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' && inputs.release_merge_sha != '' }}
     environment: release-publish
     steps:

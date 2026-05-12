@@ -1479,8 +1479,8 @@ if not job_match:
     sys.exit(1)
 
 job = job_match.group('body')
-if not re.search(r'(?m)^    runs-on:\s*docker\s*$', job):
-    errors.append('release-publish job must run in a Docker container instead of directly on a native host runner')
+if not re.search(r'(?m)^    runs-on:\s*docker-release\s*$', job):
+    errors.append('release-publish job must use the dedicated docker-release Forgejo runner label')
 
 step_match = re.search(r'- name: Build and verify Linux binary release artifacts(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
 if not step_match:
@@ -1536,9 +1536,9 @@ PY
 )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "publish workflow builds x86_64 Linux binary artifacts in Docker"
+    pass "publish workflow builds x86_64 Linux binary artifacts on the Docker release runner"
   else
-    fail "publish workflow builds x86_64 Linux binary artifacts in Docker ($output)"
+    fail "publish workflow builds x86_64 Linux binary artifacts on the Docker release runner ($output)"
   fi
 }
 

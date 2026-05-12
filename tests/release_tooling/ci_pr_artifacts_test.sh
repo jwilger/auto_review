@@ -153,6 +153,106 @@ PY
   fi
 }
 
+test_ci_workflow_uses_runner_labels_by_job_workload() {
+  local ci_workflow output status
+  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+
+  output="$(python3 - "$ci_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+jobs = {
+    match.group('name'): match.group('body')
+    for match in re.finditer(r'(?ms)^  (?P<name>[a-zA-Z0-9_-]+):\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
+}
+expected_runner_labels = {
+    'flake-check': 'ubuntu-24.04',
+    'semantic-review': 'ubuntu-24.04',
+    'pr-artifact-build': 'docker-release',
+    'pr-packages': 'ubuntu-24.04',
+}
+
+for job_name, expected_label in expected_runner_labels.items():
+    body = jobs.get(job_name)
+    if body is None:
+        errors.append(f'CI workflow is missing the {job_name} job')
+        continue
+    match = re.search(r'(?m)^    runs-on:\s*(?P<label>[^\n#]+)', body)
+    if not match:
+        errors.append(f'{job_name} must declare runs-on: {expected_label}')
+        continue
+    actual_label = match.group('label').strip().strip('"\'')
+    if actual_label != expected_label:
+        errors.append(f'{job_name} must use runs-on: {expected_label} (found {actual_label})')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "CI workflow uses runner labels by job workload"
+  else
+    fail "CI workflow uses runner labels by job workload ($output)"
+  fi
+}
+
+test_ci_semantic_review_dispatch_is_best_effort_when_gateway_request_fails() {
+  local ci_workflow output status
+  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+
+  output="$(python3 - "$ci_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+jobs = {
+    match.group('name'): match.group('body')
+    for match in re.finditer(r'(?ms)^  (?P<name>[a-zA-Z0-9_-]+):\n(?P<body>.*?)(?=^  [a-zA-Z0-9_-]+:|\Z)', workflow)
+}
+
+semantic_review = jobs.get('semantic-review')
+if semantic_review is None:
+    errors.append('CI workflow is missing the semantic-review job')
+else:
+    request_steps = [
+        step.group('step')
+        for step in re.finditer(r'(?ms)^      - (?P<step>.*?)(?=^      - |^  [a-zA-Z0-9_-]+:|\Z)', semantic_review)
+        if '/reviews/ci' in step.group('step')
+    ]
+    if not request_steps:
+        errors.append('semantic-review job must request /reviews/ci')
+    for step in request_steps:
+        curl_lines = [line for line in step.splitlines() if re.search(r'\bcurl\b', line) or '/reviews/ci' in line]
+        curl_block = '\n'.join(curl_lines)
+        job_is_non_blocking = re.search(r'(?m)^    continue-on-error:\s*true\s*$', semantic_review)
+        step_is_non_blocking = re.search(r'(?m)^        continue-on-error:\s*true\s*$', step)
+        curl_handles_failure = re.search(r'(?s)curl\b.*(?:\|\|\s*(?:true|echo\b|printf\b|:)\b|if\s+!\s+curl\b|curl\b.*;\s*then)', step)
+        if not (job_is_non_blocking or step_is_non_blocking or curl_handles_failure):
+            errors.append('semantic-review /reviews/ci curl dispatch must be best-effort/non-blocking so gateway request failures do not fail CI')
+            errors.append('observed blocking curl dispatch: ' + ' '.join(part.strip() for part in curl_block.splitlines()))
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "CI semantic review dispatch is best-effort when the gateway request fails"
+  else
+    fail "CI semantic review dispatch is best-effort when the gateway request fails ($output)"
+  fi
+}
+
 test_ci_pr_package_publication_is_token_isolated_from_untrusted_builds() {
   local ci_workflow output status
   ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
@@ -1247,6 +1347,8 @@ PY
 run_tests \
   test_ci_workflow_publishes_pr_docker_and_binary_packages_updates_pr_body_and_deletes_on_merge \
   test_ci_and_cleanup_workflows_have_clear_triggers_and_job_names \
+  test_ci_workflow_uses_runner_labels_by_job_workload \
+  test_ci_semantic_review_dispatch_is_best_effort_when_gateway_request_fails \
   test_ci_pr_package_publication_is_token_isolated_from_untrusted_builds \
   test_ci_pr_package_artifact_handoff_avoids_v4_artifact_actions \
   test_ci_pr_package_tool_resolution_prepares_nix_before_default_profile_checks \
