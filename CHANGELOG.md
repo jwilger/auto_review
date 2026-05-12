@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.9.0] - 2026-05-12
+
+### Added
+
+- *(review)* add PR metadata pre-merge check (#182)
+
+### Fixed
+
+- *(release)* attach assets during release creation (#173)
+- *(release)* package runnable binary archives (#175)
+- *(chat)* use hyphenated bot identity (#177)
+- *(review)* include prior PR discussion in follow-up reviews (#178)
+- *(review)* accept release PR metadata (#184)
+
+### Other
+
+- release v0.8.3 (#170)
+- consolidate operator documentation (#172)
+- *(docs)* remove prose wording checks (#181)
+
 ## [0.8.3] - 2026-05-09
 
 ### Fixed
