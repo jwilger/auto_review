@@ -9,6 +9,7 @@ scripts=(
   "$TEST_DIR/prepare_workflow_test.sh"
   "$TEST_DIR/publish_workflow_test.sh"
   "$TEST_DIR/ci_pr_artifacts_test.sh"
+  "$TEST_DIR/workflow_runner_labels_test.sh"
   "$TEST_DIR/docs_secrets_test.sh"
   "$TEST_DIR/release_script_flake_test.sh"
 )
