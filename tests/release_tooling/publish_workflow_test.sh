@@ -131,6 +131,94 @@ PY
   fi
 }
 
+test_publish_workflow_heredoc_terminators_are_not_indented_after_yaml_stripping() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow_path = pathlib.Path(sys.argv[1])
+workflow = workflow_path.read_text()
+errors = []
+
+
+def leading_spaces(line):
+    return len(line) - len(line.lstrip(' '))
+
+
+def run_blocks(workflow_text):
+    lines = workflow_text.splitlines()
+    index = 0
+    while index < len(lines):
+        line = lines[index]
+        match = re.match(r'^(?P<indent> *)run:\s*\|\s*$', line)
+        if not match:
+            index += 1
+            continue
+
+        run_indent = len(match.group('indent'))
+        block_start_line = index + 1
+        block_lines = []
+        index += 1
+        while index < len(lines):
+            block_line = lines[index]
+            if block_line.strip() and leading_spaces(block_line) <= run_indent:
+                break
+            block_lines.append((index + 1, block_line))
+            index += 1
+        yield block_start_line, block_lines
+
+
+def strip_yaml_block_indentation(block_lines):
+    non_empty_indents = [
+        leading_spaces(line)
+        for _, line in block_lines
+        if line.strip()
+    ]
+    if not non_empty_indents:
+        return []
+    block_indent = min(non_empty_indents)
+    return [
+        (line_number, line[block_indent:] if len(line) >= block_indent else '')
+        for line_number, line in block_lines
+    ]
+
+
+for _, block_lines in run_blocks(workflow):
+    shell_lines = strip_yaml_block_indentation(block_lines)
+    pending_heredocs = []
+    for line_number, shell_line in shell_lines:
+        for marker in re.findall(r"<<-?\s*['\"]?([A-Za-z_][A-Za-z0-9_]*)['\"]?", shell_line):
+            pending_heredocs.append((marker, line_number, shell_line.strip()))
+
+        if not pending_heredocs:
+            continue
+
+        marker, opener_line_number, opener = pending_heredocs[0]
+        if shell_line == marker:
+            pending_heredocs.pop(0)
+        elif shell_line.strip() == marker:
+            errors.append(
+                f'{workflow_path}: line {line_number}: heredoc terminator {marker!r} is indented after YAML run-block stripping; '
+                f'opener at line {opener_line_number}: {opener}'
+            )
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow heredoc terminators start at shell column zero after YAML stripping"
+  else
+    fail "publish workflow heredoc terminators start at shell column zero after YAML stripping ($output)"
+  fi
+}
+
 test_publish_workflow_validates_provenance_and_changed_files_before_publish_token() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
@@ -148,7 +236,7 @@ import re
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text()
-publish_marker = 'Publish Docker image to Forgejo package registry'
+publish_marker = 'Promote release PR Docker image to Forgejo package registry'
 if publish_marker not in workflow:
     print('missing Docker image registry publish marker')
     sys.exit(1)
@@ -216,8 +304,8 @@ PY
   fi
   assert_file_contains "$publish_workflow" '.forgejo/workflows/*|scripts/*)' "publish workflow explicitly rejects script and workflow changes before publishing"
   assert_file_contains "$publish_workflow" 'refusing token-bearing publish for release PR file:' "publish workflow fails closed for unexpected release PR files"
-  assert_file_contains_before "$publish_workflow" 'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"' 'Publish Docker image to Forgejo package registry' "publish workflow validates changed files before publishing the image with the publish token"
-  assert_file_contains_before "$publish_workflow" '.forgejo/workflows/*|scripts/*)' 'Publish Docker image to Forgejo package registry' "publish workflow rejects script and workflow changes before publishing the image with the publish token"
+  assert_file_contains_before "$publish_workflow" 'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"' 'Promote release PR Docker image to Forgejo package registry' "publish workflow validates changed files before promoting the image with the publish token"
+  assert_file_contains_before "$publish_workflow" '.forgejo/workflows/*|scripts/*)' 'Promote release PR Docker image to Forgejo package registry' "publish workflow rejects script and workflow changes before promoting the image with the publish token"
 }
 
 test_publish_workflow_uses_push_sha_without_dispatch_inputs_on_push_path() {
@@ -264,7 +352,7 @@ validation_marker = 'Validate release provenance and changed files'
 if validation_marker not in workflow:
     errors.append('publish workflow must validate provenance before token-bearing publish')
 else:
-    validation_section = workflow.split(validation_marker, 1)[1].split('Publish Docker image to Forgejo package registry', 1)[0]
+    validation_section = workflow.split(validation_marker, 1)[1].split('Promote release PR Docker image to Forgejo package registry', 1)[0]
     if 'RELEASE_MERGE_SHA' not in validation_section or 'git rev-parse HEAD' not in validation_section:
         errors.append('publish workflow must validate the checked-out push/dispatch commit against RELEASE_MERGE_SHA before token-bearing publish')
 
@@ -313,7 +401,7 @@ trusted_metadata_patterns = [
 if not any(re.search(pattern, workflow) for pattern in trusted_metadata_patterns):
     errors.append('publish workflow must derive RELEASE_VERSION from trusted Cargo.toml at the checked-out merge commit')
 
-publish_marker = 'Publish Docker image to Forgejo package registry'
+publish_marker = 'Promote release PR Docker image to Forgejo package registry'
 if publish_marker in workflow:
     before_publish = workflow.split(publish_marker, 1)[0]
     if 'Cargo.toml' not in before_publish or 'RELEASE_VERSION' not in before_publish:
@@ -385,7 +473,7 @@ PY
     fail "publish workflow checkout fetches full history without persisting credentials ($output)"
   fi
   assert_file_contains "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' "publish workflow asserts HEAD is the merged release PR commit"
-  assert_file_contains_before "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' 'Publish Docker image to Forgejo package registry' "publish workflow verifies checked-out merge commit before publishing the image with the publish token"
+  assert_file_contains_before "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' 'Promote release PR Docker image to Forgejo package registry' "publish workflow verifies checked-out merge commit before promoting the image with the publish token"
 }
 
 test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_image_publish() {
@@ -398,7 +486,7 @@ import re
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text()
-publish_marker = 'Publish Docker image to Forgejo package registry'
+publish_marker = 'Promote release PR Docker image to Forgejo package registry'
 if publish_marker not in workflow:
     print('missing Docker image registry publication step')
     sys.exit(1)
@@ -556,13 +644,13 @@ PY
 )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "publish workflow builds release image and generates Forgejo release notes after merge"
+    pass "publish workflow promotes release image and generates Forgejo release notes after merge"
   else
-    fail "publish workflow builds release image and generates Forgejo release notes after merge ($output)"
+    fail "publish workflow promotes release image and generates Forgejo release notes after merge ($output)"
   fi
 }
 
-test_publish_workflow_publishes_nix_docker_image_to_forgejo_registry() {
+test_publish_workflow_promotes_release_pr_docker_image_to_forgejo_registry() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
@@ -580,16 +668,17 @@ if 'RELEASE_REGISTRY_USER' in workflow:
 
 required_markers = [
     'git.johnwilger.com/jwilger/auto_review/ar-gateway',
+    'git.johnwilger.com/jwilger/auto_review/ar-gateway-pr',
     'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}',
     'RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}',
-    'nix build .#ar-gateway-image',
-    'docker-archive:./result',
+    '$RELEASE_MERGE_SHA',
+    '$RELEASE_PR_HEAD_SHA',
 ]
 missing = [marker for marker in required_markers if marker not in workflow]
 if missing:
-    errors.append('publish workflow does not build and publish the release Docker image after merge: ' + ', '.join(missing))
-if 'RELEASE_CANDIDATE_SHA' in workflow:
-    errors.append('publish workflow must not depend on pre-merge candidate image tags')
+    errors.append('publish workflow does not promote the release PR Docker image after merge: ' + ', '.join(missing))
+if 'nix build .#ar-gateway-image' in workflow or 'docker-archive:./result' in workflow:
+    errors.append('publish workflow must not rebuild or publish a local Docker archive after merge; it must promote the release PR image')
 
 lines = workflow.splitlines()
 def workflow_steps():
@@ -613,23 +702,28 @@ for index, line in enumerate(lines):
             step_lines.append(nested)
         step = '\n'.join(step_lines)
         if 'RELEASE_PUBLISH_TOKEN' in step and 'nix build .#ar-gateway-image' in step:
-            errors.append('token-bearing publish step must publish only after a separate no-token Nix image build')
+            errors.append('token-bearing publish step must not rebuild the Docker image after merge')
             break
 
 publication_steps = []
 for step in workflow_steps():
-    if 'Publish Docker image to Forgejo package registry' in step or ('skopeo copy' in step and 'docker-archive:./result' in step):
+    if 'Promote release PR Docker image to Forgejo package registry' in step or ('skopeo copy' in step and 'ar-gateway-pr:release-v' in step):
         publication_steps.append(step)
 if not publication_steps:
-    errors.append('publish workflow is missing concrete skopeo publication from docker-archive:./result')
+    errors.append('publish workflow is missing concrete skopeo promotion from the release PR image')
     before_publish = workflow
     publish_text = ''
 else:
     first_publish = min(workflow.find(step) for step in publication_steps)
     before_publish = workflow[:first_publish]
     publish_text = '\n'.join(publication_steps)
-    if 'docker-archive:./result' not in publish_text:
-        errors.append('publish workflow must publish the Nix-built image archive after merge')
+    source_image_pattern = r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway-pr:release-v(?:\$\{?RELEASE_VERSION\}?)[^\s"\']*(?:\$\{?RELEASE_PR_HEAD_SHA\}?)'
+    if not re.search(source_image_pattern, publish_text):
+        errors.append('publish workflow must promote from the release PR image tag that includes the CI-produced $RELEASE_PR_HEAD_SHA suffix')
+    if re.search(r'ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?-[^\s"\']*\$\{?RELEASE_MERGE_SHA\}?', publish_text):
+        errors.append('publish workflow must not use $RELEASE_MERGE_SHA as the release PR image tag suffix; CI produced release-v$RELEASE_VERSION-$RELEASE_PR_HEAD_SHA')
+    if re.search(r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?(?:["\'\s]|$)', publish_text):
+        errors.append('publish workflow must reject mutable version-only source tag release-v$RELEASE_VERSION')
     version_destinations = [
         'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_VERSION',
         'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_VERSION}',
@@ -664,9 +758,241 @@ PY
 )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "publish workflow publishes the Nix-built Docker image to the Forgejo package registry"
+    pass "publish workflow promotes the release PR Docker image to the Forgejo package registry"
   else
-    fail "publish workflow publishes the Nix-built Docker image to the Forgejo package registry ($output)"
+    fail "publish workflow promotes the release PR Docker image to the Forgejo package registry ($output)"
+  fi
+}
+
+test_publish_workflow_promotes_final_tags_from_sha_bound_release_pr_digest() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+step_match = re.search(
+    r'(?ms)^      - name: Promote release PR Docker image to Forgejo package registry\n(?P<step>.*?)(?=^      - |\Z)',
+    workflow,
+)
+if not step_match:
+    errors.append('publish workflow is missing the release PR image promotion step')
+    step = ''
+else:
+    step = step_match.group('step')
+
+if step:
+    source_tag_pattern = r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?-[^\s"\']*\$\{?RELEASE_PR_HEAD_SHA\}?'
+    merge_sha_source_tag_pattern = r'ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?-[^\s"\']*\$\{?RELEASE_MERGE_SHA\}?'
+    source_vars = set()
+    digest_vars = set()
+    digest_source_vars = set()
+    inspect_result_vars = set()
+
+    for line in step.splitlines():
+        stripped = line.strip()
+        assignment = re.match(r'([A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)', stripped)
+        if assignment and re.search(source_tag_pattern, assignment.group('value')):
+            source_vars.add(assignment.group(1))
+
+    def references_sha_bound_source(text):
+        if re.search(source_tag_pattern, text):
+            return True
+        return any(f'${var}' in text or '${' + var + '}' in text for var in source_vars)
+
+    if not references_sha_bound_source(step):
+        errors.append('release-publish must retain the $RELEASE_PR_HEAD_SHA source tag existence check before promotion')
+    if re.search(merge_sha_source_tag_pattern, step):
+        errors.append('release-publish must not use $RELEASE_MERGE_SHA as the release PR image tag suffix; the source tag must be release-v$RELEASE_VERSION-$RELEASE_PR_HEAD_SHA')
+
+    inspect_lines = []
+    for line in step.splitlines():
+        stripped = line.strip()
+        if 'inspect' not in stripped or 'skopeo' not in stripped and '$SKOPEO' not in stripped and '${SKOPEO}' not in stripped:
+            continue
+        if references_sha_bound_source(stripped):
+            inspect_lines.append(stripped)
+            assignment = re.match(r'([A-Za-z_][A-Za-z0-9_]*)=\$\((?P<command>.*)\)\s*$', stripped)
+            if assignment:
+                lhs = assignment.group(1)
+                command = assignment.group('command')
+                if re.search(r'\bDigest\b|\.Digest', command):
+                    digest_vars.add(lhs)
+                else:
+                    inspect_result_vars.add(lhs)
+    if not inspect_lines:
+        errors.append('release-publish must inspect the exact SHA-bound release PR source tag or a variable assigned to that tag')
+
+    for line in step.splitlines():
+        stripped = line.strip()
+        assignment = re.match(r'([A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)', stripped)
+        if not assignment:
+            continue
+        lhs = assignment.group(1)
+        value = assignment.group('value')
+        if 'digest' in lhs.lower():
+            direct_inspect_digest = 'inspect' in value and references_sha_bound_source(value) and re.search(r'\bDigest\b|\.Digest', value)
+            derived_from_inspect_result = any((f'${var}' in value or '${' + var + '}' in value) for var in inspect_result_vars) and re.search(r'\bDigest\b|\.Digest|jq\b', value)
+            if direct_inspect_digest or derived_from_inspect_result:
+                digest_vars.add(lhs)
+        if 'ar-gateway-pr@sha256:' in value or any('ar-gateway-pr@$' + var in value or 'ar-gateway-pr@${' + var + '}' in value for var in digest_vars):
+            digest_source_vars.add(lhs)
+
+    if not digest_vars:
+        errors.append('release-publish must derive a digest variable from the SHA-bound source image inspect result')
+
+    final_copy_sources = []
+    for line in step.splitlines():
+        if 'skopeo' not in line and '$SKOPEO' not in line and '${SKOPEO}' not in line:
+            continue
+        if ' copy ' not in line:
+            continue
+        if 'ar-gateway:$RELEASE_VERSION' not in line and 'ar-gateway:${RELEASE_VERSION}' not in line and 'ar-gateway:latest' not in line:
+            continue
+        final_copy_sources.append(line.strip())
+
+    if not final_copy_sources:
+        errors.append('release-publish must copy final release tags with skopeo')
+    for line in final_copy_sources:
+        uses_digest_literal = re.search(r'ar-gateway-pr@sha256:', line)
+        uses_digest_source_var = any(f'${var}' in line or '${' + var + '}' in line for var in digest_source_vars)
+        uses_digest_var_inline = any('ar-gateway-pr@$' + var in line or 'ar-gateway-pr@${' + var + '}' in line for var in digest_vars)
+        if not (uses_digest_literal or uses_digest_source_var or uses_digest_var_inline):
+            errors.append('each final skopeo copy to version/latest must use the immutable digest source reference derived from inspect: ' + line)
+        if re.search(merge_sha_source_tag_pattern, line):
+            errors.append('final skopeo copy source must not use the release merge SHA tag release-v$RELEASE_VERSION-$RELEASE_MERGE_SHA: ' + line)
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow promotes final release tags from SHA-bound PR image digest"
+  else
+    fail "publish workflow promotes final release tags from SHA-bound PR image digest ($output)"
+  fi
+}
+
+test_publish_workflow_derives_validated_pr_head_sha_from_release_commit_artifacts() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+publish_marker = 'Promote release PR Docker image to Forgejo package registry'
+before_publish = workflow.split(publish_marker, 1)[0] if publish_marker in workflow else workflow
+publication_step = workflow.split(publish_marker, 1)[1] if publish_marker in workflow else ''
+
+comment_stripped_before_publish = '\n'.join(
+    line for line in before_publish.splitlines()
+    if not line.lstrip().startswith('#')
+)
+head_assert_positions = [
+    match.start()
+    for pattern in [
+        r'\[\[\s*"\$\(git rev-parse HEAD\)"\s*==\s*"\$RELEASE_MERGE_SHA"\s*\]\]',
+        r'\[\[\s*"\$\(git rev-parse HEAD\)"\s*==\s*"\$\{RELEASE_MERGE_SHA\}"\s*\]\]',
+    ]
+    for match in re.finditer(pattern, comment_stripped_before_publish)
+]
+git_body_command_pattern = re.compile(
+    r'(?P<command>git\s+(?:log\s+-1|show\s+-s|show)\b[^\n]*(?:--format=%B|--pretty=%B)[^\n]*(?P<target>\$\{?RELEASE_MERGE_SHA\}?|HEAD)|'
+    r'git\s+show\s+(?P<target_before>\$\{?RELEASE_MERGE_SHA\}?|HEAD)[^\n]*(?:--format=%B|--pretty=%B)[^\n]*)'
+)
+valid_commit_body_vars = set()
+valid_commit_body_commands = []
+for match in git_body_command_pattern.finditer(comment_stripped_before_publish):
+    target = match.group('target') or match.group('target_before') or ''
+    reads_merge_sha_directly = 'RELEASE_MERGE_SHA' in target
+    reads_head_after_assertion = target == 'HEAD' and any(position < match.start() for position in head_assert_positions)
+    if not (reads_merge_sha_directly or reads_head_after_assertion):
+        continue
+    line_start = comment_stripped_before_publish.rfind('\n', 0, match.start()) + 1
+    line_prefix = comment_stripped_before_publish[line_start:match.start()]
+    assignment = re.search(r'(?P<var>[A-Za-z_][A-Za-z0-9_]*)=["\']?\$\([^\n]*$', line_prefix)
+    if assignment:
+        valid_commit_body_vars.add(assignment.group('var'))
+    valid_commit_body_commands.append(match.group('command'))
+
+if not valid_commit_body_vars and not valid_commit_body_commands:
+    errors.append('release-publish must read the trusted merged release commit body either with git log/show of $RELEASE_MERGE_SHA directly, or with git log/show of HEAD only after an earlier [[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]] assertion')
+
+sha_assignment_match = re.search(
+    r'(?ms)(?:^|\n)\s*RELEASE_PR_HEAD_SHA=.*?(?=\n\s*(?:if|case|\[\[|[A-Z_][A-Za-z0-9_]+=|echo|printf|$))',
+    comment_stripped_before_publish,
+)
+if not sha_assignment_match:
+    errors.append('release-publish must assign RELEASE_PR_HEAD_SHA before publishing')
+else:
+    assignment_text = sha_assignment_match.group(0)
+    references_trusted_body_var = any(
+        re.search(rf'\$\{{?{re.escape(var)}\}}?|printf\s+[^\n]*{re.escape(var)}', assignment_text)
+        for var in valid_commit_body_vars
+    )
+    embeds_trusted_body_command = any(command in assignment_text for command in valid_commit_body_commands)
+    forty_hex_capture = r'([0-9a-fA-F]\{40\}|[[:xdigit:]]\{40\}|[0-9a-fA-F]\+|[[:xdigit:]]\+)'
+    extracts_from_pr_artifacts_heading = re.search(
+        r'PR artifacts for[^\n"\']*' + forty_hex_capture + r'[^\n"\']*:',
+        assignment_text,
+    )
+    extracts_from_docker_link = re.search(
+        r'ar-gateway-pr:release-v[^\n"\']*-' + forty_hex_capture,
+        assignment_text,
+    )
+    if not (references_trusted_body_var or embeds_trusted_body_command):
+        errors.append('RELEASE_PR_HEAD_SHA assignment/extraction command must read from the trusted release commit body variable or contain the validated git log/show command directly')
+    if not (extracts_from_pr_artifacts_heading or extracts_from_docker_link):
+        errors.append('RELEASE_PR_HEAD_SHA assignment/extraction command must contain one combined artifact extraction pattern: PR artifacts for <40-hex>: or ar-gateway-pr:release-v...-<40-hex>')
+
+hex_validation_patterns = [
+    r'\[\[\s*"?\$\{?RELEASE_PR_HEAD_SHA\}?"?\s*=~\s*\^\[\[:xdigit:\]\]\{40\}\$',
+    r'\[\[\s*"?\$\{?RELEASE_PR_HEAD_SHA\}?"?\s*=~\s*\^\[0-9a-fA-F\]\{40\}\$',
+    r'grep\s+[^\n]*\^\[0-9a-fA-F\]\{40\}\$',
+    r'grep\s+[^\n]*\^\[\[:xdigit:\]\]\{40\}\$',
+]
+if not any(re.search(pattern, before_publish) for pattern in hex_validation_patterns):
+    errors.append('release-publish must validate RELEASE_PR_HEAD_SHA is exactly a 40-character hexadecimal SHA before token-bearing publish')
+
+if re.search(r'RELEASE_PR_HEAD_SHA=[^\n]*(?:RELEASE_MERGE_SHA|github\.sha)', before_publish):
+    errors.append('release-publish must not derive RELEASE_PR_HEAD_SHA from the release merge SHA')
+
+required_order = [
+    before_publish.find('RELEASE_PR_HEAD_SHA'),
+    workflow.find(publish_marker),
+]
+if -1 in required_order or required_order[0] > required_order[1]:
+    errors.append('RELEASE_PR_HEAD_SHA derivation and validation must happen before the token-bearing image promotion step')
+
+source_tag_pattern = r'ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?-[^\s"\']*\$\{?RELEASE_PR_HEAD_SHA\}?'
+merge_sha_tag_pattern = r'ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?-[^\s"\']*\$\{?RELEASE_MERGE_SHA\}?'
+if not re.search(source_tag_pattern, publication_step):
+    errors.append('release-publish must use RELEASE_PR_HEAD_SHA in the SHA-bound source image tag for inspect/digest promotion')
+if re.search(merge_sha_tag_pattern, publication_step):
+    errors.append('release-publish must fail this contract if it uses $RELEASE_MERGE_SHA as the release PR image tag suffix')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow derives validated PR head SHA from release commit artifacts"
+  else
+    fail "publish workflow derives validated PR head SHA from release commit artifacts ($output)"
   fi
 }
 
@@ -831,9 +1157,9 @@ if not any(path in expected_manual_paths for path in manual_paths):
 required_markers = [
     "environment: release-publish",
     'git switch -C main "$RELEASE_MERGE_SHA"',
-    'Publish Docker image to Forgejo package registry',
+    'Promote release PR Docker image to Forgejo package registry',
     'release create',
-    'nix build .#ar-gateway-image',
+    '$RELEASE_MERGE_SHA',
     'git.johnwilger.com/jwilger/auto_review/ar-gateway',
 ]
 missing = [marker for marker in required_markers if marker not in workflow]
@@ -841,7 +1167,7 @@ if missing:
     print("publish workflow manual dispatch does not reuse release merge SHA for checkout/provenance/branch attachment/publication: " + ", ".join(missing))
     sys.exit(1)
 
-publish_marker = 'Publish Docker image to Forgejo package registry'
+publish_marker = 'Promote release PR Docker image to Forgejo package registry'
 before_publish = workflow.split(publish_marker, 1)[0]
 for required in [
     "Validate release provenance and changed files",
@@ -877,7 +1203,7 @@ if validation_step is None:
 if "RELEASE_PUBLISH_TOKEN" in validation_step:
     print("publish workflow validation step must not expose RELEASE_PUBLISH_TOKEN")
     sys.exit(1)
-publish_step_index = workflow.find("Publish Docker image to Forgejo package registry")
+publish_step_index = workflow.find("Promote release PR Docker image to Forgejo package registry")
 release_step_index = workflow.find("release create")
 if publish_step_index == -1:
     print("publish workflow is missing publish step")
@@ -888,7 +1214,7 @@ if publish_step_index < validation_index or token_index < publish_step_index:
 allowed_token_lines = set()
 for index, line in enumerate(lines):
     if line.strip() in {
-        "- name: Publish Docker image to Forgejo package registry",
+        "- name: Promote release PR Docker image to Forgejo package registry",
         "- name: Create Forgejo Release",
     }:
         step_lines = [line]
@@ -1137,7 +1463,7 @@ for step in steps:
     if not has_publish_token:
         continue
     token_steps.append(name)
-    if name not in {'Publish Docker image to Forgejo package registry', 'Create Forgejo Release'}:
+    if name not in {'Promote release PR Docker image to Forgejo package registry', 'Create Forgejo Release'}:
         errors.append(f'RELEASE_PUBLISH_TOKEN must be confined to final publish/release steps, not {name}')
     step_header = step.split('        run:', 1)[0]
     guarded_by_release_decision = (
@@ -1178,12 +1504,13 @@ PY
   fi
 }
 
-test_publish_workflow_builds_and_publishes_release_image_after_merge() {
+test_publish_workflow_promotes_release_pr_image_after_merge() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  assert_file_contains "$publish_workflow" 'nix build .#ar-gateway-image' "publish workflow builds the ar-gateway image after merge to main"
-  assert_file_contains "$publish_workflow" 'docker-archive:./result' "publish workflow publishes final release tags from the merged release image archive"
+  assert_file_not_contains "$publish_workflow" 'nix build .#ar-gateway-image' "publish workflow does not rebuild the ar-gateway image after merge to main"
+  assert_file_not_contains "$publish_workflow" 'docker-archive:./result' "publish workflow does not publish final release tags from a rebuilt local image archive"
+  assert_file_not_contains "$publish_workflow" 'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway-pr:release-v$RELEASE_VERSION"' "publish workflow does not promote from the mutable version-only release PR image tag"
   assert_file_contains "$publish_workflow" 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow uses the publish token only after merge validation"
   assert_file_not_contains "$publish_workflow" 'RELEASE_CANDIDATE_SHA' "publish workflow does not depend on pre-merge candidate image tags"
 
@@ -1195,38 +1522,75 @@ import sys
 workflow = pathlib.Path(sys.argv[1]).read_text()
 errors = []
 
-publish_marker = 'Publish Docker image to Forgejo package registry'
+publish_marker = 'Promote release PR Docker image to Forgejo package registry'
 if publish_marker not in workflow:
     errors.append('publish workflow is missing the token-bearing image publication step')
     before_publish = workflow
 else:
     before_publish = workflow.split(publish_marker, 1)[0]
 
-if 'RELEASE_CANDIDATE_SHA' in workflow or 'github.event.pull_request.head.sha' in workflow:
-    errors.append('publish workflow must not derive or promote pre-merge candidate image tags')
-if 'nix build .#ar-gateway-image' not in before_publish:
-    errors.append('publish workflow must build the Docker image from the merged release commit before token-bearing publication')
+if 'nix build .#ar-gateway-image' in workflow or 'docker-archive:./result' in workflow:
+    errors.append('publish workflow must not rebuild the Docker image from the merged release commit before token-bearing publication')
 
-publication_step_match = re.search(r'- name: Publish Docker image to Forgejo package registry(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
+publication_step_match = re.search(r'- name: Promote release PR Docker image to Forgejo package registry(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
 if not publication_step_match:
     errors.append('publish workflow must have a dedicated image publication step')
 else:
     step = publication_step_match.group('body')
     if 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' not in step:
         errors.append('image publication step must receive RELEASE_PUBLISH_TOKEN')
-    if 'docker-archive:./result' not in step:
-        errors.append('image publication step must copy from the merged release image archive')
+    source_image_pattern = r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway-pr:release-v(?:\$\{?RELEASE_VERSION\}?)[^\s"\']*(?:\$\{?RELEASE_PR_HEAD_SHA\}?)'
+    if not re.search(source_image_pattern, step):
+        errors.append('image publication step must copy from a release PR image tag that includes $RELEASE_PR_HEAD_SHA')
+    if re.search(r'ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?-[^\s"\']*\$\{?RELEASE_MERGE_SHA\}?', step):
+        errors.append('image publication step must not use $RELEASE_MERGE_SHA as the release PR image tag suffix')
+    if re.search(r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?(?:["\'\s]|$)', step):
+        errors.append('image publication step must not copy from mutable version-only source tag release-v$RELEASE_VERSION')
     for destination in [
         ('docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_VERSION', 'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_VERSION}'),
         'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:latest',
     ]:
         if isinstance(destination, tuple):
             if not any(candidate in step for candidate in destination):
-                errors.append('image publication step must copy the merged release image to RELEASE_VERSION')
+                errors.append('image publication step must promote the release PR image to RELEASE_VERSION')
         elif destination not in step:
-            errors.append(f'image publication step must copy the merged release image to {destination}')
+            errors.append(f'image publication step must promote the release PR image to {destination}')
     if 'nix build .#ar-gateway-image' in step:
-        errors.append('image publication step must publish only after a separate no-token Nix image build')
+        errors.append('image publication step must not rebuild the Docker image after merge')
+
+    trusted_skopeo = r'(?:(?:"\$SKOPEO")|(?:\$\{SKOPEO\})|(?:\$SKOPEO))'
+    exact_source_pattern = r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway-pr:release-v(?:\$\{?RELEASE_VERSION\}?)[^\s"\']*(?:\$\{?RELEASE_PR_HEAD_SHA\}?)'
+    final_copy_pattern = re.compile(
+        trusted_skopeo
+        + r'\s+copy\b[\s\S]*?docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway:(?:\$\{?RELEASE_VERSION\}?|latest)(?:["\'\s]|$)'
+    )
+    first_final_copy = min((match.start() for match in final_copy_pattern.finditer(step)), default=None)
+    if first_final_copy is None:
+        errors.append('image publication step must use pre-resolved $SKOPEO copy for final RELEASE_VERSION/latest tags')
+    else:
+        pre_copy_step = step[:first_final_copy]
+        source_vars = []
+        for assignment in re.finditer(
+            r'(?m)^\s*(?P<var>[A-Za-z_][A-Za-z0-9_]*)=(?P<quote>["\'])'
+            + exact_source_pattern
+            + r'(?P=quote)\s*$',
+            pre_copy_step,
+        ):
+            source_vars.append((assignment.group('var'), assignment.end()))
+
+        inspect_direct = re.search(
+            trusted_skopeo + r'\s+inspect\b[^\n]*' + exact_source_pattern,
+            pre_copy_step,
+        )
+        inspect_variable = False
+        for variable, assignment_end in source_vars:
+            variable_ref = rf'(?:"\${variable}"|\$\{{{variable}\}}|\${variable})'
+            inspect_match = re.search(trusted_skopeo + r'\s+inspect\b[^\n]*' + variable_ref, pre_copy_step)
+            if inspect_match and assignment_end < inspect_match.start():
+                inspect_variable = True
+                break
+        if not inspect_direct and not inspect_variable:
+            errors.append('image publication step must inspect/prove the exact release PR source image tag containing $RELEASE_PR_HEAD_SHA with pre-resolved $SKOPEO before any copy to final release tags')
 
 if errors:
     print('; '.join(errors))
@@ -1235,9 +1599,9 @@ PY
 )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "publish workflow builds and publishes the release image after merge"
+    pass "publish workflow promotes the release PR image after merge"
   else
-    fail "publish workflow builds and publishes the release image after merge ($output)"
+    fail "publish workflow promotes the release PR image after merge ($output)"
   fi
 }
 
@@ -1553,7 +1917,7 @@ import re
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text()
-publish_marker = 'Publish Docker image to Forgejo package registry'
+publish_marker = 'Promote release PR Docker image to Forgejo package registry'
 if publish_marker not in workflow:
     print('missing token-bearing image publication step')
     sys.exit(1)
@@ -1729,6 +2093,7 @@ PY
 run_tests \
   test_publish_workflow_triggers_on_main_push_or_manual_dispatch_only \
   test_publish_workflow_does_not_persist_push_commit_message_to_github_env \
+  test_publish_workflow_heredoc_terminators_are_not_indented_after_yaml_stripping \
   test_publish_workflow_validates_provenance_and_changed_files_before_publish_token \
   test_publish_workflow_uses_push_sha_without_dispatch_inputs_on_push_path \
   test_publish_workflow_uses_release_pr_merge_sha_not_a_recomputed_version \
@@ -1736,12 +2101,14 @@ run_tests \
   test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_image_publish \
   test_release_tooling_uses_local_prepare_and_image_registry_for_publish \
   test_publish_workflow_builds_release_image_and_generates_release_notes_after_merge \
-  test_publish_workflow_publishes_nix_docker_image_to_forgejo_registry \
+  test_publish_workflow_promotes_release_pr_docker_image_to_forgejo_registry \
+  test_publish_workflow_promotes_final_tags_from_sha_bound_release_pr_digest \
+  test_publish_workflow_derives_validated_pr_head_sha_from_release_commit_artifacts \
   test_publish_workflow_requires_trusted_release_environment \
   test_publish_workflow_supports_manual_dispatch_from_release_merge_sha \
   test_publish_workflow_keeps_dispatch_input_out_of_non_dispatch_paths \
   test_publish_workflow_uses_trusted_tools_after_publish_token_exposure \
-  test_publish_workflow_builds_and_publishes_release_image_after_merge \
+  test_publish_workflow_promotes_release_pr_image_after_merge \
   test_publish_workflow_attaches_binary_archives_checksums_signatures_and_provenance \
   test_publish_workflow_verifies_generated_binary_artifacts_before_release_upload \
   test_publish_workflow_handles_release_signing_key_in_private_tempdir \

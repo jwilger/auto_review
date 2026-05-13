@@ -99,12 +99,19 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
       PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
+      - name: Skip non-release PR artifact build
+        if: ${{ !(startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME) }}
+        run: |
+          printf 'Skipping release PR artifact build for ordinary non-release PR.\n'
+
       - uses: actions/checkout@v4
+        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
 
       - name: Install or reuse Nix
+        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
         run: |
           set -euo pipefail
           NIX_BIN_DIR="/nix/var/nix/profiles/default/bin"
@@ -131,13 +138,24 @@ jobs:
           done
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
 
-      - name: Build PR Docker image and binary package
+      - name: Build release PR Docker image and binary package
+        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.config/containers" pr-artifacts pr-publication-artifacts
           cat > "$HOME/.config/containers/policy.json" <<'EOF'
           {"default":[{"type":"insecureAcceptAnything"}]}
           EOF
+          RELEASE_VERSION="$(python3 - <<'PY'
+          import pathlib
+          import re
+
+          match = re.search(r'(?m)^version\s*=\s*"(?P<version>[^"]+)"', pathlib.Path("Cargo.toml").read_text())
+          if not match:
+              raise SystemExit("workspace package version not found in Cargo.toml")
+          print(match.group("version"))
+          PY
+          )"
           nix develop --command nix build .#ar-gateway-image
           cp -L result pr-publication-artifacts/ar-gateway-image.tar
           x86_release_root="$(nix build .#packages.x86_64-linux.ar-cli-portable-release-root --print-out-paths --no-link)"
@@ -145,9 +163,10 @@ jobs:
           (cd pr-artifacts && sha256sum "auto-review-pr-$PR_NUMBER-$PR_HEAD_SHA-linux-x86_64.tar.gz" > SHA256SUMS)
           cp pr-artifacts/auto-review-pr-$PR_NUMBER-$PR_HEAD_SHA-linux-x86_64.tar.gz pr-publication-artifacts/
           cp pr-artifacts/SHA256SUMS pr-publication-artifacts/
-          printf 'PR_NUMBER=%s\nPR_HEAD_SHA=%s\n' "$PR_NUMBER" "$PR_HEAD_SHA" > pr-publication-artifacts/pr-metadata.env
+          printf 'PR_NUMBER=%s\nPR_HEAD_SHA=%s\nRELEASE_VERSION=%s\n' "$PR_NUMBER" "$PR_HEAD_SHA" "$RELEASE_VERSION" > pr-publication-artifacts/pr-metadata.env
 
       - uses: actions/upload-artifact@v3
+        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
         with:
           name: pr-publication-artifacts
           path: pr-publication-artifacts
@@ -160,12 +179,19 @@ jobs:
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
+      - name: Skip non-release PR artifact publication
+        if: ${{ !(startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME) }}
+        run: |
+          printf 'Skipping release PR artifact publication for ordinary non-release PR.\n'
+
       - uses: actions/download-artifact@v3
+        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
         with:
           name: pr-publication-artifacts
           path: pr-publication-artifacts
 
       - name: Install or reuse Nix (nix-installer)
+        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
         run: |
           set -euo pipefail
           NIX_BIN_DIR="/nix/var/nix/profiles/default/bin"
@@ -200,6 +226,7 @@ jobs:
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
 
       - name: Resolve trusted PR package tools
+        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
         run: |
           set -euo pipefail
           SKOPEO=/nix/var/nix/profiles/default/bin/skopeo
@@ -227,7 +254,8 @@ jobs:
           printf 'SED=%s\n' "$SED" >> "$GITHUB_ENV"
           printf 'MKDIR=%s\n' "$MKDIR" >> "$GITHUB_ENV"
 
-      - name: Publish PR Docker image and generic binary package
+      - name: Publish release PR Docker image and generic binary package
+        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
         env:
           RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
           RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
@@ -235,12 +263,18 @@ jobs:
           set -euo pipefail
           unset BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES PYTHONPATH PERL5LIB RUBYLIB NODE_OPTIONS
           PR_HEAD_SHA=""
+          RELEASE_VERSION=""
           while IFS='=' read -r key value; do
             case "$key" in
               PR_NUMBER) PR_NUMBER="$value" ;;
               PR_HEAD_SHA) PR_HEAD_SHA="$value" ;;
+              RELEASE_VERSION) RELEASE_VERSION="$value" ;;
             esac
           done < pr-publication-artifacts/pr-metadata.env
+          if [ -z "$RELEASE_VERSION" ]; then
+            printf 'release PR artifact metadata did not include RELEASE_VERSION\n' >&2
+            exit 1
+          fi
           if [ -z "${RELEASE_PUBLISH_TOKEN:-}" ] || [ -z "${RELEASE_BOT_NAME:-}" ]; then
             printf 'missing RELEASE_PUBLISH_TOKEN or RELEASE_BOT_NAME for PR package publication\n' >&2
             exit 1
@@ -249,7 +283,7 @@ jobs:
           "$CAT" > "$HOME/.config/containers/policy.json" <<'EOF'
           {"default":[{"type":"insecureAcceptAnything"}]}
           EOF
-          "$SKOPEO" copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:pr-publication-artifacts/ar-gateway-image.tar "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway-pr:pr-$PR_NUMBER-$PR_HEAD_SHA"
+          "$SKOPEO" copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:pr-publication-artifacts/ar-gateway-image.tar "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway-pr:release-v$RELEASE_VERSION-$PR_HEAD_SHA"
           for artifact in "auto-review-pr-$PR_NUMBER-$PR_HEAD_SHA-linux-x86_64.tar.gz" SHA256SUMS; do
             "$CURL" -fsS -X PUT \
               -u "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" \
@@ -258,6 +292,7 @@ jobs:
           done
 
       - name: Update PR description with package links
+        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
         env:
           GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
           GITEA_SERVER_URL: https://git.johnwilger.com
@@ -266,19 +301,25 @@ jobs:
           set -euo pipefail
           unset BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES PYTHONPATH PERL5LIB RUBYLIB NODE_OPTIONS
           PR_HEAD_SHA=""
+          RELEASE_VERSION=""
           while IFS='=' read -r key value; do
             case "$key" in
               PR_NUMBER) PR_NUMBER="$value" ;;
               PR_HEAD_SHA) PR_HEAD_SHA="$value" ;;
+              RELEASE_VERSION) RELEASE_VERSION="$value" ;;
             esac
           done < pr-publication-artifacts/pr-metadata.env
+          if [ -z "$RELEASE_VERSION" ]; then
+            printf 'release PR artifact metadata did not include RELEASE_VERSION\n' >&2
+            exit 1
+          fi
           body_file="$($MKTEMP)"
           block_file="$($MKTEMP)"
           "$CAT" > "$block_file" <<EOF
           <!-- auto_review:artifact-links:start -->
           PR artifacts for $PR_HEAD_SHA:
 
-          Docker image: git.johnwilger.com/jwilger/auto_review/ar-gateway-pr:pr-$PR_NUMBER-$PR_HEAD_SHA
+          Docker image: git.johnwilger.com/jwilger/auto_review/ar-gateway-pr:release-v$RELEASE_VERSION-$PR_HEAD_SHA
           binary download: https://git.johnwilger.com/api/packages/jwilger/generic/auto-review-pr/$PR_NUMBER-$PR_HEAD_SHA/auto-review-pr-$PR_NUMBER-$PR_HEAD_SHA-linux-x86_64.tar.gz
           SHA256SUMS: https://git.johnwilger.com/api/packages/jwilger/generic/auto-review-pr/$PR_NUMBER-$PR_HEAD_SHA/SHA256SUMS
           <!-- auto_review:artifact-links:end -->
