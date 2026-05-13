@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.10.0] - 2026-05-12
+
+### Fixed
+
+- *(ci)* route image builds to docker-release (#185)
+- *(ci)* remove remaining docker runner labels (#186)
+
+### Other
+
+- release v0.9.0 (#183)
+
 ## [0.9.0] - 2026-05-12
 
 ### Added
