@@ -233,8 +233,8 @@ fn has_clearly_acceptable_release_pr_metadata(title: &str, body: &str) -> bool {
         && version[1..].chars().all(|c| c.is_ascii_digit() || c == '.')
         && body.starts_with(&format!("Prepare release {version}."))
         && body.contains(
-            "CI publishes PR-scoped Docker and binary package links on the PR; final release \
-             entries are created only after merge to main.",
+            "Docker and binary package links on the PR; final release entries are created only \
+             after merge to main.",
         )
 }
 
@@ -1518,6 +1518,100 @@ mod tests {
         assert!(
             event != "REQUEST_CHANGES" && !review_body.contains("## Pre-merge checks"),
             "release PR metadata should not be over-blocked by a Cheap-tier false negative; \
+             event was {event:?}, body was:\n{review_body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn generated_release_pr_metadata_does_not_request_changes_when_cheap_model_over_blocks() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/.forgejo/workflows/release-prepare.yml b/.forgejo/workflows/release-prepare.yml\n\
+                 index 1111111..2222222 100644\n\
+                 --- a/.forgejo/workflows/release-prepare.yml\n\
+                 +++ b/.forgejo/workflows/release-prepare.yml\n\
+                 @@ -1 +1,2 @@\n\
+                 +# release metadata update\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": ".forgejo/workflows/release-prepare.yml", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1248,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let reasoning = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let cheap = Arc::new(CannedProvider::new(vec![
+            r#"{
+                "passed": false,
+                "rationale": "Release metadata is too vague.",
+                "offending_text": "chore: release v0.10.0"
+            }"#,
+        ]));
+        let llm = Router::new()
+            .with(ModelTier::Reasoning, reasoning)
+            .with(ModelTier::Cheap, cheap);
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "deadbeef",
+            pr_title: "chore: release v0.10.0",
+            pr_body: "Prepare release v0.10.0.\n\nCI publishes release-candidate Docker and binary package links on the PR; final release entries are created only after merge to main.",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+            pr_metadata_check: true,
+        })
+        .await
+        .expect("review ok");
+
+        assert_eq!(outcome.review_id, 1248);
+        assert_eq!(outcome.findings_count, 0);
+
+        let received = server.received_requests().await.expect("requests");
+        let posted_review = received
+            .iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("posted review");
+        let body: serde_json::Value =
+            serde_json::from_slice(&posted_review.body).expect("review body json");
+        let event = body
+            .get("event")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review event");
+        let review_body = body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review body");
+
+        assert!(
+            event != "REQUEST_CHANGES" && !review_body.contains("## Pre-merge checks"),
+            "generated release PR metadata should not be over-blocked by a Cheap-tier false negative; \
              event was {event:?}, body was:\n{review_body}",
         );
     }
