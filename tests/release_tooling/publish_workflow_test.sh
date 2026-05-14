@@ -483,6 +483,56 @@ PY
 	assert_file_contains_before "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' 'Promote release PR Docker image to Forgejo package registry' "publish workflow verifies checked-out merge commit before promoting the image with the publish token"
 }
 
+test_publish_workflow_installs_release_publication_tools_before_resolving_them() {
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+resolve_marker = 'Resolve trusted release publication tools'
+if resolve_marker not in workflow:
+    errors.append('missing trusted release publication tool resolution step')
+    before_resolve = workflow
+else:
+    before_resolve = workflow.split(resolve_marker, 1)[0]
+
+required_packages = {
+    'nixpkgs#skopeo': 'skopeo',
+    'nixpkgs#tea': 'tea',
+    'nixpkgs#jq': 'jq',
+    'nixpkgs#curl': 'curl',
+    'nixpkgs#gawk': 'awk',
+    'nixpkgs#gnused': 'sed',
+    'nixpkgs#coreutils': 'mktemp/cat/mkdir',
+}
+
+if not re.search(r'\bnix\s+profile\s+install\b', before_resolve):
+    errors.append('publish workflow must install trusted release publication tools into the Nix profile before resolving /nix/var/nix/profiles/default/bin paths')
+
+for package, tool in required_packages.items():
+    if package not in before_resolve:
+        errors.append(f'missing pre-resolution Nix profile package for {tool}: {package}')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow installs release publication tools before resolving them"
+	else
+		fail "publish workflow installs release publication tools before resolving them ($output)"
+	fi
+}
+
 test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_image_publish() {
 	local publish_workflow output status
 	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
@@ -2116,6 +2166,7 @@ run_tests \
 	test_publish_workflow_uses_push_sha_without_dispatch_inputs_on_push_path \
 	test_publish_workflow_uses_release_pr_merge_sha_not_a_recomputed_version \
 	test_publish_workflow_executes_from_merge_commit_sha_before_publish_token \
+	test_publish_workflow_installs_release_publication_tools_before_resolving_them \
 	test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_image_publish \
 	test_release_tooling_uses_local_prepare_and_image_registry_for_publish \
 	test_publish_workflow_builds_release_image_and_generates_release_notes_after_merge \
