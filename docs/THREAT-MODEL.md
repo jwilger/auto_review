@@ -1,20 +1,25 @@
 # auto_review Threat Model
 
 Status: **Living document**
-Last reviewed: 2026-05-06
+Last reviewed: 2026-05-14
 
 ## Scope
 
 This document covers `auto_review` deployed as a single-tenant
-self-hosted bot next to a Forgejo (or Gitea-compatible) instance.
-The bot reads pull requests from one or more repositories, performs
-semantic LLM review against the diff after CI, and posts
-inline comments back via the Forgejo API.
+self-hosted bot next to a Forgejo (or Gitea-compatible) instance,
+plus the release preparation and publishing automation that ships
+project-owned containers, binary archives, checksums, signatures,
+and provenance metadata. The bot reads pull requests from one or
+more repositories, performs semantic LLM review against the diff
+after CI, and posts inline comments back via the Forgejo API. The
+release scope includes binary artifact integrity from release PR
+preparation through Forgejo release publication.
 
 Out of scope: the security of Forgejo itself, the host operating
-system, the LLM provider's infrastructure, and any CI/CD systems
-the operator wires into the same network. We assume operators
-have hardened those independently.
+system, the LLM provider's infrastructure, and CI/CD systems or
+runner hardening outside the repository-owned release automation
+described here. We assume operators have hardened those
+independently.
 
 ## System Context
 
