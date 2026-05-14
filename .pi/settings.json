@@ -1,0 +1,13 @@
+{
+  "packages": [
+    "npm:context-mode@1.0.131",
+    "npm:pi-mcp-adapter@2.6.1",
+    "npm:pi-lens@3.8.44",
+    "npm:@gotgenes/pi-permission-system@5.16.0",
+    "npm:@tintinweb/pi-subagents@0.7.2"
+  ],
+  "extensions": ["extensions/*.ts"],
+  "skills": ["skills"],
+  "prompts": ["prompts"],
+  "enableSkillCommands": true
+}

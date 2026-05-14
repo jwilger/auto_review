@@ -1,0 +1,61 @@
+{
+  "$schema": "https://raw.githubusercontent.com/gotgenes/pi-permission-system/main/schemas/permissions.schema.json",
+  "debugLog": false,
+  "permissionReviewLog": true,
+  "yoloMode": false,
+  "permission": {
+    "*": "ask",
+    "read": {
+      "*": "allow",
+      ".env": "deny",
+      ".env.*": "deny",
+      "*.env": "deny",
+      "*.env.*": "deny",
+      "*.env.example": "allow",
+      "**/*secret*": "ask",
+      "**/*credential*": "ask",
+      "**/*.key": "deny",
+      "**/*.pem": "deny"
+    },
+    "write": {
+      ".env": "deny",
+      ".env.*": "deny",
+      "**/*secret*": "ask",
+      "**/*credential*": "ask",
+      "**/*.key": "deny",
+      "**/*.pem": "deny",
+      "*": "allow"
+    },
+    "edit": {
+      ".env": "deny",
+      ".env.*": "deny",
+      "**/*secret*": "ask",
+      "**/*credential*": "ask",
+      "**/*.key": "deny",
+      "**/*.pem": "deny",
+      "*": "allow"
+    },
+    "bash": {
+      "git status *": "allow",
+      "git diff *": "allow",
+      "git branch *": "allow",
+      "nix *": "allow",
+      "tea *": "ask",
+      "cargo *": "ask",
+      "bacon *": "ask",
+      "*": "ask"
+    },
+    "mcp": {
+      "mcp_status": "allow",
+      "mcp_list": "allow",
+      "mcp_search": "allow",
+      "forgejo:*": "allow",
+      "forgejo_*": "allow",
+      "*": "ask"
+    },
+    "skill": {
+      "*": "allow"
+    },
+    "external_directory": "ask"
+  }
+}
