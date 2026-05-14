@@ -100,18 +100,18 @@ jobs:
       PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
     steps:
       - name: Skip non-release PR artifact build
-        if: ${{ !(startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME) }}
+        if: "${{ !(startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v')) }}"
         run: |
           printf 'Skipping release PR artifact build for ordinary non-release PR.\n'
 
       - uses: actions/checkout@v4
-        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
+        if: "${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v') }}"
         with:
           ref: ${{ github.event.pull_request.head.sha }}
           persist-credentials: false
 
       - name: Install or reuse Nix
-        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
+        if: "${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v') }}"
         run: |
           set -euo pipefail
           NIX_BIN_DIR="/nix/var/nix/profiles/default/bin"
@@ -139,7 +139,7 @@ jobs:
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
 
       - name: Build release PR Docker image and binary package
-        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
+        if: "${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v') }}"
         run: |
           set -euo pipefail
           mkdir -p "$HOME/.config/containers" pr-artifacts pr-publication-artifacts
@@ -166,7 +166,7 @@ jobs:
           printf 'PR_NUMBER=%s\nPR_HEAD_SHA=%s\nRELEASE_VERSION=%s\n' "$PR_NUMBER" "$PR_HEAD_SHA" "$RELEASE_VERSION" > pr-publication-artifacts/pr-metadata.env
 
       - uses: actions/upload-artifact@v3
-        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
+        if: "${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v') }}"
         with:
           name: pr-publication-artifacts
           path: pr-publication-artifacts
@@ -180,18 +180,18 @@ jobs:
       PR_NUMBER: ${{ github.event.pull_request.number }}
     steps:
       - name: Skip non-release PR artifact publication
-        if: ${{ !(startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME) }}
+        if: "${{ !(startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v')) }}"
         run: |
           printf 'Skipping release PR artifact publication for ordinary non-release PR.\n'
 
       - uses: actions/download-artifact@v3
-        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
+        if: "${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v') }}"
         with:
           name: pr-publication-artifacts
           path: pr-publication-artifacts
 
       - name: Install or reuse Nix (nix-installer)
-        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
+        if: "${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v') }}"
         run: |
           set -euo pipefail
           NIX_BIN_DIR="/nix/var/nix/profiles/default/bin"
@@ -226,7 +226,7 @@ jobs:
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
 
       - name: Resolve trusted PR package tools
-        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
+        if: "${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v') }}"
         run: |
           set -euo pipefail
           SKOPEO=/nix/var/nix/profiles/default/bin/skopeo
@@ -255,7 +255,7 @@ jobs:
           printf 'MKDIR=%s\n' "$MKDIR" >> "$GITHUB_ENV"
 
       - name: Publish release PR Docker image and generic binary package
-        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
+        if: "${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v') }}"
         env:
           RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
           RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}

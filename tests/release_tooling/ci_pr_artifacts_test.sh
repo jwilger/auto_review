@@ -7,10 +7,11 @@ source "$SCRIPT_DIR/lib.sh"
 RELEASE_TOOLING_SUITE_NAME="release tooling: ci pr artifacts"
 
 test_ci_workflow_publishes_release_pr_docker_and_binary_packages_updates_pr_body_and_deletes_on_merge() {
-  local ci_workflow output status
-  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+	local ci_workflow output status
+	ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
 
-  output="$(python3 - "$ci_workflow" <<'PY'
+	output="$(
+		python3 - "$ci_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -51,7 +52,7 @@ jobs = {
 trusted_pr_patterns = [
     r"startsWith\(github\.event\.pull_request\.head\.ref, ['\"]release/v['\"]\)",
     r"github\.event\.pull_request\.head\.repo\.full_name\s*==\s*github\.repository",
-    r"github\.event\.pull_request\.user\.login\s*==\s*vars\.RELEASE_BOT_NAME",
+    r"startsWith\(github\.event\.pull_request\.title, ['\"]chore: release v['\"]\)",
 ]
 
 def step_blocks(job_body):
@@ -191,20 +192,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "CI workflow publishes release PR Docker and binary packages without Forgejo Releases"
-  else
-    fail "CI workflow publishes release PR Docker and binary packages without Forgejo Releases ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "CI workflow publishes release PR Docker and binary packages without Forgejo Releases"
+	else
+		fail "CI workflow publishes release PR Docker and binary packages without Forgejo Releases ($output)"
+	fi
 }
 
 test_ci_release_pr_artifact_jobs_require_trusted_release_pr_source() {
-  local ci_workflow output status
-  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+	local ci_workflow output status
+	ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
 
-  output="$(python3 - "$ci_workflow" <<'PY'
+	output="$(
+		python3 - "$ci_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -220,7 +222,7 @@ jobs = {
 trusted_pr_requirements = {
     "release/v branch gate": r"startsWith\(github\.event\.pull_request\.head\.ref, ['\"]release/v['\"]\)",
     "same-repository PR head gate": r"github\.event\.pull_request\.head\.repo\.full_name\s*==\s*github\.repository",
-    "release bot author gate": r"github\.event\.pull_request\.user\.login\s*==\s*vars\.RELEASE_BOT_NAME",
+    "release PR title gate": r"startsWith\(github\.event\.pull_request\.title, ['\"]chore: release v['\"]\)",
 }
 
 def job_if_expression(job_name, body):
@@ -321,7 +323,7 @@ for job_name in ['pr-artifact-build', 'pr-packages']:
         step_label = re.search(r'(?m)^        name:\s*(?P<name>[^\n]+)', step)
         step_name = step_label.group('name').strip().strip("'\"") if step_label else '<unnamed>'
         if not trusted_pr_predicate_is_conjunctive(step_if):
-            errors.append(f'{job_name} heavy/token-bearing step {step_name} must be step-level gated by a positive conjunctive trusted release PR predicate containing release/v, same-repository, and release-bot checks joined with && and no negated trusted checks')
+            errors.append(f'{job_name} heavy/token-bearing step {step_name} must be step-level gated by a positive conjunctive trusted release PR predicate containing release/v, same-repository, and release-title checks joined with && and no negated trusted checks')
 
     if job_name == 'pr-packages' and 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' not in body:
         errors.append('pr-packages must remain the token-bearing PR package publication job covered by the trusted source gate')
@@ -330,21 +332,22 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "CI release PR artifact jobs require trusted same-repository release bot PRs"
-  else
-    fail "CI release PR artifact jobs require trusted same-repository release bot PRs ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "CI release PR artifact jobs require trusted same-repository release PRs"
+	else
+		fail "CI release PR artifact jobs require trusted same-repository release PRs ($output)"
+	fi
 }
 
 test_ci_workflow_has_release_pr_contexts_without_pr_package_cleanup_expectation() {
-  local ci_workflow cleanup_workflow output status
-  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
-  cleanup_workflow="$ROOT/.forgejo/workflows/pr-package-cleanup.yml"
+	local ci_workflow cleanup_workflow output status
+	ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+	cleanup_workflow="$ROOT/.forgejo/workflows/pr-package-cleanup.yml"
 
-  output="$(python3 - "$ci_workflow" "$cleanup_workflow" <<'PY'
+	output="$(
+		python3 - "$ci_workflow" "$cleanup_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -379,20 +382,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "CI workflow has release PR contexts without PR package cleanup expectation"
-  else
-    fail "CI workflow has release PR contexts without PR package cleanup expectation ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "CI workflow has release PR contexts without PR package cleanup expectation"
+	else
+		fail "CI workflow has release PR contexts without PR package cleanup expectation ($output)"
+	fi
 }
 
 test_ci_workflow_uses_runner_labels_by_job_workload() {
-  local ci_workflow output status
-  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+	local ci_workflow output status
+	ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
 
-  output="$(python3 - "$ci_workflow" <<'PY'
+	output="$(
+		python3 - "$ci_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -428,20 +432,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "CI workflow uses runner labels by job workload"
-  else
-    fail "CI workflow uses runner labels by job workload ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "CI workflow uses runner labels by job workload"
+	else
+		fail "CI workflow uses runner labels by job workload ($output)"
+	fi
 }
 
 test_ci_semantic_review_dispatch_is_best_effort_when_gateway_request_fails() {
-  local ci_workflow output status
-  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+	local ci_workflow output status
+	ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
 
-  output="$(python3 - "$ci_workflow" <<'PY'
+	output="$(
+		python3 - "$ci_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -479,20 +484,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "CI semantic review dispatch is best-effort when the gateway request fails"
-  else
-    fail "CI semantic review dispatch is best-effort when the gateway request fails ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "CI semantic review dispatch is best-effort when the gateway request fails"
+	else
+		fail "CI semantic review dispatch is best-effort when the gateway request fails ($output)"
+	fi
 }
 
 test_ci_pr_package_publication_is_token_isolated_from_untrusted_builds() {
-  local ci_workflow output status
-  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+	local ci_workflow output status
+	ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
 
-  output="$(python3 - "$ci_workflow" <<'PY'
+	output="$(
+		python3 - "$ci_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -641,20 +647,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "CI PR package publication is isolated from untrusted PR build evaluation by inert artifacts"
-  else
-    fail "CI PR package publication is isolated from untrusted PR build evaluation by inert artifacts ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "CI PR package publication is isolated from untrusted PR build evaluation by inert artifacts"
+	else
+		fail "CI PR package publication is isolated from untrusted PR build evaluation by inert artifacts ($output)"
+	fi
 }
 
 test_ci_pr_package_artifact_handoff_avoids_v4_artifact_actions() {
-  local ci_workflow output status
-  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+	local ci_workflow output status
+	ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
 
-  output="$(python3 - "$ci_workflow" <<'PY'
+	output="$(
+		python3 - "$ci_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -671,20 +678,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "CI PR package artifact handoff avoids v4 artifact actions"
-  else
-    fail "CI PR package artifact handoff avoids v4 artifact actions ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "CI PR package artifact handoff avoids v4 artifact actions"
+	else
+		fail "CI PR package artifact handoff avoids v4 artifact actions ($output)"
+	fi
 }
 
 test_ci_pr_package_tool_resolution_prepares_nix_before_default_profile_checks() {
-  local ci_workflow output status
-  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+	local ci_workflow output status
+	ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
 
-  output="$(python3 - "$ci_workflow" <<'PY'
+	output="$(
+		python3 - "$ci_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -719,20 +727,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "CI PR package tool resolution prepares Nix before checking default-profile tools"
-  else
-    fail "CI PR package tool resolution prepares Nix before checking default-profile tools ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "CI PR package tool resolution prepares Nix before checking default-profile tools"
+	else
+		fail "CI PR package tool resolution prepares Nix before checking default-profile tools ($output)"
+	fi
 }
 
 test_ci_pr_package_tool_resolution_installs_default_profile_tools_before_checks() {
-  local ci_workflow output status
-  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+	local ci_workflow output status
+	ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
 
-  output="$(python3 - "$ci_workflow" <<'PY'
+	output="$(
+		python3 - "$ci_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -773,23 +782,22 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "CI PR package tool resolution installs default-profile tools before checking them"
-  else
-    fail "CI PR package tool resolution installs default-profile tools before checking them ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "CI PR package tool resolution installs default-profile tools before checking them"
+	else
+		fail "CI PR package tool resolution installs default-profile tools before checking them ($output)"
+	fi
 }
 
-
 run_tests \
-  test_ci_workflow_publishes_release_pr_docker_and_binary_packages_updates_pr_body_and_deletes_on_merge \
-  test_ci_release_pr_artifact_jobs_require_trusted_release_pr_source \
-  test_ci_workflow_has_release_pr_contexts_without_pr_package_cleanup_expectation \
-  test_ci_workflow_uses_runner_labels_by_job_workload \
-  test_ci_semantic_review_dispatch_is_best_effort_when_gateway_request_fails \
-  test_ci_pr_package_publication_is_token_isolated_from_untrusted_builds \
-  test_ci_pr_package_artifact_handoff_avoids_v4_artifact_actions \
-  test_ci_pr_package_tool_resolution_prepares_nix_before_default_profile_checks \
-  test_ci_pr_package_tool_resolution_installs_default_profile_tools_before_checks
+	test_ci_workflow_publishes_release_pr_docker_and_binary_packages_updates_pr_body_and_deletes_on_merge \
+	test_ci_release_pr_artifact_jobs_require_trusted_release_pr_source \
+	test_ci_workflow_has_release_pr_contexts_without_pr_package_cleanup_expectation \
+	test_ci_workflow_uses_runner_labels_by_job_workload \
+	test_ci_semantic_review_dispatch_is_best_effort_when_gateway_request_fails \
+	test_ci_pr_package_publication_is_token_isolated_from_untrusted_builds \
+	test_ci_pr_package_artifact_handoff_avoids_v4_artifact_actions \
+	test_ci_pr_package_tool_resolution_prepares_nix_before_default_profile_checks \
+	test_ci_pr_package_tool_resolution_installs_default_profile_tools_before_checks
