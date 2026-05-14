@@ -40,6 +40,14 @@ jobs:
                 -s /usr/sbin/nologin -c "Nix build user $i" "nixbld$i"
             fi
           done
+          PATH="$NIX_BIN_DIR:$PATH" nix profile install \
+            nixpkgs#skopeo \
+            nixpkgs#tea \
+            nixpkgs#jq \
+            nixpkgs#curl \
+            nixpkgs#coreutils \
+            nixpkgs#gawk \
+            nixpkgs#gnused
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
       - uses: actions/checkout@v4
         name: Checkout pushed main commit
