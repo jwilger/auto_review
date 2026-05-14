@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.12.0] - 2026-05-14
+
+### Fixed
+
+- *(release)* recover publish from reviewed PR (#191)
+- *(ci)* promote release images in final repository (#193)
+
+### Other
+
+- release v0.11.0 (#189)
+
 ## [0.11.0] - 2026-05-13
 
 ### Fixed
