@@ -1,0 +1,16 @@
+{
+  "disabledServers": ["rust"],
+  "servers": {
+    "rust-nix": {
+      "name": "rust-analyzer via nix develop",
+      "extensions": [".rs"],
+      "command": "nix",
+      "args": ["develop", ".", "--command", "rust-analyzer"],
+      "rootMarkers": ["Cargo.toml", "rust-project.json", ".git"],
+      "env": {
+        "CARGO_HOME": ".dependencies/cargo",
+        "RUSTUP_HOME": ".dependencies/rustup"
+      }
+    }
+  }
+}

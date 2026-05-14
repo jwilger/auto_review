@@ -1,0 +1,16 @@
+{
+  "mcpServers": {
+    "forgejo": {
+      "command": "sh",
+      "args": [
+        "-lc",
+        "exec nix develop . --command forgejo-mcp --transport stdio --url https://git.johnwilger.com --token \"$FORGEJO_TOKEN\" --user-agent auto_review/forgejo-mcp"
+      ],
+      "env": {
+        "FORGEJO_USER_AGENT": "auto_review/forgejo-mcp"
+      },
+      "lifecycle": "lazy",
+      "idleTimeout": 10
+    }
+  }
+}
