@@ -791,6 +791,39 @@ PY
 	fi
 }
 
+test_ci_pr_package_skopeo_inspect_uses_supported_credentials_flag() {
+	local ci_workflow output status
+	ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+
+	output="$(
+		python3 - "$ci_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+for line_number, line in enumerate(workflow.splitlines(), start=1):
+    if 'skopeo' in line.lower() and 'inspect' in line and '--src-creds' in line:
+        errors.append(f'skopeo inspect must use --creds, not unsupported copy-only --src-creds: line {line_number}: {line.strip()}')
+
+if 'image_digest="$($SKOPEO inspect --creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" "docker://$sha_tag"' not in workflow:
+    errors.append('CI release PR image digest inspection must authenticate with skopeo inspect --creds')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "CI PR package skopeo inspect uses supported credentials flag"
+	else
+		fail "CI PR package skopeo inspect uses supported credentials flag ($output)"
+	fi
+}
+
 run_tests \
 	test_ci_workflow_publishes_release_pr_docker_and_binary_packages_updates_pr_body_and_deletes_on_merge \
 	test_ci_release_pr_artifact_jobs_require_trusted_release_pr_source \
@@ -800,4 +833,5 @@ run_tests \
 	test_ci_pr_package_publication_is_token_isolated_from_untrusted_builds \
 	test_ci_pr_package_artifact_handoff_avoids_v4_artifact_actions \
 	test_ci_pr_package_tool_resolution_prepares_nix_before_default_profile_checks \
-	test_ci_pr_package_tool_resolution_installs_default_profile_tools_before_checks
+	test_ci_pr_package_tool_resolution_installs_default_profile_tools_before_checks \
+	test_ci_pr_package_skopeo_inspect_uses_supported_credentials_flag

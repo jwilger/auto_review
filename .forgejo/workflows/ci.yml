@@ -290,7 +290,7 @@ jobs:
           sha_tag="git.johnwilger.com/jwilger/auto_review/ar-gateway:$PR_HEAD_SHA"
           rc_tag="git.johnwilger.com/jwilger/auto_review/ar-gateway:release-candidate"
           "$SKOPEO" copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:pr-publication-artifacts/ar-gateway-image.tar "docker://$sha_tag"
-          image_digest="$($SKOPEO inspect --src-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" "docker://$sha_tag" | "$JQ" -r '.Digest')"
+          image_digest="$($SKOPEO inspect --creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" "docker://$sha_tag" | "$JQ" -r '.Digest')"
           if [[ ! "$image_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
             printf 'release PR image digest was not sha256-shaped: %s\n' "$image_digest" >&2
             exit 1

@@ -7,10 +7,11 @@ source "$SCRIPT_DIR/lib.sh"
 RELEASE_TOOLING_SUITE_NAME="release tooling: publish workflow"
 
 test_publish_workflow_triggers_on_main_push_or_manual_dispatch_only() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -76,20 +77,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow triggers on main push or manual dispatch only"
-  else
-    fail "publish workflow triggers on main push or manual dispatch only ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow triggers on main push or manual dispatch only"
+	else
+		fail "publish workflow triggers on main push or manual dispatch only ($output)"
+	fi
 }
 
 test_publish_workflow_does_not_persist_push_commit_message_to_github_env() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -122,20 +124,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow does not persist push commit message to GITHUB_ENV"
-  else
-    fail "publish workflow does not persist push commit message to GITHUB_ENV ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow does not persist push commit message to GITHUB_ENV"
+	else
+		fail "publish workflow does not persist push commit message to GITHUB_ENV ($output)"
+	fi
 }
 
 test_publish_workflow_heredoc_terminators_are_not_indented_after_yaml_stripping() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -210,26 +213,27 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow heredoc terminators start at shell column zero after YAML stripping"
-  else
-    fail "publish workflow heredoc terminators start at shell column zero after YAML stripping ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow heredoc terminators start at shell column zero after YAML stripping"
+	else
+		fail "publish workflow heredoc terminators start at shell column zero after YAML stripping ($output)"
+	fi
 }
 
 test_publish_workflow_validates_provenance_and_changed_files_before_publish_token() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  assert_file_contains "$publish_workflow" 'Validate release provenance and changed files' "publish workflow has a no-token provenance validation step"
-  assert_file_contains "$publish_workflow" 'RELEASE_BASE_SHA: ${{ github.event.before }}' "publish workflow records the push before SHA for provenance checks"
-  assert_file_contains "$publish_workflow" 'RELEASE_MERGE_SHA: ${{ github.sha }}' "publish workflow derives the release merge SHA from push event context"
-  assert_file_contains "$publish_workflow" 'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"' "publish workflow derives changed files from the merged release PR"
-  assert_file_contains "$publish_workflow" 'case "$changed_file" in' "publish workflow evaluates each changed file before publishing"
-  assert_file_contains "$publish_workflow" 'Cargo.toml|Cargo.lock|CHANGELOG.md)' "publish workflow allows release metadata files before publishing"
-  output="$(python3 - "$publish_workflow" <<'PY'
+	assert_file_contains "$publish_workflow" 'Validate release provenance and changed files' "publish workflow has a no-token provenance validation step"
+	assert_file_contains "$publish_workflow" 'RELEASE_BASE_SHA: ${{ github.event.before }}' "publish workflow records the push before SHA for provenance checks"
+	assert_file_contains "$publish_workflow" 'RELEASE_MERGE_SHA: ${{ github.sha }}' "publish workflow derives the release merge SHA from push event context"
+	assert_file_contains "$publish_workflow" 'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"' "publish workflow derives changed files from the merged release PR"
+	assert_file_contains "$publish_workflow" 'case "$changed_file" in' "publish workflow evaluates each changed file before publishing"
+	assert_file_contains "$publish_workflow" 'Cargo.toml|Cargo.lock|CHANGELOG.md)' "publish workflow allows release metadata files before publishing"
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import fnmatch
 import pathlib
 import re
@@ -295,24 +299,25 @@ if permitted_forbidden:
     print('observed allowlist patterns: ' + ', '.join(patterns))
     sys.exit(1)
 PY
-  )"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow allows only root release metadata before image publishing"
-  else
-    fail "publish workflow allows only root release metadata before image publishing ($output)"
-  fi
-  assert_file_contains "$publish_workflow" '.forgejo/workflows/*|scripts/*)' "publish workflow explicitly rejects script and workflow changes before publishing"
-  assert_file_contains "$publish_workflow" 'refusing token-bearing publish for release PR file:' "publish workflow fails closed for unexpected release PR files"
-  assert_file_contains_before "$publish_workflow" 'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"' 'Promote release PR Docker image to Forgejo package registry' "publish workflow validates changed files before promoting the image with the publish token"
-  assert_file_contains_before "$publish_workflow" '.forgejo/workflows/*|scripts/*)' 'Promote release PR Docker image to Forgejo package registry' "publish workflow rejects script and workflow changes before promoting the image with the publish token"
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow allows only root release metadata before image publishing"
+	else
+		fail "publish workflow allows only root release metadata before image publishing ($output)"
+	fi
+	assert_file_contains "$publish_workflow" '.forgejo/workflows/*|scripts/*)' "publish workflow explicitly rejects script and workflow changes before publishing"
+	assert_file_contains "$publish_workflow" 'refusing token-bearing publish for release PR file:' "publish workflow fails closed for unexpected release PR files"
+	assert_file_contains_before "$publish_workflow" 'git diff --name-only "$RELEASE_BASE_SHA" "$RELEASE_MERGE_SHA"' 'Promote release PR Docker image to Forgejo package registry' "publish workflow validates changed files before promoting the image with the publish token"
+	assert_file_contains_before "$publish_workflow" '.forgejo/workflows/*|scripts/*)' 'Promote release PR Docker image to Forgejo package registry' "publish workflow rejects script and workflow changes before promoting the image with the publish token"
 }
 
 test_publish_workflow_uses_push_sha_without_dispatch_inputs_on_push_path() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -360,24 +365,25 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow uses push SHA without dispatch inputs on push path"
-  else
-    fail "publish workflow uses push SHA without dispatch inputs on push path ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow uses push SHA without dispatch inputs on push path"
+	else
+		fail "publish workflow uses push SHA without dispatch inputs on push path ($output)"
+	fi
 }
 
 test_publish_workflow_uses_release_pr_merge_sha_not_a_recomputed_version() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  assert_file_not_contains "$publish_workflow" 'RELEASE_VERSION="${FORGEJO_PULL_REQUEST_HEAD_BRANCH#release/v}"' "publish workflow does not derive a release version from a hand-managed branch"
-  assert_file_not_contains "$publish_workflow" '[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]' "publish workflow does not recompute release versions"
-  assert_file_not_contains "$publish_workflow" 'release-plz' "publish workflow does not use release-plz"
-  assert_file_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway' "publish workflow publishes the application Docker image rather than workspace crates"
-  output="$(python3 - "$publish_workflow" <<'PY'
+	assert_file_not_contains "$publish_workflow" 'RELEASE_VERSION="${FORGEJO_PULL_REQUEST_HEAD_BRANCH#release/v}"' "publish workflow does not derive a release version from a hand-managed branch"
+	assert_file_not_contains "$publish_workflow" '[[ "$RELEASE_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]' "publish workflow does not recompute release versions"
+	assert_file_not_contains "$publish_workflow" 'release-plz' "publish workflow does not use release-plz"
+	assert_file_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway' "publish workflow publishes the application Docker image rather than workspace crates"
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -414,20 +420,21 @@ if errors:
     sys.exit(1)
 sys.exit(0)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow derives release version from checked-out Cargo.toml metadata"
-  else
-    fail "publish workflow derives release version from checked-out Cargo.toml metadata ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow derives release version from checked-out Cargo.toml metadata"
+	else
+		fail "publish workflow derives release version from checked-out Cargo.toml metadata ($output)"
+	fi
 }
 
 test_publish_workflow_executes_from_merge_commit_sha_before_publish_token() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import sys
 
@@ -465,22 +472,23 @@ for index, line in enumerate(workflow):
         print(f"actions/checkout@v4 with mapping is missing: {', '.join(missing)}")
 sys.exit(1)
 PY
-  )"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow checkout fetches full history without persisting credentials"
-  else
-    fail "publish workflow checkout fetches full history without persisting credentials ($output)"
-  fi
-  assert_file_contains "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' "publish workflow asserts HEAD is the merged release PR commit"
-  assert_file_contains_before "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' 'Promote release PR Docker image to Forgejo package registry' "publish workflow verifies checked-out merge commit before promoting the image with the publish token"
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow checkout fetches full history without persisting credentials"
+	else
+		fail "publish workflow checkout fetches full history without persisting credentials ($output)"
+	fi
+	assert_file_contains "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' "publish workflow asserts HEAD is the merged release PR commit"
+	assert_file_contains_before "$publish_workflow" '[[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]]' 'Promote release PR Docker image to Forgejo package registry' "publish workflow verifies checked-out merge commit before promoting the image with the publish token"
 }
 
 test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_image_publish() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -537,35 +545,36 @@ if set_upstream_line is None and (remote_line is None or merge_line is None):
     sys.exit(1)
 sys.exit(0)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow attaches the merge commit to main with upstream before registry image publication"
-  else
-    fail "publish workflow attaches the merge commit to main with upstream before registry image publication ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow attaches the merge commit to main with upstream before registry image publication"
+	else
+		fail "publish workflow attaches the merge commit to main with upstream before registry image publication ($output)"
+	fi
 }
 
 test_release_tooling_uses_local_prepare_and_image_registry_for_publish() {
-  local prepare_workflow publish_workflow
-  prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local prepare_workflow publish_workflow
+	prepare_workflow="$ROOT/.forgejo/workflows/release-prepare.yml"
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  assert_file_contains "$prepare_workflow" 'scripts/release plan --workspace .' "release PR preparation workflow invokes local release planning"
-  assert_file_contains "$prepare_workflow" 'scripts/release prepare --workspace . --version "$RELEASE_VERSION"' "release PR preparation workflow invokes local release metadata preparation"
-  assert_file_not_contains "$prepare_workflow" 'release-plz' "release PR preparation workflow does not invoke release-plz"
-  assert_file_not_contains "$publish_workflow" 'release-plz' "publish workflow does not invoke release-plz"
-  assert_file_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway' "publish workflow targets the application image package registry"
-  assert_file_contains "$prepare_workflow" 'tea login add' "release PR preparation workflow configures tea login"
-  assert_file_contains "$prepare_workflow" 'tea pr create' "release PR preparation workflow uses tea for PR management"
-  assert_file_contains "$publish_workflow" 'release create' "publish workflow creates a Forgejo Release entry"
+	assert_file_contains "$prepare_workflow" 'scripts/release plan --workspace .' "release PR preparation workflow invokes local release planning"
+	assert_file_contains "$prepare_workflow" 'scripts/release prepare --workspace . --version "$RELEASE_VERSION"' "release PR preparation workflow invokes local release metadata preparation"
+	assert_file_not_contains "$prepare_workflow" 'release-plz' "release PR preparation workflow does not invoke release-plz"
+	assert_file_not_contains "$publish_workflow" 'release-plz' "publish workflow does not invoke release-plz"
+	assert_file_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway' "publish workflow targets the application image package registry"
+	assert_file_contains "$prepare_workflow" 'tea login add' "release PR preparation workflow configures tea login"
+	assert_file_contains "$prepare_workflow" 'tea pr create' "release PR preparation workflow uses tea for PR management"
+	assert_file_contains "$publish_workflow" 'release create' "publish workflow creates a Forgejo Release entry"
 }
 
 test_publish_workflow_builds_release_image_and_generates_release_notes_after_merge() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -641,20 +650,21 @@ if errors:
     sys.exit(1)
 sys.exit(0)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow promotes release image and generates Forgejo release notes after merge"
-  else
-    fail "publish workflow promotes release image and generates Forgejo release notes after merge ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow promotes release image and generates Forgejo release notes after merge"
+	else
+		fail "publish workflow promotes release image and generates Forgejo release notes after merge ($output)"
+	fi
 }
 
 test_publish_workflow_promotes_release_pr_docker_image_to_forgejo_registry() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -756,20 +766,21 @@ if errors:
 
 sys.exit(0)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow promotes the release PR Docker image to the Forgejo package registry"
-  else
-    fail "publish workflow promotes the release PR Docker image to the Forgejo package registry ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow promotes the release PR Docker image to the Forgejo package registry"
+	else
+		fail "publish workflow promotes the release PR Docker image to the Forgejo package registry ($output)"
+	fi
 }
 
 test_publish_workflow_promotes_final_tags_from_recorded_release_pr_digest() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -825,20 +836,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow promotes final release tags from recorded PR image digest"
-  else
-    fail "publish workflow promotes final release tags from recorded PR image digest ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow promotes final release tags from recorded PR image digest"
+	else
+		fail "publish workflow promotes final release tags from recorded PR image digest ($output)"
+	fi
 }
 
 test_publish_workflow_resolves_release_pr_image_digest_from_release_candidate_tag() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -949,20 +961,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow resolves release PR image digest from release-candidate tag"
-  else
-    fail "publish workflow resolves release PR image digest from release-candidate tag ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow resolves release PR image digest from release-candidate tag"
+	else
+		fail "publish workflow resolves release PR image digest from release-candidate tag ($output)"
+	fi
 }
 
 test_publish_workflow_requires_trusted_release_environment() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import sys
 
@@ -1003,20 +1016,21 @@ if environment_line > steps_line:
     sys.exit(1)
 sys.exit(0)
 PY
-  )"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow requires the protected release-publish environment at job level before steps"
-  else
-    fail "publish workflow requires the protected release-publish environment at job level before steps ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow requires the protected release-publish environment at job level before steps"
+	else
+		fail "publish workflow requires the protected release-publish environment at job level before steps ($output)"
+	fi
 }
 
 test_publish_workflow_supports_manual_dispatch_from_release_merge_sha() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import sys
 
@@ -1197,20 +1211,21 @@ for forbidden in ["git clone", "tea pr checkout", "gh pr checkout"]:
         print(f"publish workflow should not require local manual checkout recovery commands, found: {forbidden}")
         sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow supports protected manual dispatch from a release merge SHA"
-  else
-    fail "publish workflow supports protected manual dispatch from a release merge SHA ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow supports protected manual dispatch from a release merge SHA"
+	else
+		fail "publish workflow supports protected manual dispatch from a release merge SHA ($output)"
+	fi
 }
 
 test_publish_workflow_keeps_dispatch_input_out_of_non_dispatch_paths() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -1254,20 +1269,21 @@ if errors:
     print("; ".join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow keeps workflow_dispatch input out of non-dispatch release paths"
-  else
-    fail "publish workflow keeps workflow_dispatch input out of non-dispatch release paths ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow keeps workflow_dispatch input out of non-dispatch release paths"
+	else
+		fail "publish workflow keeps workflow_dispatch input out of non-dispatch release paths ($output)"
+	fi
 }
 
 test_publish_workflow_uses_trusted_tools_after_publish_token_exposure() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -1457,28 +1473,29 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow uses only trusted pre-resolved tools after publish token exposure"
-  else
-    fail "publish workflow uses only trusted pre-resolved tools after publish token exposure ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow uses only trusted pre-resolved tools after publish token exposure"
+	else
+		fail "publish workflow uses only trusted pre-resolved tools after publish token exposure ($output)"
+	fi
 }
 
 test_publish_workflow_promotes_release_pr_image_after_merge() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  assert_file_not_contains "$publish_workflow" 'nix build .#ar-gateway-image' "publish workflow does not rebuild the ar-gateway image after merge to main"
-  assert_file_not_contains "$publish_workflow" 'docker-archive:./result' "publish workflow does not publish final release tags from a rebuilt local image archive"
-  assert_file_not_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway-rc' "publish workflow does not promote from an RC-only image repository"
-  assert_file_not_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway-pr' "publish workflow does not promote from a PR-only image repository"
-  assert_file_not_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/pr-ar-gateway' "publish workflow does not promote from an alternate PR-only image repository"
-  assert_file_contains "$publish_workflow" 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow uses the publish token only after merge validation"
-  assert_file_not_contains "$publish_workflow" 'RELEASE_CANDIDATE_SHA' "publish workflow does not depend on pre-merge candidate image tags"
+	assert_file_not_contains "$publish_workflow" 'nix build .#ar-gateway-image' "publish workflow does not rebuild the ar-gateway image after merge to main"
+	assert_file_not_contains "$publish_workflow" 'docker-archive:./result' "publish workflow does not publish final release tags from a rebuilt local image archive"
+	assert_file_not_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway-rc' "publish workflow does not promote from an RC-only image repository"
+	assert_file_not_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway-pr' "publish workflow does not promote from a PR-only image repository"
+	assert_file_not_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/pr-ar-gateway' "publish workflow does not promote from an alternate PR-only image repository"
+	assert_file_contains "$publish_workflow" 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow uses the publish token only after merge validation"
+	assert_file_not_contains "$publish_workflow" 'RELEASE_CANDIDATE_SHA' "publish workflow does not depend on pre-merge candidate image tags"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -1558,20 +1575,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow promotes the release PR image after merge"
-  else
-    fail "publish workflow promotes the release PR image after merge ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow promotes the release PR image after merge"
+	else
+		fail "publish workflow promotes the release PR image after merge ($output)"
+	fi
 }
 
 test_publish_workflow_attaches_binary_archives_checksums_signatures_and_provenance() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -1638,20 +1656,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow attaches Linux binary archives, checksums, signatures, SBOM, and provenance metadata"
-  else
-    fail "publish workflow attaches Linux binary archives, checksums, signatures, SBOM, and provenance metadata ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow attaches Linux binary archives, checksums, signatures, SBOM, and provenance metadata"
+	else
+		fail "publish workflow attaches Linux binary archives, checksums, signatures, SBOM, and provenance metadata ($output)"
+	fi
 }
 
 test_publish_workflow_verifies_reviewed_binary_artifacts_before_release_upload() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -1701,20 +1720,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow verifies reviewed binary artifacts before Forgejo upload"
-  else
-    fail "publish workflow verifies reviewed binary artifacts before Forgejo upload ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow verifies reviewed binary artifacts before Forgejo upload"
+	else
+		fail "publish workflow verifies reviewed binary artifacts before Forgejo upload ($output)"
+	fi
 }
 
 test_publish_workflow_handles_release_signing_key_in_private_tempdir() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -1786,20 +1806,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow handles release signing key in a private temporary directory"
-  else
-    fail "publish workflow handles release signing key in a private temporary directory ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow handles release signing key in a private temporary directory"
+	else
+		fail "publish workflow handles release signing key in a private temporary directory ($output)"
+	fi
 }
 
 test_publish_workflow_promotes_reviewed_x86_64_linux_artifacts_without_rebuilding() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import pathlib
 import re
 import sys
@@ -1859,20 +1880,21 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow promotes reviewed x86_64 Linux artifacts without rebuilding"
-  else
-    fail "publish workflow promotes reviewed x86_64 Linux artifacts without rebuilding ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow promotes reviewed x86_64 Linux artifacts without rebuilding"
+	else
+		fail "publish workflow promotes reviewed x86_64 Linux artifacts without rebuilding ($output)"
+	fi
 }
 
 test_publish_workflow_allows_intentional_release_tooling_changes_before_token_publish() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
-  output="$(python3 - "$publish_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
 import fnmatch
 import pathlib
 import re
@@ -1954,21 +1976,22 @@ if 'tests/release_tooling/*.sh' not in validation_section:
 if errors:
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow allows intentional release tooling changes while rejecting unexpected token-bearing files"
-  else
-    fail "publish workflow allows intentional release tooling changes while rejecting unexpected token-bearing files ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow allows intentional release tooling changes while rejecting unexpected token-bearing files"
+	else
+		fail "publish workflow allows intentional release tooling changes while rejecting unexpected token-bearing files ($output)"
+	fi
 }
 
 test_linux_binary_archives_do_not_package_nix_wrappers_without_closure() {
-  local publish_workflow ci_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
-  ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
+	local publish_workflow ci_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+	ci_workflow="$ROOT/.forgejo/workflows/ci.yml"
 
-  output="$(python3 - "$publish_workflow" "$ci_workflow" <<'PY'
+	output="$(
+		python3 - "$publish_workflow" "$ci_workflow" <<'PY'
 import pathlib
 import re
 import shlex
@@ -2043,37 +2066,71 @@ if errors:
     print('; '.join(errors))
     sys.exit(1)
 PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "Linux binary archives avoid Nix wrapper-only payloads"
-  else
-    fail "Linux binary archives avoid Nix wrapper-only payloads ($output)"
-  fi
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "Linux binary archives avoid Nix wrapper-only payloads"
+	else
+		fail "Linux binary archives avoid Nix wrapper-only payloads ($output)"
+	fi
+}
+
+test_publish_workflow_skopeo_inspect_uses_supported_credentials_flag() {
+	local publish_workflow output status
+	publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+	output="$(
+		python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+for line_number, line in enumerate(workflow.splitlines(), start=1):
+    if 'skopeo' in line.lower() and 'inspect' in line and '--src-creds' in line:
+        errors.append(f'skopeo inspect must use --creds, not unsupported copy-only --src-creds: line {line_number}: {line.strip()}')
+
+if re.search(r'\$SKOPEO" inspect\s+--creds\s+"\$\{RELEASE_BOT_NAME\}:\$RELEASE_PUBLISH_TOKEN"\s+"\$release_pr_source_digest_image"', workflow) is None:
+    errors.append('publish workflow release PR image inspection must authenticate with skopeo inspect --creds')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+	)"
+	status=$?
+	if [[ $status -eq 0 ]]; then
+		pass "publish workflow skopeo inspect uses supported credentials flag"
+	else
+		fail "publish workflow skopeo inspect uses supported credentials flag ($output)"
+	fi
 }
 
 run_tests \
-  test_publish_workflow_triggers_on_main_push_or_manual_dispatch_only \
-  test_publish_workflow_does_not_persist_push_commit_message_to_github_env \
-  test_publish_workflow_heredoc_terminators_are_not_indented_after_yaml_stripping \
-  test_publish_workflow_validates_provenance_and_changed_files_before_publish_token \
-  test_publish_workflow_uses_push_sha_without_dispatch_inputs_on_push_path \
-  test_publish_workflow_uses_release_pr_merge_sha_not_a_recomputed_version \
-  test_publish_workflow_executes_from_merge_commit_sha_before_publish_token \
-  test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_image_publish \
-  test_release_tooling_uses_local_prepare_and_image_registry_for_publish \
-  test_publish_workflow_builds_release_image_and_generates_release_notes_after_merge \
-  test_publish_workflow_promotes_release_pr_docker_image_to_forgejo_registry \
-  test_publish_workflow_promotes_final_tags_from_recorded_release_pr_digest \
-  test_publish_workflow_resolves_release_pr_image_digest_from_release_candidate_tag \
-  test_publish_workflow_requires_trusted_release_environment \
-  test_publish_workflow_supports_manual_dispatch_from_release_merge_sha \
-  test_publish_workflow_keeps_dispatch_input_out_of_non_dispatch_paths \
-  test_publish_workflow_uses_trusted_tools_after_publish_token_exposure \
-  test_publish_workflow_promotes_release_pr_image_after_merge \
-  test_publish_workflow_attaches_binary_archives_checksums_signatures_and_provenance \
-  test_publish_workflow_verifies_reviewed_binary_artifacts_before_release_upload \
-  test_publish_workflow_handles_release_signing_key_in_private_tempdir \
-  test_publish_workflow_promotes_reviewed_x86_64_linux_artifacts_without_rebuilding \
-  test_publish_workflow_allows_intentional_release_tooling_changes_before_token_publish \
-  test_linux_binary_archives_do_not_package_nix_wrappers_without_closure
+	test_publish_workflow_triggers_on_main_push_or_manual_dispatch_only \
+	test_publish_workflow_does_not_persist_push_commit_message_to_github_env \
+	test_publish_workflow_heredoc_terminators_are_not_indented_after_yaml_stripping \
+	test_publish_workflow_validates_provenance_and_changed_files_before_publish_token \
+	test_publish_workflow_uses_push_sha_without_dispatch_inputs_on_push_path \
+	test_publish_workflow_uses_release_pr_merge_sha_not_a_recomputed_version \
+	test_publish_workflow_executes_from_merge_commit_sha_before_publish_token \
+	test_publish_workflow_attaches_merge_commit_to_main_with_upstream_before_image_publish \
+	test_release_tooling_uses_local_prepare_and_image_registry_for_publish \
+	test_publish_workflow_builds_release_image_and_generates_release_notes_after_merge \
+	test_publish_workflow_promotes_release_pr_docker_image_to_forgejo_registry \
+	test_publish_workflow_promotes_final_tags_from_recorded_release_pr_digest \
+	test_publish_workflow_resolves_release_pr_image_digest_from_release_candidate_tag \
+	test_publish_workflow_requires_trusted_release_environment \
+	test_publish_workflow_supports_manual_dispatch_from_release_merge_sha \
+	test_publish_workflow_keeps_dispatch_input_out_of_non_dispatch_paths \
+	test_publish_workflow_uses_trusted_tools_after_publish_token_exposure \
+	test_publish_workflow_promotes_release_pr_image_after_merge \
+	test_publish_workflow_attaches_binary_archives_checksums_signatures_and_provenance \
+	test_publish_workflow_verifies_reviewed_binary_artifacts_before_release_upload \
+	test_publish_workflow_handles_release_signing_key_in_private_tempdir \
+	test_publish_workflow_promotes_reviewed_x86_64_linux_artifacts_without_rebuilding \
+	test_publish_workflow_allows_intentional_release_tooling_changes_before_token_publish \
+	test_linux_binary_archives_do_not_package_nix_wrappers_without_closure \
+	test_publish_workflow_skopeo_inspect_uses_supported_credentials_flag
