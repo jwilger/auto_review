@@ -157,37 +157,26 @@ release_pr_publication_steps = [
     if final_image in step.group('body') and ('skopeo copy' in step.group('body') or 'Docker image:' in step.group('body') or 'digest' in step.group('body').lower())
 ]
 release_pr_publication_text = '\n'.join(release_pr_publication_steps)
-if not re.search(r'ar-gateway:(?:\$\{?PR_HEAD_SHA\}?|github\.event\.pull_request\.head\.sha)', release_pr_publication_text):
-    errors.append('CI release PR Docker image must be tagged in the final ar-gateway repository with the immutable PR head SHA')
-if not re.search(r'ar-gateway:\$\{?RELEASE_VERSION\}?-rc\.\$\{?GITHUB_RUN_NUMBER\}?', release_pr_publication_text):
-    errors.append('CI release PR Docker image must also be tagged as $RELEASE_VERSION-rc.$GITHUB_RUN_NUMBER in the final ar-gateway repository')
-if not re.search(r'(?:skopeo\s+inspect|\.Digest|digest)', release_pr_publication_text, re.I):
-    errors.append('CI release PR publication must record the image digest for the PR body')
+if not re.search(r'ar-gateway:release-candidate\b', release_pr_publication_text):
+    errors.append('CI release PR Docker image must publish git.johnwilger.com/jwilger/auto_review/ar-gateway:release-candidate from the reviewed PR artifact')
+for mutable_contract in ['Image digest:', 'CURRENT_PR_BODY', 'github.event.pull_request.body']:
+    if mutable_contract in release_pr_publication_text:
+        errors.append(f'CI release PR Docker publication must not depend on mutable PR body artifact strings: {mutable_contract}')
 
 generic_package_markers = [
-    '/api/packages/jwilger/generic/',
-    'tea api packages/jwilger/generic/',
-    'type=generic',
+    '/api/packages/jwilger/generic/auto-review-release-candidate/release-candidate/',
+    'tea api packages/jwilger/generic/auto-review-release-candidate/release-candidate/',
 ]
 binary_archive_markers = ['auto-review-', 'linux-x86_64.tar.gz', 'SHA256SUMS']
 if not any(marker in workflow for marker in generic_package_markers):
-    errors.append('CI workflow must host release PR binary downloads as Forgejo generic packages')
+    errors.append('CI workflow must host reviewed release PR binary downloads at the stable release-candidate Forgejo generic package path')
 for marker in binary_archive_markers:
     if marker not in workflow:
         errors.append(f'CI workflow must publish release PR binary package artifact marker: {marker}')
 
-pr_body_update_markers = ['tea pr edit', 'PATCH', 'pulls/${{ github.event.pull_request.number }}', 'pulls/$PR_NUMBER']
-if not any(marker in workflow for marker in pr_body_update_markers):
-    errors.append('CI workflow must update the release PR description with artifact links')
-for marker in ['Docker image', 'binary download', 'Image digest']:
-    if marker not in workflow:
-        errors.append(f'PR description update must include {marker} links')
-for tag_pattern, description in [
-    (r'ar-gateway:(?:\$\{?PR_HEAD_SHA\}?|github\.event\.pull_request\.head\.sha)', 'PR head SHA image tag'),
-    (r'ar-gateway:\$\{?RELEASE_VERSION\}?-rc\.\$\{?GITHUB_RUN_NUMBER\}?', 'release-candidate run-number image tag'),
-]:
-    if not re.search(tag_pattern, workflow):
-        errors.append(f'PR description update must record the {description}')
+for forbidden_body_contract in ['Image digest:', 'CURRENT_PR_BODY: ${{ github.event.pull_request.body }}']:
+    if forbidden_body_contract in workflow:
+        errors.append(f'CI workflow must not make release publishing depend on PR description/body artifact strings: {forbidden_body_contract}')
 
 cleanup_markers = ['cleanup-pr-packages:', 'Delete PR Docker and generic binary packages', 'DELETE', '-X DELETE']
 for marker in cleanup_markers:

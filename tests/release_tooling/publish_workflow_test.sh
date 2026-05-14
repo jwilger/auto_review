@@ -834,7 +834,7 @@ PY
   fi
 }
 
-test_publish_workflow_derives_validated_release_pr_image_digest_from_release_commit_artifacts() {
+test_publish_workflow_resolves_release_pr_image_digest_from_release_candidate_tag() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
@@ -853,27 +853,94 @@ comment_stripped_before_publish = '\n'.join(
     line for line in before_publish.splitlines()
     if not line.lstrip().startswith('#')
 )
+derive_step_match = re.search(
+    r'(?ms)^      - name: Derive release PR image digest from merged release commit\n(?P<step>.*?)(?=^      - |\Z)',
+    workflow,
+)
+derive_step = derive_step_match.group('step') if derive_step_match else ''
+promotion_step_match = re.search(
+    r'(?ms)^      - name: Promote release PR Docker image to Forgejo package registry\n(?P<step>.*?)(?=^      - |\Z)',
+    workflow,
+)
+promotion_step = promotion_step_match.group('step') if promotion_step_match else ''
+digest_resolution_scope = derive_step + '\n' + promotion_step
 
 if not re.search(r'git\s+(?:log|-?show|show)\b[\s\S]{0,240}(?:--format=%B|--pretty=%B)[\s\S]{0,240}(?:\$\{?RELEASE_MERGE_SHA\}?|HEAD)', comment_stripped_before_publish):
-    errors.append('release-publish must read the trusted merged release commit body before token-bearing image promotion')
+    errors.append('release-publish must read the trusted merged release commit body to find the Reviewed-on PR before token-bearing image promotion')
+
+body_digest_parse_patterns = [
+    r'(?:release_commit_body|RELEASE_COMMIT_BODY|pr\.get\(\s*["\']body["\']|\[\s*["\']body["\']\s*\])[\s\S]{0,320}Image digest\s*:',
+    r'Image digest\s*:[\s\S]{0,320}(?:release_commit_body|RELEASE_COMMIT_BODY|pr\.get\(\s*["\']body["\']|\[\s*["\']body["\']\s*\])',
+]
+if any(re.search(pattern, digest_resolution_scope, re.I) for pattern in body_digest_parse_patterns):
+    errors.append('release-publish must not parse or require Image digest from the release commit or PR body; the PR body is mutable and must not be the digest source')
+
+if 'Reviewed-on:' not in derive_step:
+    errors.append('release-publish must derive the release PR number from the Reviewed-on trailer in the merged release commit')
+
+pr_validation_patterns = [
+    r'\[\s*["\']merged["\']\s*\][\s\S]{0,160}True[\s\S]{0,240}\[\s*["\']merge_commit_sha["\']\s*\][\s\S]{0,160}RELEASE_MERGE_SHA',
+    r'\[\s*["\']merge_commit_sha["\']\s*\][\s\S]{0,160}RELEASE_MERGE_SHA[\s\S]{0,240}\[\s*["\']merged["\']\s*\][\s\S]{0,160}True',
+]
+if not any(re.search(pattern, derive_step) for pattern in pr_validation_patterns):
+    errors.append('release-publish must validate the Reviewed-on PR API response is merged to RELEASE_MERGE_SHA')
+
+head_sha_patterns = [
+    r'RELEASE_PR_HEAD_SHA[\s\S]{0,240}\[\s*["\']head["\']\s*\][\s\S]{0,120}\[\s*["\']sha["\']\s*\]',
+    r'\[\s*["\']head["\']\s*\][\s\S]{0,120}\[\s*["\']sha["\']\s*\][\s\S]{0,240}RELEASE_PR_HEAD_SHA',
+    r'RELEASE_PR_HEAD_SHA=.*?pr\["head"\]\["sha"\]',
+]
+if not any(re.search(pattern, derive_step) for pattern in head_sha_patterns):
+    errors.append('release-publish must validate the Reviewed-on PR API response exposes the reviewed PR head SHA for provenance checks')
+
+release_candidate_source_patterns = [
+    r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway:release-candidate\b',
+    r'git\.johnwilger\.com/jwilger/auto_review/ar-gateway:release-candidate\b',
+]
+release_candidate_source_vars = set()
+for line in derive_step.splitlines():
+    assignment = re.match(r'\s*([A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)', line.strip())
+    if assignment and any(re.search(pattern, assignment.group('value')) for pattern in release_candidate_source_patterns):
+        release_candidate_source_vars.add(assignment.group(1))
+for line in promotion_step.splitlines():
+    assignment = re.match(r'\s*([A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)', line.strip())
+    if assignment and any(re.search(pattern, assignment.group('value')) for pattern in release_candidate_source_patterns):
+        release_candidate_source_vars.add(assignment.group(1))
+
+has_release_candidate_source = any(re.search(pattern, digest_resolution_scope) for pattern in release_candidate_source_patterns)
+if not has_release_candidate_source:
+    errors.append('release-publish must construct the source registry image from git.johnwilger.com/jwilger/auto_review/ar-gateway:release-candidate')
+
+def command_uses_release_candidate_source(command):
+    if any(re.search(pattern, command) for pattern in release_candidate_source_patterns):
+        return True
+    return any(f'${var}' in command or '${' + var + '}' in command for var in release_candidate_source_vars)
+
+inspect_commands = [
+    line.strip()
+    for line in digest_resolution_scope.splitlines()
+    if re.search(r'(?:(?:"\$SKOPEO")|(?:\$\{SKOPEO\})|(?:\$SKOPEO))\s+inspect\b', line)
+]
+if not any(command_uses_release_candidate_source(command) for command in inspect_commands):
+    errors.append('release-publish must inspect the release-candidate source image with $SKOPEO to resolve the immutable digest')
 
 digest_assignment = re.search(
     r'(?ms)(?:^|\n)\s*RELEASE_PR_IMAGE_DIGEST=.*?(?=\n\s*(?:if|case|\[\[|[A-Z_][A-Za-z0-9_]+=|echo|printf|$))',
-    comment_stripped_before_publish,
+    digest_resolution_scope,
 )
 if not digest_assignment:
-    errors.append('release-publish must assign RELEASE_PR_IMAGE_DIGEST from the release PR body before publishing')
+    errors.append('release-publish must assign RELEASE_PR_IMAGE_DIGEST before publishing')
 else:
     assignment_text = digest_assignment.group(0)
-    if not re.search(r'(?:Image digest|Digest|sha256:)', assignment_text, re.I):
-        errors.append('RELEASE_PR_IMAGE_DIGEST assignment must extract the image digest recorded in the release PR body')
+    if not re.search(r'(?:(?:"\$SKOPEO")|(?:\$\{SKOPEO\})|(?:\$SKOPEO))\s+inspect\b[\s\S]{0,320}(?:--format|Digest)', assignment_text) or not command_uses_release_candidate_source(assignment_text):
+        errors.append('RELEASE_PR_IMAGE_DIGEST must be resolved by $SKOPEO inspecting the release-candidate registry image, not parsed from mutable PR body text')
 
 digest_validation_patterns = [
     r'\[\[\s*"?\$\{?RELEASE_PR_IMAGE_DIGEST\}?"?\s*=~\s*\^sha256:\[0-9a-fA-F\]\{64\}\$',
     r'grep\s+[^\n]*\^sha256:\[0-9a-fA-F\]\{64\}\$',
 ]
-if not any(re.search(pattern, before_publish) for pattern in digest_validation_patterns):
-    errors.append('release-publish must validate RELEASE_PR_IMAGE_DIGEST is exactly sha256:<64 hex chars> before token-bearing publish')
+if not any(re.search(pattern, digest_resolution_scope) for pattern in digest_validation_patterns):
+    errors.append('release-publish must validate RELEASE_PR_IMAGE_DIGEST is exactly sha256:<64 hex chars> before promoting final tags')
 
 if not re.search(r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway@\$\{?RELEASE_PR_IMAGE_DIGEST\}?', publication_step):
     errors.append('release-publish must copy final version/latest tags from docker://git.johnwilger.com/jwilger/auto_review/ar-gateway@$RELEASE_PR_IMAGE_DIGEST')
@@ -885,9 +952,9 @@ PY
 )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "publish workflow derives validated release PR image digest from release commit artifacts"
+    pass "publish workflow resolves release PR image digest from release-candidate tag"
   else
-    fail "publish workflow derives validated release PR image digest from release commit artifacts ($output)"
+    fail "publish workflow resolves release PR image digest from release-candidate tag ($output)"
   fi
 }
 
@@ -1580,7 +1647,7 @@ PY
   fi
 }
 
-test_publish_workflow_verifies_generated_binary_artifacts_before_release_upload() {
+test_publish_workflow_verifies_reviewed_binary_artifacts_before_release_upload() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
@@ -1595,6 +1662,10 @@ errors = []
 release_marker = 'Create Forgejo Release'
 before_release = workflow.split(release_marker, 1)[0] if release_marker in workflow else workflow
 required_before_release = [
+    'Reviewed-on:',
+    'auto-review-release-candidate/release-candidate',
+    'generic',
+    'curl -fsSL',
     'sha256sum -c SHA256SUMS',
     'linux-x86_64',
     '.sig',
@@ -1603,7 +1674,7 @@ required_before_release = [
 ]
 for marker in required_before_release:
     if marker not in before_release:
-        errors.append(f'generated release artifacts are not verified before Forgejo upload: {marker}')
+        errors.append(f'reviewed release PR artifacts are not downloaded and verified before Forgejo upload: {marker}')
 
 signature_verify_patterns = [
     r'cosign\s+verify-blob[\s\S]{0,300}\.sig',
@@ -1612,15 +1683,19 @@ signature_verify_patterns = [
     r'ssh-keygen\s+-Y\s+verify[\s\S]{0,300}\.sig',
 ]
 if not any(re.search(pattern, before_release) for pattern in signature_verify_patterns):
-    errors.append('generated binary signatures must be verified before Forgejo upload')
+    errors.append('reviewed binary signatures must be verified before Forgejo upload')
 
-artifact_build_index = min(
-    (index for index in [before_release.find('linux-x86_64')] if index != -1),
+artifact_download_markers = [
+    'auto-review-release-candidate/release-candidate',
+    'curl -fsSL',
+]
+artifact_download_index = min(
+    (before_release.find(marker) for marker in artifact_download_markers if before_release.find(marker) != -1),
     default=-1,
 )
 checksum_verify_index = before_release.find('sha256sum -c SHA256SUMS')
-if artifact_build_index == -1 or checksum_verify_index == -1 or checksum_verify_index < artifact_build_index:
-    errors.append('checksum verification must run after binary artifact generation and before release creation')
+if artifact_download_index == -1 or checksum_verify_index == -1 or checksum_verify_index < artifact_download_index:
+    errors.append('checksum verification must run after reviewed artifact download and before release creation')
 
 if errors:
     print('; '.join(errors))
@@ -1629,9 +1704,9 @@ PY
 )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "publish workflow verifies generated binary artifacts before Forgejo upload"
+    pass "publish workflow verifies reviewed binary artifacts before Forgejo upload"
   else
-    fail "publish workflow verifies generated binary artifacts before Forgejo upload ($output)"
+    fail "publish workflow verifies reviewed binary artifacts before Forgejo upload ($output)"
   fi
 }
 
@@ -1647,7 +1722,7 @@ import sys
 workflow = pathlib.Path(sys.argv[1]).read_text()
 errors = []
 
-step_match = re.search(r'- name: Build and verify Linux binary release artifacts(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
+step_match = re.search(r'- name: (?:Build and verify|Download reviewed) Linux binary release artifacts(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
 if not step_match:
     print('publish workflow is missing the binary artifact build/signing step')
     sys.exit(1)
@@ -1720,7 +1795,7 @@ PY
   fi
 }
 
-test_publish_workflow_builds_x86_64_linux_artifacts_in_docker() {
+test_publish_workflow_promotes_reviewed_x86_64_linux_artifacts_without_rebuilding() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
@@ -1741,52 +1816,44 @@ job = job_match.group('body')
 if not re.search(r'(?m)^    runs-on:\s*docker-release\s*$', job):
     errors.append('release-publish job must use the dedicated docker-release Forgejo runner label')
 
-step_match = re.search(r'- name: Build and verify Linux binary release artifacts(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
+step_match = re.search(r'- name: (?:Download|Promote|Stage) reviewed Linux binary release artifacts(?P<body>[\s\S]*?)(?:\n      - |\Z)', workflow)
 if not step_match:
-    print('publish workflow is missing the binary artifact build/signing step')
+    print('publish workflow is missing a step that downloads/stages reviewed Linux binary release artifacts')
     sys.exit(1)
 
 step = step_match.group('body')
-x86_binary_packages = [
-    '.#packages.x86_64-linux.default',
+job_without_comments = '\n'.join(
+    line for line in job.splitlines()
+    if not line.lstrip().startswith('#')
+)
+for forbidden in [
+    'nix build .#packages.x86_64-linux',
     '.#packages.x86_64-linux.ar-cli-portable-release-root',
-]
-first_x86_build = min(
-    (position for package in x86_binary_packages if (position := step.find(package)) != -1),
-    default=-1,
-)
-first_aarch64_build = step.find('.#packages.aarch64-linux.default')
-platform_config = step.find('extra-platforms = x86_64-linux aarch64-linux')
-x86_release_root_assignment = step.find(
-    'x86_release_root="$(nix build .#packages.x86_64-linux.ar-cli-portable-release-root --print-out-paths --no-link)"'
-)
-x86_release_root_archive = step.find('tar -C "$x86_release_root"')
-x86_release_root_metadata = step.find('python3 - "$RELEASE_VERSION" "$RELEASE_MERGE_SHA" "$x86_release_root"')
+    'tar -C "$x86_release_root"',
+    'tar -czf release-artifacts/auto-review',
+]:
+    if forbidden in job_without_comments:
+        errors.append(f'release-publish must not rebuild or rearchive reviewed binary artifacts after merge: {forbidden}')
 
-if first_x86_build == -1:
-    errors.append('binary artifact step must build an x86_64-linux binary package')
-if x86_release_root_assignment == -1:
-    errors.append('binary artifact step must assign x86_release_root from the portable x86 release package build')
-if x86_release_root_archive == -1:
-    errors.append('binary artifact step must archive from the x86_release_root path')
-if x86_release_root_metadata == -1:
-    errors.append('binary artifact step must pass x86_release_root to release metadata generation')
-if (
-    x86_release_root_assignment != -1
-    and x86_release_root_archive != -1
-    and x86_release_root_archive < x86_release_root_assignment
-):
-    errors.append('binary artifact step must set x86_release_root before archiving from it')
-if (
-    x86_release_root_assignment != -1
-    and x86_release_root_metadata != -1
-    and x86_release_root_metadata < x86_release_root_assignment
-):
-    errors.append('binary artifact step must set x86_release_root before metadata generation uses it')
-if first_aarch64_build != -1:
-    errors.append('binary artifact step must not attempt native aarch64-linux builds from the Docker release runner')
-if platform_config != -1:
-    errors.append('binary artifact step must not enable extra-platforms for Docker release builds')
+required_download_markers = [
+    'auto-review-release-candidate/release-candidate',
+    'generic',
+    'auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz',
+    'SHA256SUMS',
+    'release-artifacts',
+]
+for marker in required_download_markers:
+    if marker not in step:
+        errors.append(f'reviewed artifact promotion step is missing marker: {marker}')
+
+download_patterns = [
+    r'(?:curl|"\$CURL")\s+-fsSL[\s\S]{0,800}auto-review-release-candidate/release-candidate',
+    r'package_base=[^\n]*auto-review-release-candidate/release-candidate[\s\S]{0,800}(?:curl|"\$CURL")\s+-fsSL[\s\S]{0,800}\$package_base',
+]
+if not any(re.search(pattern, step) for pattern in download_patterns):
+    errors.append('reviewed artifact promotion must download the stable release-candidate generic binary package without PR description artifact links')
+if 'sha256sum -c SHA256SUMS' not in step:
+    errors.append('reviewed artifact promotion must verify downloaded assets with the reviewed SHA256SUMS')
 
 if errors:
     print('; '.join(errors))
@@ -1795,9 +1862,9 @@ PY
 )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "publish workflow builds x86_64 Linux binary artifacts on the Docker release runner"
+    pass "publish workflow promotes reviewed x86_64 Linux artifacts without rebuilding"
   else
-    fail "publish workflow builds x86_64 Linux binary artifacts on the Docker release runner ($output)"
+    fail "publish workflow promotes reviewed x86_64 Linux artifacts without rebuilding ($output)"
   fi
 }
 
@@ -1998,15 +2065,15 @@ run_tests \
   test_publish_workflow_builds_release_image_and_generates_release_notes_after_merge \
   test_publish_workflow_promotes_release_pr_docker_image_to_forgejo_registry \
   test_publish_workflow_promotes_final_tags_from_recorded_release_pr_digest \
-  test_publish_workflow_derives_validated_release_pr_image_digest_from_release_commit_artifacts \
+  test_publish_workflow_resolves_release_pr_image_digest_from_release_candidate_tag \
   test_publish_workflow_requires_trusted_release_environment \
   test_publish_workflow_supports_manual_dispatch_from_release_merge_sha \
   test_publish_workflow_keeps_dispatch_input_out_of_non_dispatch_paths \
   test_publish_workflow_uses_trusted_tools_after_publish_token_exposure \
   test_publish_workflow_promotes_release_pr_image_after_merge \
   test_publish_workflow_attaches_binary_archives_checksums_signatures_and_provenance \
-  test_publish_workflow_verifies_generated_binary_artifacts_before_release_upload \
+  test_publish_workflow_verifies_reviewed_binary_artifacts_before_release_upload \
   test_publish_workflow_handles_release_signing_key_in_private_tempdir \
-  test_publish_workflow_builds_x86_64_linux_artifacts_in_docker \
+  test_publish_workflow_promotes_reviewed_x86_64_linux_artifacts_without_rebuilding \
   test_publish_workflow_allows_intentional_release_tooling_changes_before_token_publish \
   test_linux_binary_archives_do_not_package_nix_wrappers_without_closure

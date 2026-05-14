@@ -288,7 +288,7 @@ jobs:
           {"default":[{"type":"insecureAcceptAnything"}]}
           EOF
           sha_tag="git.johnwilger.com/jwilger/auto_review/ar-gateway:$PR_HEAD_SHA"
-          rc_tag="git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_VERSION-rc.$GITHUB_RUN_NUMBER"
+          rc_tag="git.johnwilger.com/jwilger/auto_review/ar-gateway:release-candidate"
           "$SKOPEO" copy --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" docker-archive:pr-publication-artifacts/ar-gateway-image.tar "docker://$sha_tag"
           image_digest="$($SKOPEO inspect --src-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" "docker://$sha_tag" | "$JQ" -r '.Digest')"
           if [[ ! "$image_digest" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
@@ -302,66 +302,8 @@ jobs:
               -u "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" \
               --upload-file "pr-publication-artifacts/$artifact" \
               "https://git.johnwilger.com/api/packages/jwilger/generic/auto-review-pr/$PR_NUMBER-$PR_HEAD_SHA/$artifact"
+            "$CURL" -fsS -X PUT \
+              -u "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" \
+              --upload-file "pr-publication-artifacts/$artifact" \
+              "https://git.johnwilger.com/api/packages/jwilger/generic/auto-review-release-candidate/release-candidate/$artifact"
           done
-
-      - name: Update PR description with package links
-        if: ${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && github.event.pull_request.user.login == vars.RELEASE_BOT_NAME }}
-        env:
-          GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
-          GITEA_SERVER_URL: https://git.johnwilger.com
-          CURRENT_PR_BODY: ${{ github.event.pull_request.body }}
-        run: |
-          set -euo pipefail
-          unset BASH_ENV ENV LD_PRELOAD LD_LIBRARY_PATH DYLD_INSERT_LIBRARIES PYTHONPATH PERL5LIB RUBYLIB NODE_OPTIONS
-          PR_HEAD_SHA=""
-          RELEASE_VERSION=""
-          while IFS='=' read -r key value; do
-            case "$key" in
-              PR_NUMBER) PR_NUMBER="$value" ;;
-              PR_HEAD_SHA) PR_HEAD_SHA="$value" ;;
-              RELEASE_VERSION) RELEASE_VERSION="$value" ;;
-            esac
-          done < pr-publication-artifacts/pr-metadata.env
-          while IFS='=' read -r key value; do
-            case "$key" in
-              SHA_TAG) SHA_TAG="$value" ;;
-              RC_TAG) RC_TAG="$value" ;;
-              IMAGE_DIGEST) IMAGE_DIGEST="$value" ;;
-            esac
-          done < pr-publication-artifacts/pr-image.env
-          if [ -z "$RELEASE_VERSION" ]; then
-            printf 'release PR artifact metadata did not include RELEASE_VERSION\n' >&2
-            exit 1
-          fi
-          if [[ ! "${IMAGE_DIGEST:-}" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
-            printf 'release PR image digest was not sha256-shaped: %s\n' "${IMAGE_DIGEST:-}" >&2
-            exit 1
-          fi
-          body_file="$($MKTEMP)"
-          block_file="$($MKTEMP)"
-          "$CAT" > "$block_file" <<EOF
-          <!-- auto_review:artifact-links:start -->
-          PR artifacts for $PR_HEAD_SHA:
-
-          Docker image: $SHA_TAG
-          Release candidate Docker image: $RC_TAG
-          Image digest: $IMAGE_DIGEST
-          binary download: https://git.johnwilger.com/api/packages/jwilger/generic/auto-review-pr/$PR_NUMBER-$PR_HEAD_SHA/auto-review-pr-$PR_NUMBER-$PR_HEAD_SHA-linux-x86_64.tar.gz
-          SHA256SUMS: https://git.johnwilger.com/api/packages/jwilger/generic/auto-review-pr/$PR_NUMBER-$PR_HEAD_SHA/SHA256SUMS
-          <!-- auto_review:artifact-links:end -->
-          EOF
-          printf '%s\n' "$CURRENT_PR_BODY" | "$AWK" '
-            /<!-- auto_review:artifact-links:start -->/ { skipping = 1; next }
-            /<!-- auto_review:artifact-links:end -->/ { skipping = 0; next }
-            !skipping { print }
-          ' | "$SED" -e :a -e '/^\n*$/{$d;N;ba' -e '}' > "$body_file"
-          if [ -s "$body_file" ]; then
-            printf '\n\n' >> "$body_file"
-          fi
-          "$CAT" "$block_file" >> "$body_file"
-          "$JQ" -n --arg body "$("$CAT" "$body_file")" '{body: $body}' > "$body_file.json"
-          "$CURL" -fsS -X PATCH \
-            -H "Authorization: token $GITEA_SERVER_TOKEN" \
-            -H "Content-Type: application/json" \
-            --data @"$body_file.json" \
-            "$GITEA_SERVER_URL/api/v1/repos/jwilger/auto_review/pulls/$PR_NUMBER"
