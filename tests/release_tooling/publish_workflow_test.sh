@@ -996,6 +996,117 @@ PY
   fi
 }
 
+test_publish_workflow_falls_back_to_reviewed_on_pr_head_sha_before_publish_token() {
+  local publish_workflow output status
+  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
+
+  output="$(python3 - "$publish_workflow" <<'PY'
+import pathlib
+import re
+import sys
+
+workflow = pathlib.Path(sys.argv[1]).read_text()
+errors = []
+
+publish_marker = 'Promote release PR Docker image to Forgejo package registry'
+token_marker = 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}'
+before_publish = workflow.split(publish_marker, 1)[0] if publish_marker in workflow else workflow
+before_token = workflow.split(token_marker, 1)[0] if token_marker in workflow else workflow
+pre_token_publish = before_publish if len(before_publish) <= len(before_token) else before_token
+comment_stripped = '\n'.join(
+    line for line in pre_token_publish.splitlines()
+    if not line.lstrip().startswith('#')
+)
+derive_step_match = re.search(
+    r'- name: Derive release PR head SHA from merged release commit(?P<body>[\s\S]*?)(?:\n      - |\Z)',
+    comment_stripped,
+)
+derive_step = derive_step_match.group('body') if derive_step_match else ''
+
+sample_squash_body = (
+    'chore: release v0.11.0 (#189)\n\n'
+    'Reviewed-on: https://git.johnwilger.com/jwilger/auto_review/pulls/189\n'
+)
+has_trusted_reviewed_on_extraction = (
+    'RELEASE_COMMIT_BODY' in derive_step
+    and 'Reviewed-on' in derive_step
+    and r'git\.johnwilger\.com' in derive_step
+    and 'jwilger/auto_review/pulls/' in derive_step
+    and re.search(r'\[[0-9]\]\+|\[0-9\]\+|\[0-9\]\{1,\}|\(\[0-9\]\+\)|\(\[0-9\]\{1,\}\)', derive_step)
+)
+if not has_trusted_reviewed_on_extraction:
+    errors.append(
+        'release-publish must extract the release PR number from the trusted merged release commit body with a Reviewed-on URL regex, '
+        f'e.g. {sample_squash_body!r}'
+    )
+
+has_pr_number_variable = re.search(r'RELEASE_PR_(?:NUMBER|INDEX)|release_pr_(?:number|index)', derive_step)
+has_public_forgejo_pull_fetch = re.search(
+    r'curl\b[\s\S]{0,500}(?:https://git\.johnwilger\.com/api/v1/repos/jwilger/auto_review/pulls/|/api/v1/repos/jwilger/auto_review/pulls/)'
+    r'[\s\S]{0,240}(?:\$\{?RELEASE_PR_(?:NUMBER|INDEX)\}?|\$\{?release_pr_(?:number|index)\}?)',
+    derive_step,
+)
+has_head_sha_json_parse = re.search(
+    r'(?:head\s*\[\s*["\']sha["\']\s*\]|["\']head["\']\s*\]\s*\[\s*["\']sha["\']|\.head\.sha|"head"[\s\S]{0,200}"sha")',
+    derive_step,
+)
+if not (has_pr_number_variable and has_public_forgejo_pull_fetch and has_head_sha_json_parse):
+    errors.append(
+        'release-publish must fetch the Reviewed-on PR via the public Forgejo pulls API before token-bearing publish '
+        'and parse the PR head SHA from head.sha when artifact text is absent'
+    )
+
+api_fallback_slice = derive_step[derive_step.find('curl'):] if 'curl' in derive_step else derive_step
+has_api_merged_true_check = re.search(
+    r'(?:\[\s*["\']merged["\']\s*\]|\.get\(\s*["\']merged["\']|"merged"[\s\S]{0,120}(?:true|True))',
+    api_fallback_slice,
+)
+has_api_merge_commit_binding = (
+    re.search(r'(?:\[\s*["\']merge_commit_sha["\']\s*\]|\.get\(\s*["\']merge_commit_sha["\']|"merge_commit_sha")', api_fallback_slice)
+    and 'RELEASE_MERGE_SHA' in api_fallback_slice
+)
+api_guard_index = min(
+    [index for index in [api_fallback_slice.find('merged'), api_fallback_slice.find('merge_commit_sha')] if index != -1]
+    or [-1]
+)
+api_head_sha_index = api_fallback_slice.find('head')
+if not (has_api_merged_true_check and has_api_merge_commit_binding and api_guard_index != -1 and (api_head_sha_index == -1 or api_guard_index <= api_head_sha_index)):
+    errors.append(
+        'release-publish Reviewed-on API fallback must verify the fetched PR is merged and its merge_commit_sha equals $RELEASE_MERGE_SHA before exporting/using RELEASE_PR_HEAD_SHA'
+    )
+
+hex_validation_patterns = [
+    r'\[\[\s*"?\$\{?RELEASE_PR_HEAD_SHA\}?"?\s*=~\s*\^\[\[:xdigit:\]\]\{40\}\$',
+    r'\[\[\s*"?\$\{?RELEASE_PR_HEAD_SHA\}?"?\s*=~\s*\^\[0-9a-fA-F\]\{40\}\$',
+    r'grep\s+[^\n]*\^\[0-9a-fA-F\]\{40\}\$',
+    r'grep\s+[^\n]*\^\[\[:xdigit:\]\]\{40\}\$',
+]
+if not any(re.search(pattern, before_publish) for pattern in hex_validation_patterns):
+    errors.append('release-publish must validate the API-derived RELEASE_PR_HEAD_SHA is exactly 40 hex chars before image promotion')
+
+fallback_start = derive_step.find('RELEASE_PR_NUMBER')
+reviewed_on_index = derive_step.find('Reviewed-on', fallback_start if fallback_start != -1 else 0)
+curl_index = derive_step.find('curl', reviewed_on_index if reviewed_on_index != -1 else 0)
+head_sha_after_curl_index = derive_step.find('RELEASE_PR_HEAD_SHA', curl_index if curl_index != -1 else 0)
+validation_index = before_publish.find('[[ "$RELEASE_PR_HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]')
+publish_index = workflow.find(publish_marker)
+order_markers = [fallback_start, reviewed_on_index, curl_index, head_sha_after_curl_index, validation_index, publish_index]
+if -1 in order_markers or not (fallback_start <= reviewed_on_index <= curl_index <= head_sha_after_curl_index <= validation_index <= publish_index):
+    errors.append('Reviewed-on PR extraction, Forgejo API fetch, and RELEASE_PR_HEAD_SHA validation must all occur before image promotion')
+
+if errors:
+    print('; '.join(errors))
+    sys.exit(1)
+PY
+)"
+  status=$?
+  if [[ $status -eq 0 ]]; then
+    pass "publish workflow falls back to Reviewed-on PR head SHA before publish token"
+  else
+    fail "publish workflow falls back to Reviewed-on PR head SHA before publish token ($output)"
+  fi
+}
+
 test_publish_workflow_requires_trusted_release_environment() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
@@ -2104,6 +2215,7 @@ run_tests \
   test_publish_workflow_promotes_release_pr_docker_image_to_forgejo_registry \
   test_publish_workflow_promotes_final_tags_from_sha_bound_release_pr_digest \
   test_publish_workflow_derives_validated_pr_head_sha_from_release_commit_artifacts \
+  test_publish_workflow_falls_back_to_reviewed_on_pr_head_sha_before_publish_token \
   test_publish_workflow_requires_trusted_release_environment \
   test_publish_workflow_supports_manual_dispatch_from_release_merge_sha \
   test_publish_workflow_keeps_dispatch_input_out_of_non_dispatch_paths \
