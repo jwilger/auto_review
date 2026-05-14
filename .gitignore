@@ -16,6 +16,7 @@
 /.kilo/agent-manager.json
 /.pi-lens/cache/
 /.pi-lens/turn-state.json
+/.pi/npm/
 # Nix dev environment
 /.direnv/
 /.dependencies/
