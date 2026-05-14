@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.13.0] - 2026-05-14
+
+### Fixed
+
+- *(release)* promote release-candidate artifacts (#194)
+- *(ci)* detect release PR artifact publication (#197)
+- *(ci)* use supported skopeo inspect credentials (#198)
+
+### Other
+
+- release v0.12.0 (#192)
+- *(pi)* migrate agent setup (#195)
+- *(pi)* relax permission prompts and ignore local installs (#199)
+
 ## [0.12.0] - 2026-05-14
 
 ### Fixed
