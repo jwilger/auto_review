@@ -31,9 +31,6 @@ expected_jobs = {
         'pr-artifact-build': 'docker-release',
         'pr-packages': 'ubuntu-24.04',
     },
-    'pr-package-cleanup.yml': {
-        'cleanup-pr-packages': 'ubuntu-24.04',
-    },
 }
 
 
@@ -66,6 +63,9 @@ for workflow_name, expected_runner_labels in expected_jobs.items():
         actual_label = match.group('label').strip().strip('"\'')
         if actual_label != expected_label:
             errors.append(f'{workflow_name} {job_name} must use runs-on: {expected_label} (found {actual_label})')
+
+if (workflow_dir / 'pr-package-cleanup.yml').exists():
+    errors.append('release tooling must not retain a pr-package-cleanup workflow expectation when PR images publish to the final repository and promote by digest')
 
 for workflow_path in sorted(workflow_dir.glob('*.yml')):
     for line_number, line in enumerate(workflow_path.read_text().splitlines(), 1):

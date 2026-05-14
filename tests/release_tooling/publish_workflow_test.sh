@@ -668,15 +668,20 @@ if 'RELEASE_REGISTRY_USER' in workflow:
 
 required_markers = [
     'git.johnwilger.com/jwilger/auto_review/ar-gateway',
-    'git.johnwilger.com/jwilger/auto_review/ar-gateway-pr',
     'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}',
     'RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}',
     '$RELEASE_MERGE_SHA',
-    '$RELEASE_PR_HEAD_SHA',
 ]
 missing = [marker for marker in required_markers if marker not in workflow]
 if missing:
     errors.append('publish workflow does not promote the release PR Docker image after merge: ' + ', '.join(missing))
+for forbidden_repo in [
+    'git.johnwilger.com/jwilger/auto_review/ar-gateway-rc',
+    'git.johnwilger.com/jwilger/auto_review/ar-gateway-pr',
+    'git.johnwilger.com/jwilger/auto_review/pr-ar-gateway',
+]:
+    if forbidden_repo in workflow:
+        errors.append(f'publish workflow must not promote from a PR-only image repository: {forbidden_repo}')
 if 'nix build .#ar-gateway-image' in workflow or 'docker-archive:./result' in workflow:
     errors.append('publish workflow must not rebuild or publish a local Docker archive after merge; it must promote the release PR image')
 
@@ -707,7 +712,7 @@ for index, line in enumerate(lines):
 
 publication_steps = []
 for step in workflow_steps():
-    if 'Promote release PR Docker image to Forgejo package registry' in step or ('skopeo copy' in step and 'ar-gateway-pr:release-v' in step):
+    if 'Promote release PR Docker image to Forgejo package registry' in step or ('skopeo copy' in step and 'ar-gateway:' in step):
         publication_steps.append(step)
 if not publication_steps:
     errors.append('publish workflow is missing concrete skopeo promotion from the release PR image')
@@ -717,13 +722,9 @@ else:
     first_publish = min(workflow.find(step) for step in publication_steps)
     before_publish = workflow[:first_publish]
     publish_text = '\n'.join(publication_steps)
-    source_image_pattern = r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway-pr:release-v(?:\$\{?RELEASE_VERSION\}?)[^\s"\']*(?:\$\{?RELEASE_PR_HEAD_SHA\}?)'
+    source_image_pattern = r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway@\$\{?RELEASE_PR_IMAGE_DIGEST\}?|docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway@sha256:[0-9a-f]{64}'
     if not re.search(source_image_pattern, publish_text):
-        errors.append('publish workflow must promote from the release PR image tag that includes the CI-produced $RELEASE_PR_HEAD_SHA suffix')
-    if re.search(r'ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?-[^\s"\']*\$\{?RELEASE_MERGE_SHA\}?', publish_text):
-        errors.append('publish workflow must not use $RELEASE_MERGE_SHA as the release PR image tag suffix; CI produced release-v$RELEASE_VERSION-$RELEASE_PR_HEAD_SHA')
-    if re.search(r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?(?:["\'\s]|$)', publish_text):
-        errors.append('publish workflow must reject mutable version-only source tag release-v$RELEASE_VERSION')
+        errors.append('publish workflow must promote from the release PR image digest in the final ar-gateway repository')
     version_destinations = [
         'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_VERSION',
         'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_VERSION}',
@@ -764,7 +765,7 @@ PY
   fi
 }
 
-test_publish_workflow_promotes_final_tags_from_sha_bound_release_pr_digest() {
+test_publish_workflow_promotes_final_tags_from_recorded_release_pr_digest() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
@@ -787,46 +788,10 @@ else:
     step = step_match.group('step')
 
 if step:
-    source_tag_pattern = r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?-[^\s"\']*\$\{?RELEASE_PR_HEAD_SHA\}?'
-    merge_sha_source_tag_pattern = r'ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?-[^\s"\']*\$\{?RELEASE_MERGE_SHA\}?'
-    source_vars = set()
-    digest_vars = set()
     digest_source_vars = set()
-    inspect_result_vars = set()
-
-    for line in step.splitlines():
-        stripped = line.strip()
-        assignment = re.match(r'([A-Za-z_][A-Za-z0-9_]*)=(?P<value>.*)', stripped)
-        if assignment and re.search(source_tag_pattern, assignment.group('value')):
-            source_vars.add(assignment.group(1))
-
-    def references_sha_bound_source(text):
-        if re.search(source_tag_pattern, text):
-            return True
-        return any(f'${var}' in text or '${' + var + '}' in text for var in source_vars)
-
-    if not references_sha_bound_source(step):
-        errors.append('release-publish must retain the $RELEASE_PR_HEAD_SHA source tag existence check before promotion')
-    if re.search(merge_sha_source_tag_pattern, step):
-        errors.append('release-publish must not use $RELEASE_MERGE_SHA as the release PR image tag suffix; the source tag must be release-v$RELEASE_VERSION-$RELEASE_PR_HEAD_SHA')
-
-    inspect_lines = []
-    for line in step.splitlines():
-        stripped = line.strip()
-        if 'inspect' not in stripped or 'skopeo' not in stripped and '$SKOPEO' not in stripped and '${SKOPEO}' not in stripped:
-            continue
-        if references_sha_bound_source(stripped):
-            inspect_lines.append(stripped)
-            assignment = re.match(r'([A-Za-z_][A-Za-z0-9_]*)=\$\((?P<command>.*)\)\s*$', stripped)
-            if assignment:
-                lhs = assignment.group(1)
-                command = assignment.group('command')
-                if re.search(r'\bDigest\b|\.Digest', command):
-                    digest_vars.add(lhs)
-                else:
-                    inspect_result_vars.add(lhs)
-    if not inspect_lines:
-        errors.append('release-publish must inspect the exact SHA-bound release PR source tag or a variable assigned to that tag')
+    digest_source_pattern = r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway@\$\{?RELEASE_PR_IMAGE_DIGEST\}?'
+    if not re.search(digest_source_pattern, step):
+        errors.append('release-publish must promote from docker://git.johnwilger.com/jwilger/auto_review/ar-gateway@$RELEASE_PR_IMAGE_DIGEST')
 
     for line in step.splitlines():
         stripped = line.strip()
@@ -835,16 +800,8 @@ if step:
             continue
         lhs = assignment.group(1)
         value = assignment.group('value')
-        if 'digest' in lhs.lower():
-            direct_inspect_digest = 'inspect' in value and references_sha_bound_source(value) and re.search(r'\bDigest\b|\.Digest', value)
-            derived_from_inspect_result = any((f'${var}' in value or '${' + var + '}' in value) for var in inspect_result_vars) and re.search(r'\bDigest\b|\.Digest|jq\b', value)
-            if direct_inspect_digest or derived_from_inspect_result:
-                digest_vars.add(lhs)
-        if 'ar-gateway-pr@sha256:' in value or any('ar-gateway-pr@$' + var in value or 'ar-gateway-pr@${' + var + '}' in value for var in digest_vars):
+        if 'ar-gateway@${RELEASE_PR_IMAGE_DIGEST}' in value or 'ar-gateway@$RELEASE_PR_IMAGE_DIGEST' in value:
             digest_source_vars.add(lhs)
-
-    if not digest_vars:
-        errors.append('release-publish must derive a digest variable from the SHA-bound source image inspect result')
 
     final_copy_sources = []
     for line in step.splitlines():
@@ -859,13 +816,10 @@ if step:
     if not final_copy_sources:
         errors.append('release-publish must copy final release tags with skopeo')
     for line in final_copy_sources:
-        uses_digest_literal = re.search(r'ar-gateway-pr@sha256:', line)
         uses_digest_source_var = any(f'${var}' in line or '${' + var + '}' in line for var in digest_source_vars)
-        uses_digest_var_inline = any('ar-gateway-pr@$' + var in line or 'ar-gateway-pr@${' + var + '}' in line for var in digest_vars)
-        if not (uses_digest_literal or uses_digest_source_var or uses_digest_var_inline):
-            errors.append('each final skopeo copy to version/latest must use the immutable digest source reference derived from inspect: ' + line)
-        if re.search(merge_sha_source_tag_pattern, line):
-            errors.append('final skopeo copy source must not use the release merge SHA tag release-v$RELEASE_VERSION-$RELEASE_MERGE_SHA: ' + line)
+        uses_digest_inline = 'ar-gateway@${RELEASE_PR_IMAGE_DIGEST}' in line or 'ar-gateway@$RELEASE_PR_IMAGE_DIGEST' in line
+        if not (uses_digest_source_var or uses_digest_inline):
+            errors.append('each final skopeo copy to version/latest must use the immutable recorded digest source reference: ' + line)
 
 if errors:
     print('; '.join(errors))
@@ -874,13 +828,13 @@ PY
 )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "publish workflow promotes final release tags from SHA-bound PR image digest"
+    pass "publish workflow promotes final release tags from recorded PR image digest"
   else
-    fail "publish workflow promotes final release tags from SHA-bound PR image digest ($output)"
+    fail "publish workflow promotes final release tags from recorded PR image digest ($output)"
   fi
 }
 
-test_publish_workflow_derives_validated_pr_head_sha_from_release_commit_artifacts() {
+test_publish_workflow_derives_validated_release_pr_image_digest_from_release_commit_artifacts() {
   local publish_workflow output status
   publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
 
@@ -895,93 +849,34 @@ errors = []
 publish_marker = 'Promote release PR Docker image to Forgejo package registry'
 before_publish = workflow.split(publish_marker, 1)[0] if publish_marker in workflow else workflow
 publication_step = workflow.split(publish_marker, 1)[1] if publish_marker in workflow else ''
-
 comment_stripped_before_publish = '\n'.join(
     line for line in before_publish.splitlines()
     if not line.lstrip().startswith('#')
 )
-head_assert_positions = [
-    match.start()
-    for pattern in [
-        r'\[\[\s*"\$\(git rev-parse HEAD\)"\s*==\s*"\$RELEASE_MERGE_SHA"\s*\]\]',
-        r'\[\[\s*"\$\(git rev-parse HEAD\)"\s*==\s*"\$\{RELEASE_MERGE_SHA\}"\s*\]\]',
-    ]
-    for match in re.finditer(pattern, comment_stripped_before_publish)
-]
-git_body_command_pattern = re.compile(
-    r'(?P<command>git\s+(?:log\s+-1|show\s+-s|show)\b[^\n]*(?:--format=%B|--pretty=%B)[^\n]*(?P<target>\$\{?RELEASE_MERGE_SHA\}?|HEAD)|'
-    r'git\s+show\s+(?P<target_before>\$\{?RELEASE_MERGE_SHA\}?|HEAD)[^\n]*(?:--format=%B|--pretty=%B)[^\n]*)'
-)
-valid_commit_body_vars = set()
-valid_commit_body_commands = []
-for match in git_body_command_pattern.finditer(comment_stripped_before_publish):
-    target = match.group('target') or match.group('target_before') or ''
-    reads_merge_sha_directly = 'RELEASE_MERGE_SHA' in target
-    reads_head_after_assertion = target == 'HEAD' and any(position < match.start() for position in head_assert_positions)
-    if not (reads_merge_sha_directly or reads_head_after_assertion):
-        continue
-    line_start = comment_stripped_before_publish.rfind('\n', 0, match.start()) + 1
-    line_prefix = comment_stripped_before_publish[line_start:match.start()]
-    assignment = re.search(r'(?P<var>[A-Za-z_][A-Za-z0-9_]*)=["\']?\$\([^\n]*$', line_prefix)
-    if assignment:
-        valid_commit_body_vars.add(assignment.group('var'))
-    valid_commit_body_commands.append(match.group('command'))
 
-if not valid_commit_body_vars and not valid_commit_body_commands:
-    errors.append('release-publish must read the trusted merged release commit body either with git log/show of $RELEASE_MERGE_SHA directly, or with git log/show of HEAD only after an earlier [[ "$(git rev-parse HEAD)" == "$RELEASE_MERGE_SHA" ]] assertion')
+if not re.search(r'git\s+(?:log|-?show|show)\b[\s\S]{0,240}(?:--format=%B|--pretty=%B)[\s\S]{0,240}(?:\$\{?RELEASE_MERGE_SHA\}?|HEAD)', comment_stripped_before_publish):
+    errors.append('release-publish must read the trusted merged release commit body before token-bearing image promotion')
 
-sha_assignment_match = re.search(
-    r'(?ms)(?:^|\n)\s*RELEASE_PR_HEAD_SHA=.*?(?=\n\s*(?:if|case|\[\[|[A-Z_][A-Za-z0-9_]+=|echo|printf|$))',
+digest_assignment = re.search(
+    r'(?ms)(?:^|\n)\s*RELEASE_PR_IMAGE_DIGEST=.*?(?=\n\s*(?:if|case|\[\[|[A-Z_][A-Za-z0-9_]+=|echo|printf|$))',
     comment_stripped_before_publish,
 )
-if not sha_assignment_match:
-    errors.append('release-publish must assign RELEASE_PR_HEAD_SHA before publishing')
+if not digest_assignment:
+    errors.append('release-publish must assign RELEASE_PR_IMAGE_DIGEST from the release PR body before publishing')
 else:
-    assignment_text = sha_assignment_match.group(0)
-    references_trusted_body_var = any(
-        re.search(rf'\$\{{?{re.escape(var)}\}}?|printf\s+[^\n]*{re.escape(var)}', assignment_text)
-        for var in valid_commit_body_vars
-    )
-    embeds_trusted_body_command = any(command in assignment_text for command in valid_commit_body_commands)
-    forty_hex_capture = r'([0-9a-fA-F]\{40\}|[[:xdigit:]]\{40\}|[0-9a-fA-F]\+|[[:xdigit:]]\+)'
-    extracts_from_pr_artifacts_heading = re.search(
-        r'PR artifacts for[^\n"\']*' + forty_hex_capture + r'[^\n"\']*:',
-        assignment_text,
-    )
-    extracts_from_docker_link = re.search(
-        r'ar-gateway-pr:release-v[^\n"\']*-' + forty_hex_capture,
-        assignment_text,
-    )
-    if not (references_trusted_body_var or embeds_trusted_body_command):
-        errors.append('RELEASE_PR_HEAD_SHA assignment/extraction command must read from the trusted release commit body variable or contain the validated git log/show command directly')
-    if not (extracts_from_pr_artifacts_heading or extracts_from_docker_link):
-        errors.append('RELEASE_PR_HEAD_SHA assignment/extraction command must contain one combined artifact extraction pattern: PR artifacts for <40-hex>: or ar-gateway-pr:release-v...-<40-hex>')
+    assignment_text = digest_assignment.group(0)
+    if not re.search(r'(?:Image digest|Digest|sha256:)', assignment_text, re.I):
+        errors.append('RELEASE_PR_IMAGE_DIGEST assignment must extract the image digest recorded in the release PR body')
 
-hex_validation_patterns = [
-    r'\[\[\s*"?\$\{?RELEASE_PR_HEAD_SHA\}?"?\s*=~\s*\^\[\[:xdigit:\]\]\{40\}\$',
-    r'\[\[\s*"?\$\{?RELEASE_PR_HEAD_SHA\}?"?\s*=~\s*\^\[0-9a-fA-F\]\{40\}\$',
-    r'grep\s+[^\n]*\^\[0-9a-fA-F\]\{40\}\$',
-    r'grep\s+[^\n]*\^\[\[:xdigit:\]\]\{40\}\$',
+digest_validation_patterns = [
+    r'\[\[\s*"?\$\{?RELEASE_PR_IMAGE_DIGEST\}?"?\s*=~\s*\^sha256:\[0-9a-fA-F\]\{64\}\$',
+    r'grep\s+[^\n]*\^sha256:\[0-9a-fA-F\]\{64\}\$',
 ]
-if not any(re.search(pattern, before_publish) for pattern in hex_validation_patterns):
-    errors.append('release-publish must validate RELEASE_PR_HEAD_SHA is exactly a 40-character hexadecimal SHA before token-bearing publish')
+if not any(re.search(pattern, before_publish) for pattern in digest_validation_patterns):
+    errors.append('release-publish must validate RELEASE_PR_IMAGE_DIGEST is exactly sha256:<64 hex chars> before token-bearing publish')
 
-if re.search(r'RELEASE_PR_HEAD_SHA=[^\n]*(?:RELEASE_MERGE_SHA|github\.sha)', before_publish):
-    errors.append('release-publish must not derive RELEASE_PR_HEAD_SHA from the release merge SHA')
-
-required_order = [
-    before_publish.find('RELEASE_PR_HEAD_SHA'),
-    workflow.find(publish_marker),
-]
-if -1 in required_order or required_order[0] > required_order[1]:
-    errors.append('RELEASE_PR_HEAD_SHA derivation and validation must happen before the token-bearing image promotion step')
-
-source_tag_pattern = r'ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?-[^\s"\']*\$\{?RELEASE_PR_HEAD_SHA\}?'
-merge_sha_tag_pattern = r'ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?-[^\s"\']*\$\{?RELEASE_MERGE_SHA\}?'
-if not re.search(source_tag_pattern, publication_step):
-    errors.append('release-publish must use RELEASE_PR_HEAD_SHA in the SHA-bound source image tag for inspect/digest promotion')
-if re.search(merge_sha_tag_pattern, publication_step):
-    errors.append('release-publish must fail this contract if it uses $RELEASE_MERGE_SHA as the release PR image tag suffix')
+if not re.search(r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway@\$\{?RELEASE_PR_IMAGE_DIGEST\}?', publication_step):
+    errors.append('release-publish must copy final version/latest tags from docker://git.johnwilger.com/jwilger/auto_review/ar-gateway@$RELEASE_PR_IMAGE_DIGEST')
 
 if errors:
     print('; '.join(errors))
@@ -990,120 +885,9 @@ PY
 )"
   status=$?
   if [[ $status -eq 0 ]]; then
-    pass "publish workflow derives validated PR head SHA from release commit artifacts"
+    pass "publish workflow derives validated release PR image digest from release commit artifacts"
   else
-    fail "publish workflow derives validated PR head SHA from release commit artifacts ($output)"
-  fi
-}
-
-test_publish_workflow_falls_back_to_reviewed_on_pr_head_sha_before_publish_token() {
-  local publish_workflow output status
-  publish_workflow="$ROOT/.forgejo/workflows/release-publish.yml"
-
-  output="$(python3 - "$publish_workflow" <<'PY'
-import pathlib
-import re
-import sys
-
-workflow = pathlib.Path(sys.argv[1]).read_text()
-errors = []
-
-publish_marker = 'Promote release PR Docker image to Forgejo package registry'
-token_marker = 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}'
-before_publish = workflow.split(publish_marker, 1)[0] if publish_marker in workflow else workflow
-before_token = workflow.split(token_marker, 1)[0] if token_marker in workflow else workflow
-pre_token_publish = before_publish if len(before_publish) <= len(before_token) else before_token
-comment_stripped = '\n'.join(
-    line for line in pre_token_publish.splitlines()
-    if not line.lstrip().startswith('#')
-)
-derive_step_match = re.search(
-    r'- name: Derive release PR head SHA from merged release commit(?P<body>[\s\S]*?)(?:\n      - |\Z)',
-    comment_stripped,
-)
-derive_step = derive_step_match.group('body') if derive_step_match else ''
-
-sample_squash_body = (
-    'chore: release v0.11.0 (#189)\n\n'
-    'Reviewed-on: https://git.johnwilger.com/jwilger/auto_review/pulls/189\n'
-)
-has_trusted_reviewed_on_extraction = (
-    'RELEASE_COMMIT_BODY' in derive_step
-    and 'Reviewed-on' in derive_step
-    and r'git\.johnwilger\.com' in derive_step
-    and 'jwilger/auto_review/pulls/' in derive_step
-    and re.search(r'\[[0-9]\]\+|\[0-9\]\+|\[0-9\]\{1,\}|\(\[0-9\]\+\)|\(\[0-9\]\{1,\}\)', derive_step)
-)
-if not has_trusted_reviewed_on_extraction:
-    errors.append(
-        'release-publish must extract the release PR number from the trusted merged release commit body with a Reviewed-on URL regex, '
-        f'e.g. {sample_squash_body!r}'
-    )
-
-has_pr_number_variable = re.search(r'RELEASE_PR_(?:NUMBER|INDEX)|release_pr_(?:number|index)', derive_step)
-has_public_forgejo_pull_fetch = re.search(
-    r'curl\b[\s\S]{0,500}(?:https://git\.johnwilger\.com/api/v1/repos/jwilger/auto_review/pulls/|/api/v1/repos/jwilger/auto_review/pulls/)'
-    r'[\s\S]{0,240}(?:\$\{?RELEASE_PR_(?:NUMBER|INDEX)\}?|\$\{?release_pr_(?:number|index)\}?)',
-    derive_step,
-)
-has_head_sha_json_parse = re.search(
-    r'(?:head\s*\[\s*["\']sha["\']\s*\]|["\']head["\']\s*\]\s*\[\s*["\']sha["\']|\.head\.sha|"head"[\s\S]{0,200}"sha")',
-    derive_step,
-)
-if not (has_pr_number_variable and has_public_forgejo_pull_fetch and has_head_sha_json_parse):
-    errors.append(
-        'release-publish must fetch the Reviewed-on PR via the public Forgejo pulls API before token-bearing publish '
-        'and parse the PR head SHA from head.sha when artifact text is absent'
-    )
-
-api_fallback_slice = derive_step[derive_step.find('curl'):] if 'curl' in derive_step else derive_step
-has_api_merged_true_check = re.search(
-    r'(?:\[\s*["\']merged["\']\s*\]|\.get\(\s*["\']merged["\']|"merged"[\s\S]{0,120}(?:true|True))',
-    api_fallback_slice,
-)
-has_api_merge_commit_binding = (
-    re.search(r'(?:\[\s*["\']merge_commit_sha["\']\s*\]|\.get\(\s*["\']merge_commit_sha["\']|"merge_commit_sha")', api_fallback_slice)
-    and 'RELEASE_MERGE_SHA' in api_fallback_slice
-)
-api_guard_index = min(
-    [index for index in [api_fallback_slice.find('merged'), api_fallback_slice.find('merge_commit_sha')] if index != -1]
-    or [-1]
-)
-api_head_sha_index = api_fallback_slice.find('head')
-if not (has_api_merged_true_check and has_api_merge_commit_binding and api_guard_index != -1 and (api_head_sha_index == -1 or api_guard_index <= api_head_sha_index)):
-    errors.append(
-        'release-publish Reviewed-on API fallback must verify the fetched PR is merged and its merge_commit_sha equals $RELEASE_MERGE_SHA before exporting/using RELEASE_PR_HEAD_SHA'
-    )
-
-hex_validation_patterns = [
-    r'\[\[\s*"?\$\{?RELEASE_PR_HEAD_SHA\}?"?\s*=~\s*\^\[\[:xdigit:\]\]\{40\}\$',
-    r'\[\[\s*"?\$\{?RELEASE_PR_HEAD_SHA\}?"?\s*=~\s*\^\[0-9a-fA-F\]\{40\}\$',
-    r'grep\s+[^\n]*\^\[0-9a-fA-F\]\{40\}\$',
-    r'grep\s+[^\n]*\^\[\[:xdigit:\]\]\{40\}\$',
-]
-if not any(re.search(pattern, before_publish) for pattern in hex_validation_patterns):
-    errors.append('release-publish must validate the API-derived RELEASE_PR_HEAD_SHA is exactly 40 hex chars before image promotion')
-
-fallback_start = derive_step.find('RELEASE_PR_NUMBER')
-reviewed_on_index = derive_step.find('Reviewed-on', fallback_start if fallback_start != -1 else 0)
-curl_index = derive_step.find('curl', reviewed_on_index if reviewed_on_index != -1 else 0)
-head_sha_after_curl_index = derive_step.find('RELEASE_PR_HEAD_SHA', curl_index if curl_index != -1 else 0)
-validation_index = before_publish.find('[[ "$RELEASE_PR_HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]')
-publish_index = workflow.find(publish_marker)
-order_markers = [fallback_start, reviewed_on_index, curl_index, head_sha_after_curl_index, validation_index, publish_index]
-if -1 in order_markers or not (fallback_start <= reviewed_on_index <= curl_index <= head_sha_after_curl_index <= validation_index <= publish_index):
-    errors.append('Reviewed-on PR extraction, Forgejo API fetch, and RELEASE_PR_HEAD_SHA validation must all occur before image promotion')
-
-if errors:
-    print('; '.join(errors))
-    sys.exit(1)
-PY
-)"
-  status=$?
-  if [[ $status -eq 0 ]]; then
-    pass "publish workflow falls back to Reviewed-on PR head SHA before publish token"
-  else
-    fail "publish workflow falls back to Reviewed-on PR head SHA before publish token ($output)"
+    fail "publish workflow derives validated release PR image digest from release commit artifacts ($output)"
   fi
 }
 
@@ -1621,7 +1405,9 @@ test_publish_workflow_promotes_release_pr_image_after_merge() {
 
   assert_file_not_contains "$publish_workflow" 'nix build .#ar-gateway-image' "publish workflow does not rebuild the ar-gateway image after merge to main"
   assert_file_not_contains "$publish_workflow" 'docker-archive:./result' "publish workflow does not publish final release tags from a rebuilt local image archive"
-  assert_file_not_contains "$publish_workflow" 'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway-pr:release-v$RELEASE_VERSION"' "publish workflow does not promote from the mutable version-only release PR image tag"
+  assert_file_not_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway-rc' "publish workflow does not promote from an RC-only image repository"
+  assert_file_not_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/ar-gateway-pr' "publish workflow does not promote from a PR-only image repository"
+  assert_file_not_contains "$publish_workflow" 'git.johnwilger.com/jwilger/auto_review/pr-ar-gateway' "publish workflow does not promote from an alternate PR-only image repository"
   assert_file_contains "$publish_workflow" 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' "publish workflow uses the publish token only after merge validation"
   assert_file_not_contains "$publish_workflow" 'RELEASE_CANDIDATE_SHA' "publish workflow does not depend on pre-merge candidate image tags"
 
@@ -1650,13 +1436,11 @@ else:
     step = publication_step_match.group('body')
     if 'RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}' not in step:
         errors.append('image publication step must receive RELEASE_PUBLISH_TOKEN')
-    source_image_pattern = r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway-pr:release-v(?:\$\{?RELEASE_VERSION\}?)[^\s"\']*(?:\$\{?RELEASE_PR_HEAD_SHA\}?)'
+    source_image_pattern = r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway@\$\{?RELEASE_PR_IMAGE_DIGEST\}?'
     if not re.search(source_image_pattern, step):
-        errors.append('image publication step must copy from a release PR image tag that includes $RELEASE_PR_HEAD_SHA')
-    if re.search(r'ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?-[^\s"\']*\$\{?RELEASE_MERGE_SHA\}?', step):
-        errors.append('image publication step must not use $RELEASE_MERGE_SHA as the release PR image tag suffix')
-    if re.search(r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway-pr:release-v\$\{?RELEASE_VERSION\}?(?:["\'\s]|$)', step):
-        errors.append('image publication step must not copy from mutable version-only source tag release-v$RELEASE_VERSION')
+        errors.append('image publication step must copy from the release PR image digest in the final ar-gateway repository')
+    if 'ar-gateway-rc' in step or 'ar-gateway-pr' in step or 'pr-ar-gateway' in step:
+        errors.append('image publication step must not reference a PR-only image repository')
     for destination in [
         ('docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_VERSION', 'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:${RELEASE_VERSION}'),
         'docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:latest',
@@ -1670,7 +1454,7 @@ else:
         errors.append('image publication step must not rebuild the Docker image after merge')
 
     trusted_skopeo = r'(?:(?:"\$SKOPEO")|(?:\$\{SKOPEO\})|(?:\$SKOPEO))'
-    exact_source_pattern = r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway-pr:release-v(?:\$\{?RELEASE_VERSION\}?)[^\s"\']*(?:\$\{?RELEASE_PR_HEAD_SHA\}?)'
+    exact_source_pattern = r'docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway@\$\{?RELEASE_PR_IMAGE_DIGEST\}?'
     final_copy_pattern = re.compile(
         trusted_skopeo
         + r'\s+copy\b[\s\S]*?docker://git\.johnwilger\.com/jwilger/auto_review/ar-gateway:(?:\$\{?RELEASE_VERSION\}?|latest)(?:["\'\s]|$)'
@@ -1701,7 +1485,7 @@ else:
                 inspect_variable = True
                 break
         if not inspect_direct and not inspect_variable:
-            errors.append('image publication step must inspect/prove the exact release PR source image tag containing $RELEASE_PR_HEAD_SHA with pre-resolved $SKOPEO before any copy to final release tags')
+            errors.append('image publication step must inspect/prove the exact release PR digest source with pre-resolved $SKOPEO before any copy to final release tags')
 
 if errors:
     print('; '.join(errors))
@@ -2213,9 +1997,8 @@ run_tests \
   test_release_tooling_uses_local_prepare_and_image_registry_for_publish \
   test_publish_workflow_builds_release_image_and_generates_release_notes_after_merge \
   test_publish_workflow_promotes_release_pr_docker_image_to_forgejo_registry \
-  test_publish_workflow_promotes_final_tags_from_sha_bound_release_pr_digest \
-  test_publish_workflow_derives_validated_pr_head_sha_from_release_commit_artifacts \
-  test_publish_workflow_falls_back_to_reviewed_on_pr_head_sha_before_publish_token \
+  test_publish_workflow_promotes_final_tags_from_recorded_release_pr_digest \
+  test_publish_workflow_derives_validated_release_pr_image_digest_from_release_commit_artifacts \
   test_publish_workflow_requires_trusted_release_environment \
   test_publish_workflow_supports_manual_dispatch_from_release_merge_sha \
   test_publish_workflow_keeps_dispatch_input_out_of_non_dispatch_paths \
