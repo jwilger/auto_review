@@ -113,6 +113,7 @@
               || baseName == "CHANGELOG.md"
               || baseName == "AGENTS.md"
               || baseName == "flake.nix"
+              || baseName == "lefthook.yml"
              || pkgs.lib.hasInfix "/.cargo/" strPath
             || (pkgs.lib.hasInfix "/ar-prompts/schemas/" strPath
                 && pkgs.lib.hasSuffix ".json" path)
@@ -141,6 +142,8 @@
                       || strPath == "${toString ./.}/.kilo/skills/rust-workspace-engineering"
                       || strPath == "${toString ./.}/.forgejo"
                       || strPath == "${toString ./.}/.forgejo/workflows"
+                      || strPath == "${toString ./.}/.pi"
+                      || strPath == "${toString ./.}/.pi/extensions"
                      || strPath == "${toString ./.}/docs"
                      || strPath == "${toString ./.}/deploy"
                      || strPath == "${toString ./.}/deploy/systemd"))
@@ -150,6 +153,7 @@
               || (pkgs.lib.hasInfix "/.forgejo/workflows/" strPath
                   && pkgs.lib.hasSuffix ".yml" path)
               || strPath == "${toString ./.}/.forgejo/pull_request_template.md"
+              || strPath == "${toString ./.}/.pi/extensions/auto-review-guardrails.ts"
               || strPath == "${toString ./.}/.kilo/command/prepare-forgejo-pr.md"
                || strPath == "${toString ./.}/.kilo/skills/rust-workspace-engineering/SKILL.md"
                 || strPath == "${toString ./.}/docs/OPERATIONS.md"
@@ -198,6 +202,7 @@
             cargo-nextest
             cargo-semver-checks
             git
+            lefthook
             forgejo-mcp
             tea
             python3
@@ -222,6 +227,9 @@
             export RUSTUP_HOME="$PWD/.dependencies/rustup"
             mkdir -p "$CARGO_HOME" "$RUSTUP_HOME"
             export PATH="$CARGO_HOME/bin:$PATH"
+            if [ -f lefthook.yml ]; then
+              lefthook install
+            fi
           '';
         };
 
