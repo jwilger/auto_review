@@ -76,6 +76,16 @@ assert.match(
 );
 assert.match(
 	guardrailsSource,
+	/name: "safe_remove"/,
+	"pi guardrails expose a semantic safe_remove tool",
+);
+assert.match(
+	guardrailsSource,
+	/unlinkSync/,
+	"safe_remove deletes explicit file paths through Node fs semantics",
+);
+assert.match(
+	guardrailsSource,
 	/name: "verify_release_tooling"/,
 	"pi guardrails expose a semantic verify_release_tooling tool",
 );

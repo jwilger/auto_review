@@ -1,9 +1,10 @@
 import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, unlinkSync } from "node:fs";
 import {
 	assertOnlyExplicitStagedPaths,
 	conciseCommandResult,
+	validateExplicitPaths,
 	validateSafeBranchCreateInputs,
 	validateSafeBranchSwitchInputs,
 	validateSafeCommitInputs,
@@ -884,6 +885,25 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 				forceWithLease: push.forceWithLease,
 				outputPath: result.outputPath,
 			});
+		},
+	});
+
+	pi.registerTool({
+		name: "safe_remove",
+		label: "Safe Remove",
+		description: "Delete explicit files without shelling out through bash.",
+		promptSnippet:
+			"Use safe_remove instead of shell rm when deleting explicit files in auto_review.",
+		parameters: Type.Object({
+			paths: Type.Array(
+				Type.String({ description: "Explicit file path to delete" }),
+				{ minItems: 1, description: "Explicit file paths to delete" },
+			),
+		}),
+		async execute(_toolCallId, params) {
+			const paths = validateExplicitPaths(params.paths);
+			for (const path of paths) unlinkSync(path);
+			return TEXT_RESULT(`safe_remove deleted: ${paths.join(", ")}`, { paths });
 		},
 	});
 
