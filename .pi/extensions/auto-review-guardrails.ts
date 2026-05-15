@@ -3,7 +3,6 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
 	assertOnlyExplicitStagedPaths,
-	blocksDirectGitMutationCommand,
 	validateExplicitPaths,
 	validateSafePushInputs,
 } from "./auto-review-git-safety.mjs";
@@ -91,12 +90,6 @@ function filePathFromInput(input: unknown): string | undefined {
 	return typeof path === "string" ? path : undefined;
 }
 
-function commandText(input: unknown): string {
-	if (!isRecord(input)) return "";
-	const command = input.command ?? input.cmd ?? input.script;
-	return typeof command === "string" ? command : "";
-}
-
 function isEditTool(event: ToolCallEvent): boolean {
 	return (
 		event.toolName === "edit" ||
@@ -127,48 +120,6 @@ function rejectsWaterfallTodo(input: unknown): boolean {
 		!text.includes("failing test") &&
 		!text.includes("rgr")
 	);
-}
-
-function blocksForgejoInlineReply(command: string): boolean {
-	return (
-		/\bgh\s+pr\s+comment\b/.test(command) ||
-		/\btea\s+comment\s+\d+\b/.test(command) ||
-		/\/pulls\/\d+\/comments\b/.test(command) ||
-		/\/issues\/\d+\/comments\b/.test(command)
-	);
-}
-
-function blocksGithubWorkflow(command: string): boolean {
-	return /(^|\s)gh\s+(pr|issue|repo|api)(\s|$)/.test(command);
-}
-
-function blocksUnsafeToolchainCommand(command: string): boolean {
-	const checks = [
-		/(^|\s)rustup(\s|$)/,
-		/(^|\s)git\s+add\s+(-A|-u|\.)(\s|$)/,
-		/(^|\s)git\s+commit\s+[^\n]*\s-a(\s|$)/,
-		/--no-verify\b/,
-		/--no-gpg-sign\b/,
-		/(^|\s)git\s+reset\s+--hard\b/,
-		/(^|\s)git\s+checkout\s+--\b/,
-		/(^|\s)git\s+push\s+[^\n]*--force\b/,
-	];
-	return checks.some((check) => check.test(command));
-}
-
-function shellQuote(value: string): string {
-	return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-function injectToolchainEnv(command: string): string {
-	if (command.includes("AUTO_REVIEW_TOOLCHAIN_ENV=1")) return command;
-	const root = process.cwd();
-	return [
-		"export AUTO_REVIEW_TOOLCHAIN_ENV=1",
-		`export CARGO_HOME=${shellQuote(`${root}/.dependencies/cargo`)}`,
-		`export RUSTUP_HOME=${shellQuote(`${root}/.dependencies/rustup`)}`,
-		command,
-	].join("\n");
 }
 
 function hashOutput(output: string): string {
@@ -808,37 +759,11 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 
 	pi.on("tool_call", async (event) => {
 		if (isToolCallEventType("bash", event)) {
-			const command = commandText(event.input);
-			if (blocksDirectGitMutationCommand(command)) {
-				return {
-					block: true,
-					reason:
-						"Direct git mutation commands are blocked. Use safe_commit or safe_push so staging, hooks, signing, and push safety stay enforced.",
-				};
-			}
-			if (blocksUnsafeToolchainCommand(command)) {
-				return {
-					block: true,
-					reason:
-						"auto_review toolchain gate blocked a command that bypasses Nix, scope hygiene, hooks, signing, or git safety.",
-				};
-			}
-			if (blocksGithubWorkflow(command)) {
-				return {
-					block: true,
-					reason:
-						"Forgejo gate: use tea or Forgejo REST/MCP, not GitHub gh workflows, for this repo.",
-				};
-			}
-			if (blocksForgejoInlineReply(command)) {
-				return {
-					block: true,
-					reason:
-						"Forgejo review gate: inline feedback replies must use the existing review comment thread before any top-level PR comment.",
-				};
-			}
-			event.input.command = injectToolchainEnv(command);
-			return undefined;
+			return {
+				block: true,
+				reason:
+					"Direct bash execution is disabled. Use an existing typed Pi tool, or add or modify a typed Pi tool for the needed capability and cover that tool with the same RGR/test/review process as production code.",
+			};
 		}
 
 		if (isEditTool(event)) {
