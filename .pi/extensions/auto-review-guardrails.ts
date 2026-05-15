@@ -889,6 +889,39 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "safe_restore",
+		label: "Safe Restore",
+		description: "Discard working-tree changes for explicit files without shelling out through bash.",
+		promptSnippet:
+			"Use safe_restore to discard explicit working-tree file changes when the user asks to revert them.",
+		parameters: Type.Object({
+			paths: Type.Array(
+				Type.String({ description: "Explicit file path to restore" }),
+				{ minItems: 1, description: "Explicit file paths to restore" },
+			),
+			confirmation: Type.String({
+				description:
+					"Required literal confirmation: discard working-tree changes",
+			}),
+		}),
+		async execute(_toolCallId, params) {
+			if (params.confirmation !== "discard working-tree changes") {
+				throw new Error(
+					"safe_restore requires confirmation='discard working-tree changes'.",
+				);
+			}
+			const paths = validateExplicitPaths(params.paths);
+			const output = await assertGitSuccess(["restore", "--", ...paths]);
+			const result = conciseCommandResult({
+				toolName: "safe_restore",
+				summary: `safe_restore restored: ${paths.join(", ")}`,
+				output,
+			});
+			return TEXT_RESULT(result.text, { paths, outputPath: result.outputPath });
+		},
+	});
+
+	pi.registerTool({
 		name: "safe_unstage",
 		label: "Safe Unstage",
 		description: "Remove explicit files from the Git index without shelling out through bash.",
