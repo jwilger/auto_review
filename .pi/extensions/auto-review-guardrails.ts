@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
 	assertOnlyExplicitStagedPaths,
+	conciseCommandResult,
 	validateSafeBranchCreateInputs,
 	validateSafeBranchSwitchInputs,
 	validateSafeCommitInputs,
@@ -669,16 +670,21 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 			const output = await assertGitSuccess(commitArgs);
 			ensureCleanAfterCommit();
 			const head = gitOutput(["rev-parse", "--short", "HEAD"]);
-			return TEXT_RESULT(
-				[
+			const result = conciseCommandResult({
+				toolName: "safe_commit",
+				summary: [
 					`safe_commit created ${head ?? "a commit"}.`,
 					`staged paths: ${paths.join(", ")}`,
-					outputTail(output),
 				]
 					.filter(Boolean)
 					.join("\n"),
-				{ commit: head, paths },
-			);
+				output,
+			});
+			return TEXT_RESULT(result.text, {
+				commit: head,
+				paths,
+				outputPath: result.outputPath,
+			});
 		},
 	});
 
@@ -704,15 +710,15 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 				"--create",
 				createTarget.branch,
 			]);
-			return TEXT_RESULT(
-				[
-					`safe_create_branch created and switched to ${createTarget.branch}.`,
-					outputTail(output),
-				]
-					.filter(Boolean)
-					.join("\n"),
-				{ branch: createTarget.branch },
-			);
+			const result = conciseCommandResult({
+				toolName: "safe_create_branch",
+				summary: `safe_create_branch created and switched to ${createTarget.branch}.`,
+				output,
+			});
+			return TEXT_RESULT(result.text, {
+				branch: createTarget.branch,
+				outputPath: result.outputPath,
+			});
 		},
 	});
 
@@ -734,15 +740,15 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 				dirtyCount: dirty.count,
 			});
 			const output = await assertGitSuccess(["switch", switchTarget.branch]);
-			return TEXT_RESULT(
-				[
-					`safe_switch_branch switched to ${switchTarget.branch}.`,
-					outputTail(output),
-				]
-					.filter(Boolean)
-					.join("\n"),
-				{ branch: switchTarget.branch },
-			);
+			const result = conciseCommandResult({
+				toolName: "safe_switch_branch",
+				summary: `safe_switch_branch switched to ${switchTarget.branch}.`,
+				output,
+			});
+			return TEXT_RESULT(result.text, {
+				branch: switchTarget.branch,
+				outputPath: result.outputPath,
+			});
 		},
 	});
 
@@ -804,18 +810,24 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 				? ["push", "--force-with-lease", remote, `HEAD:refs/heads/${branch}`]
 				: ["push", remote, branch];
 			const output = await assertGitSuccess(pushArgs);
-			return TEXT_RESULT(
-				[
+			const result = conciseCommandResult({
+				toolName: "safe_push",
+				summary: [
 					`safe_push pushed ${branch} to ${remote}.`,
 					push.forceWithLease
 						? `force-with-lease: ${push.justification}`
 						: undefined,
-					outputTail(output),
 				]
 					.filter(Boolean)
 					.join("\n"),
-				{ remote, branch, forceWithLease: push.forceWithLease },
-			);
+				output,
+			});
+			return TEXT_RESULT(result.text, {
+				remote,
+				branch,
+				forceWithLease: push.forceWithLease,
+				outputPath: result.outputPath,
+			});
 		},
 	});
 

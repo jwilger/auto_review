@@ -1,4 +1,6 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([
 	"diff",
@@ -10,6 +12,16 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
 	"show",
 	"status",
 ]);
+
+export function conciseCommandResult({ toolName, summary, output }) {
+	const dir = mkdtempSync(join(tmpdir(), `${toolName}-`));
+	const outputPath = join(dir, "output.txt");
+	writeFileSync(outputPath, output || "", "utf8");
+	return {
+		outputPath,
+		text: [summary, `Full output: ${outputPath}`].filter(Boolean).join("\n"),
+	};
+}
 
 export function shellWords(command) {
 	const words = [];

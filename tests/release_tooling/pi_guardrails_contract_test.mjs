@@ -12,6 +12,7 @@ import { join } from "node:path";
 import {
 	assertOnlyExplicitStagedPaths,
 	blocksDirectGitMutationCommand,
+	conciseCommandResult,
 	validateExplicitPaths,
 	validateSafeBranchCreateInputs,
 	validateSafeBranchSwitchInputs,
@@ -62,6 +63,20 @@ assert.equal(
 	false,
 	"guardrail git tools must not use blocking spawnSync",
 );
+const verboseOutput = Array.from(
+	{ length: 40 },
+	(_, index) => `verbose line ${index + 1}`,
+).join("\n");
+const conciseResult = conciseCommandResult({
+	toolName: "safe_push",
+	summary: "safe_push pushed topic to origin.",
+	output: verboseOutput,
+});
+assert.match(conciseResult.text, /safe_push pushed topic to origin\./);
+assert.match(conciseResult.text, /Full output: \/tmp\//);
+assert.equal(conciseResult.text.includes("verbose line 1"), false);
+assert.equal(conciseResult.text.includes("verbose line 40"), false);
+assert.ok(readFileSync(conciseResult.outputPath, "utf8").includes("verbose line 40"));
 
 const workdir = mkdtempSync(join(tmpdir(), "auto-review-git-safety-"));
 try {
