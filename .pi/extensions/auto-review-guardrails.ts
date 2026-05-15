@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import type {
 	ExtensionAPI,
 	ToolCallEvent,
@@ -198,6 +199,19 @@ function currentBranch(): string | undefined {
 	return gitOutput(["branch", "--show-current"]);
 }
 
+function ensureLefthookInstalled(): void {
+	if (!existsSync("lefthook.yml")) return;
+	try {
+		// Keep Pi sessions aligned with the dev shell's `lefthook install` setup.
+		execFileSync("lefthook", ["install"], {
+			cwd: process.cwd(),
+			stdio: "ignore",
+		});
+	} catch (error) {
+		console.warn(`auto_review guardrail: lefthook install failed: ${error}`);
+	}
+}
+
 function dirtyStatus(): { count: number; preview: string[] } {
 	const status = gitOutput(["status", "--short"]);
 	if (!status) return { count: 0, preview: [] };
@@ -304,6 +318,8 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 	}
 
 	pi.on("session_start", (_event, ctx) => {
+		ensureLefthookInstalled();
+
 		cycle = undefined;
 		touchedFiles.clear();
 		verification = undefined;
