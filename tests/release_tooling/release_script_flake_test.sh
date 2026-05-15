@@ -448,6 +448,42 @@ test_nix_develop_enables_versioned_lefthook_pre_commit_format_guardrail() {
 	assert_file_contains "$lefthook_config" 'nix flake check' "lefthook pre-commit runs the full Nix verification"
 }
 
+test_pi_guardrails_route_git_commit_and_push_through_safe_tools() {
+	local flake guardrail_extension git_safety_helper
+	flake="$ROOT/flake.nix"
+	guardrail_extension="$ROOT/.pi/extensions/auto-review-guardrails.ts"
+	git_safety_helper="$ROOT/.pi/extensions/auto-review-git-safety.mjs"
+
+	assert_file_contains "$guardrail_extension" 'name: "safe_commit"' "pi guardrails expose a safe_commit tool"
+	assert_file_contains "$guardrail_extension" 'name: "safe_push"' "pi guardrails expose a safe_push tool"
+	assert_file_contains "$guardrail_extension" 'stageExplicitPaths' "safe_commit stages only explicit file paths"
+	assert_file_contains "$guardrail_extension" 'ensureNoPreStagedPaths' "safe_commit refuses pre-staged paths before staging"
+	assert_file_contains "$guardrail_extension" 'assertOnlyExplicitStagedPaths' "safe_commit verifies the cached diff only contains explicit paths"
+	assert_file_contains "$guardrail_extension" 'validateSafePushInputs' "safe_push validates remote, branch, and force-with-lease arguments"
+	assert_file_contains "$guardrail_extension" 'get-url' "safe_push checks the configured remote URL"
+	assert_file_contains "$guardrail_extension" '--all' "safe_push checks every configured remote and push URL"
+	assert_file_contains "$guardrail_extension" '--push' "safe_push checks the configured push URL"
+	assert_file_contains "$guardrail_extension" 'git commit' "safe_commit runs the repository commit command internally"
+	assert_file_contains "$guardrail_extension" 'git push' "safe_push runs the repository push command internally"
+	assert_file_contains "$git_safety_helper" 'blocksDirectGitMutationCommand' "pi git safety helper detects direct bash git mutation commands"
+	assert_file_contains "$flake" '.pi/extensions/auto-review-git-safety.mjs' "nix flake source includes the git safety helper contract"
+	assert_file_contains "$flake" '.pi/extensions/pi-permission-system/config.json' "nix flake source includes the project permission config contract"
+	node "$ROOT/tests/release_tooling/pi_guardrails_contract_test.mjs" >/dev/null
+	pass "pi guardrails executable contract blocks unsafe git mutations and validates safe tools"
+}
+
+test_pi_guardrails_deny_bash_and_route_capabilities_through_reviewed_tools() {
+	local guardrail_extension permission_config
+	guardrail_extension="$ROOT/.pi/extensions/auto-review-guardrails.ts"
+	permission_config="$ROOT/.pi/extensions/pi-permission-system/config.json"
+
+	assert_file_contains "$permission_config" '"bash": "deny"' "permissions deny direct bash execution by default"
+	assert_file_not_contains "$permission_config" '"bash": {' "permissions do not keep path-pattern bash allowances"
+	assert_file_contains "$guardrail_extension" 'Direct bash execution is disabled' "guardrail explains that bash is unavailable"
+	assert_file_contains "$guardrail_extension" 'add or modify a typed Pi tool' "guardrail tells agents to build typed tools for missing capabilities"
+	assert_file_contains "$guardrail_extension" 'RGR' "guardrail requires new tool capabilities to go through the review workflow"
+}
+
 test_release_plz_config_is_removed_and_workspace_crates_stay_private() {
 	local config cargo
 	config="$ROOT/release-plz.toml"
@@ -474,4 +510,6 @@ run_tests \
 	test_prepare_workflow_requires_explicit_prepare_secret_runtime_env \
 	test_release_tooling_tests_are_wired_into_nix_flake_check \
 	test_nix_develop_enables_versioned_lefthook_pre_commit_format_guardrail \
+	test_pi_guardrails_route_git_commit_and_push_through_safe_tools \
+	test_pi_guardrails_deny_bash_and_route_capabilities_through_reviewed_tools \
 	test_release_plz_config_is_removed_and_workspace_crates_stay_private
