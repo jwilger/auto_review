@@ -171,6 +171,40 @@ function isAllowedForgejoRemote(value) {
 	);
 }
 
+function validateSafeNonMainBranch(branch, toolName) {
+	const safeBranch = validateSafeGitName(branch, "branch");
+	if (safeBranch === "main") {
+		throw new Error(`${toolName} refuses to target main.`);
+	}
+	return safeBranch;
+}
+
+export function validateSafeCommitInputs({ paths, currentBranch }) {
+	if (!currentBranch)
+		throw new Error("safe_commit could not determine the current branch.");
+	if (currentBranch === "main") {
+		throw new Error("safe_commit refuses to commit on main.");
+	}
+	return { paths: validateExplicitPaths(paths), branch: currentBranch };
+}
+
+export function validateSafeBranchCreateInputs({
+	branch,
+	currentBranch,
+	dirtyCount,
+}) {
+	if (!currentBranch)
+		throw new Error(
+			"safe_create_branch could not determine the current branch.",
+		);
+	if (dirtyCount > 0) {
+		throw new Error(
+			"safe_create_branch refuses to create branches with a dirty working tree.",
+		);
+	}
+	return { branch: validateSafeNonMainBranch(branch, "safe_create_branch") };
+}
+
 export function validateSafeBranchSwitchInputs({
 	branch,
 	currentBranch,
@@ -185,11 +219,7 @@ export function validateSafeBranchSwitchInputs({
 			"safe_switch_branch refuses to switch branches with a dirty working tree.",
 		);
 	}
-	const safeBranch = validateSafeGitName(branch, "branch");
-	if (safeBranch === "main") {
-		throw new Error("safe_switch_branch refuses to switch to main.");
-	}
-	return { branch: safeBranch };
+	return { branch: validateSafeNonMainBranch(branch, "safe_switch_branch") };
 }
 
 export function validateSafePushInputs({

@@ -1,13 +1,21 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+	mkdtempSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	assertOnlyExplicitStagedPaths,
 	blocksDirectGitMutationCommand,
 	validateExplicitPaths,
+	validateSafeBranchCreateInputs,
 	validateSafeBranchSwitchInputs,
+	validateSafeCommitInputs,
 	validateSafePushInputs,
 } from "../../.pi/extensions/auto-review-git-safety.mjs";
 
@@ -45,6 +53,16 @@ assert.equal(
 );
 assert.equal(blocksDirectGitMutationCommand("git stash"), true);
 
+const guardrailsSource = readFileSync(
+	new URL("../../.pi/extensions/auto-review-guardrails.ts", import.meta.url),
+	"utf8",
+);
+assert.equal(
+	guardrailsSource.includes("spawnSync"),
+	false,
+	"guardrail git tools must not use blocking spawnSync",
+);
+
 const workdir = mkdtempSync(join(tmpdir(), "auto-review-git-safety-"));
 try {
 	process.chdir(workdir);
@@ -52,6 +70,55 @@ try {
 	mkdirSync("directory");
 
 	assert.deepEqual(validateExplicitPaths(["file.txt"]), ["file.txt"]);
+	assert.deepEqual(
+		validateSafeCommitInputs({
+			paths: ["file.txt"],
+			currentBranch: "topic",
+		}),
+		{ paths: ["file.txt"], branch: "topic" },
+	);
+	rejects(
+		() =>
+			validateSafeCommitInputs({
+				paths: ["file.txt"],
+				currentBranch: "main",
+			}),
+		"rejects commits on main",
+	);
+	rejects(
+		() =>
+			validateSafeCommitInputs({
+				paths: ["file.txt"],
+				currentBranch: undefined,
+			}),
+		"requires current branch before commit",
+	);
+	assert.deepEqual(
+		validateSafeBranchCreateInputs({
+			branch: "feature/new-tool",
+			currentBranch: "main",
+			dirtyCount: 0,
+		}),
+		{ branch: "feature/new-tool" },
+	);
+	rejects(
+		() =>
+			validateSafeBranchCreateInputs({
+				branch: "main",
+				currentBranch: "main",
+				dirtyCount: 0,
+			}),
+		"rejects creating main branch",
+	);
+	rejects(
+		() =>
+			validateSafeBranchCreateInputs({
+				branch: "topic",
+				currentBranch: "main",
+				dirtyCount: 1,
+			}),
+		"rejects branch creation with dirty working tree",
+	);
 	assert.deepEqual(
 		validateSafeBranchSwitchInputs({
 			branch: "fix/issue-207-spawnsync-guardrails",

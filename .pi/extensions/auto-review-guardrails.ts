@@ -1,10 +1,11 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
 	assertOnlyExplicitStagedPaths,
-	validateExplicitPaths,
+	validateSafeBranchCreateInputs,
 	validateSafeBranchSwitchInputs,
+	validateSafeCommitInputs,
 	validateSafePushInputs,
 } from "./auto-review-git-safety.mjs";
 import type {
@@ -157,15 +158,30 @@ function currentBranch(): string | undefined {
 	return gitOutput(["branch", "--show-current"]);
 }
 
-function runGitCommand(args: string[]): { status: number; output: string } {
-	const result = spawnSync("git", args, {
-		cwd: process.cwd(),
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-		maxBuffer: 10 * 1024 * 1024,
+function runGitCommand(
+	args: string[],
+): Promise<{ status: number; output: string }> {
+	return new Promise((resolve) => {
+		execFile(
+			"git",
+			args,
+			{
+				cwd: process.cwd(),
+				encoding: "utf8",
+				maxBuffer: 10 * 1024 * 1024,
+			},
+			(error, stdout, stderr) => {
+				const output = [stdout, stderr].filter(Boolean).join("");
+				resolve({
+					status:
+						error && typeof error === "object" && "code" in error
+							? Number(error.code) || 1
+							: 0,
+					output,
+				});
+			},
+		);
 	});
-	const output = [result.stdout, result.stderr].filter(Boolean).join("");
-	return { status: result.status ?? 1, output };
 }
 
 function outputTail(output: string): string {
@@ -173,8 +189,8 @@ function outputTail(output: string): string {
 	return lines.slice(-20).join("\n");
 }
 
-function assertGitSuccess(args: string[]): string {
-	const result = runGitCommand(args);
+async function assertGitSuccess(args: string[]): Promise<string> {
+	const result = await runGitCommand(args);
 	if (result.status !== 0) {
 		throw new Error(
 			[
@@ -188,8 +204,8 @@ function assertGitSuccess(args: string[]): string {
 	return result.output;
 }
 
-function stageExplicitPaths(paths: string[]): void {
-	assertGitSuccess(["add", "--", ...validateExplicitPaths(paths)]);
+async function stageExplicitPaths(paths: string[]): Promise<void> {
+	await assertGitSuccess(["add", "--", ...paths]);
 }
 
 function stagedPaths(): string[] {
@@ -634,9 +650,12 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 			body: Type.Optional(Type.String({ description: "Commit body" })),
 		}),
 		async execute(_toolCallId, params) {
-			const paths = validateExplicitPaths(params.paths);
+			const { paths } = validateSafeCommitInputs({
+				paths: params.paths,
+				currentBranch: currentBranch(),
+			});
 			ensureNoPreStagedPaths();
-			stageExplicitPaths(paths);
+			await stageExplicitPaths(paths);
 			const staged = stagedPaths();
 			if (staged.length === 0) {
 				throw new Error(
@@ -647,7 +666,7 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 
 			const commitArgs = ["commit", "-m", params.message];
 			if (params.body?.trim()) commitArgs.push("-m", params.body.trim());
-			const output = assertGitSuccess(commitArgs);
+			const output = await assertGitSuccess(commitArgs);
 			ensureCleanAfterCommit();
 			const head = gitOutput(["rev-parse", "--short", "HEAD"]);
 			return TEXT_RESULT(
@@ -659,6 +678,40 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 					.filter(Boolean)
 					.join("\n"),
 				{ commit: head, paths },
+			);
+		},
+	});
+
+	pi.registerTool({
+		name: "safe_create_branch",
+		label: "Safe Create Branch",
+		description:
+			"Create and switch to a non-main branch after validating the working tree is clean.",
+		promptSnippet:
+			"Use safe_create_branch instead of bash git checkout -b/switch -c for auto_review branch creation.",
+		parameters: Type.Object({
+			branch: Type.String({ description: "Non-main branch to create" }),
+		}),
+		async execute(_toolCallId, params) {
+			const dirty = dirtyStatus();
+			const createTarget = validateSafeBranchCreateInputs({
+				branch: params.branch,
+				currentBranch: currentBranch(),
+				dirtyCount: dirty.count,
+			});
+			const output = await assertGitSuccess([
+				"switch",
+				"--create",
+				createTarget.branch,
+			]);
+			return TEXT_RESULT(
+				[
+					`safe_create_branch created and switched to ${createTarget.branch}.`,
+					outputTail(output),
+				]
+					.filter(Boolean)
+					.join("\n"),
+				{ branch: createTarget.branch },
 			);
 		},
 	});
@@ -680,7 +733,7 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 				currentBranch: currentBranch(),
 				dirtyCount: dirty.count,
 			});
-			const output = assertGitSuccess(["switch", switchTarget.branch]);
+			const output = await assertGitSuccess(["switch", switchTarget.branch]);
 			return TEXT_RESULT(
 				[
 					`safe_switch_branch switched to ${switchTarget.branch}.`,
@@ -750,7 +803,7 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 			const pushArgs = push.forceWithLease
 				? ["push", "--force-with-lease", remote, `HEAD:refs/heads/${branch}`]
 				: ["push", remote, branch];
-			const output = assertGitSuccess(pushArgs);
+			const output = await assertGitSuccess(pushArgs);
 			return TEXT_RESULT(
 				[
 					`safe_push pushed ${branch} to ${remote}.`,
