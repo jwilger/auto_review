@@ -167,6 +167,9 @@ impl ChatHandler<'_> {
             ChatCommand::ReReview => {
                 self.handle_re_review(ctx).await?;
             }
+            ChatCommand::ReviewCorrection(text) => {
+                self.handle_review_correction(ctx, &text).await?;
+            }
             ChatCommand::Autofix => {
                 self.handle_suggest(ctx, SuggestionKind::Autofix).await?;
             }
@@ -238,6 +241,59 @@ impl ChatHandler<'_> {
             pr.head.sha
         );
         self.post(ctx, &reply).await
+    }
+
+    async fn handle_review_correction(
+        &self,
+        ctx: ChatContext<'_>,
+        correction: &str,
+    ) -> Result<(), ChatError> {
+        let embedding_text = format!(
+            "PR metadata review correction: when a reviewer says the title/body are adequate, \
+             do not keep blocking the PR for the same metadata rationale. User feedback: {correction}"
+        );
+        let embedding = self.embed(&embedding_text).await?;
+        let now = current_unix_seconds()?;
+        let record = self
+            .learnings
+            .add(embedding_text, LearningSource::Chat, embedding, now)
+            .await?;
+
+        let pr = self
+            .forgejo
+            .get_pull_request(ctx.owner, ctx.repo, ctx.issue_number)
+            .await?;
+        if pr.draft {
+            self.post(
+                ctx,
+                "I remembered that correction, but cannot approve while this PR is a draft.",
+            )
+            .await?;
+            return Ok(());
+        }
+        if pr.state != "open" {
+            self.post(
+                ctx,
+                "I remembered that correction, but cannot approve a closed or merged PR.",
+            )
+            .await?;
+            return Ok(());
+        }
+
+        let request = CreateReviewRequest {
+            body: format!(
+                "Accepted your correction and remembered it as learning #{}. \
+                 I agree this PR metadata is adequate for review.",
+                record.id
+            ),
+            commit_id: pr.head.sha,
+            event: ReviewEvent::Approved,
+            comments: Vec::new(),
+        };
+        self.forgejo
+            .create_review(ctx.owner, ctx.repo, ctx.issue_number, &request)
+            .await?;
+        Ok(())
     }
 
     /// Generic LLM-driven inline-suggestion command. Both `autofix`
@@ -2374,7 +2430,9 @@ mod tests {
                 ChatCommand::Autofix => Some("autofix"),
                 ChatCommand::Docstrings => Some("docstring"),
                 ChatCommand::TestScaffolds => Some("tests"),
-                ChatCommand::Freeform(_) | ChatCommand::NotMentioned => None,
+                ChatCommand::ReviewCorrection(_)
+                | ChatCommand::Freeform(_)
+                | ChatCommand::NotMentioned => None,
             }
         }
 
@@ -2386,6 +2444,7 @@ mod tests {
             ChatCommand::Autofix,
             ChatCommand::Docstrings,
             ChatCommand::TestScaffolds,
+            ChatCommand::ReviewCorrection(String::new()),
             ChatCommand::Freeform(String::new()),
             ChatCommand::NotMentioned,
         ];
