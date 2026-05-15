@@ -889,6 +889,30 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "safe_unstage",
+		label: "Safe Unstage",
+		description: "Remove explicit files from the Git index without shelling out through bash.",
+		promptSnippet:
+			"Use safe_unstage to unstage explicit paths before safe_commit when needed.",
+		parameters: Type.Object({
+			paths: Type.Array(
+				Type.String({ description: "Explicit file path to unstage" }),
+				{ minItems: 1, description: "Explicit file paths to unstage" },
+			),
+		}),
+		async execute(_toolCallId, params) {
+			const paths = validateExplicitPaths(params.paths);
+			const output = await assertGitSuccess(["restore", "--staged", "--", ...paths]);
+			const result = conciseCommandResult({
+				toolName: "safe_unstage",
+				summary: `safe_unstage unstaged: ${paths.join(", ")}`,
+				output,
+			});
+			return TEXT_RESULT(result.text, { paths, outputPath: result.outputPath });
+		},
+	});
+
+	pi.registerTool({
 		name: "safe_remove",
 		label: "Safe Remove",
 		description: "Delete explicit files without shelling out through bash.",

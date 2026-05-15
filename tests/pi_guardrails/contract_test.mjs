@@ -76,6 +76,16 @@ assert.match(
 );
 assert.match(
 	guardrailsSource,
+	/name: "safe_unstage"/,
+	"pi guardrails expose a semantic safe_unstage tool",
+);
+assert.match(
+	guardrailsSource,
+	/\["restore", "--staged", "--", \.\.\.paths\]/,
+	"safe_unstage unstages explicit file paths through git restore --staged",
+);
+assert.match(
+	guardrailsSource,
 	/name: "safe_remove"/,
 	"pi guardrails expose a semantic safe_remove tool",
 );
