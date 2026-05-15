@@ -877,6 +877,7 @@
                   bash
                   coreutils
                   git
+                  nodejs
                   python3
                   cargo-semver-checks
                   tea
