@@ -435,7 +435,7 @@ test_release_tooling_tests_are_wired_into_nix_flake_check() {
 	assert_file_contains "$flake" '/tests/' "nix flake source includes release tooling tests"
 }
 
-test_nix_develop_enables_versioned_lefthook_pre_commit_format_guardrail() {
+test_nix_develop_enables_versioned_lefthook_pre_push_verification_guardrail() {
 	local flake lefthook_config guardrail_extension
 	flake="$ROOT/flake.nix"
 	lefthook_config="$ROOT/lefthook.yml"
@@ -444,8 +444,8 @@ test_nix_develop_enables_versioned_lefthook_pre_commit_format_guardrail() {
 	assert_file_contains "$flake" 'lefthook' "nix develop exposes lefthook"
 	assert_file_contains "$flake" 'lefthook install' "nix develop automatically installs lefthook hooks"
 	assert_file_contains "$guardrail_extension" 'lefthook install' "pi session start ensures lefthook hooks are installed"
-	assert_file_contains "$lefthook_config" 'pre-commit:' "versioned lefthook config defines a pre-commit hook"
-	assert_file_contains "$lefthook_config" 'nix flake check' "lefthook pre-commit runs the full Nix verification"
+	assert_file_contains "$lefthook_config" 'pre-push:' "versioned lefthook config defines a pre-push hook"
+	assert_file_contains "$lefthook_config" 'nix flake check' "lefthook pre-push runs the full Nix verification"
 }
 
 test_pi_guardrails_route_git_commit_and_push_through_safe_tools() {
@@ -509,7 +509,7 @@ run_tests \
 	test_publish_non_dry_run_pushes_tag_and_sends_changelog_notes \
 	test_prepare_workflow_requires_explicit_prepare_secret_runtime_env \
 	test_release_tooling_tests_are_wired_into_nix_flake_check \
-	test_nix_develop_enables_versioned_lefthook_pre_commit_format_guardrail \
+	test_nix_develop_enables_versioned_lefthook_pre_push_verification_guardrail \
 	test_pi_guardrails_route_git_commit_and_push_through_safe_tools \
 	test_pi_guardrails_deny_bash_and_route_capabilities_through_reviewed_tools \
 	test_release_plz_config_is_removed_and_workspace_crates_stay_private

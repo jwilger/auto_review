@@ -1,12 +1,22 @@
 #!/usr/bin/env node
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import {
+	mkdtempSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	assertOnlyExplicitStagedPaths,
 	blocksDirectGitMutationCommand,
+	conciseCommandResult,
 	validateExplicitPaths,
+	validateSafeBranchCreateInputs,
+	validateSafeBranchSwitchInputs,
+	validateSafeCommitInputs,
 	validateSafePushInputs,
 } from "../../.pi/extensions/auto-review-git-safety.mjs";
 
@@ -44,6 +54,30 @@ assert.equal(
 );
 assert.equal(blocksDirectGitMutationCommand("git stash"), true);
 
+const guardrailsSource = readFileSync(
+	new URL("../../.pi/extensions/auto-review-guardrails.ts", import.meta.url),
+	"utf8",
+);
+assert.equal(
+	guardrailsSource.includes("spawnSync"),
+	false,
+	"guardrail git tools must not use blocking spawnSync",
+);
+const verboseOutput = Array.from(
+	{ length: 40 },
+	(_, index) => `verbose line ${index + 1}`,
+).join("\n");
+const conciseResult = conciseCommandResult({
+	toolName: "safe_push",
+	summary: "safe_push pushed topic to origin.",
+	output: verboseOutput,
+});
+assert.match(conciseResult.text, /safe_push pushed topic to origin\./);
+assert.match(conciseResult.text, /Full output: \/tmp\//);
+assert.equal(conciseResult.text.includes("verbose line 1"), false);
+assert.equal(conciseResult.text.includes("verbose line 40"), false);
+assert.ok(readFileSync(conciseResult.outputPath, "utf8").includes("verbose line 40"));
+
 const workdir = mkdtempSync(join(tmpdir(), "auto-review-git-safety-"));
 try {
 	process.chdir(workdir);
@@ -51,6 +85,101 @@ try {
 	mkdirSync("directory");
 
 	assert.deepEqual(validateExplicitPaths(["file.txt"]), ["file.txt"]);
+	assert.deepEqual(
+		validateSafeCommitInputs({
+			paths: ["file.txt"],
+			currentBranch: "topic",
+		}),
+		{ paths: ["file.txt"], branch: "topic" },
+	);
+	rejects(
+		() =>
+			validateSafeCommitInputs({
+				paths: ["file.txt"],
+				currentBranch: "main",
+			}),
+		"rejects commits on main",
+	);
+	rejects(
+		() =>
+			validateSafeCommitInputs({
+				paths: ["file.txt"],
+				currentBranch: undefined,
+			}),
+		"requires current branch before commit",
+	);
+	assert.deepEqual(
+		validateSafeBranchCreateInputs({
+			branch: "feature/new-tool",
+			currentBranch: "main",
+			dirtyCount: 0,
+		}),
+		{ branch: "feature/new-tool" },
+	);
+	rejects(
+		() =>
+			validateSafeBranchCreateInputs({
+				branch: "main",
+				currentBranch: "main",
+				dirtyCount: 0,
+			}),
+		"rejects creating main branch",
+	);
+	rejects(
+		() =>
+			validateSafeBranchCreateInputs({
+				branch: "topic",
+				currentBranch: "main",
+				dirtyCount: 1,
+			}),
+		"rejects branch creation with dirty working tree",
+	);
+	assert.deepEqual(
+		validateSafeBranchSwitchInputs({
+			branch: "fix/issue-207-spawnsync-guardrails",
+			currentBranch: "main",
+			dirtyCount: 0,
+		}),
+		{ branch: "fix/issue-207-spawnsync-guardrails" },
+	);
+	for (const branch of [
+		"main",
+		"-bad",
+		"bad branch",
+		"../bad",
+		"bad..branch",
+		"bad@{branch",
+		"/bad",
+		"bad/",
+	]) {
+		rejects(
+			() =>
+				validateSafeBranchSwitchInputs({
+					branch,
+					currentBranch: "main",
+					dirtyCount: 0,
+				}),
+			`rejects unsafe branch switch target ${branch}`,
+		);
+	}
+	rejects(
+		() =>
+			validateSafeBranchSwitchInputs({
+				branch: "topic",
+				currentBranch: "main",
+				dirtyCount: 1,
+			}),
+		"rejects branch switch with dirty working tree",
+	);
+	rejects(
+		() =>
+			validateSafeBranchSwitchInputs({
+				branch: "topic",
+				currentBranch: undefined,
+				dirtyCount: 0,
+			}),
+		"requires current branch before branch switch",
+	);
 	for (const path of [
 		".",
 		"-A",

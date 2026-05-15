@@ -1,4 +1,6 @@
-import { existsSync, statSync } from "node:fs";
+import { existsSync, mkdtempSync, statSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const READ_ONLY_GIT_SUBCOMMANDS = new Set([
 	"diff",
@@ -10,6 +12,16 @@ const READ_ONLY_GIT_SUBCOMMANDS = new Set([
 	"show",
 	"status",
 ]);
+
+export function conciseCommandResult({ toolName, summary, output }) {
+	const dir = mkdtempSync(join(tmpdir(), `${toolName}-`));
+	const outputPath = join(dir, "output.txt");
+	writeFileSync(outputPath, output || "", "utf8");
+	return {
+		outputPath,
+		text: [summary, `Full output: ${outputPath}`].filter(Boolean).join("\n"),
+	};
+}
 
 export function shellWords(command) {
 	const words = [];
@@ -169,6 +181,57 @@ function isAllowedForgejoRemote(value) {
 		parsed.host === "git.johnwilger.com" &&
 		/^jwilger\/auto_review(?:\.git)?$/.test(parsed.path)
 	);
+}
+
+function validateSafeNonMainBranch(branch, toolName) {
+	const safeBranch = validateSafeGitName(branch, "branch");
+	if (safeBranch === "main") {
+		throw new Error(`${toolName} refuses to target main.`);
+	}
+	return safeBranch;
+}
+
+export function validateSafeCommitInputs({ paths, currentBranch }) {
+	if (!currentBranch)
+		throw new Error("safe_commit could not determine the current branch.");
+	if (currentBranch === "main") {
+		throw new Error("safe_commit refuses to commit on main.");
+	}
+	return { paths: validateExplicitPaths(paths), branch: currentBranch };
+}
+
+export function validateSafeBranchCreateInputs({
+	branch,
+	currentBranch,
+	dirtyCount,
+}) {
+	if (!currentBranch)
+		throw new Error(
+			"safe_create_branch could not determine the current branch.",
+		);
+	if (dirtyCount > 0) {
+		throw new Error(
+			"safe_create_branch refuses to create branches with a dirty working tree.",
+		);
+	}
+	return { branch: validateSafeNonMainBranch(branch, "safe_create_branch") };
+}
+
+export function validateSafeBranchSwitchInputs({
+	branch,
+	currentBranch,
+	dirtyCount,
+}) {
+	if (!currentBranch)
+		throw new Error(
+			"safe_switch_branch could not determine the current branch.",
+		);
+	if (dirtyCount > 0) {
+		throw new Error(
+			"safe_switch_branch refuses to switch branches with a dirty working tree.",
+		);
+	}
+	return { branch: validateSafeNonMainBranch(branch, "safe_switch_branch") };
 }
 
 export function validateSafePushInputs({

@@ -1,9 +1,12 @@
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFile, execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import {
 	assertOnlyExplicitStagedPaths,
-	validateExplicitPaths,
+	conciseCommandResult,
+	validateSafeBranchCreateInputs,
+	validateSafeBranchSwitchInputs,
+	validateSafeCommitInputs,
 	validateSafePushInputs,
 } from "./auto-review-git-safety.mjs";
 import type {
@@ -156,15 +159,30 @@ function currentBranch(): string | undefined {
 	return gitOutput(["branch", "--show-current"]);
 }
 
-function runGitCommand(args: string[]): { status: number; output: string } {
-	const result = spawnSync("git", args, {
-		cwd: process.cwd(),
-		encoding: "utf8",
-		stdio: ["ignore", "pipe", "pipe"],
-		maxBuffer: 10 * 1024 * 1024,
+function runGitCommand(
+	args: string[],
+): Promise<{ status: number; output: string }> {
+	return new Promise((resolve) => {
+		execFile(
+			"git",
+			args,
+			{
+				cwd: process.cwd(),
+				encoding: "utf8",
+				maxBuffer: 10 * 1024 * 1024,
+			},
+			(error, stdout, stderr) => {
+				const output = [stdout, stderr].filter(Boolean).join("");
+				resolve({
+					status:
+						error && typeof error === "object" && "code" in error
+							? Number(error.code) || 1
+							: 0,
+					output,
+				});
+			},
+		);
 	});
-	const output = [result.stdout, result.stderr].filter(Boolean).join("");
-	return { status: result.status ?? 1, output };
 }
 
 function outputTail(output: string): string {
@@ -172,8 +190,8 @@ function outputTail(output: string): string {
 	return lines.slice(-20).join("\n");
 }
 
-function assertGitSuccess(args: string[]): string {
-	const result = runGitCommand(args);
+async function assertGitSuccess(args: string[]): Promise<string> {
+	const result = await runGitCommand(args);
 	if (result.status !== 0) {
 		throw new Error(
 			[
@@ -187,8 +205,8 @@ function assertGitSuccess(args: string[]): string {
 	return result.output;
 }
 
-function stageExplicitPaths(paths: string[]): void {
-	assertGitSuccess(["add", "--", ...validateExplicitPaths(paths)]);
+async function stageExplicitPaths(paths: string[]): Promise<void> {
+	await assertGitSuccess(["add", "--", ...paths]);
 }
 
 function stagedPaths(): string[] {
@@ -633,9 +651,12 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 			body: Type.Optional(Type.String({ description: "Commit body" })),
 		}),
 		async execute(_toolCallId, params) {
-			const paths = validateExplicitPaths(params.paths);
+			const { paths } = validateSafeCommitInputs({
+				paths: params.paths,
+				currentBranch: currentBranch(),
+			});
 			ensureNoPreStagedPaths();
-			stageExplicitPaths(paths);
+			await stageExplicitPaths(paths);
 			const staged = stagedPaths();
 			if (staged.length === 0) {
 				throw new Error(
@@ -646,19 +667,88 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 
 			const commitArgs = ["commit", "-m", params.message];
 			if (params.body?.trim()) commitArgs.push("-m", params.body.trim());
-			const output = assertGitSuccess(commitArgs);
+			const output = await assertGitSuccess(commitArgs);
 			ensureCleanAfterCommit();
 			const head = gitOutput(["rev-parse", "--short", "HEAD"]);
-			return TEXT_RESULT(
-				[
+			const result = conciseCommandResult({
+				toolName: "safe_commit",
+				summary: [
 					`safe_commit created ${head ?? "a commit"}.`,
 					`staged paths: ${paths.join(", ")}`,
-					outputTail(output),
 				]
 					.filter(Boolean)
 					.join("\n"),
-				{ commit: head, paths },
-			);
+				output,
+			});
+			return TEXT_RESULT(result.text, {
+				commit: head,
+				paths,
+				outputPath: result.outputPath,
+			});
+		},
+	});
+
+	pi.registerTool({
+		name: "safe_create_branch",
+		label: "Safe Create Branch",
+		description:
+			"Create and switch to a non-main branch after validating the working tree is clean.",
+		promptSnippet:
+			"Use safe_create_branch instead of bash git checkout -b/switch -c for auto_review branch creation.",
+		parameters: Type.Object({
+			branch: Type.String({ description: "Non-main branch to create" }),
+		}),
+		async execute(_toolCallId, params) {
+			const dirty = dirtyStatus();
+			const createTarget = validateSafeBranchCreateInputs({
+				branch: params.branch,
+				currentBranch: currentBranch(),
+				dirtyCount: dirty.count,
+			});
+			const output = await assertGitSuccess([
+				"switch",
+				"--create",
+				createTarget.branch,
+			]);
+			const result = conciseCommandResult({
+				toolName: "safe_create_branch",
+				summary: `safe_create_branch created and switched to ${createTarget.branch}.`,
+				output,
+			});
+			return TEXT_RESULT(result.text, {
+				branch: createTarget.branch,
+				outputPath: result.outputPath,
+			});
+		},
+	});
+
+	pi.registerTool({
+		name: "safe_switch_branch",
+		label: "Safe Switch Branch",
+		description:
+			"Switch from the current branch to a non-main branch after validating the working tree is clean.",
+		promptSnippet:
+			"Use safe_switch_branch instead of bash git checkout/switch for auto_review branch changes.",
+		parameters: Type.Object({
+			branch: Type.String({ description: "Non-main branch to switch to" }),
+		}),
+		async execute(_toolCallId, params) {
+			const dirty = dirtyStatus();
+			const switchTarget = validateSafeBranchSwitchInputs({
+				branch: params.branch,
+				currentBranch: currentBranch(),
+				dirtyCount: dirty.count,
+			});
+			const output = await assertGitSuccess(["switch", switchTarget.branch]);
+			const result = conciseCommandResult({
+				toolName: "safe_switch_branch",
+				summary: `safe_switch_branch switched to ${switchTarget.branch}.`,
+				output,
+			});
+			return TEXT_RESULT(result.text, {
+				branch: switchTarget.branch,
+				outputPath: result.outputPath,
+			});
 		},
 	});
 
@@ -719,19 +809,25 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 			const pushArgs = push.forceWithLease
 				? ["push", "--force-with-lease", remote, `HEAD:refs/heads/${branch}`]
 				: ["push", remote, branch];
-			const output = assertGitSuccess(pushArgs);
-			return TEXT_RESULT(
-				[
+			const output = await assertGitSuccess(pushArgs);
+			const result = conciseCommandResult({
+				toolName: "safe_push",
+				summary: [
 					`safe_push pushed ${branch} to ${remote}.`,
 					push.forceWithLease
 						? `force-with-lease: ${push.justification}`
 						: undefined,
-					outputTail(output),
 				]
 					.filter(Boolean)
 					.join("\n"),
-				{ remote, branch, forceWithLease: push.forceWithLease },
-			);
+				output,
+			});
+			return TEXT_RESULT(result.text, {
+				remote,
+				branch,
+				forceWithLease: push.forceWithLease,
+				outputPath: result.outputPath,
+			});
 		},
 	});
 
