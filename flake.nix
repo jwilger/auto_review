@@ -154,10 +154,13 @@
               )
             )
             || (pkgs.lib.hasInfix "/tests/" strPath && pkgs.lib.hasSuffix ".sh" path)
+            || (pkgs.lib.hasInfix "/tests/" strPath && pkgs.lib.hasSuffix ".mjs" path)
             || (pkgs.lib.hasInfix "/scripts/" strPath)
             || (pkgs.lib.hasInfix "/.forgejo/workflows/" strPath && pkgs.lib.hasSuffix ".yml" path)
             || strPath == "${toString ./.}/.forgejo/pull_request_template.md"
             || strPath == "${toString ./.}/.pi/extensions/auto-review-guardrails.ts"
+            || strPath == "${toString ./.}/.pi/extensions/auto-review-git-safety.mjs"
+            || strPath == "${toString ./.}/.pi/extensions/pi-permission-system/config.json"
             || strPath == "${toString ./.}/.kilo/command/prepare-forgejo-pr.md"
             || strPath == "${toString ./.}/.kilo/skills/rust-workspace-engineering/SKILL.md"
             || strPath == "${toString ./.}/docs/OPERATIONS.md"

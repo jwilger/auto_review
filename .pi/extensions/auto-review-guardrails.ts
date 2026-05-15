@@ -1,6 +1,12 @@
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
+import {
+	assertOnlyExplicitStagedPaths,
+	blocksDirectGitMutationCommand,
+	validateExplicitPaths,
+	validateSafePushInputs,
+} from "./auto-review-git-safety.mjs";
 import type {
 	ExtensionAPI,
 	ToolCallEvent,
@@ -197,6 +203,67 @@ function gitOutput(args: string[]): string | undefined {
 
 function currentBranch(): string | undefined {
 	return gitOutput(["branch", "--show-current"]);
+}
+
+function runGitCommand(args: string[]): { status: number; output: string } {
+	const result = spawnSync("git", args, {
+		cwd: process.cwd(),
+		encoding: "utf8",
+		stdio: ["ignore", "pipe", "pipe"],
+		maxBuffer: 10 * 1024 * 1024,
+	});
+	const output = [result.stdout, result.stderr].filter(Boolean).join("");
+	return { status: result.status ?? 1, output };
+}
+
+function outputTail(output: string): string {
+	const lines = output.trim().split(/\r?\n/).filter(Boolean);
+	return lines.slice(-20).join("\n");
+}
+
+function assertGitSuccess(args: string[]): string {
+	const result = runGitCommand(args);
+	if (result.status !== 0) {
+		throw new Error(
+			[
+				`git ${args.join(" ")} failed with status ${result.status}`,
+				outputTail(result.output),
+			]
+				.filter(Boolean)
+				.join("\n"),
+		);
+	}
+	return result.output;
+}
+
+function stageExplicitPaths(paths: string[]): void {
+	assertGitSuccess(["add", "--", ...validateExplicitPaths(paths)]);
+}
+
+function stagedPaths(): string[] {
+	const staged = gitOutput(["diff", "--cached", "--name-only"]);
+	return staged ? staged.split("\n").filter(Boolean) : [];
+}
+
+function ensureNoPreStagedPaths(): void {
+	const paths = stagedPaths();
+	if (paths.length) {
+		throw new Error(
+			`safe_commit refuses to include pre-staged paths: ${paths.join(", ")}`,
+		);
+	}
+}
+
+function ensureCleanAfterCommit(): void {
+	const dirty = dirtyStatus();
+	if (dirty.count) {
+		throw new Error(
+			[
+				"safe_commit completed but the working tree is dirty after hooks ran.",
+				...dirty.preview.map((line) => `  ${line}`),
+			].join("\n"),
+		);
+	}
 }
 
 function ensureLefthookInstalled(): void {
@@ -597,6 +664,127 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 	});
 
 	pi.registerTool({
+		name: "safe_commit",
+		label: "Safe Commit",
+		description:
+			"Stage explicit paths and create a signed/hooked git commit with post-hook cleanliness checks.",
+		promptSnippet:
+			"Use safe_commit instead of bash git add/git commit for auto_review commits.",
+		promptGuidelines: [
+			"Use safe_commit for commits so only explicit paths are staged and hooks/signing are preserved.",
+		],
+		parameters: Type.Object({
+			paths: Type.Array(
+				Type.String({ description: "Explicit file path to stage" }),
+				{ minItems: 1, description: "Explicit file paths to stage" },
+			),
+			message: Type.String({ description: "Commit subject" }),
+			body: Type.Optional(Type.String({ description: "Commit body" })),
+		}),
+		async execute(_toolCallId, params) {
+			const paths = validateExplicitPaths(params.paths);
+			ensureNoPreStagedPaths();
+			stageExplicitPaths(paths);
+			const staged = stagedPaths();
+			if (staged.length === 0) {
+				throw new Error(
+					"safe_commit found no staged changes after staging explicit paths.",
+				);
+			}
+			assertOnlyExplicitStagedPaths(paths, staged);
+
+			const commitArgs = ["commit", "-m", params.message];
+			if (params.body?.trim()) commitArgs.push("-m", params.body.trim());
+			const output = assertGitSuccess(commitArgs);
+			ensureCleanAfterCommit();
+			const head = gitOutput(["rev-parse", "--short", "HEAD"]);
+			return TEXT_RESULT(
+				[
+					`safe_commit created ${head ?? "a commit"}.`,
+					`staged paths: ${paths.join(", ")}`,
+					outputTail(output),
+				]
+					.filter(Boolean)
+					.join("\n"),
+				{ commit: head, paths },
+			);
+		},
+	});
+
+	pi.registerTool({
+		name: "safe_push",
+		label: "Safe Push",
+		description:
+			"Push the current branch without shelling out through bash; force-with-lease requires explicit justification.",
+		promptSnippet:
+			"Use safe_push instead of bash git push for auto_review branch updates.",
+		promptGuidelines: [
+			"Use safe_push for normal pushes; request forceWithLease only when explicitly authorized and justified.",
+		],
+		parameters: Type.Object({
+			remote: Type.Optional(
+				Type.String({ description: "Remote name", default: "origin" }),
+			),
+			branch: Type.Optional(
+				Type.String({ description: "Branch name; defaults to current branch" }),
+			),
+			forceWithLease: Type.Optional(
+				Type.Boolean({ description: "Use --force-with-lease" }),
+			),
+			justification: Type.Optional(
+				Type.String({ description: "Required when forceWithLease is true" }),
+			),
+		}),
+		async execute(_toolCallId, params) {
+			const remotes = (gitOutput(["remote"]) ?? "").split("\n").filter(Boolean);
+			const remoteUrls = Object.fromEntries(
+				remotes.map((remote) => [
+					remote,
+					(gitOutput(["remote", "get-url", "--all", remote]) ?? "")
+						.split("\n")
+						.filter(Boolean),
+				]),
+			);
+			const pushUrls = Object.fromEntries(
+				remotes.map((remote) => [
+					remote,
+					(gitOutput(["remote", "get-url", "--push", "--all", remote]) ?? "")
+						.split("\n")
+						.filter(Boolean),
+				]),
+			);
+			const push = validateSafePushInputs({
+				remote: params.remote ?? "origin",
+				branch: params.branch,
+				currentBranch: currentBranch(),
+				configuredRemotes: remotes,
+				remoteUrls,
+				pushUrls,
+				forceWithLease: params.forceWithLease,
+				justification: params.justification,
+			});
+			const { remote, branch } = push;
+
+			const pushArgs = push.forceWithLease
+				? ["push", "--force-with-lease", remote, `HEAD:refs/heads/${branch}`]
+				: ["push", remote, branch];
+			const output = assertGitSuccess(pushArgs);
+			return TEXT_RESULT(
+				[
+					`safe_push pushed ${branch} to ${remote}.`,
+					push.forceWithLease
+						? `force-with-lease: ${push.justification}`
+						: undefined,
+					outputTail(output),
+				]
+					.filter(Boolean)
+					.join("\n"),
+				{ remote, branch, forceWithLease: push.forceWithLease },
+			);
+		},
+	});
+
+	pi.registerTool({
 		name: "toolchain_status",
 		label: "Toolchain Status",
 		description:
@@ -621,6 +809,13 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 	pi.on("tool_call", async (event) => {
 		if (isToolCallEventType("bash", event)) {
 			const command = commandText(event.input);
+			if (blocksDirectGitMutationCommand(command)) {
+				return {
+					block: true,
+					reason:
+						"Direct git mutation commands are blocked. Use safe_commit or safe_push so staging, hooks, signing, and push safety stay enforced.",
+				};
+			}
 			if (blocksUnsafeToolchainCommand(command)) {
 				return {
 					block: true,
