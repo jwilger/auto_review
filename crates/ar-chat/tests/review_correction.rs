@@ -63,7 +63,8 @@ fn forgejo_quote_of_review_finding_with_user_correction_routes_to_review_correct
     assert_eq!(
         parse_chat_command(quoted_review_finding_correction(), "auto-review"),
         ChatCommand::ReviewCorrection(
-            "That finding is wrong; the code already handles an empty widget list correctly.".into()
+            "That finding is wrong; the code already handles an empty widget list correctly."
+                .into()
         )
     );
 }
