@@ -31,6 +31,15 @@ fn quoted_metadata_failure_correction() -> &'static str {
 The title and body are adequate for this change; please accept them."
 }
 
+fn quoted_review_finding_correction() -> &'static str {
+    "\
+@auto-review wrote in https://git.johnwilger.com/alice/widgets/pulls/42#issuecomment-8130:\n\
+> The diff introduces a panic when the widget list is empty.\n\
+> Consider returning an empty response instead.\n\
+\n\
+That finding is wrong; the code already handles an empty widget list correctly."
+}
+
 fn ctx() -> ChatContext<'static> {
     ChatContext {
         owner: "alice",
@@ -45,6 +54,16 @@ fn forgejo_quote_of_metadata_failure_with_user_correction_routes_to_review_corre
         parse_chat_command(quoted_metadata_failure_correction(), "auto-review"),
         ChatCommand::ReviewCorrection(
             "The title and body are adequate for this change; please accept them.".into()
+        )
+    );
+}
+
+#[test]
+fn forgejo_quote_of_review_finding_with_user_correction_routes_to_review_correction() {
+    assert_eq!(
+        parse_chat_command(quoted_review_finding_correction(), "auto-review"),
+        ChatCommand::ReviewCorrection(
+            "That finding is wrong; the code already handles an empty widget list correctly.".into()
         )
     );
 }
@@ -100,6 +119,11 @@ async fn review_correction_stores_chat_learning_and_approves_current_head() {
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].source, LearningSource::Chat);
     assert!(stored[0].text.contains("title and body are adequate"));
+    assert!(
+        stored[0].text.contains("Repository alice/widgets only"),
+        "learning must be scoped to the current repository: {}",
+        stored[0].text
+    );
 
     let received = server.received_requests().await.expect("requests");
     let approval_posts = received

@@ -15,8 +15,7 @@ pub enum ChatCommand {
     /// re-run the full review on the current head SHA, ignoring any
     /// recorded review history.
     ReReview,
-    /// A user correction replying to a bot review that incorrectly
-    /// blocked PR metadata.
+    /// A user correction replying to a bot review comment or finding.
     ReviewCorrection(String),
     /// `@auto-review autofix` — ask the cheap-tier model to emit
     /// inline patch suggestions for the diff. Each patch is posted
@@ -114,13 +113,6 @@ fn parse_review_correction(
     if !after.trim_start().starts_with("wrote in ") {
         return None;
     }
-    if !body
-        .to_ascii_lowercase()
-        .contains("pr metadata quality: failed")
-    {
-        return None;
-    }
-
     let correction = lines
         .filter_map(|line| {
             let trimmed = line.trim();
@@ -136,7 +128,10 @@ fn parse_review_correction(
     (lower.contains("adequate")
         || lower.contains("invalid")
         || lower.contains("fine")
-        || lower.contains("accept"))
+        || lower.contains("accept")
+        || lower.contains("wrong")
+        || lower.contains("correct")
+        || lower.contains("false positive"))
     .then_some(correction)
     .filter(|text| !text.is_empty())
 }

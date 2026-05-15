@@ -249,8 +249,9 @@ impl ChatHandler<'_> {
         correction: &str,
     ) -> Result<(), ChatError> {
         let embedding_text = format!(
-            "PR metadata review correction: when a reviewer says the title/body are adequate, \
-             do not keep blocking the PR for the same metadata rationale. User feedback: {correction}"
+            "Repository {}/{} only. Review correction from PR feedback: treat the user's \
+             explanation as repository-specific guidance for future reviews. User feedback: {correction}",
+            ctx.owner, ctx.repo
         );
         let embedding = self.embed(&embedding_text).await?;
         let now = current_unix_seconds()?;
@@ -282,8 +283,7 @@ impl ChatHandler<'_> {
 
         let request = CreateReviewRequest {
             body: format!(
-                "Accepted your correction and remembered it as learning #{}. \
-                 I agree this PR metadata is adequate for review.",
+                "Accepted your correction and remembered it as repository-specific learning #{}.",
                 record.id
             ),
             commit_id: pr.head.sha,
