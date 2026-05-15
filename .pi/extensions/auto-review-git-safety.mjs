@@ -177,7 +177,9 @@ export function validateSafeBranchSwitchInputs({
 	dirtyCount,
 }) {
 	if (!currentBranch)
-		throw new Error("safe_switch_branch could not determine the current branch.");
+		throw new Error(
+			"safe_switch_branch could not determine the current branch.",
+		);
 	if (dirtyCount > 0) {
 		throw new Error(
 			"safe_switch_branch refuses to switch branches with a dirty working tree.",
