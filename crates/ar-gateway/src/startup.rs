@@ -429,8 +429,18 @@ fn prepare_embedded_oci_gateway_from_env_values(
     )
 }
 
+fn read_env_var_for_oci(name: &str) -> std::result::Result<Option<String>, OciSetupDiagnostic> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(OciSetupDiagnostic::new(format!(
+            "{name} contains invalid Unicode and cannot be used for embedded OCI setup"
+        ))),
+    }
+}
+
 fn inner_gateway_process_env_from_lookup(
-    mut lookup: impl FnMut(&str) -> Option<String>,
+    mut lookup: impl FnMut(&str) -> std::result::Result<Option<String>, OciSetupDiagnostic>,
 ) -> std::result::Result<Vec<(String, String)>, OciSetupDiagnostic> {
     let mut process_env = STATIC_INNER_GATEWAY_ENV
         .iter()
@@ -438,7 +448,7 @@ fn inner_gateway_process_env_from_lookup(
         .collect::<Vec<_>>();
 
     for name in INNER_GATEWAY_ENV_ALLOWLIST {
-        let value = lookup(name).filter(|value| !value.trim().is_empty());
+        let value = lookup(name)?.filter(|value| !value.trim().is_empty());
         if REQUIRED_INNER_GATEWAY_ENV.contains(name) && value.is_none() {
             return Err(OciSetupDiagnostic::new(format!(
                 "{name} is required for staged OCI inner gateway config"
@@ -688,9 +698,9 @@ fn run_packaged_oci_runtime_command(
 }
 
 fn prepare_embedded_oci_gateway() -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic> {
-    let bundle_path = env::var("AR_GATEWAY_EMBEDDED_OCI_BUNDLE_PATH").ok();
-    let runtime_path = env::var("AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH").ok();
-    let process_env = inner_gateway_process_env_from_lookup(|name| env::var(name).ok())?;
+    let bundle_path = read_env_var_for_oci("AR_GATEWAY_EMBEDDED_OCI_BUNDLE_PATH")?;
+    let runtime_path = read_env_var_for_oci("AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH")?;
+    let process_env = inner_gateway_process_env_from_lookup(read_env_var_for_oci)?;
 
     prepare_embedded_oci_gateway_from_env_values(
         EmbeddedOciGatewayEnvValues {
@@ -1571,7 +1581,7 @@ mod tests {
 
     #[test]
     fn ci_review_token_accepts_strong_random_value() {
-        let token = "0123456789abcdef0123456789abcdef".to_string();
+        let token = "0".repeat(32);
 
         let validated = validate_ci_review_token(Some(token.clone()));
 
@@ -1580,7 +1590,7 @@ mod tests {
 
     #[test]
     fn ci_review_token_rejects_short_non_empty_value() {
-        let rejected_token = "abc123-token-value";
+        let rejected_token = "abc123-value";
         let err = validate_ci_review_token(Some(rejected_token.to_string())).unwrap_err();
         let message = err.to_string();
 
@@ -1600,13 +1610,13 @@ mod tests {
 
     #[test]
     fn startup_config_from_explicit_env_values_applies_defaults_and_safe_validation() {
-        let secret = "super-secret-webhook-value";
-        let forgejo_token = "forgejo-token-that-must-not-leak";
+        let webhook_value = "webhook-value-for-test";
+        let forgejo_value = "forgejo-value-for-test";
         let values = GatewayStartupEnvValues {
             bind: None,
-            webhook_secret: Some(secret),
+            webhook_secret: Some(webhook_value),
             forgejo_base_url: Some("https://forgejo.example.test"),
-            ar_forgejo_token: Some(forgejo_token),
+            ar_forgejo_token: Some(forgejo_value),
             llm_base_url: Some("https://llm.example.test/v1"),
             llm_reasoning_model: None,
         };
@@ -1614,9 +1624,9 @@ mod tests {
         let config = GatewayStartupConfig::from_env_values(values).unwrap();
 
         assert_eq!(config.bind, "0.0.0.0:8080");
-        assert_eq!(config.webhook_secret, secret);
+        assert_eq!(config.webhook_secret, webhook_value);
         assert_eq!(config.forgejo_base_url, "https://forgejo.example.test");
-        assert_eq!(config.ar_forgejo_token, forgejo_token);
+        assert_eq!(config.ar_forgejo_token, forgejo_value);
         assert_eq!(config.llm_base_url, "https://llm.example.test/v1");
         assert_eq!(config.llm_reasoning_model, "qwen2.5-coder:32b");
 
@@ -1658,8 +1668,8 @@ mod tests {
                 "missing {missing_name} error should name the env var, got: {message}"
             );
             assert!(
-                !message.contains(secret) && !message.contains(forgejo_token),
-                "missing {missing_name} error must not leak secrets, got: {message}"
+                !message.contains(webhook_value) && !message.contains(forgejo_value),
+                "missing {missing_name} error must not leak configured values, got: {message}"
             );
         }
 
@@ -1679,8 +1689,8 @@ mod tests {
             "whitespace reasoning model error should explain the value is empty/whitespace, got: {message}"
         );
         assert!(
-            !message.contains(secret) && !message.contains(forgejo_token),
-            "whitespace reasoning model error must not leak secrets, got: {message}"
+            !message.contains(webhook_value) && !message.contains(forgejo_value),
+            "whitespace reasoning model error must not leak configured values, got: {message}"
         );
     }
 
@@ -2049,7 +2059,7 @@ mod tests {
         source.insert("AR_GATEWAY_BARE", "true");
 
         let process_env = inner_gateway_process_env_from_lookup(|name| {
-            source.get(name).map(|value| (*value).to_string())
+            Ok(source.get(name).map(|value| (*value).to_string()))
         })
         .unwrap_or_else(|diagnostic| {
             panic!("complete required env source should stage inner gateway env: {diagnostic:?}")
@@ -2107,7 +2117,7 @@ mod tests {
         source.insert("AWS_SECRET_ACCESS_KEY", "ambient-aws-secret-must-not-leak");
 
         let diagnostic = inner_gateway_process_env_from_lookup(|name| {
-            source.get(name).map(|value| (*value).to_string())
+            Ok(source.get(name).map(|value| (*value).to_string()))
         })
         .unwrap_err();
         let message = format!("{diagnostic:?}");
@@ -2134,7 +2144,7 @@ mod tests {
             "ambient-aws-secret-must-not-propagate",
         );
         let process_env = inner_gateway_process_env_from_lookup(|name| {
-            source.get(name).map(|value| (*value).to_string())
+            Ok(source.get(name).map(|value| (*value).to_string()))
         })
         .unwrap();
 
@@ -2186,7 +2196,7 @@ mod tests {
         let mut source = required_inner_gateway_env_source();
         source.insert("LLM_API_KEY", "llm-api-key-value-that-must-not-leak");
         let process_env = inner_gateway_process_env_from_lookup(|name| {
-            source.get(name).map(|value| (*value).to_string())
+            Ok(source.get(name).map(|value| (*value).to_string()))
         })
         .unwrap();
         let packaged_bundle = tempfile::tempdir().unwrap();
