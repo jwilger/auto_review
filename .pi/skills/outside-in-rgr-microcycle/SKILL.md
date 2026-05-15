@@ -26,9 +26,11 @@ Next control owner:
 
 ## RED
 
-RED is valid when a focused command was run and produced an observed failure that is expected for the requested behavior. Compiler errors count as RED when the test intentionally pressures a missing API, missing type, or crate boundary.
+RED is valid only when a focused command was run and produced copied failure output that is expected for the requested behavior. Compiler errors count as RED when the test intentionally pressures a missing API, missing type, or crate boundary.
 
-Fix test misuse before production edits. Do not treat accidental misuse of existing code as implementation pressure.
+A RED test must express exactly one new behavioral expectation or one missing API pressure point. If the test asserts several independent outcomes, split it and run only the first failing slice.
+
+Fix test misuse before production edits. Do not treat accidental misuse of existing code as implementation pressure. Do not record RED from inspection, predicted failures, unavailable commands, or prose summaries.
 
 ## Test Review
 
@@ -36,7 +38,7 @@ Send every new or activated RED test to `rgr-test-reviewer` before production ed
 
 ## Single Diagnostic
 
-The implementer may treat exactly one current diagnostic at a time. The allowed production edit is the smallest concrete change that removes or changes that diagnostic. Do not predict later errors, prebuild adjacent behavior, refactor opportunistically, or batch fixes.
+The implementer may treat exactly one current diagnostic at a time. The allowed production edit is the smallest concrete change that removes or changes that diagnostic. Do not predict later errors, prebuild adjacent behavior, refactor opportunistically, or batch fixes. When the current failure changes, stop immediately and return control with the new diagnostic; do not continue implementing in the same turn.
 
 ## Ambiguous Failure Escape Hatch
 
@@ -64,7 +66,7 @@ Stop the active microcycle when all current cycle tests pass, reviewer vetoes ar
 
 ## Blocked States
 
-Report a blocked state when no focused command can be run, the failure output is unavailable, the diagnostic is ambiguous and no lower-level test seam is apparent, or required changes would touch unrelated user work.
+Report a blocked state when no focused command can be run, the failure output is unavailable, the diagnostic is ambiguous and no lower-level test seam is apparent, or required changes would touch unrelated user work. For missing execution capability, stop before RED/GREEN and propose the smallest semantic verification tool needed; do not substitute code inspection for test evidence.
 
 ## Verification
 

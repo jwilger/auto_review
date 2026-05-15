@@ -191,12 +191,58 @@ function validateSafeNonMainBranch(branch, toolName) {
 	return safeBranch;
 }
 
-export function validateSafeCommitInputs({ paths, currentBranch }) {
+function normalizedPullRequestState(pr) {
+	if (pr?.merged === true || pr?.merged_at) return "merged";
+	return String(pr?.state ?? "").toLowerCase();
+}
+
+function closedBranchPullRequests(branchPullRequests = []) {
+	return branchPullRequests.filter((pr) =>
+		["closed", "merged"].includes(normalizedPullRequestState(pr)),
+	);
+}
+
+function openBranchPullRequests(branchPullRequests = []) {
+	return branchPullRequests.filter(
+		(pr) => normalizedPullRequestState(pr) === "open",
+	);
+}
+
+export function summarizeBranchPullRequestStatus(branchPullRequests = []) {
+	const open = openBranchPullRequests(branchPullRequests);
+	if (!open.length) return undefined;
+	return open
+		.map((pr) => {
+			const number = pr.number ?? pr.index ?? "?";
+			const title = pr.title ? `\nTitle: ${pr.title}` : "";
+			const body = pr.body ? `\nDescription: ${pr.body}` : "";
+			return `Review PR #${number} title and description to ensure they cover all commits on this branch before pushing.${title}${body}`;
+		})
+		.join("\n\n");
+}
+
+function assertNoClosedBranchPullRequests(toolName, branchPullRequests = []) {
+	const closed = closedBranchPullRequests(branchPullRequests);
+	if (!closed.length) return;
+	const refs = closed
+		.map((pr) => `#${pr.number ?? pr.index ?? "?"} (${normalizedPullRequestState(pr)})`)
+		.join(", ");
+	throw new Error(
+		`${toolName} refuses to use this branch because it is associated with non-open PR(s): ${refs}. Create a new branch from freshly pulled main and cherry-pick the needed commits instead.`,
+	);
+}
+
+export function validateSafeCommitInputs({
+	paths,
+	currentBranch,
+	branchPullRequests = [],
+}) {
 	if (!currentBranch)
 		throw new Error("safe_commit could not determine the current branch.");
 	if (currentBranch === "main") {
 		throw new Error("safe_commit refuses to commit on main.");
 	}
+	assertNoClosedBranchPullRequests("safe_commit", branchPullRequests);
 	return { paths: validateExplicitPaths(paths), branch: currentBranch };
 }
 
@@ -243,6 +289,8 @@ export function validateSafePushInputs({
 	pushUrls = {},
 	forceWithLease = false,
 	justification,
+	branchPullRequests = [],
+	prMetadataReviewed = false,
 }) {
 	const safeRemote = validateSafeGitName(remote, "remote");
 	if (!configuredRemotes.includes(safeRemote)) {
@@ -280,10 +328,22 @@ export function validateSafePushInputs({
 			"safe_push requires justification for force-with-lease pushes.",
 		);
 	}
+	assertNoClosedBranchPullRequests("safe_push", branchPullRequests);
+	const openPullRequests = openBranchPullRequests(branchPullRequests);
+	if (openPullRequests.length && prMetadataReviewed !== true) {
+		throw new Error(
+			`safe_push requires prMetadataReviewed=true after verifying the open PR title and description cover all commits on this branch. ${summarizeBranchPullRequestStatus(openPullRequests)}`,
+		);
+	}
 	return {
 		remote: safeRemote,
 		branch: currentBranch,
 		forceWithLease: Boolean(forceWithLease),
 		justification: justification?.trim(),
+		openPullRequests: openPullRequests.map((pr) => ({
+			number: pr.number ?? pr.index,
+			title: pr.title,
+			body: pr.body,
+		})),
 	};
 }

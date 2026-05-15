@@ -7,6 +7,7 @@ import {
 	validateSafeBranchCreateInputs,
 	validateSafeBranchSwitchInputs,
 	validateSafeCommitInputs,
+	summarizeBranchPullRequestStatus,
 	validateSafePushInputs,
 } from "./auto-review-git-safety.mjs";
 import type {
@@ -159,12 +160,48 @@ function currentBranch(): string | undefined {
 	return gitOutput(["branch", "--show-current"]);
 }
 
-function runGitCommand(
+type BranchPullRequest = {
+	number?: number;
+	index?: number;
+	state?: string;
+	merged?: boolean;
+	merged_at?: string | null;
+	title?: string;
+	body?: string;
+	head?: { ref?: string };
+};
+
+async function branchPullRequests(branch: string): Promise<BranchPullRequest[]> {
+	const token = process.env.FORGEJO_TOKEN;
+	if (!token) {
+		throw new Error(
+			"FORGEJO_TOKEN is required so safe_commit/safe_push can check PR state for the current branch.",
+		);
+	}
+	const matches: BranchPullRequest[] = [];
+	for (let page = 1; ; page += 1) {
+		const response = await fetch(
+			`https://git.johnwilger.com/api/v1/repos/jwilger/auto_review/pulls?state=all&limit=50&page=${page}`,
+			{ headers: { Authorization: `token ${token}` } },
+		);
+		if (!response.ok) {
+			throw new Error(
+				`Forgejo PR lookup failed with status ${response.status}; safe_commit/safe_push cannot verify branch PR state.`,
+			);
+		}
+		const pulls = (await response.json()) as BranchPullRequest[];
+		matches.push(...pulls.filter((pull) => pull.head?.ref === branch));
+		if (pulls.length < 50) return matches;
+	}
+}
+
+function runCommand(
+	command: string,
 	args: string[],
 ): Promise<{ status: number; output: string }> {
 	return new Promise((resolve) => {
 		execFile(
-			"git",
+			command,
 			args,
 			{
 				cwd: process.cwd(),
@@ -183,6 +220,12 @@ function runGitCommand(
 			},
 		);
 	});
+}
+
+function runGitCommand(
+	args: string[],
+): Promise<{ status: number; output: string }> {
+	return runCommand("git", args);
 }
 
 function outputTail(output: string): string {
@@ -651,9 +694,11 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 			body: Type.Optional(Type.String({ description: "Commit body" })),
 		}),
 		async execute(_toolCallId, params) {
+			const branch = currentBranch();
 			const { paths } = validateSafeCommitInputs({
 				paths: params.paths,
-				currentBranch: currentBranch(),
+				currentBranch: branch,
+				branchPullRequests: branch ? await branchPullRequests(branch) : [],
 			});
 			ensureNoPreStagedPaths();
 			await stageExplicitPaths(paths);
@@ -775,6 +820,12 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 			justification: Type.Optional(
 				Type.String({ description: "Required when forceWithLease is true" }),
 			),
+			prMetadataReviewed: Type.Optional(
+				Type.Boolean({
+					description:
+						"Required when an open PR exists for this branch; confirms its title and description cover all branch commits",
+				}),
+			),
 		}),
 		async execute(_toolCallId, params) {
 			const remotes = (gitOutput(["remote"]) ?? "").split("\n").filter(Boolean);
@@ -794,15 +845,19 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 						.filter(Boolean),
 				]),
 			);
+			const current = currentBranch();
+			const pullRequests = current ? await branchPullRequests(current) : [];
 			const push = validateSafePushInputs({
 				remote: params.remote ?? "origin",
 				branch: params.branch,
-				currentBranch: currentBranch(),
+				currentBranch: current,
 				configuredRemotes: remotes,
 				remoteUrls,
 				pushUrls,
 				forceWithLease: params.forceWithLease,
 				justification: params.justification,
+				branchPullRequests: pullRequests,
+				prMetadataReviewed: params.prMetadataReviewed,
 			});
 			const { remote, branch } = push;
 
@@ -814,6 +869,7 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 				toolName: "safe_push",
 				summary: [
 					`safe_push pushed ${branch} to ${remote}.`,
+					summarizeBranchPullRequestStatus(pullRequests),
 					push.forceWithLease
 						? `force-with-lease: ${push.justification}`
 						: undefined,
@@ -828,6 +884,64 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 				forceWithLease: push.forceWithLease,
 				outputPath: result.outputPath,
 			});
+		},
+	});
+
+	pi.registerTool({
+		name: "verify_harness",
+		label: "Verify Harness",
+		description: "Run the auto_review Pi guardrail contract tests.",
+		promptSnippet:
+			"Use verify_harness for focused verification of Pi guardrail/tool changes.",
+		parameters: Type.Object({}),
+		async execute() {
+			const testPath = "tests/pi_guardrails/contract_test.mjs";
+			const result = await runCommand("node", [testPath]);
+			if (result.status !== 0) {
+				throw new Error(
+					[
+						`verify_harness failed: node ${testPath} exited with status ${result.status}`,
+						outputTail(result.output),
+					]
+						.filter(Boolean)
+						.join("\n"),
+				);
+			}
+			const concise = conciseCommandResult({
+				toolName: "verify_harness",
+				summary: `verify_harness passed: node ${testPath}`,
+				output: result.output,
+			});
+			return TEXT_RESULT(concise.text, { outputPath: concise.outputPath });
+		},
+	});
+
+	pi.registerTool({
+		name: "verify_release_tooling",
+		label: "Verify Release Tooling",
+		description: "Run the auto_review release tooling dry-run tests.",
+		promptSnippet:
+			"Use verify_release_tooling for focused verification of release workflow/tooling changes.",
+		parameters: Type.Object({}),
+		async execute() {
+			const testPath = "tests/release_tooling_test.sh";
+			const result = await runCommand("bash", [testPath]);
+			if (result.status !== 0) {
+				throw new Error(
+					[
+						`verify_release_tooling failed: bash ${testPath} exited with status ${result.status}`,
+						outputTail(result.output),
+					]
+						.filter(Boolean)
+						.join("\n"),
+				);
+			}
+			const concise = conciseCommandResult({
+				toolName: "verify_release_tooling",
+				summary: `verify_release_tooling passed: bash ${testPath}`,
+				output: result.output,
+			});
+			return TEXT_RESULT(concise.text, { outputPath: concise.outputPath });
 		},
 	});
 

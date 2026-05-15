@@ -1,0 +1,448 @@
+#!/usr/bin/env node
+import assert from "node:assert/strict";
+import {
+	mkdtempSync,
+	mkdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import {
+	assertOnlyExplicitStagedPaths,
+	blocksDirectGitMutationCommand,
+	conciseCommandResult,
+	validateExplicitPaths,
+	validateSafeBranchCreateInputs,
+	validateSafeBranchSwitchInputs,
+	validateSafeCommitInputs,
+	validateSafePushInputs,
+	summarizeBranchPullRequestStatus,
+} from "../../.pi/extensions/auto-review-git-safety.mjs";
+
+function rejects(fn, description) {
+	assert.throws(fn, Error, description);
+}
+
+assert.equal(blocksDirectGitMutationCommand("git status --short"), false);
+assert.equal(blocksDirectGitMutationCommand("git diff -- flake.nix"), false);
+assert.equal(blocksDirectGitMutationCommand("git add flake.nix"), true);
+assert.equal(
+	blocksDirectGitMutationCommand("git -C /tmp/repo add flake.nix"),
+	true,
+);
+assert.equal(
+	blocksDirectGitMutationCommand("git -c user.name=test commit -m msg"),
+	true,
+);
+assert.equal(
+	blocksDirectGitMutationCommand("git --git-dir .git push origin main"),
+	true,
+);
+assert.equal(
+	blocksDirectGitMutationCommand(
+		"git -c alias.ship='!git push origin HEAD' ship",
+	),
+	true,
+);
+assert.equal(blocksDirectGitMutationCommand("git branch -D topic"), true);
+assert.equal(
+	blocksDirectGitMutationCommand(
+		"git remote set-url origin ssh://git@evil.example/repo.git",
+	),
+	true,
+);
+assert.equal(blocksDirectGitMutationCommand("git stash"), true);
+
+const guardrailsSource = readFileSync(
+	new URL("../../.pi/extensions/auto-review-guardrails.ts", import.meta.url),
+	"utf8",
+);
+assert.equal(
+	guardrailsSource.includes("spawnSync"),
+	false,
+	"guardrail git tools must not use blocking spawnSync",
+);
+assert.match(
+	guardrailsSource,
+	/name: "verify_harness"/,
+	"pi guardrails expose a semantic verify_harness tool",
+);
+assert.match(
+	guardrailsSource,
+	/tests\/pi_guardrails\/contract_test\.mjs/,
+	"verify_harness runs the guardrail contract tests",
+);
+assert.match(
+	guardrailsSource,
+	/name: "verify_release_tooling"/,
+	"pi guardrails expose a semantic verify_release_tooling tool",
+);
+assert.match(
+	guardrailsSource,
+	/tests\/release_tooling_test\.sh/,
+	"verify_release_tooling runs the release tooling tests",
+);
+const verboseOutput = Array.from(
+	{ length: 40 },
+	(_, index) => `verbose line ${index + 1}`,
+).join("\n");
+const conciseResult = conciseCommandResult({
+	toolName: "safe_push",
+	summary: "safe_push pushed topic to origin.",
+	output: verboseOutput,
+});
+assert.match(conciseResult.text, /safe_push pushed topic to origin\./);
+assert.match(conciseResult.text, /Full output: \/tmp\//);
+assert.equal(conciseResult.text.includes("verbose line 1"), false);
+assert.equal(conciseResult.text.includes("verbose line 40"), false);
+assert.ok(readFileSync(conciseResult.outputPath, "utf8").includes("verbose line 40"));
+
+const workdir = mkdtempSync(join(tmpdir(), "auto-review-git-safety-"));
+try {
+	process.chdir(workdir);
+	writeFileSync("file.txt", "content\n");
+	mkdirSync("directory");
+
+	assert.deepEqual(validateExplicitPaths(["file.txt"]), ["file.txt"]);
+	assert.deepEqual(
+		validateSafeCommitInputs({
+			paths: ["file.txt"],
+			currentBranch: "topic",
+			branchPullRequests: [],
+		}),
+		{ paths: ["file.txt"], branch: "topic" },
+	);
+	for (const state of ["closed", "merged"]) {
+		rejects(
+			() =>
+				validateSafeCommitInputs({
+					paths: ["file.txt"],
+					currentBranch: "topic",
+					branchPullRequests: [{ number: 12, state }],
+				}),
+			`rejects commits on branch with ${state} PR`,
+		);
+	}
+	rejects(
+		() =>
+			validateSafeCommitInputs({
+				paths: ["file.txt"],
+				currentBranch: "main",
+			}),
+		"rejects commits on main",
+	);
+	rejects(
+		() =>
+			validateSafeCommitInputs({
+				paths: ["file.txt"],
+				currentBranch: undefined,
+			}),
+		"requires current branch before commit",
+	);
+	assert.deepEqual(
+		validateSafeBranchCreateInputs({
+			branch: "feature/new-tool",
+			currentBranch: "main",
+			dirtyCount: 0,
+		}),
+		{ branch: "feature/new-tool" },
+	);
+	rejects(
+		() =>
+			validateSafeBranchCreateInputs({
+				branch: "main",
+				currentBranch: "main",
+				dirtyCount: 0,
+			}),
+		"rejects creating main branch",
+	);
+	rejects(
+		() =>
+			validateSafeBranchCreateInputs({
+				branch: "topic",
+				currentBranch: "main",
+				dirtyCount: 1,
+			}),
+		"rejects branch creation with dirty working tree",
+	);
+	assert.deepEqual(
+		validateSafeBranchSwitchInputs({
+			branch: "fix/issue-207-spawnsync-guardrails",
+			currentBranch: "main",
+			dirtyCount: 0,
+		}),
+		{ branch: "fix/issue-207-spawnsync-guardrails" },
+	);
+	for (const branch of [
+		"main",
+		"-bad",
+		"bad branch",
+		"../bad",
+		"bad..branch",
+		"bad@{branch",
+		"/bad",
+		"bad/",
+	]) {
+		rejects(
+			() =>
+				validateSafeBranchSwitchInputs({
+					branch,
+					currentBranch: "main",
+					dirtyCount: 0,
+				}),
+			`rejects unsafe branch switch target ${branch}`,
+		);
+	}
+	rejects(
+		() =>
+			validateSafeBranchSwitchInputs({
+				branch: "topic",
+				currentBranch: "main",
+				dirtyCount: 1,
+			}),
+		"rejects branch switch with dirty working tree",
+	);
+	rejects(
+		() =>
+			validateSafeBranchSwitchInputs({
+				branch: "topic",
+				currentBranch: undefined,
+				dirtyCount: 0,
+			}),
+		"requires current branch before branch switch",
+	);
+	for (const path of [
+		".",
+		"-A",
+		"-u",
+		"--all",
+		"directory",
+		"directory/",
+		"*",
+		":(glob)**/*.rs",
+		":!file.txt",
+		":/file.txt",
+	]) {
+		rejects(
+			() => validateExplicitPaths([path]),
+			`rejects non-explicit path ${path}`,
+		);
+	}
+
+	assert.doesNotThrow(() =>
+		assertOnlyExplicitStagedPaths(["file.txt"], ["file.txt"]),
+	);
+	rejects(
+		() =>
+			assertOnlyExplicitStagedPaths(["file.txt"], ["file.txt", "other.txt"]),
+		"rejects pre-staged or implicit paths",
+	);
+
+	const forgejoRemote = {
+		origin: ["ssh://forgejo@git.johnwilger.com:2222/jwilger/auto_review.git"],
+	};
+	rejects(
+		() =>
+			validateSafePushInputs({
+				remote: "origin",
+				currentBranch: "topic",
+				configuredRemotes: ["origin"],
+				remoteUrls: forgejoRemote,
+				pushUrls: forgejoRemote,
+				branchPullRequests: [
+					{ number: 7, state: "open", title: "Initial title", body: "Initial body" },
+				],
+			}),
+		"requires explicit PR metadata review before pushing to an open PR branch",
+	);
+	assert.deepEqual(
+		validateSafePushInputs({
+			remote: "origin",
+			currentBranch: "topic",
+			configuredRemotes: ["origin"],
+			remoteUrls: forgejoRemote,
+			pushUrls: forgejoRemote,
+			branchPullRequests: [
+				{ number: 7, state: "open", title: "Initial title", body: "Initial body" },
+			],
+			prMetadataReviewed: true,
+		}),
+		{
+			remote: "origin",
+			branch: "topic",
+			forceWithLease: false,
+			justification: undefined,
+			openPullRequests: [
+				{ number: 7, title: "Initial title", body: "Initial body" },
+			],
+		},
+	);
+	for (const state of ["closed", "merged"]) {
+		rejects(
+			() =>
+				validateSafePushInputs({
+					remote: "origin",
+					currentBranch: "topic",
+					configuredRemotes: ["origin"],
+					remoteUrls: forgejoRemote,
+					pushUrls: forgejoRemote,
+					branchPullRequests: [{ number: 12, state }],
+				}),
+			`rejects push to branch with ${state} PR`,
+		);
+	}
+	assert.match(
+		summarizeBranchPullRequestStatus([
+			{ number: 7, state: "open", title: "Initial title", body: "Initial body" },
+		]),
+		/Review PR #7 title and description to ensure they cover all commits on this branch/,
+	);
+	rejects(
+		() =>
+			validateSafePushInputs({
+				remote: "../repo",
+				currentBranch: "topic",
+				configuredRemotes: ["origin"],
+				remoteUrls: forgejoRemote,
+				pushUrls: forgejoRemote,
+			}),
+		"rejects path-like remote",
+	);
+	rejects(
+		() =>
+			validateSafePushInputs({
+				remote: "--mirror",
+				currentBranch: "topic",
+				configuredRemotes: ["origin"],
+				remoteUrls: forgejoRemote,
+				pushUrls: forgejoRemote,
+			}),
+		"rejects option-like remote",
+	);
+	rejects(
+		() =>
+			validateSafePushInputs({
+				remote: "backup",
+				currentBranch: "topic",
+				configuredRemotes: ["origin"],
+				remoteUrls: forgejoRemote,
+				pushUrls: forgejoRemote,
+			}),
+		"rejects unknown remote",
+	);
+	rejects(
+		() =>
+			validateSafePushInputs({
+				remote: "origin",
+				branch: "main",
+				currentBranch: "topic",
+				configuredRemotes: ["origin"],
+				remoteUrls: forgejoRemote,
+				pushUrls: forgejoRemote,
+			}),
+		"rejects non-current branch push",
+	);
+	rejects(
+		() =>
+			validateSafePushInputs({
+				remote: "origin",
+				currentBranch: "topic",
+				configuredRemotes: ["origin"],
+				remoteUrls: forgejoRemote,
+				pushUrls: forgejoRemote,
+				forceWithLease: true,
+			}),
+		"requires force-with-lease justification",
+	);
+	rejects(
+		() =>
+			validateSafePushInputs({
+				remote: "origin",
+				currentBranch: "main",
+				configuredRemotes: ["origin"],
+				remoteUrls: forgejoRemote,
+				pushUrls: forgejoRemote,
+			}),
+		"rejects direct main push",
+	);
+	rejects(
+		() =>
+			validateSafePushInputs({
+				remote: "origin",
+				currentBranch: "topic",
+				configuredRemotes: ["origin"],
+				remoteUrls: { origin: ["../somewhere"] },
+				pushUrls: forgejoRemote,
+			}),
+		"rejects unexpected remote URL",
+	);
+	rejects(
+		() =>
+			validateSafePushInputs({
+				remote: "origin",
+				currentBranch: "topic",
+				configuredRemotes: ["origin"],
+				remoteUrls: {
+					origin: [
+						"https://evil.example/git.johnwilger.com/jwilger/auto_review.git",
+					],
+				},
+				pushUrls: forgejoRemote,
+			}),
+		"rejects evil host with allowed path suffix",
+	);
+	rejects(
+		() =>
+			validateSafePushInputs({
+				remote: "origin",
+				currentBranch: "topic",
+				configuredRemotes: ["origin"],
+				remoteUrls: forgejoRemote,
+				pushUrls: {
+					origin: ["ssh://git@evil.example/jwilger/auto_review.git"],
+				},
+			}),
+		"rejects unsafe push URL even when fetch URL is safe",
+	);
+	rejects(
+		() =>
+			validateSafePushInputs({
+				remote: "origin",
+				currentBranch: "topic",
+				configuredRemotes: ["origin"],
+				remoteUrls: forgejoRemote,
+				pushUrls: {
+					origin: [
+						"ssh://forgejo@git.johnwilger.com:2222/jwilger/auto_review.git",
+						"ssh://git@evil.example/jwilger/auto_review.git",
+					],
+				},
+			}),
+		"rejects unsafe additional push URL",
+	);
+	for (const remoteUrl of [
+		"http://git.johnwilger.com/jwilger/auto_review.git",
+		"git://git.johnwilger.com/jwilger/auto_review.git",
+		"file://git.johnwilger.com/jwilger/auto_review.git",
+		"ftp://git.johnwilger.com/jwilger/auto_review.git",
+	]) {
+		rejects(
+			() =>
+				validateSafePushInputs({
+					remote: "origin",
+					currentBranch: "topic",
+					configuredRemotes: ["origin"],
+					remoteUrls: { origin: [remoteUrl] },
+					pushUrls: forgejoRemote,
+				}),
+			`rejects unsafe remote scheme ${remoteUrl}`,
+		);
+	}
+} finally {
+	process.chdir("/");
+	rmSync(workdir, { recursive: true, force: true });
+}
+
+console.log("pi guardrails contract tests passed");

@@ -468,7 +468,7 @@ test_pi_guardrails_route_git_commit_and_push_through_safe_tools() {
 	assert_file_contains "$git_safety_helper" 'blocksDirectGitMutationCommand' "pi git safety helper detects direct bash git mutation commands"
 	assert_file_contains "$flake" '.pi/extensions/auto-review-git-safety.mjs' "nix flake source includes the git safety helper contract"
 	assert_file_contains "$flake" '.pi/extensions/pi-permission-system/config.json' "nix flake source includes the project permission config contract"
-	node "$ROOT/tests/release_tooling/pi_guardrails_contract_test.mjs" >/dev/null
+	node "$ROOT/tests/pi_guardrails/contract_test.mjs" >/dev/null
 	pass "pi guardrails executable contract blocks unsafe git mutations and validates safe tools"
 }
 
