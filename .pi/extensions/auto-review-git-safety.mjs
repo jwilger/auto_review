@@ -171,6 +171,25 @@ function isAllowedForgejoRemote(value) {
 	);
 }
 
+export function validateSafeBranchSwitchInputs({
+	branch,
+	currentBranch,
+	dirtyCount,
+}) {
+	if (!currentBranch)
+		throw new Error("safe_switch_branch could not determine the current branch.");
+	if (dirtyCount > 0) {
+		throw new Error(
+			"safe_switch_branch refuses to switch branches with a dirty working tree.",
+		);
+	}
+	const safeBranch = validateSafeGitName(branch, "branch");
+	if (safeBranch === "main") {
+		throw new Error("safe_switch_branch refuses to switch to main.");
+	}
+	return { branch: safeBranch };
+}
+
 export function validateSafePushInputs({
 	remote = "origin",
 	branch,

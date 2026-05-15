@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import {
 	assertOnlyExplicitStagedPaths,
 	validateExplicitPaths,
+	validateSafeBranchSwitchInputs,
 	validateSafePushInputs,
 } from "./auto-review-git-safety.mjs";
 import type {
@@ -658,6 +659,36 @@ export default function autoReviewGuardrails(pi: ExtensionAPI) {
 					.filter(Boolean)
 					.join("\n"),
 				{ commit: head, paths },
+			);
+		},
+	});
+
+	pi.registerTool({
+		name: "safe_switch_branch",
+		label: "Safe Switch Branch",
+		description:
+			"Switch from the current branch to a non-main branch after validating the working tree is clean.",
+		promptSnippet:
+			"Use safe_switch_branch instead of bash git checkout/switch for auto_review branch changes.",
+		parameters: Type.Object({
+			branch: Type.String({ description: "Non-main branch to switch to" }),
+		}),
+		async execute(_toolCallId, params) {
+			const dirty = dirtyStatus();
+			const switchTarget = validateSafeBranchSwitchInputs({
+				branch: params.branch,
+				currentBranch: currentBranch(),
+				dirtyCount: dirty.count,
+			});
+			const output = assertGitSuccess(["switch", switchTarget.branch]);
+			return TEXT_RESULT(
+				[
+					`safe_switch_branch switched to ${switchTarget.branch}.`,
+					outputTail(output),
+				]
+					.filter(Boolean)
+					.join("\n"),
+				{ branch: switchTarget.branch },
 			);
 		},
 	});

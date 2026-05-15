@@ -7,6 +7,7 @@ import {
 	assertOnlyExplicitStagedPaths,
 	blocksDirectGitMutationCommand,
 	validateExplicitPaths,
+	validateSafeBranchSwitchInputs,
 	validateSafePushInputs,
 } from "../../.pi/extensions/auto-review-git-safety.mjs";
 
@@ -51,6 +52,52 @@ try {
 	mkdirSync("directory");
 
 	assert.deepEqual(validateExplicitPaths(["file.txt"]), ["file.txt"]);
+	assert.deepEqual(
+		validateSafeBranchSwitchInputs({
+			branch: "fix/issue-207-spawnsync-guardrails",
+			currentBranch: "main",
+			dirtyCount: 0,
+		}),
+		{ branch: "fix/issue-207-spawnsync-guardrails" },
+	);
+	for (const branch of [
+		"main",
+		"-bad",
+		"bad branch",
+		"../bad",
+		"bad..branch",
+		"bad@{branch",
+		"/bad",
+		"bad/",
+	]) {
+		rejects(
+			() =>
+				validateSafeBranchSwitchInputs({
+					branch,
+					currentBranch: "main",
+					dirtyCount: 0,
+				}),
+			`rejects unsafe branch switch target ${branch}`,
+		);
+	}
+	rejects(
+		() =>
+			validateSafeBranchSwitchInputs({
+				branch: "topic",
+				currentBranch: "main",
+				dirtyCount: 1,
+			}),
+		"rejects branch switch with dirty working tree",
+	);
+	rejects(
+		() =>
+			validateSafeBranchSwitchInputs({
+				branch: "topic",
+				currentBranch: undefined,
+				dirtyCount: 0,
+			}),
+		"requires current branch before branch switch",
+	);
 	for (const path of [
 		".",
 		"-A",
