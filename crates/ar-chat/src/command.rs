@@ -15,6 +15,8 @@ pub enum ChatCommand {
     /// re-run the full review on the current head SHA, ignoring any
     /// recorded review history.
     ReReview,
+    /// A user correction replying to a bot review comment or finding.
+    ReviewCorrection(String),
     /// `@auto-review autofix` — ask the cheap-tier model to emit
     /// inline patch suggestions for the diff. Each patch is posted
     /// as a Forgejo review comment with a `\`\`\`suggestion` block
@@ -54,6 +56,9 @@ pub enum ChatCommand {
 pub fn parse_chat_command(body: &str, bot_name: &str) -> ChatCommand {
     let mention = format!("@{bot_name}");
     let compatibility_mention = (bot_name == "auto-review").then_some("@auto_review");
+    if let Some(correction) = parse_review_correction(body, &mention, compatibility_mention) {
+        return ChatCommand::ReviewCorrection(correction);
+    }
     for raw_line in body.lines() {
         let line = raw_line.trim();
         // Case-insensitive prefix check so @Auto-Review matches
@@ -94,6 +99,41 @@ fn strip_mention<'a>(line: &'a str, mention: &str) -> Option<&'a str> {
         .get(..mention.len())
         .filter(|prefix| prefix.eq_ignore_ascii_case(mention.as_bytes()))
         .map(|_| &line[mention.len()..])
+}
+
+fn parse_review_correction(
+    body: &str,
+    mention: &str,
+    compatibility_mention: Option<&str>,
+) -> Option<String> {
+    let mut lines = body.lines();
+    let first = lines.next()?.trim();
+    let after = strip_mention(first, mention)
+        .or_else(|| compatibility_mention.and_then(|alias| strip_mention(first, alias)))?;
+    if !after.trim_start().starts_with("wrote in ") {
+        return None;
+    }
+    let correction = lines
+        .filter_map(|line| {
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('>') {
+                None
+            } else {
+                Some(trimmed)
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("\n");
+    let lower = correction.to_ascii_lowercase();
+    (lower.contains("adequate")
+        || lower.contains("invalid")
+        || lower.contains("fine")
+        || lower.contains("accept")
+        || lower.contains("wrong")
+        || lower.contains("correct")
+        || lower.contains("false positive"))
+    .then_some(correction)
+    .filter(|text| !text.is_empty())
 }
 
 fn is_separator(c: char) -> bool {

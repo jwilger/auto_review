@@ -1183,8 +1183,9 @@ mod tests {
             flake.contains("default = self.packages.${system}.ar-cli;"),
             "nix default package should publish the unified auto-review binary"
         );
+        let whitespace_normalized_flake = flake.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            flake.contains("Cmd = [ \"/bin/auto-review\" \"gateway\" ];"),
+            whitespace_normalized_flake.contains("Cmd = [ \"/bin/auto-review\" \"gateway\" ];"),
             "gateway container should start through auto-review gateway"
         );
         assert!(
