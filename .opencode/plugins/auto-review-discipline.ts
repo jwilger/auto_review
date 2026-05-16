@@ -63,7 +63,7 @@ export const AutoReviewDisciplinePlugin: Plugin = async () => ({
       async execute(args, context) {
         recordVerification(context.sessionID, args.verification);
         clearCycle(context.sessionID);
-        return "REFACTOR recorded. RGR cycle complete.";
+        return "REFACTOR recorded. RGR cycle complete. Commit the approved GREEN/refactor state before starting the next RED.";
       },
     }),
     rgr_status: tool({
