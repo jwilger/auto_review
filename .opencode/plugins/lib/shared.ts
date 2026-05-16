@@ -66,6 +66,12 @@ export function forgejoInlineReplyPayload(comment: { body: string; path: string;
   };
 }
 
+export function validateRgrRedEvidence(output: string): void {
+  if (/test result: FAILED\. ([2-9]|\d{2,}) failed;/.test(output)) {
+    throw new Error("RED evidence must contain exactly one failing test");
+  }
+}
+
 export function setCycle(sessionID: string, cycle: RgrCycle): void {
   cycles.set(sessionID, cycle);
 }
