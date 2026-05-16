@@ -38,7 +38,7 @@ if "failingOutput" not in approve_body:
 if not re.search(r'setCycle\([^\n]+reviewedRed\s*:\s*true', approve_body, re.S):
     raise SystemExit("rgr_approve_red must set reviewedRed: true on the active cycle")
 
-edit_gate = re.search(r'if \(path && isProductionRustPath\(path\).*?\n\s*\}\n\s*\}', plugin, re.S)
+edit_gate = re.search(r'for \(const path of changedPathsFromArgs\(output\.args\)\).*?\n\s*\}\n\s*\}', plugin, re.S)
 if not edit_gate:
     raise SystemExit("production Rust edit gate was not found")
 gate_body = edit_gate.group(0)
