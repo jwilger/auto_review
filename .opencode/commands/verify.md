@@ -1,5 +1,5 @@
 ---
-description: Run focused or full repository verification through the Nix-pinned toolchain.
+description: Run focused or full repository verification through just recipes.
 agent: build
 ---
 
@@ -8,11 +8,12 @@ Verify the current work: $ARGUMENTS
 Prefer focused checks first, then broader gates as needed:
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace --no-tests=pass
-cargo deny check licenses bans sources
-nix flake check
+just fmt
+just clippy
+just test
+just deny
+just build
+just ci
 ```
 
-Use `nix flake check` when the change affects Rust, Nix, CI, generated checks, or release/operator behavior. State any skipped gate and why.
+Use `just ci` for the aggregate routine gate. State any skipped gate and why.

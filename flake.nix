@@ -93,7 +93,7 @@
         };
 
         # Single source of truth: rust-toolchain.toml. The dev
-        # shell, every `nix flake check`, and CI all resolve to
+        # shell and package/check derivations resolve to
         # the same compiler + components from this file.
         rustToolchain = pkgs.rust-bin.fromRustupToolchainFile ./rust-toolchain.toml;
         craneLib = (crane.mkLib pkgs).overrideToolchain rustToolchain;
@@ -120,6 +120,7 @@
             || baseName == "AGENTS.md"
             || baseName == "flake.nix"
             || baseName == "lefthook.yml"
+            || baseName == "Justfile"
             || pkgs.lib.hasInfix "/.cargo/" strPath
             || (pkgs.lib.hasInfix "/ar-prompts/schemas/" strPath && pkgs.lib.hasSuffix ".json" path)
             || (pkgs.lib.hasInfix "/docs/" strPath && pkgs.lib.hasSuffix ".md" strPath)
@@ -213,8 +214,10 @@
             rustToolchain
             cargo-deny
             cargo-nextest
+            just
             cargo-semver-checks
             git
+            just
             lefthook
             forgejo-mcp
             tea
@@ -589,9 +592,9 @@
         };
 
         # ----- CI checks ---------------------------------------------
-        # `nix flake check` runs every entry below. CI shells out
-        # to exactly that command, so local + CI exercise the same
-        # derivations bit-for-bit.
+        # Nix keeps these package-shaped checks available for reproducible
+        # validation, while everyday development and CI invoke the matching
+        # `just` recipes directly.
         checks = {
           # Formatting drift — rejects any file rustfmt would
           # rewrite. Same surface as `cargo fmt --all -- --check`.

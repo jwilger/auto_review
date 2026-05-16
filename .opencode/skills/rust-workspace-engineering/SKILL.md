@@ -7,7 +7,7 @@ description: auto_review Rust workspace conventions, Nix toolchain use, error ha
 
 ## Toolchain
 
-Use Nix and the pinned Rust toolchain. Prefer focused checks during RGR and `nix flake check` for full parity.
+Use `just` for routine checks. Nix remains supported for provisioning the pinned Rust toolchain. Prefer focused checks during RGR and `just ci` for the aggregate routine gate.
 
 ## Code Conventions
 

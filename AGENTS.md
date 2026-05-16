@@ -4,23 +4,24 @@ opencode uses this file as the always-loaded project guidance for `auto_review`.
 
 ## Toolchain
 
-Everything goes through Nix. The dev shell pins the Rust toolchain in `rust-toolchain.toml` plus `cargo-nextest`, `cargo-deny`, `forgejo-mcp`, `git`, `pkg-config`, and `openssl`. Do not call system `rustup` or bypass project-local `CARGO_HOME` / `RUSTUP_HOME` under `.dependencies/`.
+`just` is the canonical command interface for routine development and CI checks. Nix is optional for developers who already have the required tools on `PATH`, and remains the supported way to provision the pinned Rust toolchain in `rust-toolchain.toml` plus `cargo-nextest`, `cargo-deny`, `forgejo-mcp`, `git`, `pkg-config`, `openssl`, and other project tools. Do not call system `rustup` from inside `nix develop` or bypass project-local `CARGO_HOME` / `RUSTUP_HOME` under `.dependencies/`.
 
 ```sh
 nix develop
-nix flake check
+just ci
 ```
 
-Faster focused gates:
+Focused gates:
 
 ```sh
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace --no-tests=pass
-cargo deny check licenses bans sources
+just fmt
+just clippy
+just test
+just deny
+just build
 ```
 
-`cargo deny check advisories` requires network and is excluded from `nix flake check`'s sandbox; run it manually when bumping dependencies.
+`cargo deny check advisories` requires network and is excluded from the default `just deny`/CI policy gate; run it manually when bumping dependencies.
 
 Use `nix run .#dev-gateway-container` for the containerized gateway development watcher. Use `bacon`, `bacon clippy`, or `bacon test` for focused Rust check loops.
 
@@ -35,7 +36,7 @@ tea pr create --repo jwilger/auto_review --head <branch> --base main --title "..
 
 opencode also configures a local `forgejo` MCP server in `opencode.json`. It runs `forgejo-mcp` from the Nix dev shell against `https://git.johnwilger.com` and expects `FORGEJO_TOKEN` in the environment; never hardcode or commit the token. Use the Forgejo MCP tools when available for Forgejo issue/PR/repository operations, with `tea` as the CLI fallback.
 
-Branch protection requires a PR for every merge to `main`. CI in `.forgejo/workflows/ci.yml` runs `nix flake check` on every PR.
+Branch protection requires a PR for every merge to `main`. CI in `.forgejo/workflows/ci.yml` runs the project verification gates on every PR.
 
 ## Architecture
 

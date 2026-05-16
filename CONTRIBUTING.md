@@ -6,43 +6,43 @@ Thanks for considering a contribution to `auto_review`.
 
 ### Prerequisites
 
-- **[Nix](https://nixos.org/download.html) with flakes enabled.**
-  This is the supported path: it pins the Rust toolchain (nightly,
-  resolved by `flake.lock`'s rust-overlay revision), supplies
+- A Rust toolchain plus the project tools on `PATH`: `just`,
   `cargo-deny`, `cargo-nextest`, `git`, `pkg-config`, `openssl`,
-  and the rest. Local dev and CI run identical derivations
-  bit-for-bit.
+  and the rest of the normal build prerequisites.
+- Optional: **[Nix](https://nixos.org/download.html) with flakes
+  enabled.** This is the supported provisioning path: it pins the
+  Rust toolchain (nightly, resolved by `flake.lock`'s rust-overlay
+  revision) and supplies the project tools used by CI.
 - Optional: [direnv](https://direnv.net/) for automatic shell
   setup — `direnv allow` from this directory loads the flake's
   dev shell on every `cd`.
 
-The dev shell does NOT use any system rustup, cargo, or rust
-binaries. Project-local `CARGO_HOME` / `RUSTUP_HOME` directories
-under `.dependencies/` keep everything reproducible.
+When using `nix develop`, the dev shell does NOT use any system rustup,
+cargo, or rust binaries. Project-local `CARGO_HOME` / `RUSTUP_HOME`
+directories under `.dependencies/` keep that shell reproducible.
 
 ### First build
 
 ```sh
-# One-time: enter the dev shell (or `direnv allow` once).
+# Optional: enter the dev shell (or `direnv allow` once).
 nix develop
 
-# Run every CI check locally — same derivations as CI.
-nix flake check
+# Run every routine CI check locally.
+just ci
 
-# Run individual checks (faster iteration, since flake check
-# rebuilds all four):
-cargo fmt --all -- --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo nextest run --workspace --no-tests=pass
-cargo deny check licenses bans sources
+# Run individual checks:
+just fmt
+just clippy
+just test
+just deny
+just build
 ```
 
-`nix flake check` exercises four derivations: rustfmt, clippy
-(with `-D warnings`), the full nextest test suite, and
-cargo-deny (licenses + bans + sources — advisories require
-network access blocked by the Nix sandbox, so run them
-separately when bumping a dep). Land no commit that fails any
-of them.
+`just ci` runs rustfmt, clippy (with `-D warnings`), the full
+nextest test suite, cargo-deny (licenses + bans + sources), and a
+workspace build. Advisory checks require network access, so run
+`cargo deny check advisories` separately when bumping a dep. Land no
+commit that fails any required check.
 
 ### Bumping the toolchain or a dep
 

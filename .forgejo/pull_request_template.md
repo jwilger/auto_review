@@ -25,10 +25,10 @@ Delete the comment block once you've filled the rest in.
 
 <!-- Tick what you did. -->
 
-- [ ] `cargo test --workspace --all-targets`
-- [ ] `cargo clippy --workspace --all-targets -- -D warnings`
-- [ ] `cargo fmt --all -- --check`
-- [ ] `cargo deny check` (when bumping dependencies)
+- [ ] `just test`
+- [ ] `just clippy`
+- [ ] `just fmt`
+- [ ] `just deny` (when bumping dependencies)
 - [ ] Manual smoke test against a dev gateway (when changing the
       review pipeline or webhook surface)
 

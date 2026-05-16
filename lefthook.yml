@@ -1,4 +1,4 @@
 pre-push:
   commands:
     full-verification:
-      run: nix flake check
+      run: just ci
