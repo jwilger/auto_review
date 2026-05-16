@@ -164,6 +164,7 @@
             || strPath == "${toString ./.}/.opencode/agents/build.md"
             || strPath == "${toString ./.}/.opencode/commands/prepare-forgejo-pr.md"
             || strPath == "${toString ./.}/.opencode/plugins/auto-review-toolchain.ts"
+            || strPath == "${toString ./.}/.opencode/plugins/auto-review-discipline.ts"
             || strPath == "${toString ./.}/.opencode/plugins/lib/shared.ts"
             || strPath == "${toString ./.}/.opencode/rules/scope-hygiene.md"
             || strPath == "${toString ./.}/.opencode/skills/rust-workspace-engineering/SKILL.md"

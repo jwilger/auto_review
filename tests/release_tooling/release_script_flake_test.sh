@@ -461,6 +461,7 @@ test_opencode_guardrails_block_unsafe_git_and_toolchain_commands() {
 	assert_file_contains "$guardrail_helpers" 'git\s+push\s+[^\n]*--force' "opencode guardrail blocks force pushes"
 	assert_file_contains "$guardrail_helpers" 'rustup' "opencode guardrail blocks rustup bypasses"
 	assert_file_contains "$flake" '.opencode/plugins/auto-review-toolchain.ts' "nix flake source includes the opencode toolchain plugin contract"
+	assert_file_contains "$flake" '.opencode/plugins/auto-review-discipline.ts' "nix flake source includes the opencode discipline plugin contract"
 	assert_file_contains "$flake" '.opencode/plugins/lib/shared.ts' "nix flake source includes the opencode guardrail helper contract"
 	assert_file_contains "$opencode_config" 'opencode-rtk' "opencode config enables the opencode RTK plugin"
 }
