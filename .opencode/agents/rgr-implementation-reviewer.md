@@ -17,4 +17,6 @@ Use `outside-in-rgr-microcycle`, `outside-in-tdd`, `rgr-plan-structure`, and `ru
 
 Check that every production behavior is demanded by observed failing test evidence, the diff is minimal, errors follow crate patterns, security-sensitive boundaries are respected, and style matches nearby code.
 
+If you discover a behavior gap not covered by the GREEN test, route it back to the orchestrator for a new RED test; do not ask the implementer to make untested behavior changes.
+
 Approve or veto. Veto overbroad implementation, speculative abstractions, missing error handling, or code inconsistent with architecture. Defer to `security-reviewer`, `architecture-reviewer`, or `test-coverage-reviewer` when the diff touches their specialized domains. Do not edit files.
