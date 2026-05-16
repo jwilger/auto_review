@@ -29,6 +29,15 @@ function rejectsWaterfallTodo(args: unknown): boolean {
   return hasComponents && !text.includes("red") && !text.includes("failing test") && !text.includes("rgr");
 }
 
+function rejectsBroadDiagnosticTask(args: unknown): boolean {
+  const text = JSON.stringify(args ?? "").toLowerCase();
+  if (!text.includes("rgr-diagnostic-implementer")) return false;
+  const namesDiagnostic = /current\s+diagnostic|diagnostic/.test(text);
+  const namesAllowedChange = text.includes("allowed immediate change") || text.includes("allowed change");
+  const broadFix = text.includes("fix all") || text.includes("all failures") || text.includes("fix everything");
+  return broadFix || !namesDiagnostic || !namesAllowedChange;
+}
+
 export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree }) => ({
   tool: {
     rgr_start: tool({
@@ -113,6 +122,9 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree }) => ({
     }
     if (/todo(write|update)?$/i.test(input.tool) && rejectsWaterfallTodo(output.args)) {
       throw new Error("RGR plan gate: behavior work todo lists must name failing tests, not component-waterfall tasks.");
+    }
+    if (/^task$/i.test(input.tool) && rejectsBroadDiagnosticTask(output.args)) {
+      throw new Error("RGR task gate: rgr-diagnostic-implementer prompts must name one current diagnostic and the allowed immediate change.");
     }
   },
   "experimental.session.compacting": async (input, output) => {
