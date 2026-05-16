@@ -39,7 +39,7 @@ if not mark_green_tool:
 if not re.search(token_pattern, mark_green_tool.group("body"), re.I):
     raise SystemExit("rgr_mark_green must clear the implementation/edit token after the focused command records GREEN")
 
-edit_gate = re.search(r'if \(path && isProductionRustPath\(path\).*?\n\s*\}\n\s*\}', plugin, re.S)
+edit_gate = re.search(r'for \(const path of changedPathsFromArgs\(output\.args\)\).*?\n\s*\}\n\s*\}', plugin, re.S)
 if not edit_gate:
     raise SystemExit("production Rust edit gate was not found")
 gate_body = edit_gate.group(0)
