@@ -1,5 +1,5 @@
 import { tool, type Plugin } from "@opencode-ai/plugin";
-import { getCycle, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordTouchedFile, setCycle, clearCycle, recordVerification, sessionContext } from "./lib/shared.ts";
+import { getCycle, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordTouchedFile, setCycle, clearCycle, recordVerification, sessionContext, validateRgrRedEvidence } from "./lib/shared.ts";
 
 function filePathFromArgs(args: unknown): string | undefined {
   if (!args || typeof args !== "object") return undefined;
@@ -41,6 +41,7 @@ export const AutoReviewDisciplinePlugin: Plugin = async () => ({
       async execute(args, context) {
         const current = getCycle(context.sessionID);
         if (!current) throw new Error("Start an RGR cycle before recording RED.");
+        validateRgrRedEvidence(args.output);
         setCycle(context.sessionID, { ...current, command: args.command, failingOutput: args.output, stage: "red" });
         return "RED recorded. Minimum production edits are now allowed for this cycle.";
       },
