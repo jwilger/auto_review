@@ -1,5 +1,5 @@
 import { tool, type Plugin } from "@opencode-ai/plugin";
-import { getCycle, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordTouchedFile, setCycle, clearCycle, recordVerification, sessionContext, validateRgrRedEvidence } from "./lib/shared.ts";
+import { assertCleanWorktree, getCycle, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordTouchedFile, setCycle, clearCycle, recordVerification, sessionContext, validateRgrRedEvidence } from "./lib/shared.ts";
 
 function filePathFromArgs(args: unknown): string | undefined {
   if (!args || typeof args !== "object") return undefined;
@@ -19,7 +19,7 @@ function rejectsWaterfallTodo(args: unknown): boolean {
   return hasComponents && !text.includes("red") && !text.includes("failing test") && !text.includes("rgr");
 }
 
-export const AutoReviewDisciplinePlugin: Plugin = async () => ({
+export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree }) => ({
   tool: {
     rgr_start: tool({
       description: "Start an auto_review RED-GREEN-REFACTOR cycle for one behavior.",
@@ -28,6 +28,7 @@ export const AutoReviewDisciplinePlugin: Plugin = async () => ({
         test: tool.schema.string().describe("Specific failing test name or path"),
       },
       async execute(args, context) {
+        assertCleanWorktree(worktree);
         setCycle(context.sessionID, { behavior: args.behavior, test: args.test, stage: "red" });
         return `RGR cycle started for ${args.behavior}. Record observed RED output before production edits.`;
       },
