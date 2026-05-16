@@ -10,14 +10,7 @@
 /.vscode
 .DS_Store
 /.remember/
-/.kilo/node_modules/
-/.kilo/plans/
-/.kilo/worktrees/
-/.kilo/agent-manager.json
-/.pi-lens/cache/
-/.pi-lens/turn-state.json
-**/.pi-lens/
-/.pi/npm/
+/.opencode/node_modules/
 # Nix dev environment
 /.direnv/
 /.dependencies/
