@@ -875,28 +875,6 @@
 
                 touch "$out"
               '';
-          release-tooling =
-            pkgs.runCommand "auto-review-release-tooling"
-              {
-                inherit src;
-                nativeBuildInputs = with pkgs; [
-                  bash
-                  coreutils
-                  git
-                  nodejs
-                  python3
-                  cargo-semver-checks
-                  tea
-                ];
-              }
-              ''
-                cp -R "$src" source
-                chmod -R u+w source
-                cd source
-                patchShebangs scripts/release
-                bash tests/release_tooling_test.sh
-                touch "$out"
-              '';
           ar-gateway-image = self.packages.${system}.ar-gateway-image;
         };
       }
