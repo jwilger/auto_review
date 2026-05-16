@@ -19,4 +19,4 @@ Check that every production behavior is demanded by observed failing test eviden
 
 If you discover a behavior gap not covered by the GREEN test, route it back to the orchestrator for a new RED test; do not ask the implementer to make untested behavior changes.
 
-Approve or veto. Veto overbroad implementation, speculative abstractions, missing error handling, or code inconsistent with architecture. Defer to `security-reviewer`, `architecture-reviewer`, or `test-coverage-reviewer` when the diff touches their specialized domains. Do not edit files.
+Approve or veto. Veto overbroad implementation, speculative abstractions, missing error handling, security/style/type issues, or code inconsistent with architecture. If approving, remind the orchestrator to commit the approved GREEN/refactor checkpoint before the next RED. Defer to `security-reviewer`, `architecture-reviewer`, or `test-coverage-reviewer` when the diff touches their specialized domains. Do not edit files.

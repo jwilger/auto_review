@@ -9,12 +9,12 @@ This command is a compatibility entry point for the specialist-agent RGR workflo
 
 Workflow:
 
-1. Identify the smallest failing test for the requested behavior.
+1. Identify the smallest failing test for the requested behavior and narrow it to exactly one RED failure.
 2. Dispatch `rgr-test-author` to write or activate that test and run the focused command.
 3. Dispatch `rgr-test-reviewer` to approve RED before any production edit.
-4. Record RED with the RGR ledger tool, including command and real output.
-5. Dispatch `rgr-diagnostic-implementer` to make exactly one minimum production edit for the current diagnostic.
-6. Run the focused test and record GREEN when it passes.
+4. Record RED with the RGR ledger tool, including command and real output, then call `rgr_approve_red`.
+5. Dispatch `rgr-diagnostic-implementer` with the current diagnostic and allowed immediate change.
+6. Run the focused test after one behavioral edit; record changed RED or GREEN before any further edit.
 7. Dispatch `rgr-implementation-reviewer` to approve the GREEN diff.
-8. Refactor only with tests green and reviewer-approved, then record REFACTOR.
+8. Refactor only with tests green and reviewer-approved, then record REFACTOR and commit the approved checkpoint before the next RED.
 9. Run the strongest relevant verification gate feasible before handoff.

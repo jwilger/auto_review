@@ -77,7 +77,8 @@ changing public behavior. The CLI command reference lives in `docs/CLI.md`.
 
 ## Development Discipline
 
-- TDD is mandatory. For behavior changes, use the specialist RGR agents: `rgr-test-author` for RED, `rgr-test-reviewer` before production edits, `rgr-diagnostic-implementer` for each minimum GREEN change, and `rgr-implementation-reviewer` before REFACTOR or broader verification.
+- TDD is mandatory. For behavior changes, use the specialist RGR agents: `rgr-test-author` for one focused RED, `rgr-test-reviewer` and `rgr_approve_red` before production edits, `rgr-diagnostic-implementer` for one minimum GREEN edit per current diagnostic, and `rgr-implementation-reviewer` before REFACTOR or broader verification. Multi-failure RED output is invalid; split or narrow tests until one failure drives one edit.
+- After one behavioral production edit, rerun the focused command and record the changed RED or GREEN before editing again. Commit each approved GREEN/refactor checkpoint before starting the next RED.
 - Plans and todo lists for behavior work must be RGR-shaped, not component waterfalls.
 - Pure parsing and formatting helpers get adjacent `#[cfg(test)] mod tests`; HTTP integration tests use `wiremock`; LLM tests use `CannedProvider` or `ScriptedProvider` fakes.
 - Do not add deterministic tests that assert documentation wording for docs-only content. Keep tests for executable behavior, generated docs, public CLI/contracts, schemas, deployment artifacts, and security red-team boundaries; justify any docs-reading contract test near the test.
