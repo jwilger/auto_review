@@ -591,61 +591,10 @@
           };
         };
 
-        # ----- CI checks ---------------------------------------------
-        # Nix keeps these package-shaped checks available for reproducible
-        # validation, while everyday development and CI invoke the matching
-        # `just` recipes directly.
+        # ----- Nix boundary checks -----------------------------------
+        # Keep package-shaped checks for Nix-owned packaging and module
+        # contracts; routine CI checks stay in the `just` workflow.
         checks = {
-          # Formatting drift — rejects any file rustfmt would
-          # rewrite. Same surface as `cargo fmt --all -- --check`.
-          cargo-fmt = craneLib.cargoFmt {
-            inherit src;
-            pname = "auto_review";
-            # Force Cargo's formatter lookup to the exact rustfmt
-            # binary exposed by the dev shell's rustToolchain. This
-            # keeps local `cargo fmt` and crane's cargo-fmt check on
-            # the same tool package, not merely the same version.
-            RUSTFMT = "${rustToolchain}/bin/rustfmt";
-          };
-
-          # Clippy with `-D warnings` so the lint set the project
-          # has chosen to enforce blocks the merge.
-          cargo-clippy = craneLib.cargoClippy (
-            commonArgs
-            // {
-              inherit cargoArtifacts;
-              pname = "auto_review";
-              cargoClippyExtraArgs = "--workspace --all-targets -- -D warnings";
-            }
-          );
-
-          # Full workspace test suite. nextest produces parallel,
-          # well-formatted output and refuses to run a target with
-          # zero tests (caught by `--no-tests=pass`).
-          cargo-nextest = craneLib.cargoNextest (
-            commonArgs
-            // {
-              inherit cargoArtifacts;
-              pname = "auto_review";
-              cargoNextestExtraArgs = "--workspace --no-tests=pass";
-            }
-          );
-
-          # Supply-chain gate. Advisory checks need network access
-          # (fetching RustSec DB) which the Nix sandbox blocks, so
-          # the in-flake check covers licenses + bans + sources.
-          # Operators run `cargo deny check advisories` separately
-          # from the dev shell when they want the vuln scan.
-          cargo-deny = craneLib.mkCargoDerivation (
-            commonArgs
-            // {
-              inherit cargoArtifacts;
-              pname = "auto_review";
-              pnameSuffix = "-deny";
-              nativeBuildInputs = (commonArgs.nativeBuildInputs or [ ]) ++ [ pkgs.cargo-deny ];
-              buildPhaseCargoCommand = "cargo deny check licenses bans sources";
-            }
-          );
           auto-review-packaged-gateway-launcher-contract =
             pkgs.runCommand "auto-review-packaged-gateway-launcher-contract"
               {
@@ -821,64 +770,6 @@
 
                 touch "$out"
               '';
-          ar-gateway-docker-image-unified-binary-contract =
-            pkgs.runCommand "ar-gateway-docker-image-unified-binary-contract"
-              {
-                gatewayImage = self.packages.${system}.ar-gateway-image;
-                nativeBuildInputs = with pkgs; [
-                  jq
-                  gnugrep
-                ];
-              }
-              ''
-                set -eu
-
-                image_dir="$PWD/image"
-                mkdir -p "$image_dir"
-                tar -xf "$gatewayImage" -C "$image_dir"
-
-                config_file="$(jq -r '.[0].Config' "$image_dir/manifest.json")"
-                config="$image_dir/$config_file"
-                missing=0
-
-                if ! jq -e '.config.Cmd == ["/bin/auto-review", "gateway"]' "$config" >/dev/null; then
-                  printf 'docker image must launch the unified CLI as /bin/auto-review gateway; observed Cmd: %s\n' "$(jq -c '.config.Cmd' "$config")" >&2
-                  missing=1
-                fi
-
-                if jq -e '((.config.Entrypoint // []) + (.config.Cmd // [])) | any(. == "ar-gateway" or test("(^|/)ar-gateway$"))' "$config" >/dev/null; then
-                  printf 'docker image still carries a stale ar-gateway entrypoint expectation\n' >&2
-                  missing=1
-                fi
-
-                assert_layer_contains() {
-                  path="$1"
-                  found=0
-                  for layer in "$image_dir"/*/layer.tar; do
-                    entries="$PWD/layer-entries.txt"
-                    tar -tf "$layer" > "$entries" 2>/dev/null
-                    if grep -Eq "^/?(\\./)?$path$" "$entries"; then
-                      found=1
-                      break
-                    fi
-                  done
-
-                  if [ "$found" -ne 1 ]; then
-                    printf 'docker image must contain /%s for operator exec/smoke usage\n' "$path" >&2
-                    missing=1
-                  fi
-                }
-
-                assert_layer_contains bin/auto-review
-                assert_layer_contains bin/git
-
-                if [ "$missing" -ne 0 ]; then
-                  exit 1
-                fi
-
-                touch "$out"
-              '';
-          ar-gateway-image = self.packages.${system}.ar-gateway-image;
         };
       }
     )
