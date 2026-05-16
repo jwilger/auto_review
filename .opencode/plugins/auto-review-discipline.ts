@@ -1,11 +1,21 @@
 import { tool, type Plugin } from "@opencode-ai/plugin";
-import { getCycle, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordTouchedFile, setCycle, clearCycle, recordVerification, sessionContext } from "./lib/shared.ts";
+import { assertCleanWorktree, getCycle, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordTouchedFile, setCycle, clearCycle, recordVerification, sessionContext, validateRgrRedEvidence } from "./lib/shared.ts";
 
 function filePathFromArgs(args: unknown): string | undefined {
   if (!args || typeof args !== "object") return undefined;
   const record = args as Record<string, unknown>;
   const path = record.filePath ?? record.file_path ?? record.path;
   return typeof path === "string" ? path : undefined;
+}
+
+function changedPathsFromArgs(args: unknown): string[] {
+  if (!args || typeof args !== "object") return [];
+  const record = args as Record<string, unknown>;
+  const directPath = record.filePath ?? record.file_path ?? record.path;
+  if (typeof directPath === "string") return [directPath];
+  const patchText = record.patchText;
+  if (typeof patchText !== "string") return [];
+  return Array.from(patchText.matchAll(/^\*\*\* Update File: (.+)$/gm), (match) => match[1]);
 }
 
 function isEditTool(toolID: string): boolean {
@@ -19,7 +29,16 @@ function rejectsWaterfallTodo(args: unknown): boolean {
   return hasComponents && !text.includes("red") && !text.includes("failing test") && !text.includes("rgr");
 }
 
-export const AutoReviewDisciplinePlugin: Plugin = async () => ({
+function rejectsBroadDiagnosticTask(args: unknown): boolean {
+  const text = JSON.stringify(args ?? "").toLowerCase();
+  if (!text.includes("rgr-diagnostic-implementer")) return false;
+  const namesDiagnostic = /current\s+diagnostic|diagnostic/.test(text);
+  const namesAllowedChange = text.includes("allowed immediate change") || text.includes("allowed change");
+  const broadFix = text.includes("fix all") || text.includes("all failures") || text.includes("fix everything");
+  return broadFix || !namesDiagnostic || !namesAllowedChange;
+}
+
+export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree }) => ({
   tool: {
     rgr_start: tool({
       description: "Start an auto_review RED-GREEN-REFACTOR cycle for one behavior.",
@@ -28,6 +47,7 @@ export const AutoReviewDisciplinePlugin: Plugin = async () => ({
         test: tool.schema.string().describe("Specific failing test name or path"),
       },
       async execute(args, context) {
+        assertCleanWorktree(worktree);
         setCycle(context.sessionID, { behavior: args.behavior, test: args.test, stage: "red" });
         return `RGR cycle started for ${args.behavior}. Record observed RED output before production edits.`;
       },
@@ -41,8 +61,19 @@ export const AutoReviewDisciplinePlugin: Plugin = async () => ({
       async execute(args, context) {
         const current = getCycle(context.sessionID);
         if (!current) throw new Error("Start an RGR cycle before recording RED.");
-        setCycle(context.sessionID, { ...current, command: args.command, failingOutput: args.output, stage: "red" });
-        return "RED recorded. Minimum production edits are now allowed for this cycle.";
+        validateRgrRedEvidence(args.output);
+        setCycle(context.sessionID, { ...current, command: args.command, failingOutput: args.output, reviewedRed: false, implementationEditToken: false, stage: "red" });
+        return "RED recorded. RED review approval is required before production edits.";
+      },
+    }),
+    rgr_approve_red: tool({
+      description: "Approve the recorded RED evidence before production edits.",
+      args: {},
+      async execute(_args, context) {
+        const current = getCycle(context.sessionID);
+        if (!current?.failingOutput) throw new Error("Cannot approve RED before observed RED is recorded.");
+        setCycle(context.sessionID, { ...current, reviewedRed: true });
+        return "RED approved. Minimum production edits are now allowed for this cycle.";
       },
     }),
     rgr_mark_green: tool({
@@ -51,7 +82,7 @@ export const AutoReviewDisciplinePlugin: Plugin = async () => ({
       async execute(args, context) {
         const current = getCycle(context.sessionID);
         if (!current?.failingOutput) throw new Error("Cannot mark GREEN before observed RED is recorded.");
-        setCycle(context.sessionID, { ...current, stage: "green" });
+        setCycle(context.sessionID, { ...current, implementationEditToken: false, stage: "green" });
         recordVerification(context.sessionID, args.output);
         return "GREEN recorded. Refactoring is allowed with tests green.";
       },
@@ -62,7 +93,7 @@ export const AutoReviewDisciplinePlugin: Plugin = async () => ({
       async execute(args, context) {
         recordVerification(context.sessionID, args.verification);
         clearCycle(context.sessionID);
-        return "REFACTOR recorded. RGR cycle complete.";
+        return "REFACTOR recorded. RGR cycle complete. Commit the approved GREEN/refactor state before starting the next RED.";
       },
     }),
     rgr_status: tool({
@@ -76,17 +107,24 @@ export const AutoReviewDisciplinePlugin: Plugin = async () => ({
   },
   "tool.execute.before": async (input, output) => {
     if (isEditTool(input.tool)) {
-      const path = filePathFromArgs(output.args);
-      if (path) recordTouchedFile(input.sessionID, path);
-      if (path && isProductionRustPath(path) && !isLikelyTestPath(path) && !isNonBehavioralPath(path)) {
+      for (const path of changedPathsFromArgs(output.args)) {
+        recordTouchedFile(input.sessionID, path);
+        if (!isProductionRustPath(path) || isLikelyTestPath(path) || isNonBehavioralPath(path)) continue;
         const current = getCycle(input.sessionID);
-        if (!current?.failingOutput) {
-          throw new Error("RGR gate: production Rust edits under crates/*/src require observed RED output recorded with rgr_record_red.");
+        if (!current?.reviewedRed) {
+          throw new Error("RGR gate: production Rust edits under crates/*/src require RED review approval recorded with rgr_approve_red.");
         }
+        if (current.implementationEditToken) {
+          throw new Error("RGR gate: another behavioral production edit requires rerunning the focused command and recording RED or GREEN first.");
+        }
+        setCycle(input.sessionID, { ...current, implementationEditToken: true });
       }
     }
     if (/todo(write|update)?$/i.test(input.tool) && rejectsWaterfallTodo(output.args)) {
       throw new Error("RGR plan gate: behavior work todo lists must name failing tests, not component-waterfall tasks.");
+    }
+    if (/^task$/i.test(input.tool) && rejectsBroadDiagnosticTask(output.args)) {
+      throw new Error("RGR task gate: rgr-diagnostic-implementer prompts must name one current diagnostic and the allowed immediate change.");
     }
   },
   "experimental.session.compacting": async (input, output) => {

@@ -1,3 +1,5 @@
+import { execFileSync } from "node:child_process";
+
 export type RgrStage = "red" | "green" | "refactor";
 
 export type RgrCycle = {
@@ -5,6 +7,8 @@ export type RgrCycle = {
   test: string;
   command?: string;
   failingOutput?: string;
+  reviewedRed?: boolean;
+  implementationEditToken?: boolean;
   stage: RgrStage;
 };
 
@@ -64,6 +68,21 @@ export function forgejoInlineReplyPayload(comment: { body: string; path: string;
     new_position: comment.position,
     old_position: 0,
   };
+}
+
+export function validateRgrRedEvidence(output: string): void {
+  if (/test result: FAILED\. ([2-9]|\d{2,}) failed;/.test(output)) {
+    throw new Error("RED evidence must contain exactly one failing test");
+  }
+}
+
+export function assertCleanWorktree(worktree: string): void {
+  const status = execFileSync("git", ["-C", worktree, "status", "--porcelain"], { encoding: "utf8" });
+  if (status.trim()) {
+    throw new Error(
+      "RGR gate: start a new cycle only from a clean worktree. Commit the approved GREEN/refactor state before starting the next RED."
+    );
+  }
 }
 
 export function setCycle(sessionID: string, cycle: RgrCycle): void {

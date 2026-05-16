@@ -5,4 +5,4 @@ agent: build
 
 Fix this bug through RGR: $ARGUMENTS
 
-First reproduce the defect with a failing test or a minimal existing test that currently fails. Record the failing command/output in the RGR ledger before editing production code. Then implement the minimum fix, run the focused test to GREEN, refactor if needed, and run relevant verification.
+First reproduce the defect with one failing test or one intentional diagnostic. Record and approve the RED evidence before editing production code. Then make one minimum fix for the current diagnostic, rerun the focused test, record changed RED or GREEN before any further edit, refactor if needed, commit the approved checkpoint, and run relevant verification.

@@ -28,15 +28,19 @@ Next control owner:
 
 RED is valid when a focused command was run and produced an observed failure that is expected for the requested behavior. Compiler errors count as RED when the test intentionally pressures a missing API, missing type, or crate boundary.
 
+RED must expose exactly one current failing test or one current diagnostic. If a command reports multiple failing tests, narrow the command or split the behavior before implementation.
+
 Fix test misuse before production edits. Do not treat accidental misuse of existing code as implementation pressure.
 
 ## Test Review
 
-Send every new or activated RED test to `rgr-test-reviewer` before production edits. A reviewer veto blocks implementation until the test author addresses the mandatory notes and records a new RED.
+Send every new or activated RED test to `rgr-test-reviewer` before production edits, then record approval with `rgr_approve_red`. A reviewer veto blocks implementation until the test author addresses the mandatory notes and records a new RED.
 
 ## Single Diagnostic
 
 The implementer may treat exactly one current diagnostic at a time. The allowed production edit is the smallest concrete change that removes or changes that diagnostic. Do not predict later errors, prebuild adjacent behavior, refactor opportunistically, or batch fixes.
+
+Each implementer handoff must name the current diagnostic and the allowed immediate change. After one behavioral production edit, stop and rerun the focused command; do not make a second behavioral edit until the orchestrator records the changed RED or GREEN.
 
 ## Ambiguous Failure Escape Hatch
 
@@ -48,7 +52,7 @@ GREEN means the focused command for the current test passes after the smallest d
 
 ## Implementation Review
 
-After GREEN, send the production diff to `rgr-implementation-reviewer`. A reviewer veto blocks refactor, broader verification, and handoff until the implementer addresses the mandatory notes with focused tests still green.
+After GREEN, send the production diff to `rgr-implementation-reviewer`. A reviewer veto blocks refactor, broader verification, and handoff until the implementer addresses mandatory notes about minimality, type correctness, error handling, security boundaries, crate patterns, or style. If the reviewer finds a missing behavior not covered by the GREEN test, it returns to the orchestrator as a new RED instead of becoming an untested implementation request.
 
 ## REFACTOR
 
@@ -60,7 +64,7 @@ Return control to the orchestrator whenever a test is authored, a reviewer appro
 
 ## Stop Conditions
 
-Stop the active microcycle when all current cycle tests pass, reviewer vetoes are resolved, focused verification passes, and the ledger identifies the next handoff. Do not commit unless the user explicitly requests it.
+Stop the active microcycle when the current test passes, reviewer vetoes are resolved, focused verification passes, and the ledger identifies the next handoff. Commit each approved GREEN/refactor checkpoint before starting the next RED unless the user explicitly says not to commit.
 
 ## Blocked States
 

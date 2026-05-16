@@ -9,18 +9,18 @@ Use this skill for behavior changes and bug fixes. This skill defines the discip
 
 ## Rule
 
-Never write production behavior without an observed failing test demanding it.
+Never write production behavior without one observed failing test demanding it. Multi-failure output is not valid RED; narrow the command or split the behavior until exactly one test or one intentional compiler/API diagnostic is failing.
 
 ## Sequence
 
 1. Name the behavior and the smallest externally visible test that should fail.
 2. Dispatch `rgr-test-author` to write or activate that test, run the focused command, and capture real failing output.
 3. Dispatch `rgr-test-reviewer` to approve the RED evidence and API pressure before production edits.
-4. Record RED with the RGR ledger tool before editing production Rust.
-5. Dispatch `rgr-diagnostic-implementer` to implement only the minimum code that changes one current diagnostic.
-6. Run the focused test and record GREEN when it passes.
+4. Record RED and RED approval with the RGR ledger tools before editing production behavior.
+5. Dispatch `rgr-diagnostic-implementer` with the current diagnostic and allowed immediate change; it implements only the minimum code that changes that diagnostic.
+6. Run the focused test after that edit. If the failure changes, record the new RED and repeat review/implementation for that diagnostic. If it passes, record GREEN.
 7. Dispatch `rgr-implementation-reviewer` to approve the GREEN diff before refactor or broader verification.
-8. Refactor only while tests are green and reviewer-approved, then record REFACTOR.
+8. Refactor only while tests are green and reviewer-approved, then record REFACTOR and commit the approved checkpoint before the next RED.
 
 ## Drill-Down
 
@@ -28,7 +28,7 @@ When an integration or acceptance failure points at internal logic, route the lo
 
 ## Evidence
 
-Observed failure output must be copied from an actual run, not paraphrased. Commit bodies should explain why and include the RED command/output for behavior commits when practical.
+Observed failure output must be copied from an actual run, not paraphrased. It must identify one current failing test or diagnostic. Commit bodies should explain why and include the RED command/output for behavior commits when practical.
 
 ## Exemptions
 
