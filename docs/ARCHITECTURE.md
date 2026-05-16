@@ -105,25 +105,45 @@ Review lifecycle metrics cross the crate boundary through `ReviewObserver` so th
 orchestrator does not depend on the gateway's Prometheus implementation. Metric
 names, dashboards, alert rules, and operator docs are a coupled contract.
 
+## Development and CI tooling
+
+`just` is the canonical command interface for routine development and CI checks.
+Recipes such as formatting, clippy, tests, dependency policy checks, build checks,
+and aggregate CI checks should call the underlying tools directly rather than
+requiring `nix develop --command ...` inside the recipe.
+
+Nix is an optional developer setup path and a supported CI provisioning mechanism.
+Developers may use any environment that provides the required tools on `PATH`,
+while `nix develop` provides the pinned tool environment used by the project. Nix
+also remains responsible for production package assembly, embedded OCI/rootfs
+runtime packaging, and NixOS module/service support.
+
+Forgejo PR CI should run focused jobs built around the `just` recipes. CI may use
+Nix to provision tools, but `nix flake check` is not the primary orchestration
+interface for routine checks.
+
 ## Distribution and runtime isolation
 
-The recommended production artifact is the Docker/OCI image containing the
-`auto-review` executable and running `auto-review gateway` by default.
+The official out-of-the-box Linux distribution artifact is the signed
+`auto-review` binary archive published through Forgejo releases. Release assets
+must include checksums, signatures, signing material, SBOM/provenance metadata,
+and verification instructions. Direct binary releases are temporarily Linux
+`x86_64` only until a trusted Linux `aarch64` build and provenance path exists.
 
-Direct Linux binary releases are also part of the architecture. They must include
-checksums, signatures, SBOM/provenance metadata, and verification instructions in
-Forgejo releases. Direct binary releases are temporarily Linux `x86_64` only
-until a trusted Linux `aarch64` build and provenance path exists.
+The project does not currently publish an official Docker/OCI image as a
+first-class release artifact. Operators who want Docker or Podman images may
+build their own image from the source or released binary.
 
-For direct gateway execution, the architecture requires embedded or linked OCI
-isolation by default. Bare-process gateway mode is an explicit opt-out and must be
-reported clearly in startup logs, `/info`, and diagnostic commands. If embedded
-OCI isolation cannot be established and the operator has not opted out, startup
-fails closed.
+For gateway execution from the official binary artifact, the architecture
+requires embedded or linked OCI isolation by default. Bare-process gateway mode is
+an explicit opt-out and must be reported clearly in startup logs, `/info`, and
+diagnostic commands. If embedded OCI isolation cannot be established and the
+operator has not opted out, startup fails closed.
 
 Existing implementation in this area may be staged; new work should move toward
-the fail-closed embedded-OCI posture rather than expanding bare-process gateway
-operation.
+the binary-first, fail-closed embedded-OCI posture rather than expanding
+bare-process gateway operation or reintroducing project-published image release
+obligations.
 
 ## ADR event stream
 
