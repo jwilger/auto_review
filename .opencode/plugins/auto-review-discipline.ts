@@ -47,6 +47,16 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree }) => ({
         return "RED recorded. Minimum production edits are now allowed for this cycle.";
       },
     }),
+    rgr_approve_red: tool({
+      description: "Approve the recorded RED evidence before production edits.",
+      args: {},
+      async execute(_args, context) {
+        const current = getCycle(context.sessionID);
+        if (!current?.failingOutput) throw new Error("Cannot approve RED before observed RED is recorded.");
+        setCycle(context.sessionID, { ...current, reviewedRed: true });
+        return "RED approved. Minimum production edits are now allowed for this cycle.";
+      },
+    }),
     rgr_mark_green: tool({
       description: "Mark the active RGR cycle green after the focused test passes.",
       args: { output: tool.schema.string().describe("Passing test output or concise verification summary") },
@@ -82,8 +92,8 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree }) => ({
       if (path) recordTouchedFile(input.sessionID, path);
       if (path && isProductionRustPath(path) && !isLikelyTestPath(path) && !isNonBehavioralPath(path)) {
         const current = getCycle(input.sessionID);
-        if (!current?.failingOutput) {
-          throw new Error("RGR gate: production Rust edits under crates/*/src require observed RED output recorded with rgr_record_red.");
+        if (!current?.reviewedRed) {
+          throw new Error("RGR gate: production Rust edits under crates/*/src require RED review approval recorded with rgr_approve_red.");
         }
       }
     }
