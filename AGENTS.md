@@ -101,10 +101,9 @@ changing public behavior. The CLI command reference lives in `docs/CLI.md`.
 
 ## Reference Docs
 
-- `docs/ADR-0001-architecture.md`
-- `docs/ADR-0002-sandbox.md`
-- `docs/ADR-0003-observability.md`
-- `docs/ADR-0004-vector-store.md`
+- `docs/ADR-0001-hybrid-review-pipeline.md`
+- `docs/ADR-0016-adr-event-stream-architecture-projection.md`
+- `docs/ARCHITECTURE.md`
 - `docs/THREAT-MODEL.md`
 - `docs/OPERATIONS.md`
 - `docs/USER-GUIDE.md`

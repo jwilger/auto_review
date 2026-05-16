@@ -90,10 +90,18 @@ everyone (and CI) picks up the same versions.
 
 ## Architecture overview
 
-See `docs/ADR-0001-architecture.md` for the high-level decision,
-`docs/ADR-0002-sandbox.md` for the superseded linter-sandbox decision,
-`docs/ADR-0003-observability.md` for the metrics / readiness /
-runtime-introspection design, and `docs/CRATES.md` for the crate map.
+See `docs/ARCHITECTURE.md` for the current architecture projection,
+`docs/ADR-0001-hybrid-review-pipeline.md` for the initial high-level decision,
+`docs/ADR-0016-adr-event-stream-architecture-projection.md` for the ADR process,
+and `docs/CRATES.md` for the crate map.
+
+ADR files are managed as an append-only event stream. Create architecture changes
+as proposed ADRs through the project ADR workflow tools, update proposed ADRs
+through the same typed workflow, and transition them with the accept/reject
+tools. Once accepted or rejected, an ADR body is immutable; later changes require
+a new ADR and may only add brief supersession metadata to the older record. Keep
+`docs/ARCHITECTURE.md` in sync as the current projection rather than rewriting
+historical ADR rationale.
 
 Crate-level navigation is centralized in `docs/CRATES.md`. The summary table:
 

@@ -392,8 +392,8 @@ threat-model claims fail CI when a regression slips in:
   as container-equivalent isolation.
 
 T1 is now primarily an architectural guardrail: normal review jobs must not
-reintroduce repo-controlled deterministic tool execution. Issue #46's rescope
-enumerates remaining workspace paths in `docs/ADR-0002-sandbox.md`;
+reintroduce repo-controlled deterministic tool execution. ADR-0011 enumerates
+the normal workspace capability split;
 `crates/ar-review/src/workspace.rs` red-team tests pin that Git workspace
 preparation ignores host global aliases, env-injected Git config, ambient
 repo/template/object/SSH variables, and askpass helpers. Any future feature that

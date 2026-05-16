@@ -47,6 +47,7 @@ belong in CI/static analysis jobs. -->
       (`deploy/prometheus/auto_review.rules.yaml`) and dashboard
       (`deploy/grafana/auto_review.dashboard.json`) still pass
       their contract tests
+- [ ] Architecture changes use the ADR workflow tools: proposed ADRs may be edited, accepted/rejected ADRs are immutable except supersession metadata, and `docs/ARCHITECTURE.md` is updated as the current projection
 
 ## Related
 

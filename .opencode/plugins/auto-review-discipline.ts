@@ -1,4 +1,7 @@
 import { tool, type Plugin } from "@opencode-ai/plugin";
+import cp from "node:child_process";
+import fs from "node:fs";
+import path from "node:path";
 import { assertCleanWorktree, getCycle, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordTouchedFile, setCycle, clearCycle, recordVerification, sessionContext, validateRgrRedEvidence } from "./lib/shared.ts";
 
 function filePathFromArgs(args: unknown): string | undefined {
@@ -22,11 +25,171 @@ function isEditTool(toolID: string): boolean {
   return /(^|\.)(edit|write|apply_patch)$/i.test(toolID) || /apply_patch/i.test(toolID);
 }
 
+function isProtectedAdrPath(filePath) {
+  const normalized = (path.isAbsolute(filePath) ? path.relative(process.cwd(), filePath) : filePath).replaceAll("\\", "/");
+  return /^docs\/ADR-[^/]*\.md$/i.test(normalized) || normalized === "docs/ARCHITECTURE.md";
+}
+
+function patchTouchesProtectedAdrPath(args) {
+  if (!args || typeof args !== "object") return false;
+  const patchText = (args as Record<string, unknown>).patchText;
+  if (typeof patchText !== "string") return false;
+  for (const match of patchText.matchAll(/^\*\*\* (?:Add|Update|Delete) File: (.+)$/gm)) {
+    if (isProtectedAdrPath(match[1].trim())) return true;
+  }
+  for (const match of patchText.matchAll(/^\*\*\* Move to: (.+)$/gm)) {
+    if (isProtectedAdrPath(match[1].trim())) return true;
+  }
+  return false;
+}
+
 function rejectsWaterfallTodo(args: unknown): boolean {
   const text = JSON.stringify(args ?? "").toLowerCase();
   const componentWords = ["model", "handler", "route", "repository", "service", "then add tests"];
   const hasComponents = componentWords.filter((word) => text.includes(word)).length >= 2;
   return hasComponents && !text.includes("red") && !text.includes("failing test") && !text.includes("rgr");
+}
+
+function requireString(record, field) {
+  const value = record[field];
+  if (typeof value !== "string" || value.trim() === "") throw new Error(`adr_create requires ${field}`);
+  return value;
+}
+
+function titleSlug(title) {
+  return title
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+}
+
+function nextAdrNumber(docsDir) {
+  let highest = 0;
+  for (const entry of fs.readdirSync(docsDir, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    const match = /^ADR-(\d+)-.*\.md$/i.exec(entry.name);
+    if (match) highest = Math.max(highest, Number.parseInt(match[1], 10));
+  }
+  return highest + 1;
+}
+
+function applyArchitecturePatch(patch) {
+  if (!patch || typeof patch !== "object") throw new Error("adr_create requires architecturePatch");
+  const patchRecord = patch;
+  const patchPath = requireString(patchRecord, "path");
+  const find = requireString(patchRecord, "find");
+  const replace = requireString(patchRecord, "replace");
+  if (patchPath.replaceAll("\\", "/") !== "docs/ARCHITECTURE.md") {
+    throw new Error("adr_create architecturePatch.path must be docs/ARCHITECTURE.md");
+  }
+  const current = fs.readFileSync(patchPath, "utf8");
+  if (!current.includes(find)) throw new Error("adr_create architecturePatch.find was not found");
+  fs.writeFileSync(patchPath, current.replace(find, replace));
+}
+
+function proposedArchitecturePatchSection(patch) {
+  if (!patch || typeof patch !== "object") throw new Error("adr_create requires architecturePatch");
+  const patchRecord = patch;
+  const storedPatch = {
+    path: requireString(patchRecord, "path"),
+    find: requireString(patchRecord, "find"),
+    replace: requireString(patchRecord, "replace"),
+  };
+  return `## Proposed Architecture Patch\n\nPatch:\n${JSON.stringify(storedPatch)}\n`;
+}
+
+function replaceProposedArchitecturePatchSection(text, patch) {
+  const section = proposedArchitecturePatchSection(patch).trimEnd();
+  if (!/^## Proposed Architecture Patch\n\n/m.test(text)) return `${text.trimEnd()}\n\n${section}\n`;
+  return text.replace(/(^|\n)## Proposed Architecture Patch\n\n[\s\S]*?(?=\n## |\s*$)/, `$1${section}`);
+}
+
+function storedProposedArchitecturePatch(text) {
+  const jsonMatch = /^## Proposed Architecture Patch\n\nPatch:\n([^\n]+)\n/m.exec(text);
+  if (jsonMatch) return JSON.parse(jsonMatch[1]);
+  const match = /^## Proposed Architecture Patch\n\nPath: ([^\n]+)\nFind:\n([\s\S]*?)\nReplace:\n([\s\S]*?)(?=\n## |\s*$)/m.exec(text);
+  if (!match) return undefined;
+  return { path: match[1].trim(), find: match[2].trim(), replace: match[3].trim() };
+}
+
+function removeProposedArchitecturePatchSection(text) {
+  return text.replace(/\n?## Proposed Architecture Patch\n\n[\s\S]*?(?=\n## |\s*$)/, "");
+}
+
+function recordedSupersedes(text) {
+  const supersedes = adrSectionValue(text, "Supersedes");
+  if (!supersedes) return [];
+  return supersedes.split("\n").map((line) => /^- ([^:]+): (.+)$/.exec(line)).filter(Boolean).map((match) => ({ path: match[1], reason: match[2] }));
+}
+
+function adrSectionValue(text, section) {
+  const match = new RegExp(`^## ${section}\\n\\n([\\s\\S]*?)(?=\\n## |$)`, "m").exec(text);
+  return match?.[1]?.trim();
+}
+
+function replaceAdrSection(text, section, value) {
+  return text.replace(new RegExp(`(^## ${section}\\n\\n)([\\s\\S]*?)(?=\\n## |$)`, "m"), `$1${value.trim()}\n`);
+}
+
+function adrIdFromPath(adrPath) {
+  return /^ADR-(\d+)/.exec(path.basename(adrPath))?.[0] ?? path.basename(adrPath, ".md");
+}
+
+function requireAcceptedSupersedes(supersedes) {
+  for (const entry of supersedes) {
+    const supersededPath = requireString(entry, "path");
+    requireString(entry, "reason");
+    if (!isAdrDocumentPath(supersededPath) || !fs.existsSync(supersededPath)) {
+      throw new Error("supersedes entries must reference existing ADR files");
+    }
+    const superseded = fs.readFileSync(supersededPath, "utf8");
+    if (adrSectionValue(superseded, "Status") !== "Accepted") {
+      throw new Error("supersedes entries must reference Accepted ADRs");
+    }
+  }
+}
+
+function gitPathExistsOnMain(filePath) {
+  const gitPath = filePath.replaceAll("\\", "/");
+  const main = cp.spawnSync("git", ["rev-parse", "--verify", "main^{commit}"], { stdio: "ignore" });
+  if (main.status !== 0) throw new Error("adr_delete_unmerged cannot verify main; refusing to delete ADR");
+  const result = cp.spawnSync("git", ["ls-tree", "--name-only", "main", "--", gitPath], { encoding: "utf8" });
+  if (result.status !== 0) throw new Error("adr_delete_unmerged cannot check whether ADR exists on main");
+  return result.stdout.trim() !== "";
+}
+
+function isAdrDocumentPath(filePath) {
+  return /^docs\/ADR-[^/]*\.md$/i.test(filePath.replaceAll("\\", "/"));
+}
+
+function removeLinesReferencing(text, references) {
+  return text
+    .split("\n")
+    .filter((line) => !references.some((reference) => line.includes(reference)))
+    .join("\n");
+}
+
+function cleanAdrReferences(deletedAdrPath, context) {
+  const references = [deletedAdrPath.replaceAll("\\", "/"), path.basename(deletedAdrPath)];
+  const architecturePath = "docs/ARCHITECTURE.md";
+  if (fs.existsSync(architecturePath)) {
+    const current = fs.readFileSync(architecturePath, "utf8");
+    const updated = removeLinesReferencing(current, references);
+    if (updated !== current) {
+      fs.writeFileSync(architecturePath, updated);
+      recordTouchedFile(context.sessionID, architecturePath);
+    }
+  }
+  for (const entry of fs.readdirSync("docs", { withFileTypes: true })) {
+    if (!entry.isFile() || !/^ADR-.*\.md$/i.test(entry.name)) continue;
+    const adrPath = path.join("docs", entry.name);
+    const current = fs.readFileSync(adrPath, "utf8");
+    const updated = removeLinesReferencing(current, references);
+    if (updated !== current) {
+      fs.writeFileSync(adrPath, updated);
+      recordTouchedFile(context.sessionID, adrPath);
+    }
+  }
 }
 
 function rejectsBroadDiagnosticTask(args: unknown): boolean {
@@ -38,7 +201,7 @@ function rejectsBroadDiagnosticTask(args: unknown): boolean {
   return broadFix || !namesDiagnostic || !namesAllowedChange;
 }
 
-export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree }) => ({
+export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => ({
   tool: {
     rgr_start: tool({
       description: "Start an auto_review RED-GREEN-REFACTOR cycle for one behavior.",
@@ -104,10 +267,166 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree }) => ({
         return items.length ? items.join("\n") : "No active RGR cycle recorded for this session.";
       },
     }),
+    adr_create: tool({
+      description: "Create a Proposed ADR and store its deferred architecture projection patch.",
+      args: {
+        title: tool.schema.string().min(1).describe("ADR title"),
+        date: tool.schema.string().min(1).describe("ADR date"),
+        context: tool.schema.string().min(1).describe("Context motivating the decision"),
+        decision: tool.schema.string().min(1).describe("Decision being proposed"),
+        consequences: tool.schema.string().min(1).describe("Expected consequences"),
+        architecturePatch: tool.schema.object({
+          path: tool.schema.string().min(1).describe("Architecture projection path"),
+          find: tool.schema.string().min(1).describe("Existing architecture text to replace"),
+          replace: tool.schema.string().min(1).describe("Replacement architecture text"),
+        }).describe("Paired docs/ARCHITECTURE.md patch"),
+        supersedes: tool.schema.array(tool.schema.object({
+          path: tool.schema.string().min(1).describe("Superseded ADR path"),
+          reason: tool.schema.string().min(1).describe("Reason this ADR supersedes the prior ADR"),
+        })).optional().describe("Accepted ADRs superseded by this ADR"),
+      },
+      async execute(args, context) {
+        const title = requireString(args, "title");
+        const adrContext = requireString(args, "context");
+        const decision = requireString(args, "decision");
+        const consequences = requireString(args, "consequences");
+        const date = requireString(args, "date");
+        const docsDir = "docs";
+        const number = nextAdrNumber(docsDir);
+        const numberText = String(number).padStart(4, "0");
+        const adrPath = path.join(docsDir, `ADR-${numberText}-${titleSlug(title)}.md`);
+        const supersedes = Array.isArray(args.supersedes) ? args.supersedes : [];
+        const supersedesSection = supersedes.length ? `\n## Supersedes\n\n${supersedes.map((entry) => `- ${requireString(entry, "path")}: ${requireString(entry, "reason")}`).join("\n")}\n` : "";
+        const body = `# ADR-${numberText}: ${title}\n\n## Status\n\nProposed\n\n## Date\n\n${date}\n\n## Context\n\n${adrContext}\n\n## Decision\n\n${decision}\n\n## Consequences\n\n${consequences}\n\n${proposedArchitecturePatchSection(args.architecturePatch)}${supersedesSection}`;
+        requireAcceptedSupersedes(supersedes);
+        fs.writeFileSync(adrPath, body);
+        recordTouchedFile(context.sessionID, adrPath);
+        return `Created ${adrPath}`;
+      },
+    }),
+    adr_update: tool({
+      description: "Update requested sections of a Proposed ADR and store its deferred architecture projection patch.",
+      args: {
+        path: tool.schema.string().min(1).describe("ADR path"),
+        title: tool.schema.string().min(1).describe("ADR title"),
+        date: tool.schema.string().min(1).describe("ADR date"),
+        context: tool.schema.string().min(1).describe("Context motivating the decision"),
+        decision: tool.schema.string().min(1).describe("Decision being proposed"),
+        consequences: tool.schema.string().min(1).describe("Expected consequences"),
+        sectionsToUpdate: tool.schema.array(tool.schema.string()).describe("ADR sections to rewrite"),
+        architecturePatch: tool.schema.object({
+          path: tool.schema.string().min(1).describe("Architecture projection path"),
+          find: tool.schema.string().min(1).describe("Existing architecture text to replace"),
+          replace: tool.schema.string().min(1).describe("Replacement architecture text"),
+        }).describe("Paired docs/ARCHITECTURE.md patch"),
+        supersedes: tool.schema.array(tool.schema.object({
+          path: tool.schema.string().min(1).describe("Superseded ADR path"),
+          reason: tool.schema.string().min(1).describe("Reason this ADR supersedes the prior ADR"),
+        })).optional().describe("Accepted ADRs superseded by this ADR"),
+      },
+      async execute(args, context) {
+        const adrPath = requireString(args, "path");
+        let current = fs.readFileSync(adrPath, "utf8");
+        if (adrSectionValue(current, "Status") !== "Proposed") {
+          throw new Error("adr_update only updates Proposed ADRs");
+        }
+        const replacements = {
+          title: requireString(args, "title"),
+          date: requireString(args, "date"),
+          context: requireString(args, "context"),
+          decision: requireString(args, "decision"),
+          consequences: requireString(args, "consequences"),
+        };
+        for (const section of args.sectionsToUpdate) {
+          const heading = section === "date" ? "Date" : section === "context" ? "Context" : section === "decision" ? "Decision" : section === "consequences" ? "Consequences" : undefined;
+          if (heading) current = replaceAdrSection(current, heading, replacements[section]);
+        }
+        current = replaceProposedArchitecturePatchSection(current, args.architecturePatch);
+        const supersedes = Array.isArray(args.supersedes) ? args.supersedes : [];
+        if (supersedes.length) {
+          current += `\n## Supersedes\n\n${supersedes.map((entry) => `- ${requireString(entry, "path")}: ${requireString(entry, "reason")}`).join("\n")}\n`;
+        }
+        requireAcceptedSupersedes(supersedes);
+        fs.writeFileSync(adrPath, current);
+        recordTouchedFile(context.sessionID, adrPath);
+        return `Updated ${adrPath}`;
+      },
+    }),
+    adr_accept: tool({
+      description: "Accept a Proposed ADR without editing its body sections.",
+      args: {
+        path: tool.schema.string().min(1).describe("ADR path"),
+      },
+      async execute(args, context) {
+        const adrPath = requireString(args, "path");
+        let current = fs.readFileSync(adrPath, "utf8");
+        if (adrSectionValue(current, "Status") !== "Proposed") {
+          throw new Error("adr_accept only transitions Proposed ADRs");
+        }
+        requireAcceptedSupersedes(recordedSupersedes(current));
+        const storedPatch = storedProposedArchitecturePatch(current);
+        if (storedPatch) {
+          applyArchitecturePatch(storedPatch);
+          current = removeProposedArchitecturePatchSection(current);
+          recordTouchedFile(context.sessionID, "docs/ARCHITECTURE.md");
+        }
+        for (const entry of recordedSupersedes(current)) {
+          const superseded = fs.readFileSync(entry.path, "utf8");
+          fs.writeFileSync(entry.path, replaceAdrSection(superseded, "Status", `Superseded\n\n## Superseded By\n\n${adrIdFromPath(adrPath)}: ${entry.reason}`));
+          recordTouchedFile(context.sessionID, entry.path);
+        }
+        fs.writeFileSync(adrPath, current.replace("## Status\n\nProposed", "## Status\n\nAccepted"));
+        recordTouchedFile(context.sessionID, adrPath);
+        return `Accepted ${adrPath}`;
+      },
+    }),
+    adr_reject: tool({
+      description: "Reject a Proposed ADR and record the rejection rationale.",
+      args: {
+        path: tool.schema.string().min(1).describe("ADR path"),
+        rationale: tool.schema.string().min(1).describe("Reason the ADR is rejected"),
+      },
+      async execute(args, context) {
+        const adrPath = requireString(args, "path");
+        const rationale = requireString(args, "rationale");
+        const current = fs.readFileSync(adrPath, "utf8");
+        if (adrSectionValue(current, "Status") !== "Proposed") {
+          throw new Error("adr_reject only transitions Proposed ADRs");
+        }
+        fs.writeFileSync(adrPath, replaceAdrSection(current, "Status", `Rejected\n\n## Rejection Rationale\n\n${rationale}`));
+        recordTouchedFile(context.sessionID, adrPath);
+        return `Rejected ${adrPath}`;
+      },
+    }),
+    adr_delete_unmerged: tool({
+      description: "Delete an ADR that has not reached main.",
+      args: {
+        path: tool.schema.string().min(1).describe("ADR path"),
+      },
+      async execute(args, context) {
+        const adrPath = requireString(args, "path");
+        if (!isAdrDocumentPath(adrPath)) {
+          throw new Error("adr_delete_unmerged only deletes docs/ADR-*.md paths");
+        }
+        if (gitPathExistsOnMain(adrPath)) {
+          throw new Error(`adr_delete_unmerged refuses to delete ${adrPath} because it exists on main`);
+        }
+        fs.unlinkSync(adrPath);
+        recordTouchedFile(context.sessionID, adrPath);
+        cleanAdrReferences(adrPath, context);
+        return `Deleted unmerged ADR ${adrPath}`;
+      },
+    }),
   },
   "tool.execute.before": async (input, output) => {
     if (isEditTool(input.tool)) {
+      if (typeof patchTouchesProtectedAdrPath === "function" && patchTouchesProtectedAdrPath(output.args)) {
+        throw new Error("ADR path gate: use ADR workflow tools instead of direct edit/write/apply_patch changes for protected architecture decision records.");
+      }
       for (const path of changedPathsFromArgs(output.args)) {
+        if (typeof isProtectedAdrPath === "function" && isProtectedAdrPath(path)) {
+          throw new Error("ADR path gate: use ADR workflow tools instead of direct edit/write/apply_patch changes for protected architecture decision records.");
+        }
         recordTouchedFile(input.sessionID, path);
         if (!isProductionRustPath(path) || isLikelyTestPath(path) || isNonBehavioralPath(path)) continue;
         const current = getCycle(input.sessionID);
