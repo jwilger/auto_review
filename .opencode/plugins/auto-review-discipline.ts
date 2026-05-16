@@ -1,4 +1,4 @@
-import { tool, type Plugin } from "@kilocode/plugin";
+import { tool, type Plugin } from "@opencode-ai/plugin";
 import { getCycle, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordTouchedFile, setCycle, clearCycle, recordVerification, sessionContext } from "./lib/shared.ts";
 
 function filePathFromArgs(args: unknown): string | undefined {

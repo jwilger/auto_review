@@ -1,6 +1,6 @@
 ---
 description: Reproduce a defect with a failing test before applying a bug fix.
-agent: auto-review-rust-implementer
+agent: build
 ---
 
 Fix this bug through RGR: $ARGUMENTS

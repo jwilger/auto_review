@@ -1,4 +1,4 @@
-import type { Plugin } from "@kilocode/plugin";
+import type { Plugin } from "@opencode-ai/plugin";
 import { sessionContext } from "./lib/shared.ts";
 
 export const AutoReviewContextPlugin: Plugin = async () => ({

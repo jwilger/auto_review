@@ -1,12 +1,11 @@
 {
-  "$schema": "https://app.kilo.ai/config.json",
+  "$schema": "https://opencode.ai/config.json",
   "instructions": [
-    "AGENTS.md",
-    ".kilo/rules/*.md"
+    ".opencode/rules/*.md"
   ],
-  "default_agent": "auto-review-rust-implementer",
+  "default_agent": "build",
   "plugin": [
-    "kilo-rtk@npm:@jwilger/kilo-rtk"
+    "opencode-rtk"
   ],
   "mcp": {
     "forgejo": {
@@ -14,7 +13,7 @@
       "command": [
         "sh",
         "-lc",
-        "exec forgejo-mcp --transport stdio --url https://git.johnwilger.com --token \"$FORGEJO_TOKEN\" --user-agent auto_review/forgejo-mcp"
+        "exec nix develop . --command forgejo-mcp --transport stdio --url https://git.johnwilger.com --token \"$FORGEJO_TOKEN\" --user-agent auto_review/forgejo-mcp"
       ],
       "environment": {
         "FORGEJO_USER_AGENT": "auto_review/forgejo-mcp"
@@ -33,7 +32,7 @@
         "rust-analyzer"
       ],
       "extensions": [
-        "rs"
+        ".rs"
       ],
       "initialization": {
         "cargo": {
@@ -46,7 +45,9 @@
     }
   },
   "skills": {
-    "paths": [".kilo/skills"]
+    "paths": [
+      ".opencode/skills"
+    ]
   },
   "permission": {
     "read": "allow",

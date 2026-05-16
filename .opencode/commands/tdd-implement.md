@@ -1,6 +1,6 @@
 ---
 description: Implement behavior through an explicit RED-GREEN-REFACTOR cycle.
-agent: auto-review-rust-implementer
+agent: build
 ---
 
 Use the `outside-in-tdd`, `outside-in-rgr-microcycle`, and `rgr-plan-structure` skills for: $ARGUMENTS

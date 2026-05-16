@@ -1,4 +1,4 @@
-import { tool, type Plugin } from "@kilocode/plugin";
+import { tool, type Plugin } from "@opencode-ai/plugin";
 import { blocksForgejoInlineReply, commandText, forgejoInlineReplyPayload, recordForgejoFeedback } from "./lib/shared.ts";
 
 export const AutoReviewForgejoPlugin: Plugin = async () => ({

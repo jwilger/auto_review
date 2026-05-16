@@ -1,6 +1,6 @@
 ---
 description: Run focused or full repository verification through the Nix-pinned toolchain.
-agent: auto-review-rust-implementer
+agent: build
 ---
 
 Verify the current work: $ARGUMENTS

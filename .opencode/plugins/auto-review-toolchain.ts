@@ -1,4 +1,4 @@
-import type { Plugin } from "@kilocode/plugin";
+import type { Plugin } from "@opencode-ai/plugin";
 import { blocksUnsafeToolchainCommand, commandText } from "./lib/shared.ts";
 
 export const AutoReviewToolchainPlugin: Plugin = async ({ worktree }) => ({

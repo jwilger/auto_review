@@ -1,6 +1,6 @@
 ---
 description: Prepare a scoped Forgejo PR with explicit-path staging and conventional commit checks.
-agent: auto-review-rust-implementer
+agent: build
 ---
 
 Prepare a Forgejo PR for: $ARGUMENTS
