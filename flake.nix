@@ -162,6 +162,7 @@
             || strPath == "${toString ./.}/.forgejo/pull_request_template.md"
             || strPath == "${toString ./.}/opencode.json"
             || strPath == "${toString ./.}/.opencode/agents/build.md"
+            || strPath == "${toString ./.}/.opencode/agents/rgr-implementation-reviewer.md"
             || strPath == "${toString ./.}/.opencode/commands/prepare-forgejo-pr.md"
             || strPath == "${toString ./.}/.opencode/plugins/auto-review-toolchain.ts"
             || strPath == "${toString ./.}/.opencode/plugins/auto-review-discipline.ts"
