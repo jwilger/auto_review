@@ -44,7 +44,7 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree }) => ({
         if (!current) throw new Error("Start an RGR cycle before recording RED.");
         validateRgrRedEvidence(args.output);
         setCycle(context.sessionID, { ...current, command: args.command, failingOutput: args.output, stage: "red" });
-        return "RED recorded. Minimum production edits are now allowed for this cycle.";
+        return "RED recorded. RED review approval is required before production edits.";
       },
     }),
     rgr_approve_red: tool({
