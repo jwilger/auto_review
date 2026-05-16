@@ -237,6 +237,7 @@ test_prepare_workflow_closes_superseded_release_prs_before_creating_current_pr()
 
   output="$(python3 - "$prepare_workflow" <<'PY'
 import pathlib
+import re
 import sys
 
 workflow = pathlib.Path(sys.argv[1]).read_text()
@@ -246,12 +247,54 @@ if create_marker not in workflow:
     sys.exit(1)
 
 before_create = workflow.split(create_marker, 1)[0]
-required_markers = [
-    'pulls?state=open',
-    'release/v',
-    'superseded',
+login_marker = 'tea login add'
+existing_pr_branch_marker = 'if [ -z "$existing_pr" ]; then'
+if login_marker not in before_create:
+    print('prepare workflow is missing tea login before release PR lookup')
+    sys.exit(1)
+lookup_and_create = before_create.split(login_marker, 1)[1]
+if existing_pr_branch_marker not in lookup_and_create:
+    print('prepare workflow is missing existing release PR branch after open PR lookup')
+    sys.exit(1)
+lookup_section = lookup_and_create.split(existing_pr_branch_marker, 1)[0]
+
+raw_api_marker = 'pulls?state=open'
+if raw_api_marker in lookup_section:
+    print('prepare workflow uses raw Forgejo pulls API for open release PR lookup before jq: ' + raw_api_marker)
+    sys.exit(1)
+
+structured_listing = re.search(
+    r'(?:\btea|\$\{?TEA\}?|/[^\s|;&]*tea|nix\s+develop\s+--command\s+(?:tea|\$\{?TEA\}?))\s+(?:pr\s+ls|pulls\s+list)\b',
+    lookup_section,
+)
+if not structured_listing:
+    print('prepare workflow does not use tea structured PR listing in the open release PR lookup section')
+    sys.exit(1)
+
+required_listing_markers = [
+    '--state open',
+    '--output json',
 ]
-missing = [marker for marker in required_markers if marker not in before_create]
+missing_listing = [marker for marker in required_listing_markers if marker not in lookup_section]
+field_markers = ['index', 'number']
+head_markers = ['head', 'head.ref', 'head_branch']
+if not any(marker in lookup_section for marker in field_markers):
+    missing_listing.append('PR index/number field')
+if not any(marker in lookup_section for marker in head_markers):
+    missing_listing.append('PR head branch field')
+if missing_listing:
+    print('prepare workflow structured PR listing is missing open-release lookup markers in the lookup section: ' + ', '.join(missing_listing))
+    sys.exit(1)
+
+first_jq = lookup_section.find('jq')
+if first_jq != -1:
+    structured_listing_index = structured_listing.start()
+    if structured_listing_index > first_jq:
+        print('prepare workflow parses open release PRs with jq before the structured tea PR listing runs')
+        sys.exit(1)
+
+required_markers = ['release/v', 'superseded']
+missing = [marker for marker in required_markers if marker not in lookup_section]
 if missing:
     print('prepare workflow does not identify superseded open release/v* PRs before creating the current release PR: ' + ', '.join(missing))
     sys.exit(1)
@@ -266,7 +309,14 @@ if not any(marker in before_create for marker in close_markers):
     print('prepare workflow does not close superseded open release/v* PRs before creating the current release PR')
     sys.exit(1)
 
-if '.head.ref != $branch' not in before_create and '.head.ref != $current_branch' not in before_create and '!= "$branch"' not in before_create:
+preserves_current_branch = any(marker in lookup_section for marker in [
+    '.head.ref != $branch',
+    '.head.ref != $current_branch',
+    '.head != $branch',
+    '.head != $current_branch',
+    '!= "$branch"',
+])
+if not preserves_current_branch:
     print('prepare workflow does not preserve the current release branch while closing older release/v* PRs')
     sys.exit(1)
 PY
