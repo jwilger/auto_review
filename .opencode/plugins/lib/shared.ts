@@ -8,6 +8,7 @@ export type RgrCycle = {
   command?: string;
   failingOutput?: string;
   reviewedRed?: boolean;
+  implementationEditToken?: boolean;
   stage: RgrStage;
 };
 

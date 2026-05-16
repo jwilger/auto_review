@@ -43,7 +43,7 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree }) => ({
         const current = getCycle(context.sessionID);
         if (!current) throw new Error("Start an RGR cycle before recording RED.");
         validateRgrRedEvidence(args.output);
-        setCycle(context.sessionID, { ...current, command: args.command, failingOutput: args.output, reviewedRed: false, stage: "red" });
+        setCycle(context.sessionID, { ...current, command: args.command, failingOutput: args.output, reviewedRed: false, implementationEditToken: false, stage: "red" });
         return "RED recorded. RED review approval is required before production edits.";
       },
     }),
@@ -63,7 +63,7 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree }) => ({
       async execute(args, context) {
         const current = getCycle(context.sessionID);
         if (!current?.failingOutput) throw new Error("Cannot mark GREEN before observed RED is recorded.");
-        setCycle(context.sessionID, { ...current, stage: "green" });
+        setCycle(context.sessionID, { ...current, implementationEditToken: false, stage: "green" });
         recordVerification(context.sessionID, args.output);
         return "GREEN recorded. Refactoring is allowed with tests green.";
       },
@@ -95,6 +95,10 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree }) => ({
         if (!current?.reviewedRed) {
           throw new Error("RGR gate: production Rust edits under crates/*/src require RED review approval recorded with rgr_approve_red.");
         }
+        if (current.implementationEditToken) {
+          throw new Error("RGR gate: another behavioral production edit requires rerunning the focused command and recording RED or GREEN first.");
+        }
+        setCycle(input.sessionID, { ...current, implementationEditToken: true });
       }
     }
     if (/todo(write|update)?$/i.test(input.tool) && rejectsWaterfallTodo(output.args)) {
