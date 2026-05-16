@@ -15,8 +15,7 @@ function changedPathsFromArgs(args: unknown): string[] {
   if (typeof directPath === "string") return [directPath];
   const patchText = record.patchText;
   if (typeof patchText !== "string") return [];
-  const updateFile = patchText.match(/^\*\*\* Update File: (.+)$/m);
-  return updateFile?.[1] ? [updateFile[1]] : [];
+  return Array.from(patchText.matchAll(/^\*\*\* Update File: (.+)$/gm), (match) => match[1]);
 }
 
 function isEditTool(toolID: string): boolean {
@@ -99,9 +98,9 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree }) => ({
   },
   "tool.execute.before": async (input, output) => {
     if (isEditTool(input.tool)) {
-      const path = filePathFromArgs(output.args);
-      if (path) recordTouchedFile(input.sessionID, path);
-      if (path && isProductionRustPath(path) && !isLikelyTestPath(path) && !isNonBehavioralPath(path)) {
+      for (const path of changedPathsFromArgs(output.args)) {
+        recordTouchedFile(input.sessionID, path);
+        if (!isProductionRustPath(path) || isLikelyTestPath(path) || isNonBehavioralPath(path)) continue;
         const current = getCycle(input.sessionID);
         if (!current?.reviewedRed) {
           throw new Error("RGR gate: production Rust edits under crates/*/src require RED review approval recorded with rgr_approve_red.");
