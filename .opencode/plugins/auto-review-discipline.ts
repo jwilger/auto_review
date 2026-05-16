@@ -8,6 +8,17 @@ function filePathFromArgs(args: unknown): string | undefined {
   return typeof path === "string" ? path : undefined;
 }
 
+function changedPathsFromArgs(args: unknown): string[] {
+  if (!args || typeof args !== "object") return [];
+  const record = args as Record<string, unknown>;
+  const directPath = record.filePath ?? record.file_path ?? record.path;
+  if (typeof directPath === "string") return [directPath];
+  const patchText = record.patchText;
+  if (typeof patchText !== "string") return [];
+  const updateFile = patchText.match(/^\*\*\* Update File: (.+)$/m);
+  return updateFile?.[1] ? [updateFile[1]] : [];
+}
+
 function isEditTool(toolID: string): boolean {
   return /(^|\.)(edit|write|apply_patch)$/i.test(toolID) || /apply_patch/i.test(toolID);
 }
