@@ -77,7 +77,9 @@ export function validateRgrRedEvidence(output: string): void {
 export function assertCleanWorktree(worktree: string): void {
   const status = execFileSync("git", ["-C", worktree, "status", "--porcelain"], { encoding: "utf8" });
   if (status.trim()) {
-    throw new Error("RGR gate: start a new cycle only from a clean worktree.");
+    throw new Error(
+      "RGR gate: start a new cycle only from a clean worktree. Commit the approved GREEN/refactor state before starting the next RED."
+    );
   }
 }
 
