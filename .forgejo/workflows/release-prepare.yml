@@ -135,10 +135,10 @@ jobs:
           if [ -z "$existing_pr" ]; then
             nix develop --command tea pr create --login "$tea_login" --repo jwilger/auto_review --head "$branch" --base main --title "chore: release v$RELEASE_VERSION" --description "Prepare release v$RELEASE_VERSION.
 
-            CI publishes release-candidate Docker and binary package links on the PR; final release entries are created only after merge to main."
+            CI publishes release-candidate binary package links on the PR; final release entries are created only after merge to main."
           else
             printf 'release PR already open: #%s\n' "$existing_pr"
             nix develop --command tea pr edit --login "$tea_login" --repo jwilger/auto_review "$existing_pr" --description "Prepare release v$RELEASE_VERSION.
 
-            CI publishes release-candidate Docker and binary package links on the PR; final release entries are created only after merge to main."
+            CI publishes release-candidate binary package links on the PR; final release entries are created only after merge to main."
           fi
