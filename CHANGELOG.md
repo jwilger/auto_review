@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.14.0] - 2026-05-17
+
+### Fixed
+
+- *(release)* install publish workflow tools (#200)
+- *(review)* accept repo-scoped review corrections (#204)
+- *(gateway)* report invalid OCI env values (#206)
+- *(release)* use structured PR lookup JSON (#211)
+- *(opencode)* enforce disciplined RGR guardrails (#212)
+- *(opencode)* require RGR cycle before RED author delegation (#228)
+- *(release)* push release branch inside Nix (#230)
+- *(ci)* stop publishing PR packages (#232)
+
+### Other
+
+- release v0.13.0 (#196)
+- include release automation in threat scope (#202)
+- *(pi)* require reviewed typed tools (#205)
+- apply threat model markdown formatting (#203)
+- *(pi)* add safe branch workflow tools (#208)
+- *(opencode)* migrate project agent config (#210)
+- reconstruct ADR event stream and add workflow tools (#213)
+- record Just-based CI distribution ADR (#222)
+- *(ci)* retire release workflow text tests (#223)
+- *(dev)* add just command interface (#224)
+- *(nix)* keep checks to retained boundaries (#225)
+- *(ci)* run PR checks as parallel just jobs (#227)
+- *(release)* remove official gateway image artifacts (#229)
+- *(dev)* add gateway serve recipes (#231)
+
 ## [0.13.0] - 2026-05-14
 
 ### Fixed
