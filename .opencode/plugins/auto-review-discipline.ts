@@ -201,6 +201,11 @@ function rejectsBroadDiagnosticTask(args: unknown): boolean {
   return broadFix || !namesDiagnostic || !namesAllowedChange;
 }
 
+function isRgrTestAuthorTask(args: unknown): boolean {
+  if (!args || typeof args !== "object") return false;
+  return (args as Record<string, unknown>).subagent_type === "rgr-test-author";
+}
+
 export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => ({
   tool: {
     rgr_start: tool({
@@ -444,6 +449,9 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
     }
     if (/^task$/i.test(input.tool) && rejectsBroadDiagnosticTask(output.args)) {
       throw new Error("RGR task gate: rgr-diagnostic-implementer prompts must name one current diagnostic and the allowed immediate change.");
+    }
+    if (/^task$/i.test(input.tool) && isRgrTestAuthorTask(output.args) && !getCycle(input.sessionID)) {
+      throw new Error("RGR task gate: start an RGR cycle with rgr_start before delegating to rgr-test-author; recover by starting the cycle or asking the orchestrator to do so.");
     }
   },
   "experimental.session.compacting": async (input, output) => {
