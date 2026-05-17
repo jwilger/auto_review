@@ -23,7 +23,7 @@ just build
 
 `cargo deny check advisories` requires network and is excluded from the default `just deny`/CI policy gate; run it manually when bumping dependencies.
 
-Use `nix run .#dev-gateway-container` for the containerized gateway development watcher. Use `bacon`, `bacon clippy`, or `bacon test` for focused Rust check loops.
+Use `bacon`, `bacon clippy`, or `bacon test` for focused Rust check loops.
 
 ## Forgejo, Not GitHub
 
