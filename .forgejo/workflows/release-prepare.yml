@@ -121,7 +121,7 @@ jobs:
             exit 0
           fi
           git commit -m "chore: release v$RELEASE_VERSION"
-          git push --force-with-lease origin "$branch"
+          nix develop --command git push --force-with-lease origin "$branch"
           export GITEA_SERVER_URL="https://git.johnwilger.com"
           export GITEA_SERVER_TOKEN="$RELEASE_PREPARE_TOKEN"
           tea_login="auto_review-release-${GITHUB_RUN_ID:-$$}"
