@@ -73,25 +73,22 @@ Actions secret such as `AUTO_REVIEW_ACTION_TOKEN`.
 
 ## 4. Run the gateway
 
-Production deployment is container-first. The release image runs the same
-`auto-review gateway` binary and marks the external container boundary with
-`AR_GATEWAY_EXTERNAL_ISOLATION=container`.
-
-For local evaluation or a custom host boundary, run the direct binary explicitly
-in bare mode:
+On supported Linux hosts, the packaged `auto-review` binary starts the gateway
+through the embedded OCI launcher by default:
 
 ```sh
 set -a
 . ./auto-review.env
 set +a
-$AUTO_REVIEW gateway --bare
+$AUTO_REVIEW gateway
 ```
 
-Bare mode is an explicit opt-out from the embedded OCI launcher. It keeps
-application-level controls only and is not container-equivalent isolation.
+Use `auto-review gateway --bare` only for local evaluation or custom host
+boundaries where you intentionally opt out of embedded OCI isolation. Bare mode
+keeps application-level controls only and is not container-equivalent isolation.
 
-See [Deployment](./DEPLOYMENT.md) for container image, NixOS, Kubernetes/Helm,
-systemd, and observability install details.
+See [Deployment](./DEPLOYMENT.md) for binary, NixOS, systemd, custom
+container/Kubernetes/Helm, and observability install details.
 
 ## 5. Register the webhook
 

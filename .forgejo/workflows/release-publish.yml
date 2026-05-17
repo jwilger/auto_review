@@ -41,7 +41,6 @@ jobs:
             fi
           done
           PATH="$NIX_BIN_DIR:$PATH" nix profile install \
-            nixpkgs#skopeo \
             nixpkgs#tea \
             nixpkgs#jq \
             nixpkgs#curl \
@@ -172,7 +171,6 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
         run: |
           set -euo pipefail
-          SKOPEO=/nix/var/nix/profiles/default/bin/skopeo
           TEA=/nix/var/nix/profiles/default/bin/tea
           JQ=/nix/var/nix/profiles/default/bin/jq
           CURL=/nix/var/nix/profiles/default/bin/curl
@@ -181,7 +179,6 @@ jobs:
           MKTEMP=/nix/var/nix/profiles/default/bin/mktemp
           CAT=/nix/var/nix/profiles/default/bin/cat
           MKDIR=/nix/var/nix/profiles/default/bin/mkdir
-          [ -x "$SKOPEO" ]
           [ -x "$TEA" ]
           [ -x "$JQ" ]
           [ -x "$CURL" ]
@@ -190,7 +187,6 @@ jobs:
           [ -x "$MKTEMP" ]
           [ -x "$CAT" ]
           [ -x "$MKDIR" ]
-          printf 'SKOPEO=%s\n' "$SKOPEO" >> "$GITHUB_ENV"
           printf 'TEA=%s\n' "$TEA" >> "$GITHUB_ENV"
           printf 'JQ=%s\n' "$JQ" >> "$GITHUB_ENV"
           printf 'CURL=%s\n' "$CURL" >> "$GITHUB_ENV"
@@ -199,7 +195,7 @@ jobs:
           printf 'MKTEMP=%s\n' "$MKTEMP" >> "$GITHUB_ENV"
           printf 'CAT=%s\n' "$CAT" >> "$GITHUB_ENV"
           printf 'MKDIR=%s\n' "$MKDIR" >> "$GITHUB_ENV"
-      - name: Derive release PR image digest from merged release commit
+      - name: Derive release PR coordinates from merged release commit
         if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
         run: |
           set -euo pipefail
@@ -217,17 +213,8 @@ jobs:
           release_pr_json="$(curl -fsSL "https://git.johnwilger.com/api/v1/repos/jwilger/auto_review/pulls/$RELEASE_PR_NUMBER")"
           export RELEASE_MERGE_SHA
           RELEASE_PR_HEAD_SHA="$(RELEASE_PR_JSON="$release_pr_json" python3 -c 'import json, os; pr = json.loads(os.environ["RELEASE_PR_JSON"]); assert pr["merged"] is True and pr["merge_commit_sha"] == os.environ["RELEASE_MERGE_SHA"], "Reviewed-on PR is not the release merge commit"; print(pr["head"]["sha"])')"
-          release_pr_source_image="docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:release-candidate"
-          RELEASE_PR_IMAGE_DIGEST="$($SKOPEO inspect --format '{{.Digest}}' "$release_pr_source_image")"
-          if [[ "$RELEASE_PR_IMAGE_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
-            :
-          else
-            printf 'release PR image digest was not sha256-shaped: %s\n' "$RELEASE_PR_IMAGE_DIGEST" >&2
-            exit 1
-          fi
           printf 'RELEASE_PR_NUMBER=%s\n' "$RELEASE_PR_NUMBER" >> "$GITHUB_ENV"
           printf 'RELEASE_PR_HEAD_SHA=%s\n' "$RELEASE_PR_HEAD_SHA" >> "$GITHUB_ENV"
-          printf 'RELEASE_PR_IMAGE_DIGEST=%s\n' "$RELEASE_PR_IMAGE_DIGEST" >> "$GITHUB_ENV"
       - name: Download reviewed Linux binary release artifacts
         if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
         env:
@@ -375,39 +362,6 @@ jobs:
             sha256sum -c SHA256SUMS
             nix develop --command ssh-keygen -Y verify -f allowed-signers -I "$RELEASE_BOT_EMAIL" -n file -s SHA256SUMS.sig < SHA256SUMS
           )
-      - name: Promote release PR Docker image to Forgejo package registry
-        if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
-        env:
-          RELEASE_PUBLISH_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
-          RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
-        run: |
-          set -euo pipefail
-          "$MKDIR" -p "$HOME/.config/containers"
-          "$CAT" > "$HOME/.config/containers/policy.json" <<'EOF'
-          {
-            "default": [
-              {
-                "type": "insecureAcceptAnything"
-              }
-            ]
-          }
-          EOF
-          if [ -z "${RELEASE_PUBLISH_TOKEN:-}" ]; then
-            printf 'missing RELEASE_PUBLISH_TOKEN\n' >&2
-            exit 1
-          fi
-          if [ -z "${RELEASE_BOT_NAME:-}" ]; then
-            printf 'missing RELEASE_BOT_NAME repository variable\n' >&2
-            exit 1
-          fi
-          if [[ ! "$RELEASE_PR_IMAGE_DIGEST" =~ ^sha256:[0-9a-fA-F]{64}$ ]]; then
-            printf 'release PR image digest was not sha256-shaped: %s\n' "$RELEASE_PR_IMAGE_DIGEST" >&2
-            exit 1
-          fi
-          release_pr_source_digest_image="docker://git.johnwilger.com/jwilger/auto_review/ar-gateway@$RELEASE_PR_IMAGE_DIGEST"
-          "$SKOPEO" inspect --creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" "$release_pr_source_digest_image" > /dev/null
-          "$SKOPEO" copy --src-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" "$release_pr_source_digest_image" "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:$RELEASE_VERSION"
-          "$SKOPEO" copy --src-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" --dest-creds "${RELEASE_BOT_NAME}:$RELEASE_PUBLISH_TOKEN" "$release_pr_source_digest_image" "docker://git.johnwilger.com/jwilger/auto_review/ar-gateway:latest"
       - name: Create Forgejo Release
         if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
         env:
@@ -419,7 +373,6 @@ jobs:
           RELEASE_NOTES_FILE="$($MKTEMP)"
           # Generate notes from the finalized CHANGELOG.md ## [$RELEASE_VERSION] section.
           "$AWK" "/^## \\[$RELEASE_VERSION\\]/{emit=1; next} /^## \\[/{if (emit) exit} emit {print}" CHANGELOG.md > "$RELEASE_NOTES_FILE"
-          printf '\nDocker image: git.johnwilger.com/jwilger/auto_review/ar-gateway:%s\n' "$RELEASE_VERSION" >> "$RELEASE_NOTES_FILE"
           printf '\nLinux binary archive:\n- auto-review-%s-linux-x86_64.tar.gz\n' "$RELEASE_VERSION" >> "$RELEASE_NOTES_FILE"
           printf '\nVerify downloads before use:\n```bash\nsha256sum -c SHA256SUMS\nssh-keygen -Y verify -f allowed-signers -I %s -n file -s SHA256SUMS.sig < SHA256SUMS\n```\n' "$RELEASE_BOT_EMAIL" >> "$RELEASE_NOTES_FILE"
           tea_login="auto_review-release-publish-${GITHUB_RUN_ID:-$$}"

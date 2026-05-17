@@ -1183,14 +1183,13 @@ mod tests {
             flake.contains("default = self.packages.${system}.ar-cli;"),
             "nix default package should publish the unified auto-review binary"
         );
-        let whitespace_normalized_flake = flake.split_whitespace().collect::<Vec<_>>().join(" ");
         assert!(
-            whitespace_normalized_flake.contains("Cmd = [ \"/bin/auto-review\" \"gateway\" ];"),
-            "gateway container should start through auto-review gateway"
+            !flake.contains("ar-gateway-image"),
+            "flake should not publish an official gateway Docker/OCI image package"
         );
         assert!(
-            flake.contains("AR_GATEWAY_EXTERNAL_ISOLATION=container"),
-            "gateway container should mark its external container isolation so the direct-binary OCI launcher is not used inside the image"
+            !flake.contains("git.johnwilger.com/jwilger/auto_review/ar-gateway"),
+            "flake should not publish the official gateway image repository"
         );
         assert!(
             !flake.contains("cargoExtraArgs = \"-p ar-gateway --bin ar-gateway\""),
@@ -1217,7 +1216,7 @@ mod tests {
             ),
             (
                 embedded_package.contains("rootfs") && embedded_package.contains("config.json"),
-                "embedded gateway artifact should be an OCI bundle/rootfs, not only the published Docker image",
+                "embedded gateway artifact should be an OCI bundle/rootfs for the direct binary package",
             ),
             (
                 embedded_package.contains("${ar-cli}/bin/auto-review")

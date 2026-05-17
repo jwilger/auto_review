@@ -6,17 +6,15 @@ layouts and platform-specific details.
 
 ## Recommended production posture
 
-Use the published Docker/OCI image for production. It runs `auto-review gateway`
-inside an external container boundary and sets
-`AR_GATEWAY_EXTERNAL_ISOLATION=container` so startup logs, `/info`, and
-`auto-review ops status` report the correct runtime posture.
-
-Direct binary execution is supported for local evaluation, diagnostics, custom VM
-images, and operators who intentionally own the host boundary. On supported Linux
-hosts, the packaged binary attempts embedded OCI isolation by default. If that is
-unavailable, startup fails closed unless you explicitly opt out with
+Use the signed `auto-review` Linux binary archive for production. On supported
+Linux hosts, the packaged binary attempts embedded OCI isolation by default. If
+that is unavailable, startup fails closed unless you explicitly opt out with
 `auto-review gateway --bare` or `AR_GATEWAY_BARE=true`. Bare mode is not
 container-equivalent isolation.
+
+The project does not publish an official Docker/OCI image as a first-class
+artifact. Operators who want Docker, Podman, Kubernetes, or Helm deployments may
+build and publish their own image from the binary package.
 
 ## Environment file
 
@@ -40,20 +38,15 @@ RUST_LOG=info,ar_gateway=debug
 Keep this file out of Git and out of the Nix store. Use your platform's secret
 manager for production.
 
-## Container image
+## Custom container images
 
-The release image is published under the Forgejo package registry:
+No official `auto_review` gateway image is published. If your production boundary
+is Docker, Podman, Kubernetes, or a platform that consumes OCI images, build and
+publish an operator-owned image that runs `auto-review gateway`, includes `git`,
+listens on `0.0.0.0:8080`, and stores persistent state under
+`/var/lib/auto_review`.
 
-```text
-git.johnwilger.com/jwilger/auto_review/ar-gateway:<version>
-git.johnwilger.com/jwilger/auto_review/ar-gateway:latest
-```
-
-The image listens on `0.0.0.0:8080`, contains `auto-review` plus `git`, and runs
-as uid/gid `65532`. Mount a state volume at `/var/lib/auto_review` when using
-SQLite persistence.
-
-Example with Podman or Docker:
+Example with an operator-owned Podman or Docker image:
 
 ```sh
 podman run -d --name auto-review \
@@ -61,14 +54,14 @@ podman run -d --name auto-review \
   --env-file /etc/auto_review/auto_review.env \
   -p 127.0.0.1:8080:8080 \
   -v auto-review-state:/var/lib/auto_review \
-  git.johnwilger.com/jwilger/auto_review/ar-gateway:latest
+  registry.example.com/auto-review/ar-gateway:latest
 ```
 
 Put a TLS-terminating reverse proxy in front of `127.0.0.1:8080` and point
 Forgejo webhooks at `https://reviewer.example.com/webhooks/forgejo`.
 
-Use the release image or the Nix image package instead of building ad-hoc
-operator images from source-tree Dockerfiles.
+Treat operator-owned images as part of your deployment boundary: scan, sign, and
+promote them with your normal platform controls.
 
 ## Nix and NixOS
 
@@ -78,25 +71,6 @@ Build or install the current program:
 nix build git+https://git.johnwilger.com/jwilger/auto_review
 nix profile install git+https://git.johnwilger.com/jwilger/auto_review
 nix shell git+https://git.johnwilger.com/jwilger/auto_review -c auto-review --help
-```
-
-Build the production image artifact from source:
-
-```sh
-nix build git+https://git.johnwilger.com/jwilger/auto_review#ar-gateway-image
-```
-
-On NixOS, prefer the OCI image for production:
-
-```nix
-{
-  virtualisation.oci-containers.containers.auto-review-gateway = {
-    image = "git.johnwilger.com/jwilger/auto_review/ar-gateway:latest";
-    ports = [ "127.0.0.1:8080:8080" ];
-    volumes = [ "auto-review-state:/var/lib/auto_review" ];
-    environmentFiles = [ "/run/secrets/auto-review-gateway.env" ];
-  };
-}
 ```
 
 The flake also ships a NixOS module for direct-host deployments and for installing
@@ -124,7 +98,8 @@ only the CLI:
 ```
 
 The module's gateway service intentionally sets `AR_GATEWAY_BARE=true`; it is a
-systemd/direct-host deployment path, not the recommended container boundary.
+systemd/direct-host deployment path with systemd hardening rather than embedded
+OCI isolation.
 
 To install the CLI without enabling the service:
 
@@ -171,8 +146,7 @@ The example env file sets `AR_GATEWAY_BARE=true` and binds the service to
 `127.0.0.1:8080` for a reverse proxy. The unit adds systemd hardening such as
 `NoNewPrivileges`, `ProtectSystem=strict`, `PrivateTmp`, `PrivateDevices`,
 empty capability sets, and syscall filtering. These controls are defense in
-depth around a bare process; they are not equivalent to the recommended
-container deployment.
+depth around a bare process; they are not equivalent to embedded OCI isolation.
 
 Upgrade a systemd host with the pinned Nix build:
 
@@ -188,11 +162,12 @@ auto-review ops doctor
 ## Kubernetes / Helm
 
 The Helm chart in `deploy/helm` creates a Deployment, Service, optional Ingress,
-and Secret. Use the current Forgejo image repository:
+and Secret for an operator-owned image. Build and publish that image first, then
+point the chart at your repository:
 
 ```sh
 helm install auto-review ./deploy/helm \
-  --set image.repository=git.johnwilger.com/jwilger/auto_review/ar-gateway \
+  --set image.repository=registry.example.com/auto-review/ar-gateway \
   --set image.tag=latest \
   --set config.forgejoBaseUrl=https://forgejo.example.com \
   --set config.llmBaseUrl=https://api.openai.com \
@@ -218,7 +193,7 @@ kubectl create secret generic auto-review-creds \
   --from-literal=LLM_API_KEY=...
 
 helm install auto-review ./deploy/helm \
-  --set image.repository=git.johnwilger.com/jwilger/auto_review/ar-gateway \
+  --set image.repository=registry.example.com/auto-review/ar-gateway \
   --set config.forgejoBaseUrl=https://forgejo.example.com \
   --set config.llmBaseUrl=https://api.openai.com \
   --set secrets.secretRef=auto-review-creds

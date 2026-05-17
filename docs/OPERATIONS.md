@@ -48,20 +48,19 @@ fails; `webhook test` exits non-zero when the gateway returns non-2xx.
 
 ## 0.1 Deployment posture
 
-The recommended production deployment remains the Docker/OCI image. It runs the
-same `auto-review` binary as direct installs, but the image supplies an external
-container boundary and marks that posture with
-`AR_GATEWAY_EXTERNAL_ISOLATION=container`.
-
-Direct binary use is supported for local diagnostics, evaluation, and operators
-who intentionally manage the host boundary themselves. On supported Linux hosts,
+The recommended out-of-the-box Linux deployment is the signed `auto-review`
+binary with embedded OCI isolation. On supported Linux hosts,
 `auto-review gateway` defaults to the embedded OCI launcher. If embedded OCI
 setup is unavailable, startup fails closed unless the operator explicitly opts
 out with `auto-review gateway --bare` or `AR_GATEWAY_BARE=true`. That opt-out
 leaves only application-level controls active and must not be treated as
 container-equivalent isolation.
 
-Install details for container image, Nix/NixOS, systemd, Kubernetes/Helm,
+The project does not publish an official Docker/OCI image. Operators who want
+Docker, Podman, Kubernetes, or Helm deployments may build and publish their own
+image from the binary package.
+
+Install details for binary, Nix/NixOS, systemd, custom container/Kubernetes/Helm,
 Forgejo Actions, Prometheus, Grafana, and runner cache setup live in
 [Deployment](./DEPLOYMENT.md).
 
@@ -173,13 +172,13 @@ Configure the release preparation credential as Forgejo Actions secret `RELEASE_
 Create a dedicated release bot Forgejo user for release PR commits. Add its
 public SSH signing key to that account, store the private key as Forgejo Actions secret `RELEASE_SIGNING_KEY`, and set repository variables `RELEASE_BOT_NAME` and `RELEASE_BOT_EMAIL` to the bot identity attached to the signing key. Release publish also uses that SSH signing key to sign `SHA256SUMS`.
 
-Configure the release publishing credential as Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`, owned by the same release bot named in `RELEASE_BOT_NAME`. Its release publishing PAT blast radius is to publish container images to `git.johnwilger.com/jwilger/auto_review/ar-gateway` and create Forgejo Releases only in `jwilger/auto_review`; it also covers publish PR Docker/container package, delete PR Docker/container package, publish generic package, delete generic package, and managed PR body/description edit for artifact links.
+Configure the release publishing credential as Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`, owned by the same release bot named in `RELEASE_BOT_NAME`. Its release publishing PAT blast radius is to publish Linux binary archives, checksums, signatures, SBOM/provenance metadata, and Forgejo Releases only in `jwilger/auto_review`; it also covers publish generic package, delete generic package, and managed PR body/description edit for artifact links.
 
-The PR package publishing credential model keeps `RELEASE_PUBLISH_TOKEN` out of checkout/build steps and exposes it only after artifacts exist. CI publishes PR Docker images under a package name distinct from final releases, publishes PR binary downloads as Forgejo generic packages, updates the PR description with those links, and will delete PR Docker and binary packages after the PR merges.
+The PR package publishing credential model keeps `RELEASE_PUBLISH_TOKEN` out of checkout/build steps and exposes it only after artifacts exist. CI publishes PR binary downloads as Forgejo generic packages, updates the PR description with those links, and will delete PR binary packages after the PR merges.
 
-Final release publication builds and verifies the Linux x86_64 binary archive,
-publishes the release image tags from the merged release image archive, attaches
-the final binary assets, and includes verification commands in the release notes:
+Final release publication verifies the reviewed Linux x86_64 binary archive,
+attaches the final binary assets, and includes verification commands in the
+release notes:
 
 ```bash
 sha256sum -c SHA256SUMS
@@ -384,30 +383,13 @@ pressure now usually means too many concurrent reviews, large workspaces, or
 slow LLM calls rather than runaway linter execution.
 
 Run the gateway inside your deployment isolation boundary (for example the
-published container image, a VM, or a deliberately hardened service-manager
-sandbox). The project exposes a Nix-built OCI image as `.#ar-gateway-image`; the
-image runs as uid/gid 65532 and binds `0.0.0.0:8080` inside the container.
+packaged binary's embedded OCI launcher, an operator-owned container image, a VM,
+or a deliberately hardened service-manager sandbox).
 
 The default Nix package installs the `auto-review` binary. Use `nix build .`
 when constructing custom VM images, custom container images, or direct systemd
-hosts; use `nix build .#ar-gateway-image` when you want the project image
-artifact. A NixOS module is available for direct-host deployments, but the
-container image remains the recommended production boundary. See
+hosts. A NixOS module is available for direct-host deployments. See
 [Deployment](./DEPLOYMENT.md#nix-and-nixos).
-
-For local development against the same image shape:
-
-```bash
-nix run .#dev-gateway-container
-```
-
-The watcher rebuilds `.#ar-gateway-image`, loads it into Podman or Docker,
-removes the prior `auto-review-dev` container, and relaunches it on
-`127.0.0.1:8090` by mapping the host dev port to the container's port 8080. It
-passes common gateway/LLM environment variables through
-from the host and reads `.env` by default when present; override with
-`AR_DEV_ENV_FILE`, `AR_DEV_ENV_PASSTHROUGH`, `AR_DEV_CONTAINER_RUNTIME`,
-`AR_DEV_CONTAINER_NAME`, `AR_DEV_IMAGE_TAG`, or `AR_DEV_GATEWAY_PORT`.
 
 ### 5.1.5 Cap concurrent in-flight reviews
 
