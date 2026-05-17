@@ -1,7 +1,9 @@
 # Default values for the auto-review Helm chart.
 
 image:
-  repository: git.johnwilger.com/jwilger/auto_review/ar-gateway
+  # auto_review does not publish an official gateway image. Set this to an
+  # operator-owned image repository before installing the chart.
+  repository: registry.example.com/auto-review/ar-gateway
   tag: ""  # defaults to .Chart.AppVersion
   pullPolicy: IfNotPresent
 
