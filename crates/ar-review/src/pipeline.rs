@@ -234,7 +234,7 @@ fn has_clearly_acceptable_release_pr_metadata(title: &str, body: &str) -> bool {
         && version[1..].chars().all(|c| c.is_ascii_digit() || c == '.')
         && body.starts_with(&format!("Prepare release {version}."))
         && body.contains(
-            "Docker and binary package links on the PR; final release entries are created only \
+            "binary package links on the PR; final release entries are created only \
              after merge to main.",
         )
 }
@@ -1672,7 +1672,7 @@ mod tests {
             pr_number: 7,
             head_sha: "deadbeef",
             pr_title: "chore: release v0.10.0",
-            pr_body: "Prepare release v0.10.0.\n\nCI publishes release-candidate Docker and binary package links on the PR; final release entries are created only after merge to main.",
+            pr_body: "Prepare release v0.10.0.\n\nCI publishes release-candidate binary package links on the PR; final release entries are created only after merge to main.",
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
