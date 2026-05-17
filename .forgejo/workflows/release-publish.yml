@@ -42,8 +42,6 @@ jobs:
           done
           PATH="$NIX_BIN_DIR:$PATH" nix profile install \
             nixpkgs#tea \
-            nixpkgs#jq \
-            nixpkgs#curl \
             nixpkgs#coreutils \
             nixpkgs#gawk \
             nixpkgs#gnused
@@ -172,50 +170,24 @@ jobs:
         run: |
           set -euo pipefail
           TEA=/nix/var/nix/profiles/default/bin/tea
-          JQ=/nix/var/nix/profiles/default/bin/jq
-          CURL=/nix/var/nix/profiles/default/bin/curl
           AWK=/nix/var/nix/profiles/default/bin/awk
           SED=/nix/var/nix/profiles/default/bin/sed
           MKTEMP=/nix/var/nix/profiles/default/bin/mktemp
           CAT=/nix/var/nix/profiles/default/bin/cat
           MKDIR=/nix/var/nix/profiles/default/bin/mkdir
           [ -x "$TEA" ]
-          [ -x "$JQ" ]
-          [ -x "$CURL" ]
           [ -x "$AWK" ]
           [ -x "$SED" ]
           [ -x "$MKTEMP" ]
           [ -x "$CAT" ]
           [ -x "$MKDIR" ]
           printf 'TEA=%s\n' "$TEA" >> "$GITHUB_ENV"
-          printf 'JQ=%s\n' "$JQ" >> "$GITHUB_ENV"
-          printf 'CURL=%s\n' "$CURL" >> "$GITHUB_ENV"
           printf 'AWK=%s\n' "$AWK" >> "$GITHUB_ENV"
           printf 'SED=%s\n' "$SED" >> "$GITHUB_ENV"
           printf 'MKTEMP=%s\n' "$MKTEMP" >> "$GITHUB_ENV"
           printf 'CAT=%s\n' "$CAT" >> "$GITHUB_ENV"
           printf 'MKDIR=%s\n' "$MKDIR" >> "$GITHUB_ENV"
-      - name: Derive release PR coordinates from merged release commit
-        if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
-        run: |
-          set -euo pipefail
-          release_commit_body="$(git log -1 --format=%B "$RELEASE_MERGE_SHA")"
-          RELEASE_PR_NUMBER="$(RELEASE_COMMIT_BODY="$release_commit_body" python3 - <<'PY'
-          import os
-          import re
-          body = os.environ["RELEASE_COMMIT_BODY"]
-          match = re.search(r'Reviewed-on:\s+(?:https://git\.johnwilger\.com/)?jwilger/auto_review/pulls/([0-9]+)', body)
-          if not match:
-              raise SystemExit("Reviewed-on PR URL not found in merged release commit body")
-          print(match.group(1))
-          PY
-          )"
-          release_pr_json="$(curl -fsSL "https://git.johnwilger.com/api/v1/repos/jwilger/auto_review/pulls/$RELEASE_PR_NUMBER")"
-          export RELEASE_MERGE_SHA
-          RELEASE_PR_HEAD_SHA="$(RELEASE_PR_JSON="$release_pr_json" python3 -c 'import json, os; pr = json.loads(os.environ["RELEASE_PR_JSON"]); assert pr["merged"] is True and pr["merge_commit_sha"] == os.environ["RELEASE_MERGE_SHA"], "Reviewed-on PR is not the release merge commit"; print(pr["head"]["sha"])')"
-          printf 'RELEASE_PR_NUMBER=%s\n' "$RELEASE_PR_NUMBER" >> "$GITHUB_ENV"
-          printf 'RELEASE_PR_HEAD_SHA=%s\n' "$RELEASE_PR_HEAD_SHA" >> "$GITHUB_ENV"
-      - name: Download reviewed Linux binary release artifacts
+      - name: Build Linux binary release artifacts from merged commit
         if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
         env:
           RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
@@ -230,24 +202,15 @@ jobs:
             printf 'missing RELEASE_BOT_EMAIL repository variable\n' >&2
             exit 1
           fi
-          if [[ ! "$RELEASE_PR_NUMBER" =~ ^[0-9]+$ ]] || [[ ! "$RELEASE_PR_HEAD_SHA" =~ ^[0-9a-fA-F]{40}$ ]]; then
-            printf 'invalid reviewed release PR artifact coordinates\n' >&2
-            exit 1
-          fi
           umask 077
           signing_dir="$(mktemp -d)"
           trap 'rm -rf "$signing_dir"' EXIT TERM INT
           signing_key="$signing_dir/release-signing-key"
           printf '%s\n' "$RELEASE_SIGNING_KEY" > "$signing_key"
           chmod 600 "$signing_key"
-          "$MKDIR" -p release-artifacts reviewed-release-artifacts
-          reviewed_archive="auto-review-pr-$RELEASE_PR_NUMBER-$RELEASE_PR_HEAD_SHA-linux-x86_64.tar.gz"
-          package_base="https://git.johnwilger.com/api/packages/jwilger/generic/auto-review-release-candidate/release-candidate"
-          "$CURL" -fsSL -o "reviewed-release-artifacts/$reviewed_archive" "$package_base/$reviewed_archive"
-          "$CURL" -fsSL -o reviewed-release-artifacts/SHA256SUMS "$package_base/SHA256SUMS"
-          (cd reviewed-release-artifacts && sha256sum -c SHA256SUMS)
-          cp "reviewed-release-artifacts/$reviewed_archive" "release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz"
-          x86_release_root="$package_base/$reviewed_archive"
+          "$MKDIR" -p release-artifacts
+          x86_release_root="$(nix build .#packages.x86_64-linux.ar-cli-portable-release-root --print-out-paths --no-link)"
+          tar -C "$x86_release_root" -czf "release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz" auto-review bin nix
           (
             cd release-artifacts
             sha256sum auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz > SHA256SUMS
