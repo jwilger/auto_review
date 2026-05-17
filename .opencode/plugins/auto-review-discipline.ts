@@ -2,7 +2,7 @@ import { tool, type Plugin } from "@opencode-ai/plugin";
 import cp from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { assertCleanWorktree, getCycle, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordTouchedFile, setCycle, clearCycle, recordVerification, sessionContext, validateRgrRedEvidence } from "./lib/shared.ts";
+import { assertCleanWorktree, getCycle, consumeImplementationReviewVetoRecovery, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordImplementationReviewVetoRecovery, recordTouchedFile, setCycle, clearCycle, recordVerification, sessionContext, validateRgrRedEvidence } from "./lib/shared.ts";
 
 function filePathFromArgs(args: unknown): string | undefined {
   if (!args || typeof args !== "object") return undefined;
@@ -272,6 +272,17 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
         return items.length ? items.join("\n") : "No active RGR cycle recorded for this session.";
       },
     }),
+    rgr_recover_implementation_review_veto: tool({
+      description: "Record implementation-review veto recovery context before delegating the next RED on a dirty worktree.",
+      args: {
+        veto: tool.schema.string().describe("Implementation-review veto that requires recovery"),
+        nextRedScope: tool.schema.string().describe("Next RED scope allowed for recovery"),
+      },
+      async execute(args, context) {
+        recordImplementationReviewVetoRecovery(context.sessionID, { veto: args.veto, nextRedScope: args.nextRedScope });
+        return "Implementation-review veto recovery recorded. rgr-test-author may write the scoped next RED.";
+      },
+    }),
     adr_create: tool({
       description: "Create a Proposed ADR and store its deferred architecture projection patch.",
       args: {
@@ -451,7 +462,9 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
       throw new Error("RGR task gate: rgr-diagnostic-implementer prompts must name one current diagnostic and the allowed immediate change.");
     }
     if (/^task$/i.test(input.tool) && isRgrTestAuthorTask(output.args) && !getCycle(input.sessionID)) {
-      throw new Error("RGR task gate: start an RGR cycle with rgr_start before delegating to rgr-test-author; recover by starting the cycle or asking the orchestrator to do so.");
+      if (!consumeImplementationReviewVetoRecovery(input.sessionID)) {
+        throw new Error("RGR task gate: start an RGR cycle with rgr_start before delegating to rgr-test-author; recover by starting the cycle or asking the orchestrator to do so.");
+      }
     }
   },
   "experimental.session.compacting": async (input, output) => {

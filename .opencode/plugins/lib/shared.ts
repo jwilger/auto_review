@@ -13,6 +13,7 @@ export type RgrCycle = {
 };
 
 const cycles = new Map<string, RgrCycle>();
+const implementationReviewVetoRecovery = new Map<string, { veto: string; nextRedScope: string }>();
 const touchedFiles = new Map<string, Set<string>>();
 const verification = new Map<string, string>();
 const forgejoFeedback = new Map<string, string[]>();
@@ -97,6 +98,16 @@ export function clearCycle(sessionID: string): void {
   cycles.delete(sessionID);
 }
 
+export function recordImplementationReviewVetoRecovery(sessionID: string, recovery: { veto: string; nextRedScope: string }): void {
+  implementationReviewVetoRecovery.set(sessionID, recovery);
+}
+
+export function consumeImplementationReviewVetoRecovery(sessionID: string): { veto: string; nextRedScope: string } | undefined {
+  const recovery = implementationReviewVetoRecovery.get(sessionID);
+  implementationReviewVetoRecovery.delete(sessionID);
+  return recovery;
+}
+
 export function recordTouchedFile(sessionID: string, path: string): void {
   const files = touchedFiles.get(sessionID) ?? new Set<string>();
   files.add(path);
@@ -117,6 +128,8 @@ export function sessionContext(sessionID: string): string[] {
   const context: string[] = [];
   const cycle = cycles.get(sessionID);
   if (cycle) context.push(`Active RGR cycle: ${JSON.stringify(cycle)}`);
+  const recovery = implementationReviewVetoRecovery.get(sessionID);
+  if (recovery) context.push(`Implementation-review veto recovery: ${JSON.stringify(recovery)}`);
   const files = touchedFiles.get(sessionID);
   if (files?.size) context.push(`Touched files: ${Array.from(files).sort().join(", ")}`);
   const verify = verification.get(sessionID);
