@@ -1,12 +1,20 @@
 # bacon — focused Rust checks only.
 #
-# Runtime development now uses the same Nix-built container image as deploy:
+# Runtime development can use the same Nix-built embedded OCI artifact as deploy:
 #
-#   nix run .#dev-gateway-container
+#   just serve
+#   just watch
 #
-# That watcher rebuilds .#ar-gateway-image, loads it into podman/docker, and
-# relaunches the gateway on 127.0.0.1:8090. Bacon remains useful for quick
-# foreground `bacon check`, `bacon clippy`, and `bacon test` loops, but it no
-# longer owns process restart.
+# `just serve` builds the packaged launcher and embedded OCI rootfs, then runs
+# the gateway on 0.0.0.0:8090. Bacon remains useful for quick foreground
+# `bacon check`, `bacon clippy`, and `bacon test` loops. The gateway-dev job
+# below is a lighter bare-mode restart loop for local cargo development.
 
 default_job = "check"
+
+[jobs.gateway-dev]
+command = ["cargo", "run", "--", "gateway", "--bare"]
+need_stdout = true
+allow_warnings = true
+background = false
+on_change_strategy = "kill_then_restart"

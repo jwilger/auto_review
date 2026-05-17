@@ -17,4 +17,10 @@ deny:
 build:
 	cargo build --workspace
 
+serve:
+	pkg="$(nix build --no-link --print-out-paths .#ar-cli)"; AR_GATEWAY_BIND=0.0.0.0:8090 "$pkg/bin/auto-review" gateway
+
+watch:
+	AR_GATEWAY_BIND=0.0.0.0:8090 bacon --job gateway-dev
+
 ci: fmt clippy test deny build
