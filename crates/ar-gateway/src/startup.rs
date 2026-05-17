@@ -194,6 +194,8 @@ const INNER_GATEWAY_ENV_ALLOWLIST: &[&str] = &[
     "RUST_LOG",
 ];
 
+const OCI_RUNTIME_ENV_ALLOWLIST: &[&str] = &["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"];
+
 impl OciSetupDiagnostic {
     fn new(detail: impl Into<String>) -> Self {
         Self {
@@ -505,6 +507,50 @@ fn staged_oci_config_with_process_env(
     Ok(config)
 }
 
+#[cfg(unix)]
+fn staged_oci_config_with_outer_rootless_mapping_ids(
+    mut config: serde_json::Value,
+    staged_bundle: &Path,
+) -> std::result::Result<serde_json::Value, OciSetupDiagnostic> {
+    use std::os::unix::fs::MetadataExt;
+
+    let metadata = fs::metadata(staged_bundle).map_err(|error| {
+        OciSetupDiagnostic::new(format!(
+            "staged OCI bundle metadata could not be read: {}",
+            error.kind()
+        ))
+    })?;
+
+    rewrite_oci_mapping_host_ids(&mut config, "uidMappings", metadata.uid());
+    rewrite_oci_mapping_host_ids(&mut config, "gidMappings", metadata.gid());
+
+    Ok(config)
+}
+
+#[cfg(not(unix))]
+fn staged_oci_config_with_outer_rootless_mapping_ids(
+    _config: serde_json::Value,
+    _staged_bundle: &Path,
+) -> std::result::Result<serde_json::Value, OciSetupDiagnostic> {
+    Err(OciSetupDiagnostic::new(
+        "embedded OCI gateway launcher requires Unix rootless mapping staging",
+    ))
+}
+
+fn rewrite_oci_mapping_host_ids(config: &mut serde_json::Value, mapping_name: &str, host_id: u32) {
+    if let Some(mappings) = config
+        .get_mut("linux")
+        .and_then(|linux| linux.get_mut(mapping_name))
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for mapping in mappings {
+            if let Some(mapping) = mapping.as_object_mut() {
+                mapping.insert("hostID".to_string(), serde_json::Value::from(host_id));
+            }
+        }
+    }
+}
+
 fn stage_embedded_oci_gateway_bundle_at_path(
     packaged_bundle: &Path,
     staged_bundle: &Path,
@@ -536,6 +582,8 @@ fn stage_embedded_oci_gateway_bundle_at_path(
     let config = serde_json::from_str::<serde_json::Value>(&packaged_config)
         .map_err(|_error| OciSetupDiagnostic::new("packaged OCI config could not be parsed"))?;
     let staged_config = staged_oci_config_with_process_env(config, process_env)?;
+    let staged_config =
+        staged_oci_config_with_outer_rootless_mapping_ids(staged_config, staged_bundle)?;
     let staged_config = serde_json::to_vec_pretty(&staged_config)
         .map_err(|_error| OciSetupDiagnostic::new("staged OCI config could not be serialized"))?;
 
@@ -573,9 +621,96 @@ fn link_packaged_rootfs(
     source: &Path,
     destination: &Path,
 ) -> std::result::Result<(), OciSetupDiagnostic> {
-    std::os::unix::fs::symlink(source, destination).map_err(|error| {
+    fs::create_dir(destination).map_err(|error| {
         OciSetupDiagnostic::new(format!(
-            "packaged OCI rootfs could not be linked into staged bundle: {}",
+            "packaged OCI rootfs could not be materialized into staged bundle: {}",
+            error.kind()
+        ))
+    })?;
+    copy_packaged_rootfs_contents(source, destination)?;
+    copy_directory_permissions(source, destination)
+}
+
+#[cfg(unix)]
+fn copy_packaged_rootfs_contents(
+    source: &Path,
+    destination: &Path,
+) -> std::result::Result<(), OciSetupDiagnostic> {
+    let entries = fs::read_dir(source).map_err(|error| {
+        OciSetupDiagnostic::new(format!(
+            "packaged OCI rootfs could not be materialized into staged bundle: {}",
+            error.kind()
+        ))
+    })?;
+
+    for entry in entries {
+        let entry = entry.map_err(|error| {
+            OciSetupDiagnostic::new(format!(
+                "packaged OCI rootfs could not be materialized into staged bundle: {}",
+                error.kind()
+            ))
+        })?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|error| {
+            OciSetupDiagnostic::new(format!(
+                "packaged OCI rootfs could not be materialized into staged bundle: {}",
+                error.kind()
+            ))
+        })?;
+
+        if file_type.is_dir() {
+            fs::create_dir(&destination_path).map_err(|error| {
+                OciSetupDiagnostic::new(format!(
+                    "packaged OCI rootfs could not be materialized into staged bundle: {}",
+                    error.kind()
+                ))
+            })?;
+            copy_packaged_rootfs_contents(&source_path, &destination_path)?;
+            copy_directory_permissions(&source_path, &destination_path)?;
+        } else if file_type.is_symlink() {
+            let target = fs::read_link(&source_path).map_err(|error| {
+                OciSetupDiagnostic::new(format!(
+                    "packaged OCI rootfs could not be materialized into staged bundle: {}",
+                    error.kind()
+                ))
+            })?;
+            std::os::unix::fs::symlink(target, &destination_path).map_err(|error| {
+                OciSetupDiagnostic::new(format!(
+                    "packaged OCI rootfs could not be materialized into staged bundle: {}",
+                    error.kind()
+                ))
+            })?;
+        } else {
+            fs::copy(&source_path, &destination_path).map_err(|error| {
+                OciSetupDiagnostic::new(format!(
+                    "packaged OCI rootfs could not be materialized into staged bundle: {}",
+                    error.kind()
+                ))
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+#[cfg(unix)]
+fn copy_directory_permissions(
+    source: &Path,
+    destination: &Path,
+) -> std::result::Result<(), OciSetupDiagnostic> {
+    let permissions = fs::metadata(source)
+        .map_err(|error| {
+            OciSetupDiagnostic::new(format!(
+                "packaged OCI rootfs permissions could not be read: {}",
+                error.kind()
+            ))
+        })?
+        .permissions();
+
+    fs::set_permissions(destination, permissions).map_err(|error| {
+        OciSetupDiagnostic::new(format!(
+            "packaged OCI rootfs permissions could not be materialized into staged bundle: {}",
             error.kind()
         ))
     })
@@ -603,6 +738,20 @@ fn unique_oci_stage_bundle_path() -> PathBuf {
     ))
 }
 
+fn unique_packaged_oci_container_id() -> PathBuf {
+    static LAUNCH_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+    let sequence = LAUNCH_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let launch_entropy = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|duration| duration.as_nanos())
+        .unwrap_or(0);
+    PathBuf::from(format!(
+        "auto-review-gateway-{}-{launch_entropy}-{sequence}",
+        std::process::id()
+    ))
+}
+
 fn stage_embedded_oci_gateway_bundle(
     packaged_bundle: &Path,
     process_env: &[(String, String)],
@@ -624,11 +773,23 @@ fn build_packaged_oci_runtime_command(
             PathBuf::from("run"),
             PathBuf::from("--bundle"),
             bundle_path.to_path_buf(),
-            PathBuf::from("auto-review-gateway"),
+            unique_packaged_oci_container_id(),
         ],
         clear_ambient_env: true,
-        env: Vec::new(),
+        env: oci_runtime_env_from_outer_process(),
     }
+}
+
+fn oci_runtime_env_from_outer_process() -> Vec<(String, String)> {
+    OCI_RUNTIME_ENV_ALLOWLIST
+        .iter()
+        .filter_map(|name| {
+            env::var(name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| ((*name).to_string(), value))
+        })
+        .collect()
 }
 
 fn execute_packaged_oci_runtime_with_executor(
@@ -660,7 +821,7 @@ fn execute_packaged_oci_runtime_with_staged_bundle(
         executor,
     );
 
-    if let Err(error) = fs::remove_dir_all(&staged_bundle) {
+    if let Err(error) = remove_staged_oci_bundle(&staged_bundle) {
         tracing::warn!(
             error = %error.kind(),
             "staged OCI bundle cleanup failed after runtime exit"
@@ -668,6 +829,37 @@ fn execute_packaged_oci_runtime_with_staged_bundle(
     }
 
     outcome
+}
+
+#[cfg(unix)]
+fn remove_staged_oci_bundle(path: &Path) -> std::io::Result<()> {
+    make_directory_tree_owner_accessible(path)?;
+    fs::remove_dir_all(path)
+}
+
+#[cfg(unix)]
+fn make_directory_tree_owner_accessible(path: &Path) -> std::io::Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() {
+        return Ok(());
+    }
+
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(permissions.mode() | 0o700);
+    fs::set_permissions(path, permissions)?;
+
+    for entry in fs::read_dir(path)? {
+        make_directory_tree_owner_accessible(&entry?.path())?;
+    }
+
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn remove_staged_oci_bundle(path: &Path) -> std::io::Result<()> {
+    fs::remove_dir_all(path)
 }
 
 fn run_packaged_oci_runtime_command(
@@ -2042,6 +2234,15 @@ mod tests {
             .collect::<HashMap<_, _>>()
     }
 
+    fn assert_runtime_env_is_limited_to_rootless_session_allowlist(env: &[(String, String)]) {
+        for (name, _value) in env {
+            assert!(
+                OCI_RUNTIME_ENV_ALLOWLIST.contains(&name.as_str()),
+                "OCI runtime env may only contain rootless session allowlist entries, got: {env:?}"
+            );
+        }
+    }
+
     #[test]
     fn inner_gateway_oci_env_allowlist_includes_required_config_and_excludes_unrelated_secret_names(
     ) {
@@ -2192,7 +2393,56 @@ mod tests {
     }
 
     #[test]
+    fn staged_oci_config_rewrites_rootless_mapping_host_ids() {
+        use std::os::unix::fs::MetadataExt;
+
+        let process_env = inner_gateway_process_env_from_lookup(|name| {
+            Ok(required_inner_gateway_env_source()
+                .get(name)
+                .map(|value| (*value).to_string()))
+        })
+        .unwrap();
+        let packaged_bundle = tempfile::tempdir().unwrap();
+        std::fs::create_dir(packaged_bundle.path().join("rootfs")).unwrap();
+        let outer_metadata = std::fs::metadata(packaged_bundle.path()).unwrap();
+        let outer_uid = outer_metadata.uid();
+        let outer_gid = outer_metadata.gid();
+        std::fs::write(
+            packaged_bundle.path().join("config.json"),
+            serde_json::json!({
+                "ociVersion": "1.0.2",
+                "process": { "env": [] },
+                "root": { "path": "rootfs", "readonly": true },
+                "linux": {
+                    "uidMappings": [{ "containerID": 65532, "hostID": 65532, "size": 1 }],
+                    "gidMappings": [{ "containerID": 65532, "hostID": 65532, "size": 1 }]
+                }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let stage_parent = tempfile::tempdir().unwrap();
+        let stage_bundle = stage_parent.path().join("auto-review-oci-stage");
+
+        let staged_bundle = stage_embedded_oci_gateway_bundle_at_path(
+            packaged_bundle.path(),
+            &stage_bundle,
+            &process_env,
+        )
+        .unwrap_or_else(|diagnostic| panic!("staged config should be produced: {diagnostic:?}"));
+        let staged_config = std::fs::read_to_string(staged_bundle.join("config.json")).unwrap();
+        let staged: serde_json::Value = serde_json::from_str(&staged_config).unwrap();
+
+        assert_eq!(staged["linux"]["uidMappings"][0]["containerID"], 65532);
+        assert_eq!(staged["linux"]["uidMappings"][0]["hostID"], outer_uid);
+        assert_eq!(staged["linux"]["gidMappings"][0]["containerID"], 65532);
+        assert_eq!(staged["linux"]["gidMappings"][0]["hostID"], outer_gid);
+    }
+
+    #[test]
     fn staged_oci_bundle_materializes_config_and_runtime_command_points_at_stage() {
+        use std::os::unix::fs::PermissionsExt;
+
         let mut source = required_inner_gateway_env_source();
         source.insert("LLM_API_KEY", "llm-api-key-value-that-must-not-leak");
         let process_env = inner_gateway_process_env_from_lookup(|name| {
@@ -2200,7 +2450,26 @@ mod tests {
         })
         .unwrap();
         let packaged_bundle = tempfile::tempdir().unwrap();
-        std::fs::create_dir(packaged_bundle.path().join("rootfs")).unwrap();
+        let packaged_rootfs = packaged_bundle.path().join("rootfs");
+        std::fs::create_dir(&packaged_rootfs).unwrap();
+        std::fs::create_dir_all(packaged_rootfs.join("etc/auto-review")).unwrap();
+        let packaged_restrictive_dir = packaged_rootfs.join("etc/auto-review/restrictive-sentinel");
+        std::fs::create_dir(&packaged_restrictive_dir).unwrap();
+        std::fs::write(
+            packaged_restrictive_dir.join("child-sentinel.txt"),
+            "packaged restrictive child\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(
+            &packaged_restrictive_dir,
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+        std::fs::write(
+            packaged_rootfs.join("etc/auto-review/rootfs-sentinel.txt"),
+            "packaged rootfs sentinel\n",
+        )
+        .unwrap();
         std::fs::write(
             packaged_bundle.path().join("config.json"),
             serde_json::json!({
@@ -2230,6 +2499,44 @@ mod tests {
             staged_bundle.join("rootfs").exists(),
             "staged bundle must contain or link the packaged rootfs"
         );
+        let staged_rootfs_metadata =
+            std::fs::symlink_metadata(staged_bundle.join("rootfs")).unwrap();
+        assert!(
+            staged_rootfs_metadata.is_dir() && !staged_rootfs_metadata.file_type().is_symlink(),
+            "staged rootfs must be an ephemeral writable directory, not a symlink to the packaged rootfs"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                staged_bundle.join("rootfs/etc/auto-review/rootfs-sentinel.txt")
+            )
+            .unwrap(),
+            "packaged rootfs sentinel\n",
+            "staged rootfs must contain packaged sentinel content"
+        );
+        assert_eq!(
+            std::fs::read_to_string(
+                staged_bundle
+                    .join("rootfs/etc/auto-review/restrictive-sentinel/child-sentinel.txt")
+            )
+            .unwrap(),
+            "packaged restrictive child\n",
+            "staged restrictive directory must contain packaged child content"
+        );
+        let packaged_restrictive_mode = std::fs::metadata(&packaged_restrictive_dir)
+            .unwrap()
+            .permissions()
+            .mode()
+            & 0o777;
+        let staged_restrictive_mode =
+            std::fs::metadata(staged_bundle.join("rootfs/etc/auto-review/restrictive-sentinel"))
+                .unwrap()
+                .permissions()
+                .mode()
+                & 0o777;
+        assert_eq!(
+            staged_restrictive_mode, packaged_restrictive_mode,
+            "staged rootfs directory modes must preserve packaged permission constraints"
+        );
         let staged_config = std::fs::read_to_string(staged_bundle.join("config.json")).unwrap();
         assert!(staged_config.contains("WEBHOOK_SECRET=webhook-secret-value-that-must-not-leak"));
         assert!(!staged_config.contains("UNRELATED_TOKEN"));
@@ -2240,18 +2547,20 @@ mod tests {
         );
 
         assert!(command.clear_ambient_env);
-        assert!(
-            command.env.is_empty(),
-            "OCI runtime process env must stay empty; inner gateway env belongs in staged config.json"
-        );
+        assert_runtime_env_is_limited_to_rootless_session_allowlist(&command.env);
+        assert_eq!(command.args.len(), 4);
         assert_eq!(
-            command.args,
-            vec![
+            &command.args[..3],
+            &[
                 PathBuf::from("run"),
                 PathBuf::from("--bundle"),
                 staged_bundle,
-                PathBuf::from("auto-review-gateway"),
             ]
+        );
+        let container_id = command.args[3].to_string_lossy();
+        assert!(
+            container_id.starts_with("auto-review-gateway-"),
+            "OCI runtime container id should remain observable, got {container_id}"
         );
     }
 
@@ -2261,40 +2570,176 @@ mod tests {
             bundle_path: Path::new("/nix/store/test-ar-gateway-embedded-oci-rootfs"),
             runtime_path: Path::new("/nix/store/test-embedded-youki-runtime"),
         };
-        let mut observed_runtime = None;
-        let mut observed_args = Vec::new();
+        let mut observed_commands = Vec::new();
 
-        let outcome = execute_packaged_oci_runtime_with_executor(packaged_inputs, |command| {
-            observed_runtime = Some(command.program.to_path_buf());
-            observed_args = command
-                .args
-                .iter()
-                .map(|arg| arg.to_path_buf())
-                .collect::<Vec<_>>();
+        for _ in 0..2 {
+            let outcome = execute_packaged_oci_runtime_with_executor(packaged_inputs, |command| {
+                observed_commands.push((
+                    command.program.to_path_buf(),
+                    command
+                        .args
+                        .iter()
+                        .map(|arg| arg.to_path_buf())
+                        .collect::<Vec<_>>(),
+                ));
 
-            Ok(())
-        })
-        .unwrap_or_else(|diagnostic| {
-            panic!(
-                "successful fake OCI runtime execution should finish the outer launcher, got setup diagnostic: {diagnostic:?}"
-            )
-        });
+                Ok(())
+            })
+            .unwrap_or_else(|diagnostic| {
+                panic!(
+                    "successful fake OCI runtime execution should finish the outer launcher, got setup diagnostic: {diagnostic:?}"
+                )
+            });
 
-        assert_eq!(outcome, GatewayLaunchOutcome::OuterLauncherFinished);
+            assert_eq!(outcome, GatewayLaunchOutcome::OuterLauncherFinished);
+        }
+
+        assert_eq!(observed_commands.len(), 2);
+
+        let first_args = &observed_commands[0].1;
+        let second_args = &observed_commands[1].1;
+
+        for (observed_runtime, observed_args) in &observed_commands {
+            assert_eq!(
+                observed_runtime.as_path(),
+                packaged_inputs.runtime_path,
+                "OCI execution must use the packaged runtime binary"
+            );
+            assert_eq!(
+                &observed_args[..3],
+                &[
+                    PathBuf::from("run"),
+                    PathBuf::from("--bundle"),
+                    packaged_inputs.bundle_path.to_path_buf(),
+                ],
+                "OCI execution must use the youki-compatible shape: run --bundle <bundle> <container-id>"
+            );
+        }
+
         assert_eq!(
-            observed_runtime.as_deref(),
-            Some(packaged_inputs.runtime_path),
-            "OCI execution must use the packaged runtime binary"
+            first_args.len(),
+            4,
+            "OCI execution must pass exactly one container id after run --bundle <bundle>"
         );
         assert_eq!(
-            observed_args,
-            vec![
-                PathBuf::from("run"),
-                PathBuf::from("--bundle"),
-                packaged_inputs.bundle_path.to_path_buf(),
-                PathBuf::from("auto-review-gateway"),
-            ],
-            "OCI execution must use the youki-compatible shape: run --bundle <bundle> <stable-container-id>"
+            second_args.len(),
+            4,
+            "OCI execution must pass exactly one container id after run --bundle <bundle>"
+        );
+        let first_container_id = first_args[3].to_string_lossy();
+        let second_container_id = second_args[3].to_string_lossy();
+        assert!(
+            first_container_id.starts_with("auto-review-gateway-"),
+            "first packaged OCI launch must use an observable auto-review-gateway-* container id, got {first_container_id}"
+        );
+        assert!(
+            second_container_id.starts_with("auto-review-gateway-"),
+            "second packaged OCI launch must use an observable auto-review-gateway-* container id, got {second_container_id}"
+        );
+        for container_id in [&first_container_id, &second_container_id] {
+            let suffix = container_id
+                .strip_prefix("auto-review-gateway-")
+                .unwrap_or_default();
+            let components = suffix.split('-').collect::<Vec<_>>();
+            assert!(
+                components.len() >= 3 && components.iter().all(|component| !component.is_empty()),
+                "packaged OCI container id must include restart-safe per-launch entropy in addition to pid and sequence, got {container_id}"
+            );
+        }
+        assert_ne!(
+            first_container_id, second_container_id,
+            "repeated packaged OCI launches must use unique observable container ids"
+        );
+    }
+
+    #[test]
+    fn packaged_oci_runtime_with_staged_bundle_removes_secret_config_after_restrictive_rootfs_success(
+    ) {
+        use std::os::unix::fs::PermissionsExt;
+
+        let mut source = required_inner_gateway_env_source();
+        source.insert("LLM_API_KEY", "llm-api-key-value-that-must-not-leak");
+        let process_env = inner_gateway_process_env_from_lookup(|name| {
+            Ok(source.get(name).map(|value| (*value).to_string()))
+        })
+        .unwrap();
+        let packaged_bundle = tempfile::tempdir().unwrap();
+        let packaged_rootfs = packaged_bundle.path().join("rootfs");
+        std::fs::create_dir(&packaged_rootfs).unwrap();
+        let packaged_restrictive_dir = packaged_rootfs.join("restrictive-non-empty");
+        std::fs::create_dir(&packaged_restrictive_dir).unwrap();
+        std::fs::write(packaged_restrictive_dir.join("child.txt"), "child\n").unwrap();
+        std::fs::set_permissions(
+            &packaged_restrictive_dir,
+            std::fs::Permissions::from_mode(0o555),
+        )
+        .unwrap();
+        std::fs::write(
+            packaged_bundle.path().join("config.json"),
+            serde_json::json!({
+                "ociVersion": "1.0.2",
+                "process": { "env": ["UNRELATED_TOKEN=ambient-token-must-not-propagate"] },
+                "root": { "path": "rootfs", "readonly": true }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let inputs = EmbeddedOciGatewayInputs {
+            bundle_path: packaged_bundle.path(),
+            runtime_path: Path::new("/nix/store/test-embedded-youki-runtime/bin/youki"),
+        };
+        let observed_staged_bundle = std::cell::RefCell::new(None::<PathBuf>);
+
+        let outcome =
+            execute_packaged_oci_runtime_with_staged_bundle(inputs, &process_env, |command| {
+                let staged_bundle = command.args[2].clone();
+                let staged_config = std::fs::read_to_string(staged_bundle.join("config.json"))
+                    .unwrap_or_else(|error| {
+                        panic!(
+                            "fake executor should see staged secret-bearing config.json: {error}"
+                        )
+                    });
+                assert!(
+                    staged_config
+                        .contains("WEBHOOK_SECRET=webhook-secret-value-that-must-not-leak"),
+                    "staged config should carry inner gateway secret-bearing env"
+                );
+                assert!(
+                    staged_bundle
+                        .join("rootfs/restrictive-non-empty/child.txt")
+                        .is_file(),
+                    "staged rootfs should contain the restrictive non-empty directory child"
+                );
+                assert_eq!(
+                    std::fs::metadata(staged_bundle.join("rootfs/restrictive-non-empty"))
+                        .unwrap()
+                        .permissions()
+                        .mode()
+                        & 0o777,
+                    0o555,
+                    "staged rootfs should preserve the restrictive directory mode before cleanup"
+                );
+                *observed_staged_bundle.borrow_mut() = Some(staged_bundle);
+
+                Ok(())
+            })
+            .unwrap_or_else(|diagnostic| {
+                panic!("successful fake OCI runtime should finish outer launcher: {diagnostic:?}")
+            });
+        std::fs::set_permissions(
+            &packaged_restrictive_dir,
+            std::fs::Permissions::from_mode(0o755),
+        )
+        .unwrap();
+
+        assert_eq!(outcome, GatewayLaunchOutcome::OuterLauncherFinished);
+        let staged_bundle = observed_staged_bundle
+            .into_inner()
+            .expect("fake executor should capture staged bundle path");
+        assert!(
+            !staged_bundle.join("config.json").exists() && !staged_bundle.exists(),
+            "successful packaged OCI execution must remove the staged secret-bearing bundle/config even when rootfs contains a restrictive non-empty directory; left behind: {}",
+            staged_bundle.display()
         );
     }
 
@@ -2310,11 +2755,7 @@ mod tests {
                 command.clear_ambient_env,
                 "OCI runtime command must clear the ambient process environment"
             );
-            assert!(
-                command.env.is_empty(),
-                "inner gateway env values must be staged into OCI config.json, not inherited by the runtime process: {:?}",
-                command.env
-            );
+            assert_runtime_env_is_limited_to_rootless_session_allowlist(&command.env);
 
             Ok(())
         })

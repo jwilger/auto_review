@@ -144,11 +144,16 @@ in startup diagnostics.
 _Mitigation:_ The packaged wrapper provides Nix-store-resolved embedded rootfs and
 runtime paths, and startup rejects default packaged paths outside `/nix/store`
 before runtime lookup. The outer launcher clears the runtime process environment
-and stages a deterministic OCI bundle whose generated `config.json` carries only
-the explicit gateway allowlist required by the inner process. The embedded OCI
-config declares `noNewPrivileges`, empty capability sets, PID/network/mount/IPC/
-UTS/cgroup namespaces, masked sensitive paths, readonly sensitive paths, and only
-the explicit `/tmp` and `/var/lib/auto_review` writable tmpfs mounts. Startup
+except for the minimal non-secret rootless session allowlist required by `youki`
+(`DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR`), and stages a deterministic
+OCI bundle whose generated `config.json` carries only the explicit gateway
+allowlist required by the inner process. The staged bundle materializes an
+ephemeral rootfs copy so rootless `youki` can prepare masked paths without
+mutating the packaged rootfs. The embedded OCI config declares
+`noNewPrivileges`, empty capability sets, PID/network/mount/IPC/UTS/cgroup
+namespaces, masked sensitive paths, readonly sensitive paths, and writable state
+only in the ephemeral staged rootfs plus the explicit `/tmp` and
+`/var/lib/auto_review` tmpfs mounts. Startup
 diagnostics name missing keys or failing subsystems without echoing configured
 secret values or rejected paths. Startup logs, `/info.runtime_isolation`, and
 `auto-review ops doctor/status` surface only non-secret posture labels and

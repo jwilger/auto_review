@@ -274,8 +274,8 @@
                   process = {
                     terminal = false;
                     user = {
-                      uid = 65532;
-                      gid = 65532;
+                      uid = 0;
+                      gid = 0;
                     };
                     noNewPrivileges = true;
                     capabilities = {
@@ -300,7 +300,7 @@
                   };
                   root = {
                     path = "rootfs";
-                    readonly = true;
+                    readonly = false;
                   };
                   mounts = [
                     {
@@ -321,8 +321,8 @@
                         "nosuid"
                         "nodev"
                         "mode=0700"
-                        "uid=65532"
-                        "gid=65532"
+                        "uid=0"
+                        "gid=0"
                       ];
                     }
                   ];
@@ -334,6 +334,21 @@
                       { type = "ipc"; }
                       { type = "uts"; }
                       { type = "cgroup"; }
+                      { type = "user"; }
+                    ];
+                    uidMappings = [
+                      {
+                        containerID = 0;
+                        hostID = 65532;
+                        size = 1;
+                      }
+                    ];
+                    gidMappings = [
+                      {
+                        containerID = 0;
+                        hostID = 65532;
+                        size = 1;
+                      }
                     ];
                     maskedPaths = [
                       "/proc/acpi"
@@ -367,13 +382,14 @@
                 passAsFile = [ "ociConfig" ];
               }
               ''
-                mkdir -p "$out/rootfs/bin" "$out/rootfs/etc/ssl/certs" "$out/rootfs/nix/store" "$out/rootfs/var/lib/auto_review" "$out/rootfs/tmp"
+                mkdir -p "$out/rootfs/bin" "$out/rootfs/dev" "$out/rootfs/etc/ssl/certs" "$out/rootfs/nix/store" "$out/rootfs/var/lib/auto_review" "$out/rootfs/tmp"
                 while IFS= read -r storePath; do
                   cp -a "$storePath" "$out/rootfs/nix/store/"
                 done < "$rootfsClosure/store-paths"
                 ln -s "${ar-cli-unwrapped}/bin/auto-review" "$out/rootfs/bin/auto-review"
                 ln -s "${pkgs.git}/bin/git" "$out/rootfs/bin/git"
                 ln -s "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt" "$out/rootfs/etc/ssl/certs/ca-bundle.crt"
+                : > "$out/rootfs/dev/null"
                 printf 'auto_review:x:65532:65532:auto_review:/var/lib/auto_review:/sbin/nologin\n' > "$out/rootfs/etc/passwd"
                 printf 'auto_review:x:65532:\n' > "$out/rootfs/etc/group"
                 printf 'hosts: files dns\n' > "$out/rootfs/etc/nsswitch.conf"
@@ -588,6 +604,53 @@
                   jq -e --arg namespace "$namespace" 'any(.linux.namespaces[]; .type == $namespace)' "$config" >/dev/null
                 done
 
+                if ! jq -e '
+                  . as $root |
+                  any($root.linux.namespaces[]?; .type == "user") and
+                  ([$root.linux.uidMappings[]? | select(
+                    (.containerID | type == "number") and
+                    (.hostID | type == "number") and
+                    (.size | type == "number") and
+                    .size > 0 and
+                    .containerID <= $root.process.user.uid and
+                    (.containerID + .size) > $root.process.user.uid
+                  )] | length > 0) and
+                  ([$root.linux.gidMappings[]? | select(
+                    (.containerID | type == "number") and
+                    (.hostID | type == "number") and
+                    (.size | type == "number") and
+                    .size > 0 and
+                    .containerID <= $root.process.user.gid and
+                    (.containerID + .size) > $root.process.user.gid
+                  )] | length > 0)
+                ' "$config" >/dev/null; then
+                  printf 'missing OCI rootless user namespace contract: config.json must declare a user namespace with uidMappings and gidMappings covering the gateway process user\n' >&2
+                  exit 1
+                fi
+
+                if ! jq -e '
+                  . as $root |
+                  $root.process.user.uid == 0 and
+                  $root.process.user.gid == 0 and
+                  ([$root.linux.uidMappings[]? | select(
+                    .containerID == 0 and
+                    .hostID == 65532 and
+                    .size == 1 and
+                    .containerID <= $root.process.user.uid and
+                    (.containerID + .size) > $root.process.user.uid
+                  )] | length > 0) and
+                  ([$root.linux.gidMappings[]? | select(
+                    .containerID == 0 and
+                    .hostID == 65532 and
+                    .size == 1 and
+                    .containerID <= $root.process.user.gid and
+                    (.containerID + .size) > $root.process.user.gid
+                  )] | length > 0)
+                ' "$config" >/dev/null; then
+                  printf 'embedded OCI rootless config must run the process as container uid/gid 0 with single-entry uid/gid mappings for container ID 0\n' >&2
+                  exit 1
+                fi
+
                 jq -e '
                   any(.linux.maskedPaths[]; . == "/proc/kcore") and
                   any(.linux.maskedPaths[]; . == "/proc/keys") and
@@ -596,10 +659,23 @@
                   any(.linux.readonlyPaths[]; . == "/sys")
                 ' "$config" >/dev/null
 
-                jq -e '
+                if ! jq -e '((.linux.maskedPaths // []) | length) > 0 and .root.readonly == false' "$config" >/dev/null; then
+                  printf 'embedded OCI rootfs must stay writable when maskedPaths are configured so rootless youki can prepare mask symlinks like /proc/kcore\n' >&2
+                  exit 1
+                fi
+
+                if [ ! -e "$rootfsBundle/rootfs/dev/null" ] && [ ! -L "$rootfsBundle/rootfs/dev/null" ]; then
+                  printf 'embedded OCI rootfs must provide /dev/null before maskedPaths are prepared so rootless youki can safely mask /proc/kcore\n' >&2
+                  exit 1
+                fi
+
+                if ! jq -e '
                   any(.mounts[]; .destination == "/tmp" and .type == "tmpfs" and (.options | index("mode=1777"))) and
-                  any(.mounts[]; .destination == "/var/lib/auto_review" and .type == "tmpfs" and (.options | index("mode=0700")))
-                ' "$config" >/dev/null
+                  any(.mounts[]; .destination == "/var/lib/auto_review" and .type == "tmpfs" and (.options | index("mode=0700")) and (.options | index("uid=0")) and (.options | index("gid=0")))
+                ' "$config" >/dev/null; then
+                  printf 'embedded OCI rootless config must mount /var/lib/auto_review tmpfs with uid=0 and gid=0 for the mapped container root user\n' >&2
+                  exit 1
+                fi
 
                 touch "$out"
               '';
