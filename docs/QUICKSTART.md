@@ -119,15 +119,49 @@ on:
     types: [opened, synchronize, reopened, ready_for_review]
 
 jobs:
-  flake-check:
+  fmt:
     runs-on: docker
     steps:
       - uses: https://code.forgejo.org/actions/checkout@v4
-      - run: nix flake check --print-build-logs
+        with:
+          persist-credentials: false
+      - run: just fmt
+
+  clippy:
+    runs-on: docker
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: just clippy
+
+  test:
+    runs-on: docker
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: just test
+
+  deny:
+    runs-on: docker
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: just deny
+
+  build:
+    runs-on: docker
+    steps:
+      - uses: https://code.forgejo.org/actions/checkout@v4
+        with:
+          persist-credentials: false
+      - run: just build
 
   semantic-review:
     runs-on: docker
-    needs: flake-check
+    needs: [fmt, clippy, test, deny, build]
     if: ${{ github.event_name == 'pull_request' }}
     steps:
       - uses: https://git.johnwilger.com/jwilger/auto_review/deploy/forgejo-action@main

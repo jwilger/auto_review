@@ -8,21 +8,23 @@ permissions:
   contents: read
 
 jobs:
-  flake-check:
-    name: Verify PR with nix flake check
+  fmt:
+    name: Format check
     if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # Idempotent Nix install: when the runner host mounts `/nix`
       # as a persistent volume (see docs/DEPLOYMENT.md#forgejo-runner-nix-cache),
       # subsequent runs find Nix already present and skip the
       # installer. First run on a fresh volume installs from the
       # upstream determinate.systems script; the volume retains
-      # the entire /nix/store across jobs so `nix flake check`
-      # hits cache for everything cargo + crane built last time.
+      # the entire /nix/store across jobs so repeated cargo + crane
+      # work can hit cache across runs.
       - name: Install or reuse Nix
         run: |
           set -euo pipefail
@@ -43,9 +45,9 @@ jobs:
           # binary across runs, but each runner container is fresh
           # so /etc/{group,passwd} have been wiped — including the
           # `nixbld` build group/users that nix.conf references via
-          # `build-users-group = nixbld`. Without these, `nix flake
-          # check` exits 2s in with "the group 'nixbld' ... does not
-          # exist". Recreate idempotently.
+          # `build-users-group = nixbld`. Without these, Nix-backed
+          # commands exit with "the group 'nixbld' ... does not exist".
+          # Recreate idempotently.
           if ! getent group nixbld > /dev/null; then
             groupadd -r nixbld
           fi
@@ -59,15 +61,183 @@ jobs:
           # change durable across steps.
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
 
-      - name: Run all checks (fmt, clippy, nextest, deny)
+      - name: Run just fmt
         run: |
           export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-          nix flake check --print-build-logs
+          nix develop --command just fmt
+
+  clippy:
+    name: Clippy
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install or reuse Nix
+        run: |
+          set -euo pipefail
+          NIX_BIN_DIR="/nix/var/nix/profiles/default/bin"
+          if [ -x "$NIX_BIN_DIR/nix" ]; then
+            echo "Nix already present at $NIX_BIN_DIR (volume cache hit)"
+          else
+            echo "Installing Nix (cold start or fresh volume)"
+            curl --proto '=https' --tlsv1.2 -sSf -L \
+              https://install.determinate.systems/nix \
+              | sh -s -- install linux \
+                --init none \
+                --no-confirm \
+                --extra-conf "experimental-features = nix-command flakes" \
+                --extra-conf "accept-flake-config = true"
+          fi
+          if ! getent group nixbld > /dev/null; then
+            groupadd -r nixbld
+          fi
+          for i in $(seq 1 32); do
+            if ! id -u "nixbld$i" > /dev/null 2>&1; then
+              useradd -r -g nixbld -G nixbld -d /var/empty \
+                -s /usr/sbin/nologin -c "Nix build user $i" "nixbld$i"
+            fi
+          done
+          echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
+
+      - name: Run just clippy
+        run: |
+          export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+          nix develop --command just clippy
+
+  test:
+    name: Test
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install or reuse Nix
+        run: |
+          set -euo pipefail
+          NIX_BIN_DIR="/nix/var/nix/profiles/default/bin"
+          if [ -x "$NIX_BIN_DIR/nix" ]; then
+            echo "Nix already present at $NIX_BIN_DIR (volume cache hit)"
+          else
+            echo "Installing Nix (cold start or fresh volume)"
+            curl --proto '=https' --tlsv1.2 -sSf -L \
+              https://install.determinate.systems/nix \
+              | sh -s -- install linux \
+                --init none \
+                --no-confirm \
+                --extra-conf "experimental-features = nix-command flakes" \
+                --extra-conf "accept-flake-config = true"
+          fi
+          if ! getent group nixbld > /dev/null; then
+            groupadd -r nixbld
+          fi
+          for i in $(seq 1 32); do
+            if ! id -u "nixbld$i" > /dev/null 2>&1; then
+              useradd -r -g nixbld -G nixbld -d /var/empty \
+                -s /usr/sbin/nologin -c "Nix build user $i" "nixbld$i"
+            fi
+          done
+          echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
+
+      - name: Run just test
+        run: |
+          export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+          nix develop --command just test
+
+  deny:
+    name: Dependency policy
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install or reuse Nix
+        run: |
+          set -euo pipefail
+          NIX_BIN_DIR="/nix/var/nix/profiles/default/bin"
+          if [ -x "$NIX_BIN_DIR/nix" ]; then
+            echo "Nix already present at $NIX_BIN_DIR (volume cache hit)"
+          else
+            echo "Installing Nix (cold start or fresh volume)"
+            curl --proto '=https' --tlsv1.2 -sSf -L \
+              https://install.determinate.systems/nix \
+              | sh -s -- install linux \
+                --init none \
+                --no-confirm \
+                --extra-conf "experimental-features = nix-command flakes" \
+                --extra-conf "accept-flake-config = true"
+          fi
+          if ! getent group nixbld > /dev/null; then
+            groupadd -r nixbld
+          fi
+          for i in $(seq 1 32); do
+            if ! id -u "nixbld$i" > /dev/null 2>&1; then
+              useradd -r -g nixbld -G nixbld -d /var/empty \
+                -s /usr/sbin/nologin -c "Nix build user $i" "nixbld$i"
+            fi
+          done
+          echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
+
+      - name: Run just deny
+        run: |
+          export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+          nix develop --command just deny
+
+  build:
+    name: Build
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install or reuse Nix
+        run: |
+          set -euo pipefail
+          NIX_BIN_DIR="/nix/var/nix/profiles/default/bin"
+          if [ -x "$NIX_BIN_DIR/nix" ]; then
+            echo "Nix already present at $NIX_BIN_DIR (volume cache hit)"
+          else
+            echo "Installing Nix (cold start or fresh volume)"
+            curl --proto '=https' --tlsv1.2 -sSf -L \
+              https://install.determinate.systems/nix \
+              | sh -s -- install linux \
+                --init none \
+                --no-confirm \
+                --extra-conf "experimental-features = nix-command flakes" \
+                --extra-conf "accept-flake-config = true"
+          fi
+          if ! getent group nixbld > /dev/null; then
+            groupadd -r nixbld
+          fi
+          for i in $(seq 1 32); do
+            if ! id -u "nixbld$i" > /dev/null 2>&1; then
+              useradd -r -g nixbld -G nixbld -d /var/empty \
+                -s /usr/sbin/nologin -c "Nix build user $i" "nixbld$i"
+            fi
+          done
+          echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
+
+      - name: Run just build
+        run: |
+          export PATH="/nix/var/nix/profiles/default/bin:$PATH"
+          nix develop --command just build
 
   semantic-review:
     name: Request auto_review semantic review
     runs-on: ubuntu-24.04
-    needs: flake-check
+    needs: [fmt, clippy, test, deny, build]
     if: ${{ github.event_name == 'pull_request' }}
     env:
       AUTO_REVIEW_GATEWAY_URL: ${{ secrets.AUTO_REVIEW_GATEWAY_URL }}
@@ -93,7 +263,7 @@ jobs:
   pr-artifact-build:
     name: Build PR artifacts (no token)
     runs-on: docker-release
-    needs: flake-check
+    needs: [fmt, clippy, test, deny, build]
     if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
