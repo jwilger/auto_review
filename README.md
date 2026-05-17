@@ -41,17 +41,17 @@ semantically, verifies findings before posting, and talks to authors through
    LLM_REASONING_MODEL=qwen2.5-coder:32b
    ```
 
-4. Run the gateway. Production is container-first:
+4. Run the gateway. The supported out-of-the-box Linux service path is the
+   `auto-review` binary with embedded OCI isolation:
 
    ```sh
-   podman run -d --name auto-review \
-     --env-file /etc/auto_review/auto_review.env \
-     -p 127.0.0.1:8080:8080 \
-     -v auto-review-state:/var/lib/auto_review \
-     git.johnwilger.com/jwilger/auto_review/ar-gateway:latest
+   set -a
+   . /etc/auto_review/auto_review.env
+   set +a
+   $AUTO_REVIEW gateway
    ```
 
-   For local evaluation with the direct binary:
+   For local evaluation without embedded OCI isolation:
 
    ```sh
    $AUTO_REVIEW gateway --bare
@@ -108,8 +108,8 @@ providers, Ollama, vLLM, OpenRouter, Together, Groq, and similar endpoints.
 ## Documentation map
 
 - [Quickstart](./docs/QUICKSTART.md) — shortest install-and-run path.
-- [Deployment](./docs/DEPLOYMENT.md) — container image, Nix/NixOS, systemd,
-  Helm, Forgejo Actions, Prometheus, Grafana, and runner-cache notes.
+- [Deployment](./docs/DEPLOYMENT.md) — binary, Nix/NixOS, systemd, custom
+  container/Helm, Forgejo Actions, Prometheus, Grafana, and runner-cache notes.
 - [Operations](./docs/OPERATIONS.md) — health checks, metrics, failures,
   rotation, history/learnings maintenance, upgrades.
 - [User Guide](./docs/USER-GUIDE.md) — what PR authors see and how they talk to
