@@ -66,6 +66,7 @@ Benchmark fixture details live in [Benchmarks](./BENCHMARKS.md).
 
 `auto-review gateway` uses the packaged embedded OCI launcher by default on
 supported direct-binary Linux installs. Use `--bare` or `AR_GATEWAY_BARE=true`
-only when you intentionally run without that launcher, for example under a custom
-container, VM, or direct systemd boundary. The release image sets
-`AR_GATEWAY_EXTERNAL_ISOLATION=container` automatically.
+only when you intentionally run without that launcher, for example under an
+operator-owned container, VM, or direct systemd boundary. Operator-owned images
+can set `AR_GATEWAY_EXTERNAL_ISOLATION=container` to surface that external
+runtime posture.
