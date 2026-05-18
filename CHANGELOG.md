@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.14.1] - 2026-05-18
+
+### Fixed
+
+- *(gateway)* support rootless packaged serve (#234)
+- *(opencode)* recover RGR veto delegation (#235)
+- *(review)* deduplicate repeated inline comments (#236)
+- *(opencode)* adopt deterministic Han Core guardrails (#237)
+- *(release)* keep release prep metadata-only (#238)
+- *(release)* isolate release PR JSON lookup (#239)
+- *(release)* keep PR selection inside Nix (#240)
+- *(release)* render release PR descriptions correctly (#242)
+
 ## [0.14.0] - 2026-05-17
 
 ### Fixed
