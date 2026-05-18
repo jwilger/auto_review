@@ -359,6 +359,116 @@ test("grants one delegated implementation edit after parent-approved RED", async
   );
 });
 
+test("permits a second production edit after changed RED verification is re-recorded for the same command", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-red-refresh"], { stdio: "ignore" });
+
+  const hooks = await AutoReviewDisciplinePlugin({ worktree });
+  const sessionID = "session-with-changed-red-output";
+  const focusedCommand =
+    "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'permits a second production edit after changed RED verification is re-recorded for the same command'";
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior: "changed RED output for same focused command grants one refreshed edit token",
+      test: "permits a second production edit after recording a changed RED output for the same command",
+    },
+    { sessionID },
+  );
+
+  await hooks.tool.rgr_record_red.execute(
+    {
+      command: focusedCommand,
+      output: "one focused plugin test failed: initial diagnostic",
+    },
+    { sessionID },
+  );
+  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+
+  await assert.doesNotReject(
+    hooks["tool.execute.before"]({ tool: "edit", sessionID }, { args: { filePath: "crates/demo/src/lib.rs" } }),
+  );
+
+  await hooks.tool.rgr_record_red.execute(
+    {
+      command: focusedCommand,
+      output: "FAIL: one focused plugin test failed: changed diagnostic after first production edit",
+    },
+    { sessionID },
+  );
+  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+
+  await assert.doesNotReject(
+    hooks["tool.execute.before"]({ tool: "edit", sessionID }, { args: { filePath: "crates/demo/src/lib.rs" } }),
+  );
+});
+
+test("changed diagnostic tools refresh edit allowance without starting a new RED", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-changed-diagnostic-tools"], { stdio: "ignore" });
+
+  const hooks = await AutoReviewDisciplinePlugin({ worktree });
+  const sessionID = "session-with-changed-diagnostic-tools";
+  const focusedCommand =
+    "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'changed diagnostic tools refresh edit allowance without starting a new RED'";
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior: "changed diagnostic tools refresh the GREEN edit allowance",
+      test: "changed diagnostic tools refresh edit allowance without starting a new RED",
+    },
+    { sessionID },
+  );
+  await hooks.tool.rgr_record_red.execute(
+    {
+      command: focusedCommand,
+      output: "one focused plugin test failed: initial diagnostic",
+    },
+    { sessionID },
+  );
+  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+
+  await assert.doesNotReject(
+    hooks["tool.execute.before"]({ tool: "edit", sessionID }, { args: { filePath: "crates/demo/src/lib.rs" } }),
+  );
+
+  await hooks.tool.rgr_record_changed_diagnostic.execute(
+    {
+      command: focusedCommand,
+      output: "FAIL: one focused plugin test failed: changed diagnostic after first production edit",
+      diagnostic: "expected base URL, got empty string",
+    },
+    { sessionID },
+  );
+
+  await assert.rejects(
+    hooks["tool.execute.before"]({ tool: "edit", sessionID }, { args: { filePath: "crates/demo/src/lib.rs" } }),
+    /RGR gate: changed diagnostic requires approval before the next production edit\./,
+  );
+
+  await hooks.tool.rgr_approve_changed_diagnostic.execute(
+    {
+      allowedImmediateChange: "Expose provider metadata and use it in the router usage callback.",
+      allowedPaths: ["crates/demo/src/lib.rs", "crates/demo/src/other.rs"],
+    },
+    { sessionID },
+  );
+
+  await assert.doesNotReject(
+    hooks["tool.execute.before"](
+      { tool: "apply_patch", sessionID },
+      {
+        args: {
+          patchText:
+            "*** Begin Patch\n*** Update File: crates/demo/src/lib.rs\n@@\n*** End Patch\n*** Begin Patch\n*** Update File: crates/demo/src/other.rs\n@@\n*** End Patch\n",
+        },
+      },
+    ),
+  );
+});
+
 test("does not consume implementationEditToken when a multi-file apply_patch is rejected", async (t) => {
   const worktree = createCleanMainWorktree();
   t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
@@ -396,7 +506,7 @@ test("does not consume implementationEditToken when a multi-file apply_patch is 
         },
       },
     ),
-    /RGR gate: another behavioral production edit requires rerunning the focused command and recording RED or GREEN first\./,
+    /RGR gate: production Rust edit paths are outside the approved diagnostic scope\./,
   );
 
   await assert.doesNotReject(

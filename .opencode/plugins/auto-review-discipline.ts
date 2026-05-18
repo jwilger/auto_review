@@ -269,6 +269,12 @@ function validateRgrGreenVerificationOutput(output: string): void {
   }
 }
 
+function pathsWithinAllowedSet(paths: string[], allowedPaths: string[] | undefined): boolean {
+  if (!allowedPaths?.length) return paths.length <= 1;
+  const allowed = new Set(allowedPaths.map((p) => p.replaceAll("\\", "/")));
+  return paths.every((p) => allowed.has(p.replaceAll("\\", "/")));
+}
+
 export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => ({
   tool: {
     rgr_start: tool({
@@ -279,7 +285,7 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
       },
       async execute(args, context) {
         assertCleanWorktree(worktree);
-        setCycle(context.sessionID, { behavior: args.behavior, test: args.test, stage: "red" });
+        setCycle(context.sessionID, { behavior: args.behavior, test: args.test, stage: "red_started" });
         return `RGR cycle started for ${args.behavior}. Record observed RED output before production edits.`;
       },
     }),
@@ -293,7 +299,7 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
         const current = getCycle(context.sessionID);
         if (!current) throw new Error("Start an RGR cycle before recording RED.");
         validateRgrRedEvidence(args.output);
-        setCycle(context.sessionID, { ...current, command: args.command, failingOutput: args.output, reviewedRed: false, implementationEditToken: false, stage: "red" });
+        setCycle(context.sessionID, { ...current, command: args.command, failingOutput: args.output, currentDiagnostic: args.output, reviewedRed: false, implementationEditToken: false, allowedImmediateChange: undefined, allowedPaths: undefined, stage: "red_observed" });
         return "RED recorded. RED review approval is required before production edits.";
       },
     }),
@@ -303,8 +309,56 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
       async execute(_args, context) {
         const current = getCycle(context.sessionID);
         if (!current?.failingOutput) throw new Error("Cannot approve RED before observed RED is recorded.");
-        setCycle(context.sessionID, { ...current, reviewedRed: true });
+        setCycle(context.sessionID, { ...current, reviewedRed: true, stage: "red_approved" });
         return "RED approved. Minimum production edits are now allowed for this cycle.";
+      },
+    }),
+    rgr_record_changed_diagnostic: tool({
+      description: "Record a changed failing diagnostic from the same approved focused command.",
+      args: {
+        command: tool.schema.string().describe("Same focused test command that still fails"),
+        output: tool.schema.string().min(1).describe("Changed failing output from the same focused command"),
+        diagnostic: tool.schema.string().min(1).describe("Current diagnostic under treatment"),
+      },
+      async execute(args, context) {
+        const current = getCycle(context.sessionID);
+        if (!current?.command) throw new Error("Cannot record changed diagnostic before RED command is recorded.");
+        if (args.command !== current.command) {
+          throw new Error("RGR gate: changed diagnostics must use the same focused command as the approved RED.");
+        }
+        validateRgrRedEvidence(args.output);
+        setCycle(context.sessionID, {
+          ...current,
+          failingOutput: args.output,
+          currentDiagnostic: args.diagnostic,
+          reviewedRed: false,
+          implementationEditToken: false,
+          allowedImmediateChange: undefined,
+          allowedPaths: undefined,
+          stage: "changed_diagnostic_observed",
+        });
+        return "Changed diagnostic recorded. Approval is required before the next GREEN edit.";
+      },
+    }),
+    rgr_approve_changed_diagnostic: tool({
+      description: "Approve the next single GREEN edit for a changed diagnostic.",
+      args: {
+        allowedImmediateChange: tool.schema.string().min(1).describe("Smallest allowed production change for this diagnostic"),
+        allowedPaths: tool.schema.array(tool.schema.string()).optional().describe("Production paths explicitly allowed for this GREEN edit"),
+      },
+      async execute(args, context) {
+        const current = getCycle(context.sessionID);
+        if (current?.stage !== "changed_diagnostic_observed") {
+          throw new Error("Cannot approve changed diagnostic before recording changed failing output.");
+        }
+        setCycle(context.sessionID, {
+          ...current,
+          reviewedRed: true,
+          allowedImmediateChange: args.allowedImmediateChange,
+          allowedPaths: args.allowedPaths,
+          stage: "changed_diagnostic_approved",
+        });
+        return "Changed diagnostic approved. One scoped GREEN edit is allowed.";
       },
     }),
     rgr_record_proof_of_work_verification: tool({
@@ -536,18 +590,20 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
         return;
       }
 
-      if (productionRustPaths.length > 1) {
-        throw new Error("RGR gate: another behavioral production edit requires rerunning the focused command and recording RED or GREEN first.");
-      }
-
       let current = getCycle(input.sessionID);
       if (!current) {
         current = consumeDelegatedImplementationEditLease(input.sessionID);
         if (current) {
-          current = { ...current, implementationEditToken: false, stage: "red" };
+          current = { ...current, implementationEditToken: false, stage: "red_approved" };
         }
       }
+      if (!pathsWithinAllowedSet(productionRustPaths, current?.allowedPaths)) {
+        throw new Error("RGR gate: production Rust edit paths are outside the approved diagnostic scope.");
+      }
       if (!current?.reviewedRed) {
+        if (current?.stage === "changed_diagnostic_observed") {
+          throw new Error("RGR gate: changed diagnostic requires approval before the next production edit.");
+        }
         throw new Error("RGR gate: production Rust edits under crates/*/src require RED review approval recorded with rgr_approve_red.");
       }
       if (isOnMainBranch(worktree)) {

@@ -1,6 +1,15 @@
 import { execFileSync } from "node:child_process";
 
-export type RgrStage = "red" | "green" | "refactor";
+export type RgrStage =
+  | "idle"
+  | "red_started"
+  | "red_observed"
+  | "red_approved"
+  | "green_edit_applied"
+  | "changed_diagnostic_observed"
+  | "changed_diagnostic_approved"
+  | "green"
+  | "refactor";
 
 export type RgrCycle = {
   behavior: string;
@@ -10,6 +19,9 @@ export type RgrCycle = {
   reviewedRed?: boolean;
   implementationEditToken?: boolean;
   pendingProofOfWork?: boolean;
+  currentDiagnostic?: string;
+  allowedImmediateChange?: string;
+  allowedPaths?: string[];
   stage: RgrStage;
 };
 

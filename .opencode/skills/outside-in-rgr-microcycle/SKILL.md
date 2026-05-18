@@ -42,6 +42,16 @@ The implementer may treat exactly one current diagnostic at a time. The allowed 
 
 Each implementer handoff must name the current diagnostic and the allowed immediate change. After one behavioral production edit, stop and rerun the focused command; do not make a second behavioral edit until the orchestrator records the changed RED or GREEN.
 
+## GREEN Diagnostic Loop
+
+An approved RED test can require multiple GREEN implementation turns. The implementer is not required to make the whole test pass in one edit. It must make exactly one smallest edit that removes or changes the current diagnostic, then stop.
+
+When the same focused command still fails with a new expected diagnostic from the same approved test, the orchestrator records that changed output with `rgr_record_red` using the same focused command and gets `rgr_approve_red` again. That refreshes the single-edit allowance for the next GREEN turn without asking `rgr-test-author` to write a new test.
+
+Do not start a new outer RED cycle just because the approved test still fails differently. Start a new RED only when the next required behavior is not covered by the approved test, the failure is unrelated, or implementation review identifies a missing behavior outside the passing test.
+
+If the same diagnostic remains after an attempted edit, stop for diagnosis instead of taking another edit token. If the next diagnostic requires an API boundary change across multiple files, ask the orchestrator to approve that explicit path set; do not use shell scripts or other tools to bypass the edit gate.
+
 ## Ambiguous Failure Escape Hatch
 
 If the current diagnostic does not identify one concrete code change, write or request a lower-level unit test that exposes the next decision point. That lower-level test must go through RED and test review before production edits.
