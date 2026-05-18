@@ -118,6 +118,21 @@ fn release_prepare_uses_forgejo_api_json_for_open_pr_lookup() {
     );
 }
 
+#[test]
+fn release_prepare_isolates_nix_logs_from_open_pr_json() {
+    let Some(job) = workflow_job_in(RELEASE_PREPARE_WORKFLOW, "release-prepare") else {
+        panic!(".forgejo/workflows/release-prepare.yml should expose a `release-prepare` job");
+    };
+
+    assert!(
+        job.contains("open_prs_json=")
+            && job.contains("export OPEN_PRS_JSON=\"$open_prs_json\"")
+            && job.contains("> \"$OPEN_PRS_JSON\"")
+            && job.contains("open_prs=\"$(<\"$open_prs_json\")\""),
+        "release-prepare should write open PR API JSON through exported $OPEN_PRS_JSON and load open_prs from the outer $open_prs_json file so Nix stdout chatter cannot corrupt jq input"
+    );
+}
+
 fn workflow_job(job_name: &str) -> Option<&'static str> {
     workflow_job_in(CI_WORKFLOW, job_name)
 }
