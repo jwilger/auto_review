@@ -34,13 +34,15 @@ just ci
 just fmt
 just clippy
 just test
+just opencode-test
 just deny
 just build
 ```
 
 `just ci` runs rustfmt, clippy (with `-D warnings`), the full
-nextest test suite, cargo-deny (licenses + bans + sources), and a
-workspace build. Advisory checks require network access, so run
+nextest application test suite, the `.opencode/` plugin/harness test
+suite, cargo-deny (licenses + bans + sources), and a workspace build.
+Advisory checks require network access, so run
 `cargo deny check advisories` separately when bumping a dep. Land no
 commit that fails any required check.
 
@@ -87,6 +89,10 @@ everyone (and CI) picks up the same versions.
 - **End-to-end behaviour** that depends on real `git`, real Forgejo,
   or real LLMs is exercised via `auto-review review once` and is
   not currently covered by automated tests.
+- **opencode plugin and harness tests** live next to the plugins under
+  `.opencode/plugins/*.test.ts` and run with `just opencode-test`.
+  Keep these separate from Rust application tests so project coding
+  guardrails remain visible without being mistaken for product behavior.
 
 ## Architecture overview
 

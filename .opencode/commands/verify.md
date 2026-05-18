@@ -11,6 +11,7 @@ Prefer focused checks first, then broader gates as needed:
 just fmt
 just clippy
 just test
+just opencode-test
 just deny
 just build
 just ci

@@ -11,6 +11,10 @@ clippy:
 test:
 	cargo nextest run --workspace --no-tests=pass
 
+opencode-test:
+	npm --prefix .opencode ci --ignore-scripts
+	node --test .opencode/plugins/*.test.ts
+
 deny:
 	cargo deny check licenses bans sources
 
@@ -23,4 +27,4 @@ serve:
 watch:
 	AR_GATEWAY_BIND=0.0.0.0:8090 bacon --job gateway-dev
 
-ci: fmt clippy test deny build
+ci: fmt clippy test opencode-test deny build
