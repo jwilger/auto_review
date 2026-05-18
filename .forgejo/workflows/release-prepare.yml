@@ -75,36 +75,34 @@ jobs:
           export GIT_CONFIG_VALUE_3=https://git.johnwilger.com/
           git fetch --tags
           release_plan="$(nix develop --command scripts/release plan --workspace .)"
-          BASELINE_TAG="$(printf '%s\n' "$release_plan" | awk -F= '$1 == "baseline_tag" { print $2 }')"
           CONVENTIONAL_RELEASE_TYPE="$(printf '%s\n' "$release_plan" | awk -F= '$1 == "release_type" { print $2 }')"
-          if [ -n "$BASELINE_TAG" ]; then
-            semver_selected=false
-            for candidate_type in patch minor major; do
-              if nix develop --command cargo semver-checks --workspace --baseline-rev "$BASELINE_TAG" --release-type "$candidate_type"; then
-                candidate_plan="$(nix develop --command scripts/release plan --workspace . --release-type "$candidate_type")"
-                SEMVER_MINIMUM_RELEASE_TYPE="$candidate_type"
-                semver_selected=true
-                break
-              fi
-            done
-            if [ "$semver_selected" != true ]; then
-              printf 'cargo-semver-checks rejected patch, minor, and major release planning\n' >&2
-              exit 1
-            fi
-          else
-            SEMVER_MINIMUM_RELEASE_TYPE=patch
-          fi
+          BASELINE_TAG="$(printf '%s\n' "$release_plan" | awk -F= '$1 == "baseline_tag" { print $2 }')"
           release_type_rank() {
             case "$1" in
               patch) printf '0' ;;
               minor) printf '1' ;;
               major) printf '2' ;;
-              *) printf 'unknown release type: %s\n' "$1" >&2; exit 1 ;;
+              *) return 1 ;;
             esac
           }
-          RELEASE_TYPE="$CONVENTIONAL_RELEASE_TYPE"
-          if [[ "$(release_type_rank "$SEMVER_MINIMUM_RELEASE_TYPE")" -gt "$(release_type_rank "$CONVENTIONAL_RELEASE_TYPE")" ]]; then
+          SEMVER_MINIMUM_RELEASE_TYPE="$CONVENTIONAL_RELEASE_TYPE"
+          if [ -n "$BASELINE_TAG" ]; then
+            SEMVER_MINIMUM_RELEASE_TYPE=""
+            for candidate_type in patch minor major; do
+              if nix develop --command cargo semver-checks --workspace --baseline-rev "$BASELINE_TAG" --release-type "$candidate_type"; then
+                SEMVER_MINIMUM_RELEASE_TYPE="$candidate_type"
+                break
+              fi
+            done
+            if [ -z "$SEMVER_MINIMUM_RELEASE_TYPE" ]; then
+              printf 'cargo semver-checks did not accept any release type against baseline %s\n' "$BASELINE_TAG" >&2
+              exit 1
+            fi
+          fi
+          if [ "$(release_type_rank "$SEMVER_MINIMUM_RELEASE_TYPE")" -gt "$(release_type_rank "$CONVENTIONAL_RELEASE_TYPE")" ]; then
             RELEASE_TYPE="$SEMVER_MINIMUM_RELEASE_TYPE"
+          else
+            RELEASE_TYPE="$CONVENTIONAL_RELEASE_TYPE"
           fi
           selected_plan="$(nix develop --command scripts/release plan --workspace . --release-type "$RELEASE_TYPE")"
           RELEASE_VERSION="$(printf '%s\n' "$selected_plan" | awk -F= '$1 == "version" { print $2 }')"
@@ -121,12 +119,18 @@ jobs:
             exit 0
           fi
           git commit -m "chore: release v$RELEASE_VERSION"
-          nix develop --command git push --force-with-lease origin "$branch"
+          nix develop --command git push --no-verify --force-with-lease origin "$branch"
           export GITEA_SERVER_URL="https://git.johnwilger.com"
           export GITEA_SERVER_TOKEN="$RELEASE_PREPARE_TOKEN"
           tea_login="auto_review-release-${GITHUB_RUN_ID:-$$}"
           nix develop --command tea login add --name "$tea_login" --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
-          open_prs="$(nix develop --command tea pr ls --login "$tea_login" --repo jwilger/auto_review --state open --fields index,head --output json)"
+          open_prs="$(
+            nix develop --command curl -fsS \
+              -H "Authorization: token $GITEA_SERVER_TOKEN" \
+              -H "Accept: application/json" \
+              "$GITEA_SERVER_URL/api/v1/repos/jwilger/auto_review/pulls?state=open" \
+            | nix develop --command jq -c '[.[] | {index: .number, head: .head.ref}]'
+          )"
           superseded_prs="$(printf '%s\n' "$open_prs" | nix develop --command jq -r --arg branch "$branch" '.[] | select(.head | startswith("release/v")) | select(.head != $branch) | .index')"
           for superseded_pr in $superseded_prs; do
             nix develop --command tea pr close --login "$tea_login" --repo jwilger/auto_review "$superseded_pr"
