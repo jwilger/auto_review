@@ -17,6 +17,7 @@ Focused gates:
 just fmt
 just clippy
 just test
+just opencode-test
 just deny
 just build
 ```
@@ -120,7 +121,9 @@ changing public behavior. The CLI command reference lives in `docs/CLI.md`.
 - `.opencode/skills/` contains longer on-demand procedures.
 - `.opencode/agents/` contains specialist primary and subagents.
 - `.opencode/commands/` contains slash-command workflows.
-- `.opencode/plugins/` contains enforceable project-local behavior.
+- `.opencode/plugins/` contains enforceable project-local behavior and its
+  adjacent Node test suite. Run `just opencode-test` for these harness/plugin
+  tests; `just test` remains the Rust application test suite.
 
 ## Reference Docs
 

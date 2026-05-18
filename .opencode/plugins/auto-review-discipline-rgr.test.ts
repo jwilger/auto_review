@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { AutoReviewDisciplinePlugin } from "../.opencode/plugins/auto-review-discipline.ts";
+import { AutoReviewDisciplinePlugin } from "./auto-review-discipline.ts";
 
 function createDirtyWorktree() {
   const worktree = fs.mkdtempSync(path.join(os.tmpdir(), "auto-review-rgr-veto-"));
@@ -50,7 +50,7 @@ test("blocks production Rust edit tool changes on main after RED approval", asyn
   );
   await hooks.tool.rgr_record_red.execute(
     {
-      command: "node --test tests/opencode-rgr-task-gate.test.mjs --test-name-pattern 'blocks production Rust edit tool changes on main after RED approval'",
+      command: "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'blocks production Rust edit tool changes on main after RED approval'",
       output: "one focused plugin test failed",
     },
     { sessionID },
@@ -120,7 +120,7 @@ test("prevents parent edit after delegated implementation lease is consumed", as
   await hooks.tool.rgr_record_red.execute(
     {
       command:
-        "node --test tests/opencode-rgr-task-gate.test.mjs --test-name-pattern 'prevents parent edit after delegated implementation lease is consumed'",
+        "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'prevents parent edit after delegated implementation lease is consumed'",
       output: "one focused plugin test failed",
     },
     { sessionID: parentSessionID },
@@ -226,7 +226,7 @@ test("grants one delegated implementation edit after parent-approved RED", async
   await hooks.tool.rgr_record_red.execute(
     {
       command:
-        "node --test tests/opencode-rgr-task-gate.test.mjs --test-name-pattern 'grants one delegated implementation edit after parent-approved RED'",
+        "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'grants one delegated implementation edit after parent-approved RED'",
       output: "one focused plugin test failed",
     },
     { sessionID: parentSessionID },
@@ -273,7 +273,7 @@ test("does not create consumable unscoped diagnostic lease without subagent sess
   await hooks.tool.rgr_record_red.execute(
     {
       command:
-        "node --test tests/opencode-rgr-task-gate.test.mjs --test-name-pattern 'does not create consumable unscoped diagnostic lease without subagent session'",
+        "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'does not create consumable unscoped diagnostic lease without subagent session'",
       output: "one focused plugin test failed",
     },
     { sessionID: parentSessionID },
@@ -316,7 +316,7 @@ test("blocks GREEN after edit-capable Task completion until proof-of-work verifi
   );
   await hooks.tool.rgr_record_red.execute(
     {
-      command: "node --test tests/opencode-rgr-task-gate.test.mjs --test-name-pattern 'blocks GREEN after edit-capable Task completion until proof-of-work verification is recorded'",
+      command: "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'blocks GREEN after edit-capable Task completion until proof-of-work verification is recorded'",
       output: "one focused plugin test failed",
     },
     { sessionID },
@@ -360,7 +360,7 @@ test("rejects vague GREEN verification output without concrete command evidence"
   );
   await hooks.tool.rgr_record_red.execute(
     {
-      command: "node --test --test-name-pattern 'rejects vague GREEN verification output without concrete command evidence' tests/opencode-rgr-task-gate.test.mjs",
+      command: "node --test --test-name-pattern 'rejects vague GREEN verification output without concrete command evidence' .opencode/plugins/auto-review-discipline-rgr.test.ts",
       output: "one focused plugin test failed",
     },
     { sessionID },
@@ -388,7 +388,7 @@ test("recording proof-of-work verification clears pending proof before GREEN", a
   );
   await hooks.tool.rgr_record_red.execute(
     {
-      command: "node --test tests/opencode-rgr-task-gate.test.mjs --test-name-pattern 'recording proof-of-work verification clears pending proof before GREEN'",
+      command: "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'recording proof-of-work verification clears pending proof before GREEN'",
       output: "one focused plugin test failed",
     },
     { sessionID },
@@ -408,7 +408,7 @@ test("recording proof-of-work verification clears pending proof before GREEN", a
   await hooks.tool.rgr_record_proof_of_work_verification.execute(
     {
       output:
-        "node --test tests/opencode-rgr-task-gate.test.mjs --test-name-pattern 'recording proof-of-work verification clears pending proof before GREEN'\nPASS: one focused plugin test passed after the implementation edit",
+        "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'recording proof-of-work verification clears pending proof before GREEN'\nPASS: one focused plugin test passed after the implementation edit",
     },
     { sessionID },
   );
@@ -417,7 +417,7 @@ test("recording proof-of-work verification clears pending proof before GREEN", a
     hooks.tool.rgr_mark_green.execute(
       {
         output:
-          "node --test tests/opencode-rgr-task-gate.test.mjs --test-name-pattern 'recording proof-of-work verification clears pending proof before GREEN'\nPASS: explicit proof-of-work verification cleared pending proof before GREEN",
+          "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'recording proof-of-work verification clears pending proof before GREEN'\nPASS: explicit proof-of-work verification cleared pending proof before GREEN",
       },
       { sessionID },
     ),

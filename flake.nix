@@ -222,6 +222,7 @@
             forgejo-mcp
             tea
             python3
+            nodejs_24
             jq
             openssh
             kubernetes-helm
