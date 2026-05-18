@@ -25,4 +25,4 @@ Use `outside-in-tdd` and `outside-in-rgr-microcycle`, record and approve RED bef
 
 When evidence is ambiguous, cross-cutting, or contradicts prior reviewer findings, route that decision through `@plan-advisor` for a single high-reasoning pass, then proceed with the RGR flow on the clarified recommendation.
 
-Use Forgejo and `tea`; do not introduce GitHub-only workflows.
+Use Forgejo MCP first (`forgejo_*` tools), with `tea` as fallback; do not introduce GitHub-only workflows.

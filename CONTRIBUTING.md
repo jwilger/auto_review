@@ -221,8 +221,29 @@ summary changes.
 
 The history follows `feat(scope): summary` / `fix(scope): summary` /
 `docs: summary` / `chore: summary` shape. Keep summaries imperative
-("add X", "fix Y") and include a body explaining the why. Sign-off
-trailers and `Co-Authored-By:` lines are welcome.
+(`add X`, `fix Y`) and include a body that explains **why** (problem,
+risk, or user need), not just what changed.
+
+PR titles should be one concise conventional-commit-style summary of the
+entire PR, and PR bodies should enumerate all changes introduced by the
+branch, including docs/process follow-ups and non-code enforcement updates.
+
+Use this preferred body shape:
+
+```text
+Why:
+- <reason / problem / risk addressed>
+
+If this PR resolves an issue, `See issue #<issue-number>` is acceptable in the Why section.
+
+What:
+- <specific change made>
+
+Validation:
+- <focused checks run>
+```
+
+Sign-off trailers and `Co-Authored-By:` lines are welcome.
 
 ## License & CLA
 

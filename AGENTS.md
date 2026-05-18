@@ -27,14 +27,21 @@ Use `bacon`, `bacon clippy`, or `bacon test` for focused Rust check loops.
 
 ## Forgejo, Not GitHub
 
-The remote is `git.johnwilger.com` (Forgejo). `gh` does not work for this repo. Use `tea`:
+The remote is `git.johnwilger.com` (Forgejo). `gh` does not work for this repo.
+
+Prefer Forgejo MCP (`forgejo_*` tools) for issue, PR, and repository operations when available. Use `tea` only as a fallback when MCP is unavailable:
 
 ```sh
+# MCP-first path
+forgejo_list_repo_issues --owner jwilger --repo auto_review
+forgejo_create_pull_request --owner jwilger --repo auto_review --base main --head <branch> --title "..." --body "..."
+
+# CLI fallback
 tea issue view <N> --repo jwilger/auto_review
 tea pr create --repo jwilger/auto_review --head <branch> --base main --title "..." --description "..."
 ```
 
-opencode also configures a local `forgejo` MCP server in `opencode.json`. It runs `forgejo-mcp` from the Nix dev shell against `https://git.johnwilger.com` and expects `FORGEJO_TOKEN` in the environment; never hardcode or commit the token. Use the Forgejo MCP tools when available for Forgejo issue/PR/repository operations, with `tea` as the CLI fallback.
+opencode also configures a local `forgejo` MCP server in `opencode.json`. It runs `forgejo-mcp` from the Nix dev shell against `https://git.johnwilger.com` and expects `FORGEJO_TOKEN` in the environment; never hardcode or commit the token.
 
 Branch protection requires a PR for every merge to `main`. CI in `.forgejo/workflows/ci.yml` runs the project verification gates on every PR.
 
@@ -83,7 +90,22 @@ changing public behavior. The CLI command reference lives in `docs/CLI.md`.
 - Plans and todo lists for behavior work must be RGR-shaped, not component waterfalls.
 - Pure parsing and formatting helpers get adjacent `#[cfg(test)] mod tests`; HTTP integration tests use `wiremock`; LLM tests use `CannedProvider` or `ScriptedProvider` fakes.
 - Do not add deterministic tests that assert documentation wording for docs-only content. Keep tests for executable behavior, generated docs, public CLI/contracts, schemas, deployment artifacts, and security red-team boundaries; justify any docs-reading contract test near the test.
-- Commits must stay green and use `feat(scope):`, `fix(scope):`, `docs:`, `chore:`, `refactor:`, or `test:`. Bodies explain why.
+- Commits must stay green and use `feat(scope):`, `fix(scope):`, `docs:`, `chore:`, `refactor:`, or `test:`.
+  Include a short body that explains **why** the change is needed (risk solved, user need, or regression fixed), not only **what** changed.
+  PR titles should remain a concise conventional-commit-style summary of the PR as a whole, and PR bodies should capture **all** work on the branch (not only the last commit), including any follow-up docs/process updates.
+  Prefer this lightweight template:
+
+  ```
+   Why:
+   - <reason / problem / risk addressed>
+   - If this PR resolves an issue, `See issue #<issue-number>` is acceptable.
+
+  What:
+  - <specific change made>
+
+  Validation:
+  - <focused checks run>
+  ```
 - Use `read_non_empty_env(name)` and `parse_env::<T>(name)` in `ar-gateway/src/main.rs` instead of raw env parsing.
 - Cap provider error bodies with `ar_llm::cap_for_error` or equivalent helpers.
 - No `unwrap()` or `expect()` outside `#[cfg(test)]`.

@@ -172,9 +172,12 @@ Configure the release preparation credential as Forgejo Actions secret `RELEASE_
 Create a dedicated release bot Forgejo user for release PR commits. Add its
 public SSH signing key to that account, store the private key as Forgejo Actions secret `RELEASE_SIGNING_KEY`, and set repository variables `RELEASE_BOT_NAME` and `RELEASE_BOT_EMAIL` to the bot identity attached to the signing key. Release publish also uses that SSH signing key to sign `SHA256SUMS`.
 
-Configure the release publishing credential as Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`, owned by the same release bot named in `RELEASE_BOT_NAME`. Its release publishing PAT blast radius is to publish Linux binary archives, checksums, signatures, SBOM/provenance metadata, and Forgejo Releases only in `jwilger/auto_review`; it also covers publish generic package, delete generic package, and managed PR body/description edit for artifact links.
+Configure the release publishing credential as Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`, owned by the same release bot named in `RELEASE_BOT_NAME`. Its release publishing PAT blast radius is to publish Linux binary artifacts, checksums, signatures, SBOM/provenance metadata, and Forgejo Releases only in `jwilger/auto_review`; it also covers managed PR body/description edit for binary artifact links.
 
-The PR package publishing credential model keeps `RELEASE_PUBLISH_TOKEN` out of checkout/build steps and exposes it only after artifacts exist. CI publishes PR binary downloads as Forgejo generic packages, updates the PR description with those links, and will delete PR binary packages after the PR merges.
+The PR publishing credential model keeps `RELEASE_PUBLISH_TOKEN` out of
+checkout/build steps and exposes it only after artifacts exist. CI verifies PR
+release artifacts, uploads release-binary links to release PR descriptions, and
+keeps token-bearing publish steps scoped to token-bearing forge operations.
 
 Final release publication verifies the reviewed Linux x86_64 binary archive,
 attaches the final binary assets, and includes verification commands in the

@@ -6,9 +6,22 @@ this file becomes the default PR description.
 Delete the comment block once you've filled the rest in.
 -->
 
-## Summary
+## Why this change
 
-<!-- One paragraph. What does this change? Why? -->
+<!-- One paragraph. What risk/need does this solve? -->
+<!-- If this PR resolves an issue, `See issue #<issue-number>` is acceptable. -->
+
+## What changed
+
+<!-- Bullet list. Include all work from the branch, not just the most recent change. -->
+
+## Scope of this PR
+
+<!-- Enumerate every behavioral/doc/process area this PR changes. -->
+
+## Consequences
+
+<!-- Risks, tradeoffs, or follow-up work. -->
 
 ## Type of change
 
