@@ -54,7 +54,7 @@ fn pr_ci_exposes_separate_just_based_deterministic_jobs() {
 }
 
 #[test]
-fn release_prepare_only_updates_metadata_without_release_checks() {
+fn release_prepare_uses_semver_checks_for_release_type_planning() {
     let mut contract_errors = Vec::new();
     let Some(job) = workflow_job_in(RELEASE_PREPARE_WORKFLOW, "release-prepare") else {
         panic!(".forgejo/workflows/release-prepare.yml should expose a `release-prepare` job");
@@ -62,8 +62,12 @@ fn release_prepare_only_updates_metadata_without_release_checks() {
 
     require(
         &mut contract_errors,
-        !job.contains("cargo semver-checks"),
-        "release-prepare should not run release verification checks such as cargo semver-checks",
+        job.contains("cargo semver-checks")
+            && job.contains("--baseline-rev \"$BASELINE_TAG\"")
+            && ["patch", "minor", "major"]
+                .into_iter()
+                .all(|release_type| job.contains(release_type)),
+        "release-prepare should use cargo semver-checks with --baseline-rev \"$BASELINE_TAG\" while considering patch, minor, and major release types",
     );
     require(
         &mut contract_errors,
@@ -80,6 +84,11 @@ fn release_prepare_only_updates_metadata_without_release_checks() {
         job_contains_run_command(job, "tea pr create")
             || job_contains_run_command(job, "tea pr edit"),
         "release-prepare should open or update the release PR",
+    );
+    require(
+        &mut contract_errors,
+        job_contains_run_command(job, "git push --no-verify --force-with-lease origin \"$branch\""),
+        "release-prepare should bypass hook-driven full verification when pushing the generated release branch",
     );
     assert!(contract_errors.is_empty(), "{}", contract_errors.join("\n"));
 }
