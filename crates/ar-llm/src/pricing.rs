@@ -12,7 +12,41 @@ pub struct ModelPrice {
     pub embedding: f64,
 }
 
-pub type PriceTable = BTreeMap<String, ModelPrice>;
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct PriceTable {
+    #[serde(flatten)]
+    models: BTreeMap<String, ModelPrice>,
+}
+
+impl PriceTable {
+    pub fn estimate_usage_usd(
+        &self,
+        provider_base_url: &str,
+        model: &str,
+        input_tokens: u32,
+        output_tokens: u32,
+        embedding_tokens: u32,
+    ) -> Option<f64> {
+        let price = self
+            .models
+            .get(&price_key(provider_base_url, model))
+            .or_else(|| self.models.get(model))?;
+        Some(
+            (input_tokens as f64 * price.input
+                + output_tokens as f64 * price.output
+                + embedding_tokens as f64 * price.embedding)
+                / 1_000_000.0,
+        )
+    }
+
+    fn extend(&mut self, overrides: PriceTable) {
+        self.models.extend(overrides.models);
+    }
+}
+
+fn price_key(provider_base_url: &str, model: &str) -> String {
+    format!("{}|{}", provider_base_url.trim_end_matches('/'), model)
+}
 
 pub fn load_openai_price_table(path: Option<&Path>) -> Result<PriceTable, Error> {
     let mut table = default_openai_price_table();
@@ -31,7 +65,8 @@ pub fn load_openai_price_table(path: Option<&Path>) -> Result<PriceTable, Error>
 }
 
 pub fn default_openai_price_table() -> PriceTable {
-    BTreeMap::from([
+    PriceTable {
+        models: BTreeMap::from([
         (
             "gpt-4o".to_string(),
             ModelPrice {
@@ -56,7 +91,8 @@ pub fn default_openai_price_table() -> PriceTable {
                 embedding: 0.02,
             },
         ),
-    ])
+    ]),
+    }
 }
 
 #[derive(Debug, thiserror::Error)]
