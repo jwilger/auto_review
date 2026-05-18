@@ -82,6 +82,18 @@ fn release_prepare_only_updates_metadata_without_release_checks() {
     assert!(contract_errors.is_empty(), "{}", contract_errors.join("\n"));
 }
 
+#[test]
+fn release_prepare_push_bypasses_local_hooks() {
+    let Some(job) = workflow_job_in(RELEASE_PREPARE_WORKFLOW, "release-prepare") else {
+        panic!(".forgejo/workflows/release-prepare.yml should expose a `release-prepare` job");
+    };
+
+    assert!(
+        job_contains_run_command(job, "git push --no-verify --force-with-lease origin \"$branch\""),
+        "release-prepare should push the generated release branch with --no-verify so checked-out pre-push hooks cannot run"
+    );
+}
+
 fn workflow_job(job_name: &str) -> Option<&'static str> {
     workflow_job_in(CI_WORKFLOW, job_name)
 }
