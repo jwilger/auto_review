@@ -101,6 +101,55 @@ test("allows other task delegations that mention rgr-test-author", async () => {
   );
 });
 
+test("prevents parent edit after delegated implementation lease is consumed", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-lease-parent-lock"], { stdio: "ignore" });
+
+  const hooks = await AutoReviewDisciplinePlugin({ worktree });
+  const parentSessionID = "rgr-parent-session-with-lease";
+  const subagentSessionID = "rgr-implementation-subagent-session-with-lease";
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior: "parent must not consume delegated implementation lease",
+      test: "prevents parent edit after delegated implementation lease is consumed",
+    },
+    { sessionID: parentSessionID },
+  );
+  await hooks.tool.rgr_record_red.execute(
+    {
+      command:
+        "node --test tests/opencode-rgr-task-gate.test.mjs --test-name-pattern 'prevents parent edit after delegated implementation lease is consumed'",
+      output: "one focused plugin test failed",
+    },
+    { sessionID: parentSessionID },
+  );
+  await hooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+
+  const delegation = {
+    args: {
+      subagent_type: "rgr-diagnostic-implementer",
+      sessionID: subagentSessionID,
+      prompt:
+        "Current diagnostic: delegated implementation lease was granted to subagent. Allowed immediate change: one production Rust edit inside lease scope.",
+    },
+  };
+
+  await assert.doesNotReject(
+    hooks["tool.execute.before"]({ tool: "task", sessionID: parentSessionID }, delegation),
+  );
+
+  await assert.doesNotReject(
+    hooks["tool.execute.before"]({ tool: "edit", sessionID: subagentSessionID }, { args: { filePath: "crates/demo/src/lib.rs" } }),
+  );
+
+  await assert.rejects(
+    hooks["tool.execute.before"]({ tool: "edit", sessionID: parentSessionID }, { args: { filePath: "crates/demo/src/lib.rs" } }),
+    /RGR gate: another behavioral production edit requires rerunning the focused command and recording RED or GREEN first\./,
+  );
+});
+
 test("allows rgr-test-author after recording implementation-review veto recovery on a dirty worktree", async (t) => {
   const worktree = createDirtyWorktree();
   t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
@@ -155,6 +204,100 @@ test("consumes implementation-review veto recovery after one rgr-test-author del
   await assert.rejects(
     hooks["tool.execute.before"]({ tool: "task", sessionID }, delegation),
     /RGR task gate: start an RGR cycle with rgr_start before delegating to rgr-test-author; recover by starting the cycle or asking the orchestrator to do so\./,
+  );
+});
+
+test("grants one delegated implementation edit after parent-approved RED", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-subagent-lease"], { stdio: "ignore" });
+
+  const hooks = await AutoReviewDisciplinePlugin({ worktree });
+  const parentSessionID = "rgr-parent-session";
+  const subagentSessionID = "rgr-implementation-subagent-session";
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior: "orchestrator-approved RED powers one edit in delegated diagnostic session",
+      test: "grants one delegated implementation edit after parent-approved RED",
+    },
+    { sessionID: parentSessionID },
+  );
+  await hooks.tool.rgr_record_red.execute(
+    {
+      command:
+        "node --test tests/opencode-rgr-task-gate.test.mjs --test-name-pattern 'grants one delegated implementation edit after parent-approved RED'",
+      output: "one focused plugin test failed",
+    },
+    { sessionID: parentSessionID },
+  );
+  await hooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+
+  const delegation = {
+    args: {
+      subagent_type: "rgr-diagnostic-implementer",
+      sessionID: subagentSessionID,
+      prompt:
+        "Current diagnostic: parent-approved RED is not visible to subagent edit hook. Allowed immediate change: grant a scoped one-edit implementation lease to the delegated subagent session.",
+    },
+  };
+
+  await assert.doesNotReject(
+    hooks["tool.execute.before"]({ tool: "task", sessionID: parentSessionID }, delegation),
+  );
+  await assert.doesNotReject(
+    hooks["tool.execute.before"]({ tool: "edit", sessionID: subagentSessionID }, { args: { filePath: "crates/demo/src/lib.rs" } }),
+  );
+  await assert.rejects(
+    hooks["tool.execute.before"]({ tool: "edit", sessionID: subagentSessionID }, { args: { filePath: "crates/demo/src/lib.rs" } }),
+    /RGR gate: another behavioral production edit requires rerunning the focused command and recording RED or GREEN first\./,
+  );
+});
+
+test("does not create consumable unscoped diagnostic lease without subagent session", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-unscoped-diagnostic-lease"], { stdio: "ignore" });
+
+  const hooks = await AutoReviewDisciplinePlugin({ worktree });
+  const parentSessionID = "rgr-parent-session-with-missing-subagent-id";
+  const unrelatedSessionID = "rgr-unrelated-production-session";
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior: "delegation must include subagent session id",
+      test: "does not create consumable unscoped diagnostic lease without subagent session",
+    },
+    { sessionID: parentSessionID },
+  );
+  await hooks.tool.rgr_record_red.execute(
+    {
+      command:
+        "node --test tests/opencode-rgr-task-gate.test.mjs --test-name-pattern 'does not create consumable unscoped diagnostic lease without subagent session'",
+      output: "one focused plugin test failed",
+    },
+    { sessionID: parentSessionID },
+  );
+  await hooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+
+  const delegation = {
+    args: {
+      subagent_type: "rgr-diagnostic-implementer",
+      prompt:
+        "Current diagnostic: approved parent RED is being delegated. Allowed immediate change: one scoped production edit lease.",
+    },
+  };
+
+  await assert.doesNotReject(
+    hooks["tool.execute.before"]({ tool: "task", sessionID: parentSessionID }, delegation),
+  );
+
+  await assert.rejects(
+    hooks["tool.execute.before"](
+      { tool: "edit", sessionID: unrelatedSessionID },
+      { args: { filePath: "crates/demo/src/lib.rs" } },
+    ),
+    /RGR gate: production Rust edits under crates\/\*\/src require RED review approval recorded with rgr_approve_red\./,
   );
 });
 

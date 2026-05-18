@@ -14,6 +14,7 @@ export type RgrCycle = {
 };
 
 const cycles = new Map<string, RgrCycle>();
+const delegatedImplementationEditLeases = new Map<string, RgrCycle & { delegatedFromSessionID?: string }>();
 const implementationReviewVetoRecovery = new Map<string, { veto: string; nextRedScope: string }>();
 const touchedFiles = new Map<string, Set<string>>();
 const verification = new Map<string, string>();
@@ -117,6 +118,39 @@ export function recordTouchedFile(sessionID: string, path: string): void {
 
 export function recordVerification(sessionID: string, status: string): void {
   verification.set(sessionID, status);
+}
+
+export function recordDelegatedImplementationEditLease(
+  leaseToSessionID: string | undefined,
+  leaseFromSessionID: string,
+  cycle: RgrCycle,
+): void {
+  if (!cycle?.reviewedRed) return;
+  const lease = { ...cycle, stage: cycle.stage ?? "red", delegatedFromSessionID: leaseFromSessionID };
+  if (leaseToSessionID) {
+    delegatedImplementationEditLeases.set(leaseToSessionID, lease);
+    return;
+  }
+  return;
+}
+
+export function consumeDelegatedImplementationEditLease(sessionID: string): RgrCycle | undefined {
+  const lease = delegatedImplementationEditLeases.get(sessionID);
+  if (lease) {
+    delegatedImplementationEditLeases.delete(sessionID);
+    if (lease.delegatedFromSessionID) {
+      const parentCycle = cycles.get(lease.delegatedFromSessionID);
+      if (parentCycle) {
+        cycles.set(lease.delegatedFromSessionID, {
+          ...parentCycle,
+          implementationEditToken: true,
+          stage: parentCycle.stage ?? "red",
+        });
+      }
+    }
+    return lease;
+  }
+  return undefined;
 }
 
 export function recordForgejoFeedback(sessionID: string, summary: string): void {

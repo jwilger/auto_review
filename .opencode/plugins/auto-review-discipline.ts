@@ -2,7 +2,7 @@ import { tool, type Plugin } from "@opencode-ai/plugin";
 import cp from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { assertCleanWorktree, getCycle, consumeImplementationReviewVetoRecovery, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordImplementationReviewVetoRecovery, recordTouchedFile, setCycle, clearCycle, recordVerification, sessionContext, validateRgrRedEvidence } from "./lib/shared.ts";
+import { assertCleanWorktree, getCycle, consumeDelegatedImplementationEditLease, consumeImplementationReviewVetoRecovery, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordDelegatedImplementationEditLease, recordImplementationReviewVetoRecovery, recordTouchedFile, setCycle, clearCycle, recordVerification, sessionContext, validateRgrRedEvidence } from "./lib/shared.ts";
 
 function filePathFromArgs(args: unknown): string | undefined {
   if (!args || typeof args !== "object") return undefined;
@@ -218,6 +218,28 @@ function isRgrTestAuthorTask(args: unknown): boolean {
 function isRgrDiagnosticImplementerTask(args: unknown): boolean {
   if (!args || typeof args !== "object") return false;
   return (args as Record<string, unknown>).subagent_type === "rgr-diagnostic-implementer";
+}
+
+function delegatedSubagentSessionFromTaskArgs(args: unknown): string | undefined {
+  if (!args || typeof args !== "object") return undefined;
+  const record = args as Record<string, unknown>;
+  const candidateKeys = [
+    "sessionID",
+    "sessionId",
+    "session_id",
+    "subagent_session_id",
+    "subagentSessionId",
+    "subagentSessionID",
+    "subagent_session",
+    "subagentSession",
+    "task_session_id",
+    "taskSessionId",
+  ];
+  for (const key of candidateKeys) {
+    const value = record[key];
+    if (typeof value === "string" && value.trim()) return value;
+  }
+  return undefined;
 }
 
 function isOnMainBranch(worktree: string | undefined): boolean {
@@ -487,7 +509,13 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
         }
         recordTouchedFile(input.sessionID, path);
         if (!isProductionRustPath(path) || isLikelyTestPath(path) || isNonBehavioralPath(path)) continue;
-        const current = getCycle(input.sessionID);
+        let current = getCycle(input.sessionID);
+        if (!current) {
+          current = consumeDelegatedImplementationEditLease(input.sessionID);
+          if (current) {
+            setCycle(input.sessionID, { ...current, implementationEditToken: false, stage: "red" });
+          }
+        }
         if (!current?.reviewedRed) {
           throw new Error("RGR gate: production Rust edits under crates/*/src require RED review approval recorded with rgr_approve_red.");
         }
@@ -510,6 +538,12 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
       if (!consumeImplementationReviewVetoRecovery(input.sessionID)) {
         throw new Error("RGR task gate: start an RGR cycle with rgr_start before delegating to rgr-test-author; recover by starting the cycle or asking the orchestrator to do so.");
       }
+    }
+
+    if (/^task$/i.test(input.tool) && isRgrDiagnosticImplementerTask(output.args)) {
+      const current = getCycle(input.sessionID);
+      if (!current?.reviewedRed) return;
+      recordDelegatedImplementationEditLease(delegatedSubagentSessionFromTaskArgs(output.args), input.sessionID, current);
     }
   },
   "tool.execute.after": async (input, output) => {
