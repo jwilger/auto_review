@@ -96,8 +96,9 @@ changing public behavior. The CLI command reference lives in `docs/CLI.md`.
   Prefer this lightweight template:
 
   ```
-  Why:
-  - <reason / problem / risk addressed>
+   Why:
+   - <reason / problem / risk addressed>
+   - If this PR resolves an issue, `See issue #<issue-number>` is acceptable.
 
   What:
   - <specific change made>

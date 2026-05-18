@@ -9,6 +9,7 @@ Delete the comment block once you've filled the rest in.
 ## Why this change
 
 <!-- One paragraph. What risk/need does this solve? -->
+<!-- If this PR resolves an issue, `See issue #<issue-number>` is acceptable. -->
 
 ## What changed
 

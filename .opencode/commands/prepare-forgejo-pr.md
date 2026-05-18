@@ -13,13 +13,14 @@ Workflow:
 4. Ensure commit message body (or PR description body for this PR) includes why the change is needed, and that the PR body captures all changes from the branch (not just the latest change).
    Prefer:
 
-   ```text
-   Why:
-   - <reason / problem / risk addressed>
+```text
+Why:
+- <reason / problem / risk addressed>
+- If this PR resolves an issue, `See issue #<issue-number>` is acceptable.
 
-   What:
-    - <specific change made>
-    - <cover every commit area in this branch>
+What:
+ - <specific change made>
+ - <cover every commit area in this branch>
 
    Validation:
    - <focused checks run>

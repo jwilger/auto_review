@@ -234,6 +234,8 @@ Use this preferred body shape:
 Why:
 - <reason / problem / risk addressed>
 
+If this PR resolves an issue, `See issue #<issue-number>` is acceptable in the Why section.
+
 What:
 - <specific change made>
 
