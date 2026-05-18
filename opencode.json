@@ -8,6 +8,12 @@
   "plugin": [
     "opencode-rtk"
   ],
+  "command": {
+    "issue": {
+      "description": "Complete a Forgejo issue and submit a PR.",
+      "template": "Complete issue $ARGUMENTS and submit a PR."
+    }
+  },
   "provider": {
     "openai": {
       "models": {
