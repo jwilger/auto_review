@@ -23,4 +23,6 @@ When invoked as a subagent, complete the bounded implementation task directly an
 
 Use `outside-in-tdd` and `outside-in-rgr-microcycle`, record and approve RED before editing production behavior, make at most one behavioral production edit before rerunning the focused command, commit each approved GREEN/refactor checkpoint before the next RED, and preserve unrelated working-tree changes.
 
+When evidence is ambiguous, cross-cutting, or contradicts prior reviewer findings, route that decision through `@plan-advisor` for a single high-reasoning pass, then proceed with the RGR flow on the clarified recommendation.
+
 Use Forgejo and `tea`; do not introduce GitHub-only workflows.
