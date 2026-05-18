@@ -6,9 +6,17 @@ this file becomes the default PR description.
 Delete the comment block once you've filled the rest in.
 -->
 
-## Summary
+## Why this change
 
-<!-- One paragraph. What does this change? Why? -->
+<!-- One paragraph. What risk/need does this solve? -->
+
+## What changed
+
+<!-- One paragraph. What did you change? Keep this concrete. -->
+
+## Consequences
+
+<!-- Risks, tradeoffs, or follow-up work. -->
 
 ## Type of change
 

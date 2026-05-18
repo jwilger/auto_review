@@ -221,8 +221,23 @@ summary changes.
 
 The history follows `feat(scope): summary` / `fix(scope): summary` /
 `docs: summary` / `chore: summary` shape. Keep summaries imperative
-("add X", "fix Y") and include a body explaining the why. Sign-off
-trailers and `Co-Authored-By:` lines are welcome.
+(`add X`, `fix Y`) and include a body that explains **why** (problem,
+risk, or user need), not just what changed.
+
+Use this preferred body shape:
+
+```text
+Why:
+- <reason / problem / risk addressed>
+
+What:
+- <specific change made>
+
+Validation:
+- <focused checks run>
+```
+
+Sign-off trailers and `Co-Authored-By:` lines are welcome.
 
 ## License & CLA
 
