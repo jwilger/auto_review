@@ -134,6 +134,24 @@ fn release_prepare_isolates_nix_logs_from_open_pr_json() {
     );
 }
 
+#[test]
+fn release_prepare_creates_mergeable_release_pr_description() {
+    let descriptions = release_pr_descriptions(RELEASE_PREPARE_WORKFLOW);
+
+    assert!(
+        !descriptions.is_empty()
+            && descriptions.iter().all(|description| {
+                let lines: Vec<_> = description.lines().collect();
+                lines.iter().all(|line| !line.starts_with("    "))
+                    && lines.iter().any(|line| {
+                        line.contains("CI builds release PR artifacts for review")
+                            && line.contains("published only after merge to main")
+                    })
+            }),
+        "release-prepare should pass tea release PR descriptions as normal Markdown paragraphs that describe artifact/release behavior, not as four-space-indented code blocks: {descriptions:#?}"
+    );
+}
+
 fn workflow_job(job_name: &str) -> Option<&'static str> {
     workflow_job_in(CI_WORKFLOW, job_name)
 }
@@ -180,6 +198,38 @@ fn job_checkout_disables_persisted_credentials(job: &str) -> bool {
         .map_or(&job[checkout_start..], |(step, _)| step);
 
     checkout_step.contains("persist-credentials: false")
+}
+
+fn release_pr_descriptions(workflow: &str) -> Vec<String> {
+    let script_lines = workflow
+        .lines()
+        .map(|line| line.strip_prefix("          ").unwrap_or(line));
+    let mut descriptions = Vec::new();
+    let mut current: Option<String> = None;
+
+    for line in script_lines {
+        if let Some(description) = current.as_mut() {
+            if let Some((tail, _)) = line.split_once('"') {
+                description.push('\n');
+                description.push_str(tail);
+                descriptions.push(current.take().unwrap_or_default());
+            } else {
+                description.push('\n');
+                description.push_str(line);
+            }
+            continue;
+        }
+
+        if let Some((_, body_start)) = line.split_once("--description \"") {
+            if let Some((body, _)) = body_start.split_once('"') {
+                descriptions.push(body.to_owned());
+            } else {
+                current = Some(body_start.to_owned());
+            }
+        }
+    }
+
+    descriptions
 }
 
 fn require(errors: &mut Vec<String>, condition: bool, message: impl Into<String>) {
