@@ -75,37 +75,8 @@ jobs:
           export GIT_CONFIG_VALUE_3=https://git.johnwilger.com/
           git fetch --tags
           release_plan="$(nix develop --command scripts/release plan --workspace .)"
-          BASELINE_TAG="$(printf '%s\n' "$release_plan" | awk -F= '$1 == "baseline_tag" { print $2 }')"
           CONVENTIONAL_RELEASE_TYPE="$(printf '%s\n' "$release_plan" | awk -F= '$1 == "release_type" { print $2 }')"
-          if [ -n "$BASELINE_TAG" ]; then
-            semver_selected=false
-            for candidate_type in patch minor major; do
-              if nix develop --command cargo semver-checks --workspace --baseline-rev "$BASELINE_TAG" --release-type "$candidate_type"; then
-                candidate_plan="$(nix develop --command scripts/release plan --workspace . --release-type "$candidate_type")"
-                SEMVER_MINIMUM_RELEASE_TYPE="$candidate_type"
-                semver_selected=true
-                break
-              fi
-            done
-            if [ "$semver_selected" != true ]; then
-              printf 'cargo-semver-checks rejected patch, minor, and major release planning\n' >&2
-              exit 1
-            fi
-          else
-            SEMVER_MINIMUM_RELEASE_TYPE=patch
-          fi
-          release_type_rank() {
-            case "$1" in
-              patch) printf '0' ;;
-              minor) printf '1' ;;
-              major) printf '2' ;;
-              *) printf 'unknown release type: %s\n' "$1" >&2; exit 1 ;;
-            esac
-          }
           RELEASE_TYPE="$CONVENTIONAL_RELEASE_TYPE"
-          if [[ "$(release_type_rank "$SEMVER_MINIMUM_RELEASE_TYPE")" -gt "$(release_type_rank "$CONVENTIONAL_RELEASE_TYPE")" ]]; then
-            RELEASE_TYPE="$SEMVER_MINIMUM_RELEASE_TYPE"
-          fi
           selected_plan="$(nix develop --command scripts/release plan --workspace . --release-type "$RELEASE_TYPE")"
           RELEASE_VERSION="$(printf '%s\n' "$selected_plan" | awk -F= '$1 == "version" { print $2 }')"
           if [ -z "$RELEASE_VERSION" ] || [ -z "$RELEASE_TYPE" ]; then

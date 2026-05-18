@@ -1,4 +1,5 @@
 const CI_WORKFLOW: &str = include_str!("../../../.forgejo/workflows/ci.yml");
+const RELEASE_PREPARE_WORKFLOW: &str = include_str!("../../../.forgejo/workflows/release-prepare.yml");
 
 #[test]
 fn pr_ci_exposes_separate_just_based_deterministic_jobs() {
@@ -51,9 +52,43 @@ fn pr_ci_exposes_separate_just_based_deterministic_jobs() {
     assert!(contract_errors.is_empty(), "{}", contract_errors.join("\n"));
 }
 
+#[test]
+fn release_prepare_only_updates_metadata_without_release_checks() {
+    let mut contract_errors = Vec::new();
+    let Some(job) = workflow_job_in(RELEASE_PREPARE_WORKFLOW, "release-prepare") else {
+        panic!(".forgejo/workflows/release-prepare.yml should expose a `release-prepare` job");
+    };
+
+    require(
+        &mut contract_errors,
+        !job.contains("cargo semver-checks"),
+        "release-prepare should not run release verification checks such as cargo semver-checks",
+    );
+    require(
+        &mut contract_errors,
+        job_contains_run_command(job, "scripts/release plan --workspace ."),
+        "release-prepare should plan release metadata",
+    );
+    require(
+        &mut contract_errors,
+        job_contains_run_command(job, "scripts/release prepare --workspace ."),
+        "release-prepare should prepare release metadata",
+    );
+    require(
+        &mut contract_errors,
+        job_contains_run_command(job, "tea pr create") || job_contains_run_command(job, "tea pr edit"),
+        "release-prepare should open or update the release PR",
+    );
+    assert!(contract_errors.is_empty(), "{}", contract_errors.join("\n"));
+}
+
 fn workflow_job(job_name: &str) -> Option<&'static str> {
-    let jobs_start = CI_WORKFLOW.find("jobs:\n")?;
-    let jobs = &CI_WORKFLOW[jobs_start + "jobs:\n".len()..];
+    workflow_job_in(CI_WORKFLOW, job_name)
+}
+
+fn workflow_job_in(workflow: &'static str, job_name: &str) -> Option<&'static str> {
+    let jobs_start = workflow.find("jobs:\n")?;
+    let jobs = &workflow[jobs_start + "jobs:\n".len()..];
     let marker = format!("  {job_name}:");
     let start = jobs.find(&marker)?;
     let rest = &jobs[start..];
