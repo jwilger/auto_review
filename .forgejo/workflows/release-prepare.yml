@@ -97,7 +97,13 @@ jobs:
           export GITEA_SERVER_TOKEN="$RELEASE_PREPARE_TOKEN"
           tea_login="auto_review-release-${GITHUB_RUN_ID:-$$}"
           nix develop --command tea login add --name "$tea_login" --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
-          open_prs="$(nix develop --command tea pr ls --login "$tea_login" --repo jwilger/auto_review --state open --fields index,head --output json)"
+          open_prs="$(
+            nix develop --command curl -fsS \
+              -H "Authorization: token $GITEA_SERVER_TOKEN" \
+              -H "Accept: application/json" \
+              "$GITEA_SERVER_URL/api/v1/repos/jwilger/auto_review/pulls?state=open" \
+            | nix develop --command jq -c '[.[] | {index: .number, head: .head.ref}]'
+          )"
           superseded_prs="$(printf '%s\n' "$open_prs" | nix develop --command jq -r --arg branch "$branch" '.[] | select(.head | startswith("release/v")) | select(.head != $branch) | .index')"
           for superseded_pr in $superseded_prs; do
             nix develop --command tea pr close --login "$tea_login" --repo jwilger/auto_review "$superseded_pr"

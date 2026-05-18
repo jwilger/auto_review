@@ -1,5 +1,6 @@
 const CI_WORKFLOW: &str = include_str!("../../../.forgejo/workflows/ci.yml");
-const RELEASE_PREPARE_WORKFLOW: &str = include_str!("../../../.forgejo/workflows/release-prepare.yml");
+const RELEASE_PREPARE_WORKFLOW: &str =
+    include_str!("../../../.forgejo/workflows/release-prepare.yml");
 
 #[test]
 fn pr_ci_exposes_separate_just_based_deterministic_jobs() {
@@ -76,7 +77,8 @@ fn release_prepare_only_updates_metadata_without_release_checks() {
     );
     require(
         &mut contract_errors,
-        job_contains_run_command(job, "tea pr create") || job_contains_run_command(job, "tea pr edit"),
+        job_contains_run_command(job, "tea pr create")
+            || job_contains_run_command(job, "tea pr edit"),
         "release-prepare should open or update the release PR",
     );
     assert!(contract_errors.is_empty(), "{}", contract_errors.join("\n"));
@@ -91,6 +93,19 @@ fn release_prepare_push_bypasses_local_hooks() {
     assert!(
         job_contains_run_command(job, "git push --no-verify --force-with-lease origin \"$branch\""),
         "release-prepare should push the generated release branch with --no-verify so checked-out pre-push hooks cannot run"
+    );
+}
+
+#[test]
+fn release_prepare_uses_forgejo_api_json_for_open_pr_lookup() {
+    let Some(job) = workflow_job_in(RELEASE_PREPARE_WORKFLOW, "release-prepare") else {
+        panic!(".forgejo/workflows/release-prepare.yml should expose a `release-prepare` job");
+    };
+
+    assert!(
+        !job.contains("tea pr ls")
+            && job.contains("/api/v1/repos/jwilger/auto_review/pulls?state=open"),
+        "release-prepare should query Forgejo pulls API JSON at /api/v1/repos/jwilger/auto_review/pulls?state=open instead of piping tea pr ls output into jq"
     );
 }
 
