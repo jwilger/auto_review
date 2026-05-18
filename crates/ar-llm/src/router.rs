@@ -2,6 +2,8 @@ use crate::types::{CompleteRequest, CompleteResponse, Error, LlmProvider, ModelT
 use std::collections::HashMap;
 use std::sync::Arc;
 
+type UsageCollector = Arc<dyn Fn(ModelTier, &str, u32, u32) + Send + Sync>;
+
 /// Maps `ModelTier` → provider instance.
 ///
 /// Activities don't talk to providers directly — they ask the router for a
@@ -10,6 +12,7 @@ use std::sync::Arc;
 #[derive(Clone, Default)]
 pub struct Router {
     providers: HashMap<ModelTier, Arc<dyn LlmProvider>>,
+    usage_collector: Option<UsageCollector>,
 }
 
 impl Router {
@@ -22,6 +25,14 @@ impl Router {
         self
     }
 
+    pub fn with_usage_collector<F>(mut self, collector: F) -> Self
+    where
+        F: Fn(ModelTier, &str, u32, u32) + Send + Sync + 'static,
+    {
+        self.usage_collector = Some(Arc::new(collector));
+        self
+    }
+
     pub fn provider(&self, tier: ModelTier) -> Result<&Arc<dyn LlmProvider>, Error> {
         self.providers.get(&tier).ok_or(Error::NoProvider(tier))
     }
@@ -31,11 +42,28 @@ impl Router {
         tier: ModelTier,
         req: CompleteRequest,
     ) -> Result<CompleteResponse, Error> {
-        self.provider(tier)?.complete(req).await
+        let resp = self.provider(tier)?.complete(req).await?;
+        self.record_usage(tier, resp.input_tokens, resp.output_tokens);
+        Ok(resp)
     }
 
     pub async fn embed(&self, tier: ModelTier, texts: &[String]) -> Result<Vec<Vec<f32>>, Error> {
-        self.provider(tier)?.embed(texts).await
+        let resp = self.provider(tier)?.embed(texts).await?;
+        self.record_usage(tier, 0, 0);
+        Ok(resp)
+    }
+
+    fn record_usage(&self, tier: ModelTier, input_tokens: u32, output_tokens: u32) {
+        if let Some(collector) = &self.usage_collector {
+            collector(tier, default_model_label(tier), input_tokens, output_tokens);
+        }
+    }
+}
+
+fn default_model_label(tier: ModelTier) -> &'static str {
+    match tier {
+        ModelTier::Cheap | ModelTier::Reasoning => "completion-model",
+        ModelTier::Embedding => "embedding-model",
     }
 }
 
