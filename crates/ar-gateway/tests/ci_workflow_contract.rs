@@ -128,8 +128,9 @@ fn release_prepare_isolates_nix_logs_from_open_pr_json() {
         job.contains("open_prs_json=")
             && job.contains("export OPEN_PRS_JSON=\"$open_prs_json\"")
             && job.contains("> \"$OPEN_PRS_JSON\"")
-            && job.contains("open_prs=\"$(<\"$open_prs_json\")\""),
-        "release-prepare should write open PR API JSON through exported $OPEN_PRS_JSON and load open_prs from the outer $open_prs_json file so Nix stdout chatter cannot corrupt jq input"
+            && job.contains("open_prs=\"$(<\"$OPEN_PRS_JSON\")\"")
+            && !job.contains("| nix develop --command jq"),
+        "release-prepare should write open PR API JSON through exported $OPEN_PRS_JSON and derive PR IDs inside Nix so Nix stdout chatter cannot corrupt jq input"
     );
 }
 

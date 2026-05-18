@@ -126,25 +126,29 @@ jobs:
           nix develop --command tea login add --name "$tea_login" --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
           open_prs_json="${RUNNER_TEMP:-/tmp}/release-open-prs.json"
           export OPEN_PRS_JSON="$open_prs_json"
+          export RELEASE_BRANCH="$branch"
+          export RELEASE_VERSION
+          export TEA_LOGIN="$tea_login"
           nix develop --command bash -c 'set -euo pipefail
             curl -fsS \
             -H "Authorization: token $GITEA_SERVER_TOKEN" \
             -H "Accept: application/json" \
             "$GITEA_SERVER_URL/api/v1/repos/jwilger/auto_review/pulls?state=open" \
             | jq -c '\''[.[] | {index: .number, head: .head.ref}]'\'' > "$OPEN_PRS_JSON"'
-          open_prs="$(<"$open_prs_json")"
-          superseded_prs="$(printf '%s\n' "$open_prs" | nix develop --command jq -r --arg branch "$branch" '.[] | select(.head | startswith("release/v")) | select(.head != $branch) | .index')"
-          for superseded_pr in $superseded_prs; do
-            nix develop --command tea pr close --login "$tea_login" --repo jwilger/auto_review "$superseded_pr"
-          done
-          existing_pr="$(printf '%s\n' "$open_prs" | nix develop --command jq -r --arg branch "$branch" '.[] | select(.head == $branch) | .index' | head -n 1)"
-          if [ -z "$existing_pr" ]; then
-            nix develop --command tea pr create --login "$tea_login" --repo jwilger/auto_review --head "$branch" --base main --title "chore: release v$RELEASE_VERSION" --description "Prepare release v$RELEASE_VERSION.
+          nix develop --command bash -c 'set -euo pipefail
+            open_prs="$(<"$OPEN_PRS_JSON")"
+            superseded_prs="$(printf "%s\n" "$open_prs" | jq -r --arg branch "$RELEASE_BRANCH" --arg prefix "release/v" ".[] | select(.head | startswith(\$prefix)) | select(.head != \$branch) | .index")"
+            for superseded_pr in $superseded_prs; do
+              tea pr close --login "$TEA_LOGIN" --repo jwilger/auto_review "$superseded_pr"
+            done
+            existing_pr="$(printf "%s\n" "$open_prs" | jq -r --arg branch "$RELEASE_BRANCH" ".[] | select(.head == \$branch) | .index" | head -n 1)"
+            if [ -z "$existing_pr" ]; then
+              tea pr create --login "$TEA_LOGIN" --repo jwilger/auto_review --head "$RELEASE_BRANCH" --base main --title "chore: release v$RELEASE_VERSION" --description "Prepare release v$RELEASE_VERSION.
 
-            CI builds release PR artifacts for review; final release assets are rebuilt and published only after merge to main."
-          else
-            printf 'release PR already open: #%s\n' "$existing_pr"
-            nix develop --command tea pr edit --login "$tea_login" --repo jwilger/auto_review "$existing_pr" --description "Prepare release v$RELEASE_VERSION.
+              CI builds release PR artifacts for review; final release assets are rebuilt and published only after merge to main."
+            else
+              printf "release PR already open: #%s\n" "$existing_pr"
+              tea pr edit --login "$TEA_LOGIN" --repo jwilger/auto_review "$existing_pr" --description "Prepare release v$RELEASE_VERSION.
 
-            CI builds release PR artifacts for review; final release assets are rebuilt and published only after merge to main."
-          fi
+              CI builds release PR artifacts for review; final release assets are rebuilt and published only after merge to main."
+            fi'
