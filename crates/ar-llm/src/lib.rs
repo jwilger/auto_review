@@ -7,6 +7,7 @@
 //! their own tier.
 
 pub mod openai;
+pub mod pricing;
 pub mod router;
 pub mod types;
 
