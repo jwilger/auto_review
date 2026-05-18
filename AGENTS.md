@@ -27,14 +27,21 @@ Use `bacon`, `bacon clippy`, or `bacon test` for focused Rust check loops.
 
 ## Forgejo, Not GitHub
 
-The remote is `git.johnwilger.com` (Forgejo). `gh` does not work for this repo. Use `tea`:
+The remote is `git.johnwilger.com` (Forgejo). `gh` does not work for this repo.
+
+Prefer Forgejo MCP (`forgejo_*` tools) for issue, PR, and repository operations when available. Use `tea` only as a fallback when MCP is unavailable:
 
 ```sh
+# MCP-first path
+forgejo_list_repo_issues --owner jwilger --repo auto_review
+forgejo_create_pull_request --owner jwilger --repo auto_review --base main --head <branch> --title "..." --body "..."
+
+# CLI fallback
 tea issue view <N> --repo jwilger/auto_review
 tea pr create --repo jwilger/auto_review --head <branch> --base main --title "..." --description "..."
 ```
 
-opencode also configures a local `forgejo` MCP server in `opencode.json`. It runs `forgejo-mcp` from the Nix dev shell against `https://git.johnwilger.com` and expects `FORGEJO_TOKEN` in the environment; never hardcode or commit the token. Use the Forgejo MCP tools when available for Forgejo issue/PR/repository operations, with `tea` as the CLI fallback.
+opencode also configures a local `forgejo` MCP server in `opencode.json`. It runs `forgejo-mcp` from the Nix dev shell against `https://git.johnwilger.com` and expects `FORGEJO_TOKEN` in the environment; never hardcode or commit the token.
 
 Branch protection requires a PR for every merge to `main`. CI in `.forgejo/workflows/ci.yml` runs the project verification gates on every PR.
 
