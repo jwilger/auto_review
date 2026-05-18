@@ -206,6 +206,24 @@ function isRgrTestAuthorTask(args: unknown): boolean {
   return (args as Record<string, unknown>).subagent_type === "rgr-test-author";
 }
 
+function isRgrDiagnosticImplementerTask(args: unknown): boolean {
+  if (!args || typeof args !== "object") return false;
+  return (args as Record<string, unknown>).subagent_type === "rgr-diagnostic-implementer";
+}
+
+function isOnMainBranch(worktree: string | undefined): boolean {
+  const result = cp.spawnSync("git", ["-C", worktree ?? process.cwd(), "branch", "--show-current"], { encoding: "utf8" });
+  return result.status === 0 && result.stdout.trim() === "main";
+}
+
+function validateRgrGreenVerificationOutput(output: string): void {
+  const hasConcreteCommand = /\b(?:cargo|just|node|npm|pnpm|yarn|bacon|nix)\b[^\n]*(?:test|nextest|fmt|clippy|build|ci)/i.test(output);
+  const hasPassFailEvidence = /\b(?:pass(?:ed|es)?|fail(?:ed|ure)?|ok|success)\b/i.test(output);
+  if (!hasConcreteCommand || !hasPassFailEvidence) {
+    throw new Error("RGR gate: GREEN verification output must include a concrete command and pass/fail evidence.");
+  }
+}
+
 export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => ({
   tool: {
     rgr_start: tool({
@@ -244,12 +262,27 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
         return "RED approved. Minimum production edits are now allowed for this cycle.";
       },
     }),
+    rgr_record_proof_of_work_verification: tool({
+      description: "Record focused verification after edit-capable implementation work.",
+      args: { output: tool.schema.string().describe("Focused verification output after the implementation edit") },
+      async execute(args, context) {
+        const current = getCycle(context.sessionID);
+        if (!current) throw new Error("Cannot record proof-of-work verification before starting an RGR cycle.");
+        setCycle(context.sessionID, { ...current, pendingProofOfWork: false });
+        recordVerification(context.sessionID, args.output);
+        return "Proof-of-work verification recorded. GREEN may be marked if the focused test passed.";
+      },
+    }),
     rgr_mark_green: tool({
       description: "Mark the active RGR cycle green after the focused test passes.",
       args: { output: tool.schema.string().describe("Passing test output or concise verification summary") },
       async execute(args, context) {
         const current = getCycle(context.sessionID);
         if (!current?.failingOutput) throw new Error("Cannot mark GREEN before observed RED is recorded.");
+        if (current.pendingProofOfWork) {
+          throw new Error("RGR gate: record explicit proof-of-work verification before marking GREEN.");
+        }
+        validateRgrGreenVerificationOutput(args.output);
         setCycle(context.sessionID, { ...current, implementationEditToken: false, stage: "green" });
         recordVerification(context.sessionID, args.output);
         return "GREEN recorded. Refactoring is allowed with tests green.";
@@ -449,6 +482,9 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
         if (!current?.reviewedRed) {
           throw new Error("RGR gate: production Rust edits under crates/*/src require RED review approval recorded with rgr_approve_red.");
         }
+        if (isOnMainBranch(worktree)) {
+          throw new Error("Branch gate: production Rust edits under crates/*/src require leaving main or calling the explicit override tool.");
+        }
         if (current.implementationEditToken) {
           throw new Error("RGR gate: another behavioral production edit requires rerunning the focused command and recording RED or GREEN first.");
         }
@@ -467,8 +503,11 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
       }
     }
   },
-  "experimental.session.compacting": async (input, output) => {
-    output.context.push(...sessionContext(input.sessionID));
+  "tool.execute.after": async (input, output) => {
+    if (!/^task$/i.test(input.tool) || !isRgrDiagnosticImplementerTask(output.args)) return;
+    const current = getCycle(input.sessionID);
+    if (!current) return;
+    setCycle(input.sessionID, { ...current, pendingProofOfWork: true });
   },
 });
 

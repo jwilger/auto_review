@@ -9,6 +9,7 @@ export type RgrCycle = {
   failingOutput?: string;
   reviewedRed?: boolean;
   implementationEditToken?: boolean;
+  pendingProofOfWork?: boolean;
   stage: RgrStage;
 };
 
