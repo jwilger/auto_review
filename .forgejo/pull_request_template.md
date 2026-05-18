@@ -12,7 +12,11 @@ Delete the comment block once you've filled the rest in.
 
 ## What changed
 
-<!-- One paragraph. What did you change? Keep this concrete. -->
+<!-- Bullet list. Include all work from the branch, not just the most recent change. -->
+
+## Scope of this PR
+
+<!-- Enumerate every behavioral/doc/process area this PR changes. -->
 
 ## Consequences
 

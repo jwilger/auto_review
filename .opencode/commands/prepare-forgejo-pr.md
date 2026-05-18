@@ -10,7 +10,7 @@ Workflow:
 1. Audit scope with `git status` and diffs.
 2. Stage only explicit paths; do not use `git add .`, `git add -A`, `git add -u`, or `git commit -a`.
 3. Check commit titles follow conventional commits; the release PR generates changelog notes from conventional commits.
-4. Ensure commit message body (or PR description body for this PR) includes why the change is needed.
+4. Ensure commit message body (or PR description body for this PR) includes why the change is needed, and that the PR body captures all changes from the branch (not just the latest change).
    Prefer:
 
    ```text
@@ -18,7 +18,8 @@ Workflow:
    - <reason / problem / risk addressed>
 
    What:
-   - <specific change made>
+    - <specific change made>
+    - <cover every commit area in this branch>
 
    Validation:
    - <focused checks run>

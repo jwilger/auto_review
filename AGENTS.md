@@ -92,6 +92,7 @@ changing public behavior. The CLI command reference lives in `docs/CLI.md`.
 - Do not add deterministic tests that assert documentation wording for docs-only content. Keep tests for executable behavior, generated docs, public CLI/contracts, schemas, deployment artifacts, and security red-team boundaries; justify any docs-reading contract test near the test.
 - Commits must stay green and use `feat(scope):`, `fix(scope):`, `docs:`, `chore:`, `refactor:`, or `test:`.
   Include a short body that explains **why** the change is needed (risk solved, user need, or regression fixed), not only **what** changed.
+  PR titles should remain a concise conventional-commit-style summary of the PR as a whole, and PR bodies should capture **all** work on the branch (not only the last commit), including any follow-up docs/process updates.
   Prefer this lightweight template:
 
   ```
