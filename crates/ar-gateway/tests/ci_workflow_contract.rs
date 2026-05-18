@@ -56,6 +56,155 @@ fn pr_ci_exposes_separate_just_based_deterministic_jobs() {
 }
 
 #[test]
+fn pr_ci_classifies_changed_paths_before_expensive_gates() {
+    let mut contract_errors = Vec::new();
+
+    let jobs = workflow_jobs(CI_WORKFLOW);
+    let Some((classifier_job_name, _classifier_job, app_output_key, opencode_output_key)) =
+        jobs.iter().find_map(|(job_name, job_text)| {
+            let output_keys = workflow_job_output_keys(job_text);
+            let app_output_key = find_matching_output_key(&output_keys, &["app", "ci"])
+                .or_else(|| find_matching_output_key(&output_keys, &["app"]));
+            let opencode_output_key = find_matching_output_key(&output_keys, &["opencode", "ci"])
+                .or_else(|| find_matching_output_key(&output_keys, &["opencode"]));
+
+            match (app_output_key, opencode_output_key) {
+                (Some(app_output_key), Some(opencode_output_key)) => Some((
+                    job_name.as_str(),
+                    *job_text,
+                    app_output_key,
+                    opencode_output_key,
+                )),
+                _ => None,
+            }
+        })
+    else {
+        panic!(
+            "CI workflow should define a path-classification job that exposes separate app and opencode CI output keys"
+        );
+    };
+
+    let app_output_ref = format!("needs.{classifier_job_name}.outputs.{app_output_key}");
+    let opencode_output_ref = format!("needs.{classifier_job_name}.outputs.{opencode_output_key}");
+
+    for gate in ["fmt", "clippy", "test", "deny", "build"] {
+        let Some(job) = workflow_job(gate) else {
+            panic!(".forgejo/workflows/ci.yml should expose `{gate}` PR CI job");
+        };
+
+        require(
+            &mut contract_errors,
+            workflow_job_if(job).is_some_and(|if_line| if_line.contains("pull_request")),
+            format!("`{gate}` should remain scoped to pull_request events"),
+        );
+        require(
+            &mut contract_errors,
+            workflow_job_needs(job).is_some_and(|needs| needs.contains(classifier_job_name)),
+            format!("`{gate}` should depend on `{classifier_job_name}` path-classification output"),
+        );
+        require(
+            &mut contract_errors,
+            workflow_job_if(job).is_some_and(|if_line| {
+                if_line.contains(&app_output_ref) && if_line.contains("'true'")
+            }),
+            format!("`{gate}` should only run when application paths changed"),
+        );
+    }
+
+    let Some(opencode_job) = workflow_job("opencode-test") else {
+        panic!(".forgejo/workflows/ci.yml should expose an `opencode-test` PR CI job");
+    };
+
+    require(
+        &mut contract_errors,
+        workflow_job_needs(opencode_job).is_some_and(|needs| needs.contains(classifier_job_name)),
+        "opencode-test should depend on path-classification outputs so it can be selected from changes".to_string(),
+    );
+    require(
+        &mut contract_errors,
+        workflow_job_if(opencode_job).is_some_and(|if_line| {
+            if_line.contains(&opencode_output_ref) && if_line.contains("'true'")
+        }),
+        "opencode-test should run only when opencode-related paths changed".to_string(),
+    );
+
+    let Some(semantic_review_job) = workflow_job("semantic-review") else {
+        panic!(".forgejo/workflows/ci.yml should expose a `semantic-review` PR job");
+    };
+
+    require(
+        &mut contract_errors,
+        workflow_job_if(semantic_review_job)
+            .is_some_and(|if_line| if_line.contains("github.event_name == 'pull_request'")),
+        "semantic-review should remain available for every pull_request after path-based routing"
+            .to_string(),
+    );
+
+    let Some(semantic_needs) = workflow_job_needs(semantic_review_job) else {
+        panic!("semantic-review should declare needs to avoid running before path routing");
+    };
+    let semantic_needs_tokens = workflow_job_needs_tokens(semantic_needs);
+    require(
+        &mut contract_errors,
+        semantic_needs_tokens
+            .iter()
+            .all(|token| !matches!(token.as_str(), "fmt" | "clippy" | "test" | "deny" | "build")),
+        "semantic-review should not depend on full application gates; path-classified opencode-only PRs must still get semantic review", 
+    );
+
+    assert!(contract_errors.is_empty(), "{}", contract_errors.join("\n"));
+}
+
+#[test]
+fn pr_ci_classifier_treats_root_opencode_json_as_opencode_and_fails_closed_to_app_ci_on_uncertain_diff(
+) {
+    let mut contract_errors = Vec::new();
+
+    let Some(classifier_job) = workflow_job("path-classification") else {
+        panic!(
+            ".forgejo/workflows/ci.yml should define path-classification job for PR path routing"
+        );
+    };
+
+    let Some(detect_paths_step) = workflow_step_lines(classifier_job, "Detect changed paths")
+    else {
+        panic!("path-classification should include a Detect changed paths step");
+    };
+    let while_guard_index =
+        line_index_with_prefix(&detect_paths_step, "while IFS= read -r file; do");
+    let app_ci_initial_true_index = line_index_with_prefix(&detect_paths_step, "app_ci=\"true\"");
+    let app_ci_initial_false_index = line_index_with_prefix(&detect_paths_step, "app_ci=\"false\"");
+    let case_patterns = shell_case_patterns(&detect_paths_step);
+
+    require(
+        &mut contract_errors,
+        case_patterns
+            .iter()
+            .any(|pattern| pattern.contains("opencode.json")),
+        "path-classification should treat root opencode.json as an opencode path",
+    );
+
+    let fail_closed_to_app_ci = match (
+        while_guard_index,
+        app_ci_initial_true_index,
+        app_ci_initial_false_index,
+    ) {
+        (Some(while_index), Some(true_index), _) => true_index < while_index,
+        (Some(_while_index), None, Some(_false_index)) => false,
+        (Some(_while_index), None, None) => false,
+        _ => false,
+    };
+
+    require(
+        &mut contract_errors,
+        fail_closed_to_app_ci,
+        "path-classification should default app_ci='true' before diff iteration to fail closed when no file list can be resolved",
+    );
+
+    assert!(contract_errors.is_empty(), "{}", contract_errors.join("\n"));
+}
+
+#[test]
 fn release_prepare_uses_semver_checks_for_release_type_planning() {
     let mut contract_errors = Vec::new();
     let Some(job) = workflow_job_in(RELEASE_PREPARE_WORKFLOW, "release-prepare") else {
@@ -232,10 +381,10 @@ fn workflow_job(job_name: &str) -> Option<&'static str> {
 
 fn workflow_job_in(workflow: &'static str, job_name: &str) -> Option<&'static str> {
     let jobs_start = workflow.find("jobs:\n")?;
-    let jobs = &workflow[jobs_start + "jobs:\n".len()..];
+    let jobs_yaml = &workflow[jobs_start + "jobs:\n".len()..];
     let marker = format!("  {job_name}:");
-    let start = jobs.find(&marker)?;
-    let rest = &jobs[start..];
+    let start = jobs_yaml.find(&marker)?;
+    let rest = &jobs_yaml[start..];
     let end = rest
         .match_indices('\n')
         .skip(1)
@@ -259,6 +408,143 @@ fn workflow_step_lines<'a>(job: &'a str, step_name: &str) -> Option<Vec<&'a str>
         .unwrap_or(lines.len());
 
     Some(lines[start..end].to_vec())
+}
+
+fn line_index_with_prefix(lines: &[&str], prefix: &str) -> Option<usize> {
+    lines
+        .iter()
+        .position(|line| line.trim().starts_with(prefix))
+}
+
+fn shell_case_patterns<'a>(step_lines: &'a [&'a str]) -> Vec<String> {
+    let mut in_case = false;
+    let mut patterns = Vec::new();
+
+    for line in step_lines {
+        let trimmed = line.trim();
+
+        if trimmed.starts_with("case ") && trimmed.ends_with("in") {
+            in_case = true;
+            continue;
+        }
+
+        if !in_case {
+            continue;
+        }
+
+        if trimmed == "esac" {
+            break;
+        }
+
+        if trimmed.ends_with(")") {
+            patterns.push(trimmed.to_owned());
+        }
+    }
+
+    patterns
+}
+
+fn workflow_jobs(workflow: &'static str) -> Vec<(String, &'static str)> {
+    let jobs_start = workflow.find("jobs:\n").unwrap_or(0);
+    if jobs_start == 0 {
+        return Vec::new();
+    }
+    let jobs_yaml = &workflow[jobs_start + "jobs:\n".len()..];
+    let mut top_level_job_starts: Vec<(String, usize)> = Vec::new();
+    let mut cursor = 0usize;
+
+    while cursor < jobs_yaml.len() {
+        let line_end = jobs_yaml[cursor..]
+            .find('\n')
+            .map_or(jobs_yaml.len(), |next| cursor + next);
+        let line = &jobs_yaml[cursor..line_end];
+        if is_top_level_workflow_job_key(line) {
+            top_level_job_starts.push((line.trim().trim_end_matches(':').to_owned(), cursor));
+        }
+        if line_end == jobs_yaml.len() {
+            break;
+        }
+        cursor = line_end + 1;
+    }
+
+    let mut job_sections = Vec::new();
+    for (idx, (name, start)) in top_level_job_starts.iter().enumerate() {
+        let end = top_level_job_starts
+            .get(idx + 1)
+            .map(|(_, next_start)| *next_start)
+            .unwrap_or(jobs_yaml.len());
+        job_sections.push((name.to_owned(), &jobs_yaml[*start..end]));
+    }
+
+    job_sections
+}
+
+fn workflow_job_output_keys(job: &str) -> Vec<String> {
+    let mut in_outputs = false;
+    let mut output_keys = Vec::new();
+
+    for line in job.lines() {
+        if in_outputs {
+            if !line.starts_with("      ") {
+                break;
+            }
+
+            if let Some((key, _)) = line.trim_start().split_once(':') {
+                output_keys.push(key.trim().to_owned());
+            }
+            continue;
+        }
+
+        if line.starts_with("    outputs:") {
+            in_outputs = true;
+        }
+    }
+
+    output_keys
+}
+
+fn find_matching_output_key(output_keys: &[String], required: &[&str]) -> Option<String> {
+    output_keys.iter().find_map(|key| {
+        let lower = key.to_ascii_lowercase();
+        if required.iter().all(|needle| lower.contains(needle)) {
+            Some(key.to_owned())
+        } else {
+            None
+        }
+    })
+}
+
+fn workflow_job_if(job: &str) -> Option<String> {
+    job.lines().find_map(|line| {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("if:") {
+            Some(trimmed.to_owned())
+        } else {
+            None
+        }
+    })
+}
+
+fn workflow_job_needs(job: &str) -> Option<String> {
+    job.lines().find_map(|line| {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("needs:") {
+            Some(trimmed.to_owned())
+        } else {
+            None
+        }
+    })
+}
+
+fn workflow_job_needs_tokens(needs_line: String) -> Vec<String> {
+    let needs_expr = needs_line.trim_start_matches("needs:").trim();
+    let needs_expr = needs_expr.trim_start_matches('[').trim_end_matches(']');
+    needs_expr
+        .split(',')
+        .map(|token| token.trim())
+        .filter(|token| !token.is_empty())
+        .map(ToString::to_string)
+        .collect()
 }
 
 fn is_top_level_workflow_job_key(line: &str) -> bool {

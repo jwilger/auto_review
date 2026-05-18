@@ -8,11 +8,53 @@ permissions:
   contents: read
 
 jobs:
-  fmt:
-    name: Format check
+  path-classification:
+    name: Classify changed paths
     if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      app_ci: ${{ steps.changed-paths.outputs.app_ci }}
+      opencode_ci: ${{ steps.changed-paths.outputs.opencode_ci }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+
+      - name: Detect changed paths
+        id: changed-paths
+        run: |
+          set -euo pipefail
+          base_sha="${{ github.event.pull_request.base.sha }}"
+          head_sha="${{ github.event.pull_request.head.sha }}"
+
+          git fetch --no-tags --depth=1 origin "$base_sha" "$head_sha"
+
+          app_ci="true"
+          opencode_ci="false"
+
+          while IFS= read -r file; do
+            case "$file" in
+              .opencode/*|opencode.json)
+                opencode_ci="true"
+                app_ci="false"
+                ;;
+              *)
+                app_ci="true"
+                ;;
+            esac
+          done < <(git diff --name-only "$base_sha" "$head_sha")
+
+          echo "app_ci=$app_ci" >> "$GITHUB_OUTPUT"
+          echo "opencode_ci=$opencode_ci" >> "$GITHUB_OUTPUT"
+
+  fmt:
+    name: Format check
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.path-classification.outputs.app_ci == 'true' }}
+    runs-on: ubuntu-24.04
     timeout-minutes: 60
+    needs: [path-classification]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -68,9 +110,10 @@ jobs:
 
   clippy:
     name: Clippy
-    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.path-classification.outputs.app_ci == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    needs: [path-classification]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -110,9 +153,10 @@ jobs:
 
   test:
     name: Test
-    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.path-classification.outputs.app_ci == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    needs: [path-classification]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -152,9 +196,10 @@ jobs:
 
   opencode-test:
     name: opencode plugin tests
-    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.path-classification.outputs.opencode_ci == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    needs: [path-classification]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -194,9 +239,10 @@ jobs:
 
   deny:
     name: Dependency policy
-    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.path-classification.outputs.app_ci == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    needs: [path-classification]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -236,9 +282,10 @@ jobs:
 
   build:
     name: Build
-    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.path-classification.outputs.app_ci == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    needs: [path-classification]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -279,7 +326,7 @@ jobs:
   semantic-review:
     name: Request auto_review semantic review
     runs-on: ubuntu-24.04
-    needs: [fmt, clippy, test, opencode-test, deny, build]
+    needs: [path-classification]
     if: ${{ github.event_name == 'pull_request' }}
     env:
       AUTO_REVIEW_GATEWAY_URL: ${{ secrets.AUTO_REVIEW_GATEWAY_URL }}
