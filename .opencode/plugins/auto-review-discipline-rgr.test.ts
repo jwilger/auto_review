@@ -66,6 +66,111 @@ test("blocks production Rust edit tool changes on main after RED approval", asyn
   );
 });
 
+test("blocks shell bypass editing production Rust file during active approved RED", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-shell-bypass"], { stdio: "ignore" });
+
+  const hooks = await AutoReviewDisciplinePlugin({ worktree });
+  const sessionID = "session-with-shell-bypass-attempt";
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior: "deterministic shell command bypasses must be blocked during approved RED",
+      test: "blocks shell bypass editing production Rust file during active approved RED",
+    },
+    { sessionID },
+  );
+  await hooks.tool.rgr_record_red.execute(
+    {
+      command:
+        "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'blocks shell bypass editing production Rust file during active approved RED'",
+      output: "one focused plugin test failed",
+    },
+    { sessionID },
+  );
+  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+
+  await assert.rejects(
+    hooks["tool.execute.before"](
+      { tool: "bash", sessionID },
+      {
+        args: {
+          command:
+            "python - <<'PY'\nfrom pathlib import Path\nPath('crates/demo/src/lib.rs').write_text('inline bypass check')\nPY",
+        },
+      },
+    ),
+    /RGR.*shell command.*bypass/i,
+  );
+});
+
+test("distinguishes read-only open from cat write redirection in shell bypass guard", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-shell-bypass-granularity"], { stdio: "ignore" });
+
+  const hooks = await AutoReviewDisciplinePlugin({ worktree });
+  const sessionID = "session-with-shell-bypass-granularity-check";
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior:
+        "shell bypass guard must allow read-only open(...) while still blocking write-producing shell redirection",
+      test: "distinguishes read-only open from cat write redirection in shell bypass guard",
+    },
+    { sessionID },
+  );
+  await hooks.tool.rgr_record_red.execute(
+    {
+      command:
+        "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'distinguishes read-only open from cat write redirection in shell bypass guard'",
+      output: "one focused plugin test failed",
+    },
+    { sessionID },
+  );
+  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+
+  let openRejected = false;
+  let catRejected = false;
+  let openError: unknown;
+  let catError: unknown;
+
+  try {
+    await hooks["tool.execute.before"](
+      { tool: "bash", sessionID },
+      {
+        args: {
+          command:
+            "python - <<'PY'\nfrom pathlib import Path\nwith open('crates/demo/src/lib.rs', 'r', encoding='utf-8') as f:\n    data = f.read()\n    print(data)\nPY",
+        },
+      },
+    );
+  } catch (error) {
+    openRejected = true;
+    openError = error;
+  }
+
+  try {
+    await hooks["tool.execute.before"](
+      { tool: "bash", sessionID },
+      {
+        args: {
+          command:
+            "cat > crates/demo/src/lib.rs <<'EOF'\n# shell write bypass check\npub fn rgr_guard_demo() {}\nEOF",
+        },
+      },
+    );
+  } catch (error) {
+    catRejected = true;
+    catError = error;
+  }
+
+  assert.equal(openRejected, false, `Read-only open('crates/demo/src/lib.rs') should not be treated as a write bypass. Guard error: ${String(openError?.toString?.() ?? openError)}`);
+  assert.equal(catRejected, true, "cat > production Rust path should be rejected as a shell write bypass.");
+  assert.match(String(catError), /RGR shell command bypass/i, "cat redirection should fail with an RGR shell bypass error.");
+});
+
 test("blocks rgr-test-author task delegation when no RGR cycle is active", async () => {
   const hooks = await AutoReviewDisciplinePlugin({ worktree: process.cwd() });
   const output = {
@@ -251,6 +356,51 @@ test("grants one delegated implementation edit after parent-approved RED", async
   await assert.rejects(
     hooks["tool.execute.before"]({ tool: "edit", sessionID: subagentSessionID }, { args: { filePath: "crates/demo/src/lib.rs" } }),
     /RGR gate: another behavioral production edit requires rerunning the focused command and recording RED or GREEN first\./,
+  );
+});
+
+test("does not consume implementationEditToken when a multi-file apply_patch is rejected", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-multifile-apply-patch"], { stdio: "ignore" });
+
+  const hooks = await AutoReviewDisciplinePlugin({ worktree });
+  const sessionID = "session-rgr-multifile-apply-patch-rejects";
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior: "multi-file apply_patch rejection should not consume the one production edit token",
+      test: "does not consume implementationEditToken when a multi-file apply_patch is rejected",
+    },
+    { sessionID },
+  );
+  await hooks.tool.rgr_record_red.execute(
+    {
+      command:
+        "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'does not consume implementationEditToken when a multi-file apply_patch is rejected'",
+      output: "one focused plugin test failed",
+    },
+    { sessionID },
+  );
+  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+
+  fs.writeFileSync(path.join(worktree, "crates/demo/src", "other.rs"), "pub fn demo_other() {}\n");
+
+  await assert.rejects(
+    hooks["tool.execute.before"](
+      { tool: "apply_patch", sessionID },
+      {
+        args: {
+          patchText:
+            "*** Begin Patch\n*** Update File: crates/demo/src/lib.rs\n@@\n*** End Patch\n*** Begin Patch\n*** Update File: crates/demo/src/other.rs\n@@\n*** End Patch\n",
+        },
+      },
+    ),
+    /RGR gate: another behavioral production edit requires rerunning the focused command and recording RED or GREEN first\./,
+  );
+
+  await assert.doesNotReject(
+    hooks["tool.execute.before"]({ tool: "edit", sessionID }, { args: { filePath: "crates/demo/src/lib.rs" } }),
   );
 });
 

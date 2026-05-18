@@ -210,6 +210,20 @@ function rejectsBroadDiagnosticTask(args: unknown): boolean {
   return broadFix || !namesDiagnostic || !namesAllowedChange;
 }
 
+function isBashProductionRustBypass(command: unknown): boolean {
+  if (typeof command !== "string") return false;
+  const normalized = command.toLowerCase();
+  const productionRustPathPattern = /crates\/.+\/src\/.+\.rs/i;
+  if (!productionRustPathPattern.test(normalized)) return false;
+  const writeMethodPatterns = [
+    /\.write_text\s*\(/i,
+    /\bopen\s*\([^\)]*\b(?:mode\s*=\s*)?["'](?:w|a|x|w\+|a\+|x\+|r\+|wb|ab|xb|w\+b|a\+b|x\+b|r\+b)["'][^\)]*\)/i,
+    /\bcat\b[\s\S]*?>/,
+    /\btee\b[\s\S]*?/i,
+  ];
+  return writeMethodPatterns.some((pattern) => pattern.test(command));
+}
+
 function isRgrTestAuthorTask(args: unknown): boolean {
   if (!args || typeof args !== "object") return false;
   return (args as Record<string, unknown>).subagent_type === "rgr-test-author";
@@ -499,34 +513,51 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
     }),
   },
   "tool.execute.before": async (input, output) => {
+    if (/^bash$/i.test(input.tool) && isBashProductionRustBypass(output.command ?? output.args?.command)) {
+      const message = "RGR shell command bypass: production Rust edits via bash are blocked during approved RED cycles.";
+      if (!getCycle(input.sessionID)?.reviewedRed) {
+        throw new Error("RGR shell command bypass: production Rust edits via bash require approved RED review first.");
+      }
+      throw new Error(message);
+    }
     if (isEditTool(input.tool)) {
       if (typeof patchTouchesProtectedAdrPath === "function" && patchTouchesProtectedAdrPath(output.args)) {
         throw new Error("ADR path gate: use ADR workflow tools instead of direct edit/write/apply_patch changes for protected architecture decision records.");
       }
-      for (const path of changedPathsFromArgs(output.args)) {
-        if (typeof isProtectedAdrPath === "function" && isProtectedAdrPath(path)) {
-          throw new Error("ADR path gate: use ADR workflow tools instead of direct edit/write/apply_patch changes for protected architecture decision records.");
-        }
+      const changedPaths = changedPathsFromArgs(output.args);
+      const productionRustPaths = changedPaths.filter((path) => {
+        return isProductionRustPath(path) && !isLikelyTestPath(path) && !isNonBehavioralPath(path);
+      });
+      for (const path of changedPaths) {
         recordTouchedFile(input.sessionID, path);
-        if (!isProductionRustPath(path) || isLikelyTestPath(path) || isNonBehavioralPath(path)) continue;
-        let current = getCycle(input.sessionID);
-        if (!current) {
-          current = consumeDelegatedImplementationEditLease(input.sessionID);
-          if (current) {
-            setCycle(input.sessionID, { ...current, implementationEditToken: false, stage: "red" });
-          }
-        }
-        if (!current?.reviewedRed) {
-          throw new Error("RGR gate: production Rust edits under crates/*/src require RED review approval recorded with rgr_approve_red.");
-        }
-        if (isOnMainBranch(worktree)) {
-          throw new Error("Branch gate: production Rust edits under crates/*/src require leaving main or calling the explicit override tool.");
-        }
-        if (current.implementationEditToken) {
-          throw new Error("RGR gate: another behavioral production edit requires rerunning the focused command and recording RED or GREEN first.");
-        }
-        setCycle(input.sessionID, { ...current, implementationEditToken: true });
       }
+
+      if (productionRustPaths.length === 0) {
+        return;
+      }
+
+      if (productionRustPaths.length > 1) {
+        throw new Error("RGR gate: another behavioral production edit requires rerunning the focused command and recording RED or GREEN first.");
+      }
+
+      let current = getCycle(input.sessionID);
+      if (!current) {
+        current = consumeDelegatedImplementationEditLease(input.sessionID);
+        if (current) {
+          current = { ...current, implementationEditToken: false, stage: "red" };
+        }
+      }
+      if (!current?.reviewedRed) {
+        throw new Error("RGR gate: production Rust edits under crates/*/src require RED review approval recorded with rgr_approve_red.");
+      }
+      if (isOnMainBranch(worktree)) {
+        throw new Error("Branch gate: production Rust edits under crates/*/src require leaving main or calling the explicit override tool.");
+      }
+      if (current.implementationEditToken) {
+        throw new Error("RGR gate: another behavioral production edit requires rerunning the focused command and recording RED or GREEN first.");
+      }
+
+      setCycle(input.sessionID, { ...current, implementationEditToken: true });
     }
     if (/todo(write|update)?$/i.test(input.tool) && rejectsWaterfallTodo(output.args)) {
       throw new Error("RGR plan gate: behavior work todo lists must name failing tests, not component-waterfall tasks.");

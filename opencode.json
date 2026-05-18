@@ -131,7 +131,7 @@
       "**/*.pem": "deny",
       "*": "allow"
     },
-    "external_directory": "ask",
+    "external_directory": "deny",
     "forgejo_*": {
       "*": "allow"
     }
