@@ -2,7 +2,7 @@ import { tool, type Plugin } from "@opencode-ai/plugin";
 import cp from "node:child_process";
 import fs from "node:fs";
 import path from "node:path";
-import { assertCleanWorktree, getCycle, consumeDelegatedImplementationEditLease, consumeImplementationReviewVetoRecovery, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordDelegatedImplementationEditLease, recordImplementationReviewVetoRecovery, recordTouchedFile, setCycle, clearCycle, recordVerification, sessionContext, validateRgrRedEvidence } from "./lib/shared.ts";
+import { assertCleanWorktree, getCycle, claimDelegatedImplementationEditLease, consumeDelegatedImplementationEditLease, consumeImplementationReviewVetoRecovery, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordDelegatedImplementationEditLease, recordImplementationReviewVetoRecovery, recordTouchedFile, setCycle, clearCycle, recordVerification, sessionContext, validateRgrRedEvidence } from "./lib/shared.ts";
 
 function filePathFromArgs(args: unknown): string | undefined {
   if (!args || typeof args !== "object") return undefined;
@@ -396,6 +396,18 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
         return "REFACTOR recorded. RGR cycle complete. Commit the approved GREEN/refactor state before starting the next RED.";
       },
     }),
+    rgr_claim_implementation_lease: tool({
+      description: "Claim a delegated implementation lease from the parent RGR session.",
+      args: {
+        claimToken: tool.schema.string().min(1).describe("Delegated implementation lease token"),
+      },
+      async execute(args, context) {
+        if (!claimDelegatedImplementationEditLease(args.claimToken, context.sessionID)) {
+          throw new Error("RGR gate: delegated implementation lease token is invalid or already claimed.");
+        }
+        return "Delegated implementation lease claimed. One scoped production edit is allowed.";
+      },
+    }),
     rgr_status: tool({
       description: "Inspect active RGR and verification context.",
       args: {},
@@ -630,7 +642,11 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
     if (/^task$/i.test(input.tool) && isRgrDiagnosticImplementerTask(output.args)) {
       const current = getCycle(input.sessionID);
       if (!current?.reviewedRed) return;
-      recordDelegatedImplementationEditLease(delegatedSubagentSessionFromTaskArgs(output.args), input.sessionID, current);
+      const claimToken = recordDelegatedImplementationEditLease(delegatedSubagentSessionFromTaskArgs(output.args), input.sessionID, current);
+      if (claimToken && output && typeof output === "object") {
+        (output as Record<string, unknown>).claimToken = claimToken;
+        return { claimToken };
+      }
     }
   },
   "tool.execute.after": async (input, output) => {

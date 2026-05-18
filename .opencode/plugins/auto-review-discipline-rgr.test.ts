@@ -359,6 +359,152 @@ test("grants one delegated implementation edit after parent-approved RED", async
   );
 });
 
+test("delegates changed-diagnostic implementation edit to a scoped subagent session", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-delegated-changed-diagnostic-lease"], { stdio: "ignore" });
+
+  const hooks = await AutoReviewDisciplinePlugin({ worktree });
+  const parentSessionID = "rgr-parent-changed-diagnostic-lease";
+  const subagentSessionID = "rgr-implementation-subagent-changed-diagnostic-lease";
+  const focusedCommand =
+    "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'delegates changed-diagnostic implementation edit to a scoped subagent session'";
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior: "delegated changed-diagnostic lease can be consumed by diagnostic implementer",
+      test: "delegates changed-diagnostic implementation edit to a scoped subagent session",
+    },
+    { sessionID: parentSessionID },
+  );
+  await hooks.tool.rgr_record_red.execute(
+    {
+      command: focusedCommand,
+      output: "one focused plugin test failed",
+    },
+    { sessionID: parentSessionID },
+  );
+  await hooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+
+  await assert.doesNotReject(
+    hooks["tool.execute.before"]({ tool: "edit", sessionID: parentSessionID }, { args: { filePath: "crates/demo/src/lib.rs" } }),
+  );
+
+  fs.writeFileSync(path.join(worktree, "crates/demo/src", "other.rs"), "pub fn demo_other() {}\n");
+
+  await hooks.tool.rgr_record_changed_diagnostic.execute(
+    {
+      command: focusedCommand,
+      output: "FAIL: changed diagnostic after first production edit",
+      diagnostic: "expected provider metadata, got undefined",
+    },
+    { sessionID: parentSessionID },
+  );
+  await hooks.tool.rgr_approve_changed_diagnostic.execute(
+    {
+      allowedImmediateChange:
+        "Apply a scoped production change to the provider dispatch path that addresses the changed diagnostic without widening edit scope.",
+      allowedPaths: ["crates/demo/src/lib.rs", "crates/demo/src/other.rs"],
+    },
+    { sessionID: parentSessionID },
+  );
+
+  await assert.doesNotReject(
+    hooks["tool.execute.before"](
+      { tool: "task", sessionID: parentSessionID },
+      {
+        args: {
+          subagent_type: "rgr-diagnostic-implementer",
+          sessionID: subagentSessionID,
+          prompt:
+            "Current diagnostic: expected provider metadata, got undefined. Allowed immediate change: update the provider dispatch path only in scoped production files.",
+        },
+      },
+    ),
+  );
+
+  await assert.doesNotReject(
+    hooks["tool.execute.before"](
+      { tool: "apply_patch", sessionID: subagentSessionID },
+      {
+        args: {
+          patchText:
+            "*** Begin Patch\n*** Update File: crates/demo/src/lib.rs\n@@\n*** End Patch\n*** Begin Patch\n*** Update File: crates/demo/src/other.rs\n@@\n*** End Patch\n",
+        },
+      },
+    ),
+  );
+});
+
+test("issues claimable lease for changed-diagnostic delegation without explicit subagent session", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-claimable-diagnostic-lease"], { stdio: "ignore" });
+  const hooks = await AutoReviewDisciplinePlugin({ worktree });
+  const parentSessionID = "rgr-parent-missing-subagent-session-id";
+  const focusedCommand =
+    "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'issues claimable lease for changed-diagnostic delegation without explicit subagent session'";
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior: "missing subagent session IDs should still produce a claimable implementation lease",
+      test: "issues claimable lease for changed-diagnostic delegation without explicit subagent session",
+    },
+    { sessionID: parentSessionID },
+  );
+
+  await hooks.tool.rgr_record_red.execute(
+    {
+      command: focusedCommand,
+      output: "one focused plugin test failed",
+    },
+    { sessionID: parentSessionID },
+  );
+  await hooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+  await hooks.tool.rgr_record_changed_diagnostic.execute(
+    {
+      command: focusedCommand,
+      output: "FAIL: changed diagnostic after first production edit",
+      diagnostic: "expected provider metadata, got undefined",
+    },
+    { sessionID: parentSessionID },
+  );
+  await hooks.tool.rgr_approve_changed_diagnostic.execute(
+    {
+      allowedImmediateChange:
+        "Update the provider metadata dispatch path only in scoped production Rust files.",
+      allowedPaths: ["crates/demo/src/lib.rs", "crates/demo/src/other.rs"],
+    },
+    { sessionID: parentSessionID },
+  );
+
+  const delegation = await hooks["tool.execute.before"](
+    { tool: "task", sessionID: parentSessionID },
+    {
+      args: {
+        subagent_type: "rgr-diagnostic-implementer",
+        prompt:
+          "Current diagnostic: expected provider metadata, got undefined. Allowed immediate change: scoped provider metadata dispatch fix.",
+      },
+    },
+  );
+
+  const claimToken = (delegation as { claimToken?: string } | undefined)?.claimToken;
+  const claimTool = (hooks.tool as Record<string, { execute?: unknown }>).rgr_claim_implementation_lease;
+  assert.equal(
+    typeof claimTool?.execute,
+    "function",
+    `Expected a claim API for delegated diagnostic leases, but got: ${claimToken ? `token=${claimToken}` : "no claimToken in delegation"}`,
+  );
+
+  await assert.doesNotReject(
+    (claimTool.execute as (args: { claimToken?: string }, context: { sessionID: string }) => Promise<unknown>)(
+      { claimToken },
+      { sessionID: "rgr-implementation-claiming-subagent" },
+    ),
+  );
+});
+
 test("permits a second production edit after changed RED verification is re-recorded for the same command", async (t) => {
   const worktree = createCleanMainWorktree();
   t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
