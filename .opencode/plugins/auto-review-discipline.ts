@@ -131,6 +131,15 @@ function replaceAdrSection(text, section, value) {
   return text.replace(new RegExp(`(^## ${section}\\n\\n)([\\s\\S]*?)(?=\\n## |$)`, "m"), `$1${value.trim()}\n`);
 }
 
+function appendSupersededBy(text, supersedingAdrPath, reason) {
+  const note = `${adrIdFromPath(supersedingAdrPath)}: ${reason}`;
+  const status = adrSectionValue(text, "Status");
+  let updated = status === "Accepted" ? replaceAdrSection(text, "Status", "Superseded") : text;
+  const existing = adrSectionValue(updated, "Superseded By");
+  if (existing) return replaceAdrSection(updated, "Superseded By", `${existing}\n${note}`);
+  return replaceAdrSection(updated, "Status", `${adrSectionValue(updated, "Status")}\n\n## Superseded By\n\n${note}`);
+}
+
 function adrIdFromPath(adrPath) {
   return /^ADR-(\d+)/.exec(path.basename(adrPath))?.[0] ?? path.basename(adrPath, ".md");
 }
@@ -143,7 +152,7 @@ function requireAcceptedSupersedes(supersedes) {
       throw new Error("supersedes entries must reference existing ADR files");
     }
     const superseded = fs.readFileSync(supersededPath, "utf8");
-    if (adrSectionValue(superseded, "Status") !== "Accepted") {
+    if (!["Accepted", "Superseded", "Partially superseded"].includes(adrSectionValue(superseded, "Status"))) {
       throw new Error("supersedes entries must reference Accepted ADRs");
     }
   }
@@ -421,7 +430,7 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
         }
         for (const entry of recordedSupersedes(current)) {
           const superseded = fs.readFileSync(entry.path, "utf8");
-          fs.writeFileSync(entry.path, replaceAdrSection(superseded, "Status", `Superseded\n\n## Superseded By\n\n${adrIdFromPath(adrPath)}: ${entry.reason}`));
+          fs.writeFileSync(entry.path, appendSupersededBy(superseded, adrPath, entry.reason));
           recordTouchedFile(context.sessionID, entry.path);
         }
         fs.writeFileSync(adrPath, current.replace("## Status\n\nProposed", "## Status\n\nAccepted"));
