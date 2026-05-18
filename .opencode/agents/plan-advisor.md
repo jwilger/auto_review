@@ -3,8 +3,7 @@ description: High-reasoning advisory subagent for complex planning and ambiguous
 mode: subagent
 steps: 120
 color: "#111827"
-model: "openai/gpt-5.5"
-reasoningEffort: "high"
+model: "openai/gpt-5.5-high"
 permission:
   read: allow
   glob: allow

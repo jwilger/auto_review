@@ -8,14 +8,30 @@
   "plugin": [
     "opencode-rtk"
   ],
+  "provider": {
+    "openai": {
+      "models": {
+        "gpt-5.5-low": {
+          "id": "gpt-5.5",
+          "options": {
+            "reasoningEffort": "low"
+          }
+        },
+        "gpt-5.5-high": {
+          "id": "gpt-5.5",
+          "options": {
+            "reasoningEffort": "high"
+          }
+        }
+      }
+    }
+  },
   "agent": {
     "build": {
-      "model": "openai/gpt-5.5",
-      "reasoningEffort": "low"
+      "model": "openai/gpt-5.5-low"
     },
     "plan": {
-      "model": "openai/gpt-5.5",
-      "reasoningEffort": "high"
+      "model": "openai/gpt-5.5-high"
     },
     "rgr-test-author": {
       "model": "openai/gpt-5.3-codex-spark"
@@ -39,16 +55,13 @@
       "model": "openai/gpt-5.3-codex-spark"
     },
     "architecture-reviewer": {
-      "model": "openai/gpt-5.5",
-      "reasoningEffort": "high"
+      "model": "openai/gpt-5.5-high"
     },
     "security-reviewer": {
-      "model": "openai/gpt-5.5",
-      "reasoningEffort": "high"
+      "model": "openai/gpt-5.5-high"
     },
     "plan-advisor": {
-      "model": "openai/gpt-5.5",
-      "reasoningEffort": "high"
+      "model": "openai/gpt-5.5-high"
     }
   },
   "mcp": {
