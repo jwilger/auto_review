@@ -1,6 +1,8 @@
 const CI_WORKFLOW: &str = include_str!("../../../.forgejo/workflows/ci.yml");
 const RELEASE_PREPARE_WORKFLOW: &str =
     include_str!("../../../.forgejo/workflows/release-prepare.yml");
+const RELEASE_PUBLISH_WORKFLOW: &str =
+    include_str!("../../../.forgejo/workflows/release-publish.yml");
 
 #[test]
 fn pr_ci_exposes_separate_just_based_deterministic_jobs() {
@@ -135,6 +137,78 @@ fn release_prepare_isolates_nix_logs_from_open_pr_json() {
 }
 
 #[test]
+fn release_publish_rejects_non_release_metadata_file_diffs() {
+    let mut contract_errors = Vec::new();
+    let Some(job) = workflow_job_in(RELEASE_PUBLISH_WORKFLOW, "release-publish") else {
+        panic!(".forgejo/workflows/release-publish.yml should expose a `release-publish` job");
+    };
+
+    let Some(validation_step) =
+        workflow_step_lines(job, "Validate release provenance and changed files")
+    else {
+        panic!("release-publish should validate allowed file-diff paths before publishing");
+    };
+    let validation_step = validation_step.join("\n");
+    require(
+        &mut contract_errors,
+        validation_step.contains("case \"$changed_file\" in"),
+        "release-publish file-diff validation should remain explicit",
+    );
+    require(
+        &mut contract_errors,
+        validation_step.contains("Cargo.toml|Cargo.lock|CHANGELOG.md"),
+        "release-publish file-diff guard should explicitly allow Cargo.toml, Cargo.lock, and CHANGELOG.md",
+    );
+    require(
+        &mut contract_errors,
+        !validation_step.contains(".forgejo/workflows/release-prepare.yml")
+            && !validation_step.contains(".forgejo/workflows/release-publish.yml")
+            && !validation_step.contains("scripts/release")
+            && !validation_step.contains(".github/workflows"),
+        "release-publish should only allow release metadata paths for token-bearing publish guard: Cargo.toml, Cargo.lock, CHANGELOG.md",
+    );
+
+    assert!(contract_errors.is_empty(), "{}", contract_errors.join("\n"));
+}
+
+#[test]
+fn release_publish_creates_binary_release_assets_only() {
+    let mut contract_errors = Vec::new();
+    let Some(job) = workflow_job_in(RELEASE_PUBLISH_WORKFLOW, "release-publish") else {
+        panic!(".forgejo/workflows/release-publish.yml should expose a `release-publish` job");
+    };
+
+    let Some(release_step) = workflow_step_lines(job, "Create Forgejo Release") else {
+        panic!("release-publish should contain a final Create Forgejo Release step");
+    };
+    let release_step = release_step.join("\n");
+    require(
+        &mut contract_errors,
+        release_step.contains("Linux binary archive")
+            && release_step.contains("auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz"),
+        "release notes should mention Linux binary archive attachment",
+    );
+    require(
+        &mut contract_errors,
+        release_step.contains("--asset release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz")
+            && release_step.contains("--asset release-artifacts/SHA256SUMS")
+            && release_step.contains("--asset release-artifacts/SHA256SUMS.sig")
+            && release_step.contains("--asset release-artifacts/release-signing-key.pub")
+            && release_step.contains("--asset release-artifacts/allowed-signers")
+            && release_step.contains("--asset release-artifacts/auto-review-$RELEASE_VERSION-sbom.spdx.json")
+            && release_step.contains("--asset release-artifacts/auto-review-$RELEASE_VERSION-provenance.json"),
+        "release creation should attach the Linux archive, checksum/signature materials, and SBOM/provenance assets",
+    );
+    require(
+        &mut contract_errors,
+        !release_step.contains("docker") && !release_step.contains("digest"),
+        "release creation should not include docker image promotion or digest operations",
+    );
+
+    assert!(contract_errors.is_empty(), "{}", contract_errors.join("\n"));
+}
+
+#[test]
 fn release_prepare_creates_mergeable_release_pr_description() {
     let descriptions = release_pr_descriptions(RELEASE_PREPARE_WORKFLOW);
 
@@ -144,7 +218,7 @@ fn release_prepare_creates_mergeable_release_pr_description() {
                 let lines: Vec<_> = description.lines().collect();
                 lines.iter().all(|line| !line.starts_with("    "))
                     && lines.iter().any(|line| {
-                        line.contains("CI builds release PR artifacts for review")
+                        line.contains("CI builds Linux release-candidate tarball artifacts for review")
                             && line.contains("published only after merge to main")
                     })
             }),
@@ -172,6 +246,19 @@ fn workflow_job_in(workflow: &'static str, job_name: &str) -> Option<&'static st
         .unwrap_or(rest.len());
 
     Some(&rest[..end])
+}
+
+fn workflow_step_lines<'a>(job: &'a str, step_name: &str) -> Option<Vec<&'a str>> {
+    let lines: Vec<&'a str> = job.lines().collect();
+    let start = lines
+        .iter()
+        .position(|line| line.starts_with("      - name: ") && line.contains(step_name))?;
+
+    let end = (start + 1..lines.len())
+        .find(|&i| lines[i].starts_with("      - "))
+        .unwrap_or(lines.len());
+
+    Some(lines[start..end].to_vec())
 }
 
 fn is_top_level_workflow_job_key(line: &str) -> bool {

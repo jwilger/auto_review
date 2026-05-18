@@ -131,12 +131,6 @@ jobs:
             case "$changed_file" in
               Cargo.toml|Cargo.lock|CHANGELOG.md)
                 ;;
-              .forgejo/workflows/release-prepare.yml|.forgejo/workflows/release-publish.yml|scripts/release)
-                ;;
-              .forgejo/workflows/*|scripts/*)
-                printf 'refusing token-bearing publish for release PR file: %s\n' "$changed_file" >&2
-                exit 1
-                ;;
               *)
                 printf 'refusing token-bearing publish for release PR file: %s\n' "$changed_file" >&2
                 exit 1
