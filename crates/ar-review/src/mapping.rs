@@ -11,10 +11,10 @@ use ar_prompts::{ReviewFinding, ReviewOutput, ReviewSeverity};
 ///   otherwise `Approved`. Advisory findings still become inline comments,
 ///   but warning-only or note-only reviews must supersede this bot's stale
 ///   `RequestChanges` reviews and satisfy branch protection.
-/// - Each finding becomes one inline `ReviewComment` anchored at
-///   `new_position = line_start`. Multi-line ranges are rendered as a
-///   `**Lines N–M:**` prefix in the body since Forgejo's per-line position
-///   schema doesn't carry an end line.
+/// - Each unique finding message/severity pair becomes one inline
+///   `ReviewComment` anchored at `new_position = line_start`. Multi-line
+///   ranges are rendered as a `**Lines N–M:**` prefix in the body since
+///   Forgejo's per-line position schema doesn't carry an end line.
 pub fn output_to_review_request(out: &ReviewOutput, head_sha: &str) -> CreateReviewRequest {
     let event = if out
         .findings
@@ -26,9 +26,19 @@ pub fn output_to_review_request(out: &ReviewOutput, head_sha: &str) -> CreateRev
         ReviewEvent::Approved
     };
 
+    let mut seen_findings = Vec::new();
     let comments = out
         .findings
         .iter()
+        .filter(|finding| {
+            let key = (finding.severity, finding.message.as_str());
+            if seen_findings.contains(&key) {
+                false
+            } else {
+                seen_findings.push(key);
+                true
+            }
+        })
         .map(finding_to_comment)
         .collect::<Vec<_>>();
 
