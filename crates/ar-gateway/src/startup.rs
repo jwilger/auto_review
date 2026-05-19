@@ -203,21 +203,46 @@ impl OciSetupDiagnostic {
         }
     }
 
-    fn public_detail(&self) -> &str {
-        if self._detail.contains("/run/secrets")
-            || self._detail.contains("secret-bearing")
-            || self._detail.contains("ar-token")
-        {
-            "embedded OCI setup failed before inner gateway startup"
-        } else {
-            &self._detail
-        }
+    fn public_detail(&self) -> String {
+        sanitize_oci_setup_detail(&self._detail)
     }
+}
+
+fn sanitize_oci_setup_detail(detail: &str) -> String {
+    redact_run_secrets_path_suffix(detail)
+        .replace("secret-bearing", "[redacted]")
+        .replace("ar-token", "[redacted]")
+}
+
+fn redact_run_secrets_path_suffix(detail: &str) -> String {
+    const SECRET_PATH_PREFIX: &str = "/run/secrets/";
+    let mut sanitized = String::with_capacity(detail.len());
+    let mut cursor = 0;
+
+    while let Some(relative_start) = detail[cursor..].find(SECRET_PATH_PREFIX) {
+        let start = cursor + relative_start;
+        sanitized.push_str(&detail[cursor..start]);
+
+        let mut end = start + SECRET_PATH_PREFIX.len();
+        while end < detail.len() {
+            let byte = detail.as_bytes()[end];
+            if byte.is_ascii_whitespace() || matches!(byte, b';' | b',' | b')' | b']' | b'}') {
+                break;
+            }
+            end += 1;
+        }
+
+        sanitized.push_str("[redacted]");
+        cursor = end;
+    }
+
+    sanitized.push_str(&detail[cursor..]);
+    sanitized
 }
 
 impl fmt::Display for OciSetupDiagnostic {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.public_detail())
+        f.write_str(&self.public_detail())
     }
 }
 
@@ -829,8 +854,11 @@ fn execute_packaged_oci_runtime_with_executor(
         inputs.runtime_path,
         inputs.bundle_path,
     ))
-    .map_err(|_diagnostic| {
-        OciSetupDiagnostic::new("packaged OCI runtime failed while starting the inner gateway")
+    .map_err(|diagnostic| {
+        OciSetupDiagnostic::new(format!(
+            "packaged OCI runtime failed while starting the inner gateway: {}",
+            diagnostic.public_detail()
+        ))
     })?;
 
     Ok(GatewayLaunchOutcome::OuterLauncherFinished)
@@ -2733,6 +2761,24 @@ mod tests {
     }
 
     #[test]
+    fn oci_setup_public_detail_fully_redacts_secret_path_suffix_and_keeps_safe_context() {
+        let diagnostic = OciSetupDiagnostic::new(
+            "bootstrap failed reading /run/secrets/production-webhook-secret; exit status: 42",
+        );
+
+        let public = diagnostic.public_detail();
+        assert!(
+            !public.contains("/run/secrets/production-webhook-secret")
+                && !public.contains("production-webhook-secret"),
+            "public diagnostic must fully redact secret path token including suffix, got: {public}"
+        );
+        assert!(
+            public.contains("exit status: 42"),
+            "public diagnostic should preserve non-sensitive exit status context, got: {public}"
+        );
+    }
+
+    #[test]
     fn packaged_oci_runtime_success_executes_packaged_runtime_against_packaged_bundle() {
         let packaged_inputs = EmbeddedOciGatewayInputs {
             bundle_path: Path::new("/nix/store/test-ar-gateway-embedded-oci-rootfs"),
@@ -2956,6 +3002,35 @@ mod tests {
                 && !message.contains("ar-token")
                 && !message.contains("/run/secrets"),
             "runtime failure diagnostic must not leak raw secret-bearing paths, got: {message}"
+        );
+    }
+
+    #[test]
+    fn execute_packaged_oci_runtime_with_executor_preserves_sanitized_executor_context() {
+        let packaged_inputs = EmbeddedOciGatewayInputs {
+            bundle_path: Path::new(
+                "/nix/store/test-ar-gateway-embedded-oci-rootfs-/run/secrets/ar-token",
+            ),
+            runtime_path: Path::new("/nix/store/test-embedded-youki-runtime-/run/secrets/ar-token"),
+        };
+
+        let diagnostic = execute_packaged_oci_runtime_with_executor(packaged_inputs, |_command| {
+            Err(OciSetupDiagnostic::new(
+                "runtime spawn failed: kind=spawn status=exit status: 42 path=/run/secrets/ar-token secret-bearing-runtime-path",
+            ))
+        })
+        .unwrap_err();
+        let message = format!("{diagnostic}");
+
+        assert!(
+            message.contains("kind=spawn") && message.contains("exit status: 42"),
+            "runtime failure diagnostic should preserve sanitized executor context, got: {message}"
+        );
+        assert!(
+            !message.contains("secret-bearing")
+                && !message.contains("ar-token")
+                && !message.contains("/run/secrets"),
+            "runtime failure diagnostic must still redact secret-bearing details, got: {message}"
         );
     }
 
