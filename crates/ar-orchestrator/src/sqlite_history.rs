@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS review_history (
     pr_number INTEGER NOT NULL,
     head_sha TEXT NOT NULL,
     updated_at INTEGER NOT NULL,
+    per_review_cost_usd REAL NOT NULL DEFAULT 0.42,
     PRIMARY KEY (owner, repo, pr_number)
 );
 "#;
@@ -330,6 +331,30 @@ mod tests {
         let h = SqliteReviewHistory::in_memory().await.unwrap();
         let dropped = h.purge_older_than(i64::MAX).await.unwrap();
         assert_eq!(dropped, 0);
+    }
+
+    #[tokio::test]
+    async fn persist_sha_with_per_review_cost_aggregate() {
+        let h = SqliteReviewHistory::in_memory().await.unwrap();
+        let k = key("o", "r", 1);
+        h.record(&k, "deadbeef").await.unwrap();
+
+        let row = sqlx::query(
+            "SELECT head_sha, per_review_cost_usd FROM review_history \
+             WHERE owner = ?1 AND repo = ?2 AND pr_number = ?3",
+        )
+        .bind(&k.owner)
+        .bind(&k.repo)
+        .bind(k.pr_number as i64)
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+
+        let head_sha: String = row.get("head_sha");
+        let per_review_cost_usd: f64 = row.get("per_review_cost_usd");
+
+        assert_eq!(head_sha.as_str(), "deadbeef");
+        assert_eq!(per_review_cost_usd, 0.42);
     }
 
     #[tokio::test]
