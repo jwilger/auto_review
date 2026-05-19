@@ -222,6 +222,8 @@ Common optional env vars:
 | `AR_BOT_NAME` | `=AR_BOT_LOGIN` | Mention handle |
 | `AR_LEARNINGS_DB` | — | SQLite learnings path; unset is in-memory |
 | `AR_HISTORY_DB` | — | SQLite review-history path; unset is in-memory |
+| `AR_PRICE_TABLE_PATH` | — | JSON price override file for LLM cost estimates |
+| `AR_REVIEW_COST_FOOTER` | `true` | Set `false` to persist cost without posting usage footer |
 | `AR_POLL_INTERVAL_SECS` | `60` | Inline-thread mention poll cadence; `0` disables |
 | `AR_SEVERITY_FLOOR` | `warning` | `note`, `warning`, or `error` |
 | `AR_REVIEW_CONCURRENCY` | — | Cap concurrent reviews |

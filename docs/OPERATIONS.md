@@ -549,6 +549,33 @@ is optional. Safe to run while the gateway is up — SQLite
 handles concurrent access. The next CI-triggered review or explicit
 `@<bot> re-review` for that PR will see no recorded SHA and do a full review.
 
+### 7.1.6 Attribute per-review LLM cost
+
+When SQLite review history is enabled with `AR_HISTORY_DB`, each successful
+review records the estimated LLM cost for that review in
+`per_review_cost_usd`. The estimate uses built-in OpenAI-compatible defaults
+unless `AR_PRICE_TABLE_PATH` points at a JSON override file:
+
+```json
+{
+  "gpt-4o-mini": { "input": 0.15, "output": 0.60, "embedding": 0.0 },
+  "https://api.openai.com/v1|gpt-4o-mini": {
+    "input": 0.15,
+    "output": 0.60,
+    "embedding": 0.0
+  }
+}
+```
+
+Prices are USD per million tokens. Provider-qualified keys
+(`<base-url>|<model>`) override model-only keys when the same model name is
+served by multiple providers.
+
+By default, the bot also appends an `LLM usage and cost` footer to posted
+reviews when token usage is available and the price table has matching entries
+for the models used. Set `AR_REVIEW_COST_FOOTER=false` to keep recording
+`per_review_cost_usd` without posting that footer.
+
 ### 7.2.5 Tune signal-to-noise via `AR_SEVERITY_FLOOR`
 
 Default is `warning`: every Note-severity finding is dropped

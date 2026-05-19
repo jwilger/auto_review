@@ -32,6 +32,10 @@ LLM_REASONING_MODEL=qwen2.5-coder:32b
 AR_LEARNINGS_DB=/var/lib/auto_review/learnings.db
 AR_HISTORY_DB=/var/lib/auto_review/review_history.db
 
+# Optional LLM cost attribution overrides
+# AR_PRICE_TABLE_PATH=/etc/auto_review/prices.json
+# AR_REVIEW_COST_FOOTER=false
+
 RUST_LOG=info,ar_gateway=debug
 ```
 
