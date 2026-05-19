@@ -95,4 +95,23 @@ pub trait LlmProvider: Send + Sync {
     async fn embed(&self, _texts: &[String]) -> Result<Vec<Vec<f32>>, Error> {
         Err(Error::Unsupported)
     }
+
+    fn provider_base_url(&self) -> String {
+        String::new()
+    }
+
+    fn completion_model_name(&self) -> String {
+        "completion-model".to_string()
+    }
+
+    fn embedding_model_name(&self) -> String {
+        "embedding-model".to_string()
+    }
+
+    fn provider_model_name(&self, tier: ModelTier) -> String {
+        match tier {
+            ModelTier::Embedding => self.embedding_model_name(),
+            ModelTier::Cheap | ModelTier::Reasoning => self.completion_model_name(),
+        }
+    }
 }

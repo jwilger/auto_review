@@ -2,7 +2,7 @@ use crate::types::{CompleteRequest, CompleteResponse, Error, LlmProvider, ModelT
 use std::collections::HashMap;
 use std::sync::Arc;
 
-type UsageCollector = Arc<dyn Fn(ModelTier, &str, u32, u32) + Send + Sync>;
+type UsageCollector = Arc<dyn Fn(ModelTier, &str, &str, u32, u32) + Send + Sync>;
 
 /// Maps `ModelTier` → provider instance.
 ///
@@ -27,7 +27,7 @@ impl Router {
 
     pub fn with_usage_collector<F>(mut self, collector: F) -> Self
     where
-        F: Fn(ModelTier, &str, u32, u32) + Send + Sync + 'static,
+        F: Fn(ModelTier, &str, &str, u32, u32) + Send + Sync + 'static,
     {
         self.usage_collector = Some(Arc::new(collector));
         self
@@ -42,28 +42,37 @@ impl Router {
         tier: ModelTier,
         req: CompleteRequest,
     ) -> Result<CompleteResponse, Error> {
-        let resp = self.provider(tier)?.complete(req).await?;
-        self.record_usage(tier, resp.input_tokens, resp.output_tokens);
+        let provider = self.provider(tier)?;
+        let resp = provider.complete(req).await?;
+        self.record_usage(&**provider, tier, resp.input_tokens, resp.output_tokens);
         Ok(resp)
     }
 
     pub async fn embed(&self, tier: ModelTier, texts: &[String]) -> Result<Vec<Vec<f32>>, Error> {
-        let resp = self.provider(tier)?.embed(texts).await?;
-        self.record_usage(tier, 0, 0);
+        let provider = self.provider(tier)?;
+        let resp = provider.embed(texts).await?;
+        self.record_usage(&**provider, tier, 0, 0);
         Ok(resp)
     }
 
-    fn record_usage(&self, tier: ModelTier, input_tokens: u32, output_tokens: u32) {
+    fn record_usage(
+        &self,
+        provider: &dyn LlmProvider,
+        tier: ModelTier,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) {
         if let Some(collector) = &self.usage_collector {
-            collector(tier, default_model_label(tier), input_tokens, output_tokens);
+            let provider_base_url = provider.provider_base_url();
+            let model_name = provider.provider_model_name(tier);
+            collector(
+                tier,
+                &provider_base_url,
+                &model_name,
+                input_tokens,
+                output_tokens,
+            );
         }
-    }
-}
-
-fn default_model_label(tier: ModelTier) -> &'static str {
-    match tier {
-        ModelTier::Cheap | ModelTier::Reasoning => "completion-model",
-        ModelTier::Embedding => "embedding-model",
     }
 }
 

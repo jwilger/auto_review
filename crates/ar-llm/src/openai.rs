@@ -141,6 +141,18 @@ impl LlmProvider for OpenAiProvider {
             .map_err(|e| Error::Decode(format!("{e}: {}", cap_for_error(&text))))?;
         Ok(parsed.data.into_iter().map(|d| d.embedding).collect())
     }
+
+    fn provider_base_url(&self) -> String {
+        self.base.as_str().trim_end_matches('/').to_string()
+    }
+
+    fn completion_model_name(&self) -> String {
+        self.chat_model.clone()
+    }
+
+    fn embedding_model_name(&self) -> String {
+        self.embedding_model.clone().unwrap_or_else(|| "embedding-model".to_string())
+    }
 }
 
 /// Cap the response body included in error messages. A misbehaving
