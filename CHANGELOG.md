@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [0.14.2] - 2026-05-19
+
+### Fixed
+
+- *(opencode)* allow repeated ADR supersession (#243)
+- *(release)* enforce binary-only release artifacts (#246)
+- *(opencode)* delegate RGR approval to implementer sessions (#250)
+- *(ci)* add path-aware PR checks (#255)
+- *(opencode)* require relative paths in subagents (#256)
+- *(opencode)* harden RGR edit guardrails (#257)
+- *(opencode)* support GREEN diagnostic loop (#258)
+- *(opencode)* add claimable RGR implementation leases (#259)
+- *(opencode)* persist RGR implementation leases (#260)
+
+### Other
+
+- *(opencode)* configure per-agent model routing and plan-advisor (#245)
+- *(opencode)* use gpt-5.5 for build orchestration (#247)
+- *(opencode)* route reasoning effort through model aliases (#251)
+- *(opencode)* separate plugin test suite (#253)
+- *(opencode)* add issue slash command (#254)
+
 ## [0.14.1] - 2026-05-18
 
 ### Fixed
