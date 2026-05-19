@@ -556,6 +556,20 @@ fn stage_embedded_oci_gateway_bundle_at_path(
     staged_bundle: &Path,
     process_env: &[(String, String)],
 ) -> std::result::Result<PathBuf, OciSetupDiagnostic> {
+    stage_embedded_oci_gateway_bundle_at_path_with_config_writer(
+        packaged_bundle,
+        staged_bundle,
+        process_env,
+        |path, contents| fs::write(path, contents),
+    )
+}
+
+fn stage_embedded_oci_gateway_bundle_at_path_with_config_writer(
+    packaged_bundle: &Path,
+    staged_bundle: &Path,
+    process_env: &[(String, String)],
+    config_writer: impl FnOnce(&Path, Vec<u8>) -> std::io::Result<()>,
+) -> std::result::Result<PathBuf, OciSetupDiagnostic> {
     let packaged_rootfs = packaged_bundle.join("rootfs");
     if !packaged_rootfs.is_dir() {
         return Err(OciSetupDiagnostic::new(
@@ -569,30 +583,45 @@ fn stage_embedded_oci_gateway_bundle_at_path(
             error.kind()
         ))
     })?;
-    restrict_stage_directory(staged_bundle)?;
-    link_packaged_rootfs(&packaged_rootfs, &staged_bundle.join("rootfs"))?;
+    let stage_result = (|| {
+        restrict_stage_directory(staged_bundle)?;
+        link_packaged_rootfs(&packaged_rootfs, &staged_bundle.join("rootfs"))?;
 
-    let packaged_config =
-        fs::read_to_string(packaged_bundle.join("config.json")).map_err(|error| {
+        let packaged_config =
+            fs::read_to_string(packaged_bundle.join("config.json")).map_err(|error| {
+                OciSetupDiagnostic::new(format!(
+                    "packaged OCI config could not be read: {}",
+                    error.kind()
+                ))
+            })?;
+        let config = serde_json::from_str::<serde_json::Value>(&packaged_config)
+            .map_err(|_error| OciSetupDiagnostic::new("packaged OCI config could not be parsed"))?;
+        let staged_config = staged_oci_config_with_process_env(config, process_env)?;
+        let staged_config =
+            staged_oci_config_with_outer_rootless_mapping_ids(staged_config, staged_bundle)?;
+        let staged_config = serde_json::to_vec_pretty(&staged_config).map_err(|_error| {
+            OciSetupDiagnostic::new("staged OCI config could not be serialized")
+        })?;
+
+        config_writer(&staged_bundle.join("config.json"), staged_config).map_err(|error| {
             OciSetupDiagnostic::new(format!(
-                "packaged OCI config could not be read: {}",
+                "staged OCI config could not be written: {}",
                 error.kind()
             ))
         })?;
-    let config = serde_json::from_str::<serde_json::Value>(&packaged_config)
-        .map_err(|_error| OciSetupDiagnostic::new("packaged OCI config could not be parsed"))?;
-    let staged_config = staged_oci_config_with_process_env(config, process_env)?;
-    let staged_config =
-        staged_oci_config_with_outer_rootless_mapping_ids(staged_config, staged_bundle)?;
-    let staged_config = serde_json::to_vec_pretty(&staged_config)
-        .map_err(|_error| OciSetupDiagnostic::new("staged OCI config could not be serialized"))?;
 
-    fs::write(staged_bundle.join("config.json"), staged_config).map_err(|error| {
-        OciSetupDiagnostic::new(format!(
-            "staged OCI config could not be written: {}",
-            error.kind()
-        ))
-    })?;
+        Ok::<(), OciSetupDiagnostic>(())
+    })();
+
+    if let Err(diagnostic) = stage_result {
+        if let Err(error) = remove_staged_oci_bundle(staged_bundle) {
+            tracing::warn!(
+                error_kind = ?error.kind(),
+                "failed to clean staged OCI bundle after setup failure"
+            );
+        }
+        return Err(diagnostic);
+    }
 
     Ok(staged_bundle.to_path_buf())
 }
@@ -2561,6 +2590,145 @@ mod tests {
         assert!(
             container_id.starts_with("auto-review-gateway-"),
             "OCI runtime container id should remain observable, got {container_id}"
+        );
+    }
+
+    #[test]
+    fn staged_oci_bundle_failure_after_stage_creation_cleans_staged_bundle_and_partial_secret_config(
+    ) {
+        let process_env = inner_gateway_process_env_from_lookup(|name| {
+            Ok(required_inner_gateway_env_source()
+                .get(name)
+                .map(|value| (*value).to_string()))
+        })
+        .unwrap();
+        let packaged_bundle = tempfile::tempdir().unwrap();
+        std::fs::create_dir(packaged_bundle.path().join("rootfs")).unwrap();
+        let stage_parent = tempfile::tempdir().unwrap();
+        let staged_bundle = stage_parent
+            .path()
+            .join("secret-stage-parent-that-must-not-leak");
+
+        let diagnostic = stage_embedded_oci_gateway_bundle_at_path(
+            packaged_bundle.path(),
+            &staged_bundle,
+            &process_env,
+        )
+        .unwrap_err();
+        let message = format!("{diagnostic:?}");
+
+        assert!(
+            message.contains("staged OCI") || message.contains("config"),
+            "staging failure diagnostic should identify staged OCI config handling, got: {message}"
+        );
+        assert!(
+            !message.contains("webhook-secret-value-that-must-not-leak")
+                && !message.contains("secret-stage-parent-that-must-not-leak")
+                && !message.contains(&staged_bundle.display().to_string()),
+            "staging failure diagnostic must not leak secret-bearing values or raw stage paths, got: {message}"
+        );
+        assert!(
+            !staged_bundle.exists() && !staged_bundle.join("config.json").exists(),
+            "failed staged OCI setup must clean staged bundle directory and partial secret-bearing config.json"
+        );
+    }
+
+    #[test]
+    fn staged_oci_bundle_config_write_failure_cleans_stage_and_redacts_public_diagnostic() {
+        let process_env = inner_gateway_process_env_from_lookup(|name| {
+            Ok(required_inner_gateway_env_source()
+                .get(name)
+                .map(|value| (*value).to_string()))
+        })
+        .unwrap();
+        let packaged_bundle = tempfile::tempdir().unwrap();
+        std::fs::create_dir(packaged_bundle.path().join("rootfs")).unwrap();
+        std::fs::write(
+            packaged_bundle.path().join("config.json"),
+            serde_json::json!({
+                "ociVersion": "1.0.2",
+                "process": { "env": [] },
+                "root": { "path": "rootfs", "readonly": true }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let stage_parent = tempfile::tempdir().unwrap();
+        let staged_bundle = stage_parent
+            .path()
+            .join("stage-dir-secret-path-that-must-not-leak");
+
+        let diagnostic = stage_embedded_oci_gateway_bundle_at_path_with_config_writer(
+            packaged_bundle.path(),
+            &staged_bundle,
+            &process_env,
+            |_path, _bytes| {
+                Err(std::io::Error::other(
+                    "write denied for /run/secrets/ar-token at stage-dir-secret-path-that-must-not-leak",
+                ))
+            },
+        )
+        .unwrap_err();
+
+        let public = diagnostic.public_detail().to_string();
+        assert!(
+            !public.contains("/run/secrets/ar-token")
+                && !public.contains("stage-dir-secret-path-that-must-not-leak"),
+            "public write-failure diagnostic must redact secret/path detail, got: {public}"
+        );
+        assert!(
+            !staged_bundle.exists() && !staged_bundle.join("config.json").exists(),
+            "failed staged OCI config write must clean staged bundle and any partial config.json"
+        );
+    }
+
+    #[test]
+    fn staged_oci_bundle_partial_config_write_failure_removes_partial_config() {
+        let process_env = inner_gateway_process_env_from_lookup(|name| {
+            Ok(required_inner_gateway_env_source()
+                .get(name)
+                .map(|value| (*value).to_string()))
+        })
+        .unwrap();
+        let packaged_bundle = tempfile::tempdir().unwrap();
+        std::fs::create_dir(packaged_bundle.path().join("rootfs")).unwrap();
+        std::fs::write(
+            packaged_bundle.path().join("config.json"),
+            serde_json::json!({
+                "ociVersion": "1.0.2",
+                "process": { "env": [] },
+                "root": { "path": "rootfs", "readonly": true }
+            })
+            .to_string(),
+        )
+        .unwrap();
+        let stage_parent = tempfile::tempdir().unwrap();
+        let staged_bundle = stage_parent
+            .path()
+            .join("stage-dir-secret-partial-config-that-must-not-leak");
+
+        let diagnostic = stage_embedded_oci_gateway_bundle_at_path_with_config_writer(
+            packaged_bundle.path(),
+            &staged_bundle,
+            &process_env,
+            |path, _bytes| {
+                std::fs::write(path, "WEBHOOK_SECRET=partial-secret-that-must-be-removed")?;
+                Err(std::io::Error::other(
+                    "partial write failed for /run/secrets/ar-token",
+                ))
+            },
+        )
+        .unwrap_err();
+
+        let public = diagnostic.public_detail().to_string();
+        assert!(
+            !public.contains("/run/secrets/ar-token")
+                && !public.contains("partial-secret-that-must-be-removed"),
+            "public partial-write diagnostic must redact secret/path detail, got: {public}"
+        );
+        assert!(
+            !staged_bundle.exists() && !staged_bundle.join("config.json").exists(),
+            "failed staged OCI config write must remove any partial secret-bearing config.json"
         );
     }
 

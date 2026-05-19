@@ -147,7 +147,9 @@ before runtime lookup. The outer launcher clears the runtime process environment
 except for the minimal non-secret rootless session allowlist required by `youki`
 (`DBUS_SESSION_BUS_ADDRESS` and `XDG_RUNTIME_DIR`), and stages a deterministic
 OCI bundle whose generated `config.json` carries only the explicit gateway
-allowlist required by the inner process. The staged bundle materializes an
+allowlist required by the inner process. Failed staging attempts best-effort
+cleanup of the staged bundle, including partial generated config files, before
+returning sanitized setup diagnostics. The staged bundle materializes an
 ephemeral rootfs copy so rootless `youki` can prepare masked paths without
 mutating the packaged rootfs. The embedded OCI config declares
 `noNewPrivileges`, empty capability sets, PID/network/mount/IPC/UTS/cgroup
@@ -396,10 +398,10 @@ threat-model claims fail CI when a regression slips in:
   `crates/ar-gateway/src/webhook.rs` `/info` posture contract tests,
   `crates/ar-cli/src/commands.rs` doctor/status posture tests, and the
   `ar-gateway-embedded-oci-config-contract` flake check cover T1a: packaged
-  path rejection, staged `config.json` env allowlisting, diagnostic redaction,
-  runtime env clearing, explicit OCI Linux isolation posture, non-secret
-  `/info.runtime_isolation`, and CLI warnings that avoid presenting bare mode
-  as container-equivalent isolation.
+  path rejection, staged `config.json` env allowlisting, failed-staging cleanup,
+  diagnostic redaction, runtime env clearing, explicit OCI Linux isolation
+  posture, non-secret `/info.runtime_isolation`, and CLI warnings that avoid
+  presenting bare mode as container-equivalent isolation.
 
 T1 is now primarily an architectural guardrail: normal review jobs must not
 reintroduce repo-controlled deterministic tool execution. ADR-0011 enumerates
