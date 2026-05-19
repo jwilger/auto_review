@@ -2518,7 +2518,7 @@ mod tests {
         ]));
         let llm = router_with(provider.clone());
 
-        review_pull_request(ReviewArgs {
+        let outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -2743,7 +2743,7 @@ mod tests {
             r#"{"summary":"lint summary","findings":[]}"#,
         ]));
         let llm = router_with(provider.clone());
-        review_pull_request(ReviewArgs {
+        let outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -3077,7 +3077,7 @@ mod tests {
             .with(ModelTier::Reasoning, provider.clone())
             .with(ModelTier::Cheap, provider.clone());
 
-        review_pull_request(ReviewArgs {
+        let outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -3098,6 +3098,12 @@ mod tests {
         })
         .await
         .expect("review ok");
+
+        assert_eq!(
+            outcome.estimated_total_cost_usd,
+            0.0,
+            "review outcome should report zero estimated cost when AR_REVIEW_COST_FOOTER=false"
+        );
 
         let received = server.received_requests().await.expect("requests");
         let posted_review = received
