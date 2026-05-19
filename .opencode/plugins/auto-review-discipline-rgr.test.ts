@@ -35,6 +35,120 @@ function createCleanMainWorktree() {
   return worktree;
 }
 
+function claimTokenlessLeaseFromFreshPluginProcess(worktree: string, sessionID: string) {
+  const claimScript = `
+import { AutoReviewDisciplinePlugin } from "./.opencode/plugins/auto-review-discipline.ts";
+
+const worktree = process.env.RGR_WORKTREE;
+if (!worktree) {
+  throw new Error("RGR_TEST: missing RGR_WORKTREE for claim script");
+}
+
+const hooks = await AutoReviewDisciplinePlugin({ worktree: worktree });
+await hooks.tool.rgr_claim_implementation_lease.execute({}, { sessionID: process.env.RGR_SESSION_ID ?? "rgr-fresh-delegated-session" });
+console.log("RGR_TEST_TOKENLESS_CLAIM_OK");
+`;
+
+  return cp.spawnSync("node", ["--input-type=module", "-e", claimScript], {
+    encoding: "utf8",
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      RGR_WORKTREE: worktree,
+      RGR_SESSION_ID: sessionID,
+    },
+  });
+}
+
+function delegateTokenlessImplementationLeaseFromFreshParentProcess(
+  worktree: string,
+  sessionID: string,
+  focusedCommand: string,
+  delegatePrompt: string,
+) {
+  const delegationScript = `
+import { AutoReviewDisciplinePlugin } from "./.opencode/plugins/auto-review-discipline.ts";
+
+const worktree = process.env.RGR_WORKTREE;
+const sessionID = process.env.RGR_SESSION_ID;
+const focusedCommand = process.env.RGR_FOCUSED_COMMAND;
+const delegatePrompt = process.env.RGR_DELEGATE_PROMPT;
+
+if (!worktree) {
+  throw new Error("RGR_TEST: missing RGR_WORKTREE for parent delegation script");
+}
+if (!sessionID) {
+  throw new Error("RGR_TEST: missing RGR_SESSION_ID for parent delegation script");
+}
+if (!focusedCommand) {
+  throw new Error("RGR_TEST: missing RGR_FOCUSED_COMMAND for parent delegation script");
+}
+if (!delegatePrompt) {
+  throw new Error("RGR_TEST: missing RGR_DELEGATE_PROMPT for parent delegation script");
+}
+
+const hooks = await AutoReviewDisciplinePlugin({ worktree });
+await hooks.tool.rgr_start.execute(
+  {
+    behavior:
+      "delegated implementation lease should be reissued across parent process boundaries when claimed tokenlessly",
+    test:
+      "supports tokenless delegated implementation lease after a changed diagnostic on restartless parent session",
+  },
+  { sessionID },
+);
+
+await hooks.tool.rgr_record_red.execute(
+  {
+    command: focusedCommand,
+    output: "one focused plugin test failed",
+  },
+  { sessionID },
+);
+await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+await hooks.tool.rgr_record_changed_diagnostic.execute(
+  {
+    command: focusedCommand,
+    output: "FAIL: follow-up changed diagnostic after tokenless delegated lease claim",
+    diagnostic: "follow-up changed diagnostic requires a second scoped implementation edit",
+  },
+  { sessionID },
+);
+await hooks.tool.rgr_approve_changed_diagnostic.execute(
+  {
+    allowedImmediateChange:
+      "Allow a second scoped implementation edit in crates/demo/src/lib.rs for the follow-up changed diagnostic.",
+    allowedPaths: ["crates/demo/src/lib.rs"],
+  },
+  { sessionID },
+);
+
+await hooks["tool.execute.before"](
+  { tool: "task", sessionID },
+  {
+    args: {
+      subagent_type: "rgr-diagnostic-implementer",
+      prompt: delegatePrompt,
+    },
+  },
+);
+
+console.log("RGR_TEST_TOKENLESS_DELEGATION_OK");
+`;
+
+  return cp.spawnSync("node", ["--input-type=module", "-e", delegationScript], {
+    encoding: "utf8",
+    cwd: process.cwd(),
+    env: {
+      ...process.env,
+      RGR_WORKTREE: worktree,
+      RGR_SESSION_ID: sessionID,
+      RGR_FOCUSED_COMMAND: focusedCommand,
+      RGR_DELEGATE_PROMPT: delegatePrompt,
+    },
+  });
+}
+
 test("blocks production Rust edit tool changes on main after RED approval", async (t) => {
   const worktree = createCleanMainWorktree();
   t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
@@ -489,20 +603,553 @@ test("issues claimable lease for changed-diagnostic delegation without explicit 
     },
   );
 
-  const claimToken = (delegation as { claimToken?: string } | undefined)?.claimToken;
   const claimTool = (hooks.tool as Record<string, { execute?: unknown }>).rgr_claim_implementation_lease;
+  assert.equal(Object.prototype.hasOwnProperty.call(delegation ?? {}, "claimToken"), false);
   assert.equal(
     typeof claimTool?.execute,
     "function",
-    `Expected a claim API for delegated diagnostic leases, but got: ${claimToken ? `token=${claimToken}` : "no claimToken in delegation"}`,
+    "Expected a claim API for delegated diagnostic leases",
   );
 
   await assert.doesNotReject(
-    (claimTool.execute as (args: { claimToken?: string }, context: { sessionID: string }) => Promise<unknown>)(
-      { claimToken },
+    (claimTool.execute as (args: {}, context: { sessionID: string }) => Promise<unknown>)(
+      {},
       { sessionID: "rgr-implementation-claiming-subagent" },
     ),
   );
+});
+
+test("does not expose or accept claimToken for delegated implementation lease claims", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-tokenless-claim-api"], { stdio: "ignore" });
+
+  const hooks = await AutoReviewDisciplinePlugin({ worktree });
+  const parentSessionID = "rgr-parent-tokenless-claim-api";
+  const focusedCommand =
+    "node --test --test-name-pattern 'does not expose or accept claimToken for delegated implementation lease claims' .opencode/plugins/auto-review-discipline-rgr.test.ts";
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior: "delegation contract should be tokenless",
+      test: "does not expose or accept claimToken for delegated implementation lease claims",
+    },
+    { sessionID: parentSessionID },
+  );
+  await hooks.tool.rgr_record_red.execute(
+    {
+      command: focusedCommand,
+      output: "one focused plugin test failed",
+    },
+    { sessionID: parentSessionID },
+  );
+  await hooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+
+  const delegation = await hooks["tool.execute.before"](
+    { tool: "task", sessionID: parentSessionID },
+    {
+      args: {
+        subagent_type: "rgr-diagnostic-implementer",
+        prompt:
+          "Current diagnostic: tokenless claim API contract should not return claim tokens. Allowed immediate change: one scoped production edit in crates/demo/src/lib.rs.",
+      },
+    },
+  );
+
+  assert.equal(
+    Object.prototype.hasOwnProperty.call(delegation ?? {}, "claimToken"),
+    false,
+    "tool.execute.before for delegated diagnostic tasks should not expose claimToken anymore",
+  );
+
+  const claimTool = hooks.tool.rgr_claim_implementation_lease;
+  await assert.rejects(
+    (claimTool.execute as (args: { claimToken?: string }, context: { sessionID: string }) => Promise<unknown>)(
+      { claimToken: "legacy-token" },
+      { sessionID: "rgr-tokened-implementation-claim" },
+    ),
+    /RGR gate: delegated implementation leases are claimed from central state; claimToken arguments are not accepted\./,
+  );
+
+  await assert.doesNotReject(
+    claimTool.execute({}, { sessionID: "rgr-tokenless-implementation-claim" }),
+  );
+});
+
+test("supports tokenless delegated implementation lease across fresh plugin instances", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-cross-instance-tokenless-claim"], { stdio: "ignore" });
+
+  const parentSessionID = "rgr-parent-cross-instance-tokenless-claim";
+  const subagentSessionID = "rgr-subagent-cross-instance-tokenless-claim";
+  const focusedCommand =
+    "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'supports tokenless delegated implementation lease across fresh plugin instances'";
+
+  const parentHooks = await AutoReviewDisciplinePlugin({ worktree });
+
+  await parentHooks.tool.rgr_start.execute(
+    {
+      behavior: "delegation state can outlive plugin instance boundaries",
+      test: "supports tokenless delegated implementation lease across fresh plugin instances",
+    },
+    { sessionID: parentSessionID },
+  );
+  await parentHooks.tool.rgr_record_red.execute(
+    {
+      command: focusedCommand,
+      output: "one focused plugin test failed",
+    },
+    { sessionID: parentSessionID },
+  );
+  await parentHooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+
+  await assert.doesNotReject(
+    parentHooks["tool.execute.before"](
+      { tool: "edit", sessionID: parentSessionID },
+      { args: { filePath: "crates/demo/src/lib.rs" } },
+    ),
+  );
+
+  await parentHooks.tool.rgr_record_changed_diagnostic.execute(
+    {
+      command: focusedCommand,
+      output: "FAIL: changed diagnostic after first production edit",
+      diagnostic: "current diagnostic should require an implementation scope update",
+    },
+    { sessionID: parentSessionID },
+  );
+  await parentHooks.tool.rgr_approve_changed_diagnostic.execute(
+    {
+      allowedImmediateChange:
+        "Allow a scoped implementation edit in crates/demo/src/lib.rs for the updated changed diagnostic.",
+      allowedPaths: ["crates/demo/src/lib.rs"],
+    },
+    { sessionID: parentSessionID },
+  );
+
+  await assert.doesNotReject(
+    parentHooks["tool.execute.before"](
+      { tool: "task", sessionID: parentSessionID },
+      {
+        args: {
+          subagent_type: "rgr-diagnostic-implementer",
+          prompt:
+            "Current diagnostic: parent-approved changed diagnostic requires implementation. Allowed immediate change: scoped crates/demo/src/lib.rs patch.",
+        },
+      },
+    ),
+  );
+
+  const subagentHooks = await AutoReviewDisciplinePlugin({ worktree });
+
+  await assert.doesNotReject(
+    // Tokenless claim is the intended contract; this should succeed when state is persisted and shared.
+    subagentHooks.tool.rgr_claim_implementation_lease.execute({}, { sessionID: subagentSessionID }),
+  );
+
+  await assert.doesNotReject(
+    subagentHooks["tool.execute.before"](
+      { tool: "edit", sessionID: subagentSessionID },
+      { args: { filePath: "crates/demo/src/lib.rs" } },
+    ),
+  );
+
+  await parentHooks.tool.rgr_record_changed_diagnostic.execute(
+    {
+      command: focusedCommand,
+      output: "FAIL: changed diagnostic after first tokenless delegated production edit",
+      diagnostic: "follow-up changed diagnostic requires a second scoped implementation edit",
+    },
+    { sessionID: parentSessionID },
+  );
+  await parentHooks.tool.rgr_approve_changed_diagnostic.execute(
+    {
+      allowedImmediateChange:
+        "Allow a second scoped implementation edit in crates/demo/src/lib.rs for the follow-up changed diagnostic.",
+      allowedPaths: ["crates/demo/src/lib.rs"],
+    },
+    { sessionID: parentSessionID },
+  );
+
+  await assert.doesNotReject(
+    parentHooks["tool.execute.before"](
+      { tool: "task", sessionID: parentSessionID },
+      {
+        args: {
+          subagent_type: "rgr-diagnostic-implementer",
+          prompt:
+            "Current diagnostic: follow-up changed diagnostic requires a second scoped implementation edit in crates/demo/src/lib.rs. Allowed immediate change: update the follow-up production scope in crates/demo/src/lib.rs only.",
+        },
+      },
+    ),
+  );
+
+  await assert.doesNotReject(
+    // Tokenless claim should continue to work for a second token from the same session.
+    subagentHooks.tool.rgr_claim_implementation_lease.execute({}, { sessionID: subagentSessionID }),
+  );
+
+  await assert.doesNotReject(
+    subagentHooks["tool.execute.before"](
+      { tool: "edit", sessionID: subagentSessionID },
+      { args: { filePath: "crates/demo/src/lib.rs" } },
+    ),
+  );
+});
+
+test("supports tokenless delegated implementation lease after a changed diagnostic on restartless parent session", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-tokenless-after-changed-diagnostic"], { stdio: "ignore" });
+  fs.writeFileSync(path.join(worktree, ".gitignore"), ".opencode/state/\n");
+  cp.execFileSync("git", ["-C", worktree, "add", ".gitignore"], { stdio: "ignore" });
+  cp.execFileSync("git", ["-C", worktree, "commit", "-m", "Ignore RGR state directory for tokenless lease tests"], { stdio: "ignore" });
+
+  const parentSessionID = "rgr-parent-tokenless-after-changed-diagnostic";
+  const focusedCommand =
+    "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'supports tokenless delegated implementation lease after a changed diagnostic on restartless parent session'";
+  const parentHooks = await AutoReviewDisciplinePlugin({ worktree });
+
+  await parentHooks.tool.rgr_start.execute(
+    {
+      behavior:
+        "a fresh-process claimed delegated lease should not poison later same-session tokenless lease issuance",
+      test: "supports tokenless delegated implementation lease after a changed diagnostic on restartless parent session",
+    },
+    { sessionID: parentSessionID },
+  );
+  await parentHooks.tool.rgr_record_red.execute(
+    {
+      command: focusedCommand,
+      output: "one focused plugin test failed",
+    },
+    { sessionID: parentSessionID },
+  );
+  await parentHooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+
+  await assert.doesNotReject(
+    parentHooks["tool.execute.before"](
+      { tool: "task", sessionID: parentSessionID },
+      {
+        args: {
+          subagent_type: "rgr-diagnostic-implementer",
+          prompt:
+            "Current diagnostic: first delegated implementation lease. Allowed immediate change: one scoped production edit in crates/demo/src/lib.rs.",
+        },
+      },
+    ),
+  );
+
+  const firstDelegatedClaim = claimTokenlessLeaseFromFreshPluginProcess(worktree, "rgr-fresh-subagent-tokenless-claim-1");
+  assert.equal(
+    firstDelegatedClaim.status,
+    0,
+    `Fresh plugin process should claim the first delegated lease. stdout=${firstDelegatedClaim.stdout}; stderr=${firstDelegatedClaim.stderr}`,
+  );
+  assert.match(String(firstDelegatedClaim.stdout), /RGR_TEST_TOKENLESS_CLAIM_OK/);
+
+  const delegationFromRestartedParent = delegateTokenlessImplementationLeaseFromFreshParentProcess(
+    worktree,
+    parentSessionID,
+    focusedCommand,
+    "Current diagnostic: follow-up changed diagnostic requires a second scoped implementation edit. Allowed immediate change: one scoped production edit in crates/demo/src/lib.rs.",
+  );
+
+  assert.equal(
+    delegationFromRestartedParent.status,
+    0,
+    `Fresh parent process should reissue a tokenless diagnostic lease after the changed diagnostic. stdout=${delegationFromRestartedParent.stdout}; stderr=${delegationFromRestartedParent.stderr}`,
+  );
+  assert.match(String(delegationFromRestartedParent.stdout), /RGR_TEST_TOKENLESS_DELEGATION_OK/);
+
+  const secondDelegatedClaim = claimTokenlessLeaseFromFreshPluginProcess(worktree, "rgr-fresh-subagent-tokenless-claim-2");
+  assert.equal(
+    secondDelegatedClaim.status,
+    0,
+    `Fresh plugin process should claim the second delegated lease after a changed diagnostic. stdout=${secondDelegatedClaim.stdout}; stderr=${secondDelegatedClaim.stderr}`,
+  );
+  assert.match(String(secondDelegatedClaim.stdout), /RGR_TEST_TOKENLESS_CLAIM_OK/);
+});
+
+test("allows a new RGR cycle on the same parent session after a tokenless claim", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-same-session-tokenless-cycle-reuse"], {
+    stdio: "ignore",
+  });
+  fs.writeFileSync(path.join(worktree, ".gitignore"), ".opencode/state/\n");
+  cp.execFileSync("git", ["-C", worktree, "add", ".gitignore"], { stdio: "ignore" });
+  cp.execFileSync("git", ["-C", worktree, "commit", "-m", "Ignore RGR state directory for tokenless lease reuse"], {
+    stdio: "ignore",
+  });
+
+  const sessionID = "rgr-parent-same-session-tokenless-cycle-reuse";
+  const focusedCommand =
+    "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'allows a new RGR cycle on the same parent session after a tokenless claim'";
+  const parentHooks = await AutoReviewDisciplinePlugin({ worktree });
+
+  await parentHooks.tool.rgr_start.execute(
+    {
+      behavior: "stale delegated lease claims should not poison future same-session cycles",
+      test: "allows a new RGR cycle on the same parent session after a tokenless claim",
+    },
+    { sessionID },
+  );
+  await parentHooks.tool.rgr_record_red.execute(
+    {
+      command: focusedCommand,
+      output: "one focused plugin test failed",
+    },
+    { sessionID },
+  );
+  await parentHooks.tool.rgr_approve_red.execute({}, { sessionID });
+
+  await assert.doesNotReject(
+    parentHooks["tool.execute.before"](
+      { tool: "task", sessionID },
+      {
+        args: {
+          subagent_type: "rgr-diagnostic-implementer",
+          prompt:
+            "Current diagnostic: initial delegated lease cycle. Allowed immediate change: one scoped production edit in crates/demo/src/lib.rs.",
+        },
+      },
+    ),
+  );
+
+  const staleTokenlessClaim = claimTokenlessLeaseFromFreshPluginProcess(
+    worktree,
+    "rgr-fresh-subagent-tokenless-claim-prior-cycle",
+  );
+  assert.equal(
+    staleTokenlessClaim.status,
+    0,
+    `Fresh process should claim the delegated lease from prior cycle. stdout=${staleTokenlessClaim.stdout}; stderr=${staleTokenlessClaim.stderr}`,
+  );
+  assert.match(String(staleTokenlessClaim.stdout), /RGR_TEST_TOKENLESS_CLAIM_OK/);
+
+  await parentHooks.tool.rgr_start.execute(
+    {
+      behavior: "fresh same-session cycle should ignore stale tokenless lease rows",
+      test: "allows a new RGR cycle on the same parent session after a tokenless claim",
+    },
+    { sessionID },
+  );
+  await parentHooks.tool.rgr_record_red.execute(
+    {
+      command: focusedCommand,
+      output: "one focused plugin test failed",
+    },
+    { sessionID },
+  );
+  await parentHooks.tool.rgr_approve_red.execute({}, { sessionID });
+
+  await assert.doesNotReject(
+    parentHooks["tool.execute.before"](
+      { tool: "edit", sessionID },
+      { args: { filePath: "crates/demo/src/lib.rs" } },
+    ),
+  );
+});
+
+test("reloads tokenless delegated implementation lease from persisted worktree state after plugin restart", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-process-boundary-tokenless-claim"], { stdio: "ignore" });
+
+  const parentSessionID = "rgr-parent-cross-instance-tokenless-claim-process-boundary";
+  const subagentSessionID = "rgr-subagent-cross-instance-tokenless-claim-process-boundary";
+  const focusedCommand =
+    "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'reloads tokenless delegated implementation lease from persisted worktree state after plugin restart'";
+
+  const parentHooks = await AutoReviewDisciplinePlugin({ worktree });
+
+  await parentHooks.tool.rgr_start.execute(
+    {
+      behavior: "delegated leases should survive plugin process restarts",
+      test: "reloads tokenless delegated implementation lease from persisted worktree state after plugin restart",
+    },
+    { sessionID: parentSessionID },
+  );
+  await parentHooks.tool.rgr_record_red.execute(
+    {
+      command: focusedCommand,
+      output: "one focused plugin test failed",
+    },
+    { sessionID: parentSessionID },
+  );
+  await parentHooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+
+  await assert.doesNotReject(
+    parentHooks.tool.rgr_record_changed_diagnostic.execute(
+      {
+        command: focusedCommand,
+        output: "FAIL: process-boundary changed diagnostic after red approved",
+        diagnostic: "delegated lease claim must be portable across plugin restarts",
+      },
+      { sessionID: parentSessionID },
+    ),
+  );
+  await parentHooks.tool.rgr_approve_changed_diagnostic.execute(
+    {
+      allowedImmediateChange:
+        "Implement the changed diagnostic fix in crates/demo/src/lib.rs using a scoped delegated implementation edit.",
+      allowedPaths: ["crates/demo/src/lib.rs"],
+    },
+    { sessionID: parentSessionID },
+  );
+
+  await assert.doesNotReject(
+    parentHooks["tool.execute.before"](
+      { tool: "task", sessionID: parentSessionID },
+      {
+        args: {
+          subagent_type: "rgr-diagnostic-implementer",
+          prompt:
+            "Current diagnostic: delegated lease portability must include restart boundaries. Allowed immediate change: scoped delegated implementation edit in crates/demo/src/lib.rs.",
+        },
+      },
+    ),
+  );
+
+  const restartResult = claimTokenlessLeaseFromFreshPluginProcess(worktree, subagentSessionID);
+
+  assert.equal(
+    restartResult.status,
+    0,
+    `Fresh plugin process should claim the delegated lease after a process-boundary restart. stdout=${restartResult.stdout}; stderr=${restartResult.stderr}`,
+  );
+  assert.match(String(restartResult.stdout), /RGR_TEST_TOKENLESS_CLAIM_OK/);
+});
+
+test("rejects parent production Rust edits after tokenless fresh-process claim", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-parent-edit-blocked-after-tokenless-claim"], {
+    stdio: "ignore",
+  });
+
+  const parentSessionID = "rgr-parent-session-tokenless-claimed-by-fresh-process";
+  const focusedCommand =
+    "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'rejects parent production Rust edits after tokenless fresh-process claim'";
+  const parentHooks = await AutoReviewDisciplinePlugin({ worktree });
+
+  await parentHooks.tool.rgr_start.execute(
+    {
+      behavior: "fresh-process tokenless delegate should consume parent edit allowance",
+      test: "rejects parent production Rust edits after tokenless fresh-process claim",
+    },
+    { sessionID: parentSessionID },
+  );
+  await parentHooks.tool.rgr_record_red.execute(
+    {
+      command: focusedCommand,
+      output: "one focused plugin test failed",
+    },
+    { sessionID: parentSessionID },
+  );
+  await parentHooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+
+  await assert.doesNotReject(
+    parentHooks["tool.execute.before"](
+      { tool: "task", sessionID: parentSessionID },
+      {
+        args: {
+          subagent_type: "rgr-diagnostic-implementer",
+          prompt:
+            "Current diagnostic: parent RED should delegate implementation edit; allowed immediate change: one scoped production edit in crates/demo/src/lib.rs.",
+        },
+      },
+    ),
+  );
+
+  const freshProcessClaim = claimTokenlessLeaseFromFreshPluginProcess(worktree, "rgr-fresh-implementation-session");
+  assert.equal(
+    freshProcessClaim.status,
+    0,
+    `Fresh process should successfully claim the delegated lease. stdout=${freshProcessClaim.stdout}; stderr=${freshProcessClaim.stderr}`,
+  );
+  assert.match(String(freshProcessClaim.stdout), /RGR_TEST_TOKENLESS_CLAIM_OK/);
+
+  await assert.rejects(
+    parentHooks["tool.execute.before"](
+      { tool: "edit", sessionID: parentSessionID },
+      { args: { filePath: "crates/demo/src/lib.rs" } },
+    ),
+    /RGR gate: another behavioral production edit requires rerunning the focused command and recording RED or GREEN first\./,
+  );
+});
+
+test("requires sqlite-backed, gitignored RGR state for tokenless delegated leases", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-sqlite-state-lease"], { stdio: "ignore" });
+
+  const parentSessionID = "rgr-parent-sqlite-state-lease";
+  const subagentSessionID = "rgr-subagent-sqlite-state-lease";
+  const focusedCommand =
+    "node --test .opencode/plugins/auto-review-discipline-rgr.test.ts --test-name-pattern 'requires sqlite-backed, gitignored RGR state for tokenless delegated leases'";
+
+  const parentHooks = await AutoReviewDisciplinePlugin({ worktree });
+
+  await parentHooks.tool.rgr_start.execute(
+    {
+      behavior: "delegated lease persistence should require a sqlite-backed, gitignored state",
+      test: "requires sqlite-backed, gitignored RGR state for tokenless delegated leases",
+    },
+    { sessionID: parentSessionID },
+  );
+  await parentHooks.tool.rgr_record_red.execute(
+    {
+      command: focusedCommand,
+      output: "one focused plugin test failed",
+    },
+    { sessionID: parentSessionID },
+  );
+  await parentHooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+
+  await assert.doesNotReject(
+    parentHooks["tool.execute.before"](
+      { tool: "task", sessionID: parentSessionID },
+      {
+        args: {
+          subagent_type: "rgr-diagnostic-implementer",
+          prompt:
+            "Current diagnostic: delegated lease persistence should be sqlite-backed and tokenless. Allowed immediate change: verify one scoped production edit via the delegated lease path.",
+        },
+      },
+    ),
+  );
+
+  const statePath = path.join(worktree, ".opencode", "state", "rgr.sqlite");
+  assert.equal(
+    fs.existsSync(statePath),
+    true,
+    `Expected tokenless lease persistence to create ${statePath}.`,
+  );
+
+  const ignoreCheck = cp.spawnSync("git", ["-C", worktree, "check-ignore", "-v", ".opencode/state/rgr.sqlite"], {
+    encoding: "utf8",
+  });
+  assert.equal(
+    ignoreCheck.status,
+    0,
+    `Expected .opencode/state/rgr.sqlite to be ignored by gitignore. git check-ignore output: ${ignoreCheck.stdout || ignoreCheck.stderr}`,
+  );
+
+  const freshClaimResult = claimTokenlessLeaseFromFreshPluginProcess(worktree, subagentSessionID);
+
+  assert.equal(
+    freshClaimResult.status,
+    0,
+    `Fresh plugin process should tokenlessly claim the delegated lease. stdout=${freshClaimResult.stdout}; stderr=${freshClaimResult.stderr}`,
+  );
+  assert.match(String(freshClaimResult.stdout), /RGR_TEST_TOKENLESS_CLAIM_OK/);
 });
 
 test("permits a second production edit after changed RED verification is re-recorded for the same command", async (t) => {

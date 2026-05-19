@@ -52,6 +52,8 @@ Do not start a new outer RED cycle just because the approved test still fails di
 
 If the same diagnostic remains after an attempted edit, stop for diagnosis instead of taking another edit token. If the next diagnostic requires an API boundary change across multiple files, ask the orchestrator to approve that explicit path set; do not use shell scripts or other tools to bypass the edit gate.
 
+Delegated implementation leases are persisted in the project-local `.opencode/state/` store so implementer subagents can claim parent-approved work across plugin instances. Treat that store as guardrail-owned state: do not edit it directly, do not commit it, and use `rgr_claim_implementation_lease` to claim eligible delegated work.
+
 ## Ambiguous Failure Escape Hatch
 
 If the current diagnostic does not identify one concrete code change, write or request a lower-level unit test that exposes the next decision point. That lower-level test must go through RED and test review before production edits.

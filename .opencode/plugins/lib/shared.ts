@@ -1,4 +1,8 @@
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 export type RgrStage =
   | "idle"
@@ -12,6 +16,7 @@ export type RgrStage =
   | "refactor";
 
 export type RgrCycle = {
+  cycleID?: string;
   behavior: string;
   test: string;
   command?: string;
@@ -137,24 +142,123 @@ export function recordDelegatedImplementationEditLease(
   leaseToSessionID: string | undefined,
   leaseFromSessionID: string,
   cycle: RgrCycle,
-): string | undefined {
+  worktree?: string,
+): void {
   if (!cycle?.reviewedRed) return;
   const lease = { ...cycle, stage: cycle.stage ?? "red", delegatedFromSessionID: leaseFromSessionID };
   if (leaseToSessionID) {
     delegatedImplementationEditLeases.set(leaseToSessionID, lease);
     return;
   }
-  const token = `rgr-lease-${leaseFromSessionID}-${claimableImplementationEditLeases.size + 1}`;
+  const token = `rgr-lease-${randomUUID()}`;
   claimableImplementationEditLeases.set(token, lease);
-  return token;
+  persistClaimableImplementationEditLease(token, lease, worktree);
 }
 
-export function claimDelegatedImplementationEditLease(token: string, sessionID: string): boolean {
-  const lease = claimableImplementationEditLeases.get(token);
+export function claimDelegatedImplementationEditLease(sessionID: string, worktree?: string): boolean {
+  const persisted = readPersistedClaimableLeases(worktree);
+  const source = worktree ? persisted : Object.fromEntries(claimableImplementationEditLeases.entries());
+  const entries = Object.entries(source);
+  if (entries.length !== 1) return false;
+  const [token, lease] = entries[0];
   if (!lease) return false;
   claimableImplementationEditLeases.delete(token);
+  removePersistedClaimableImplementationEditLease(token, worktree);
   delegatedImplementationEditLeases.set(sessionID, lease);
+  cycles.set(sessionID, { ...lease, implementationEditToken: false, stage: lease.stage ?? "red_approved" });
   return true;
+}
+
+export function refreshParentDelegatedClaims(sessionID: string, cycle: RgrCycle, worktree?: string): RgrCycle {
+  const claimed = withStateDb(worktree, (db) => {
+    const rows = db.prepare(`
+      select offered.payload_json
+      from rgr_events offered
+      where offered.event_type = 'implementation_lease_offered'
+        and exists (
+          select 1 from rgr_events claimed
+          where claimed.event_type = 'implementation_lease_claimed'
+            and claimed.token = offered.token
+        )
+    `).all() as Array<{ payload_json: string }>;
+    return rows.some((row) => {
+      const payload = JSON.parse(row.payload_json);
+      return payload.delegatedFromSessionID === sessionID && payload.cycleID === cycle.cycleID;
+    });
+  });
+  return claimed ? { ...cycle, implementationEditToken: true } : cycle;
+}
+
+function statePath(worktree?: string): string | undefined {
+  if (!worktree) return undefined;
+  return path.join(worktree, ".opencode", "state", "rgr.sqlite");
+}
+
+function withStateDb<T>(worktree: string | undefined, fn: (db: DatabaseSync) => T): T | undefined {
+  const file = statePath(worktree);
+  if (!file || !worktree) return undefined;
+  fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
+  ensureStateGitignore(worktree);
+  const db = new DatabaseSync(file);
+  try {
+    db.exec(`
+      create table if not exists rgr_events (
+        id integer primary key autoincrement,
+        created_at text not null default (datetime('now')),
+        event_type text not null,
+        token text not null,
+        session_id text,
+        payload_json text not null
+      );
+    `);
+    return fn(db);
+  } finally {
+    db.close();
+  }
+}
+
+function ensureStateGitignore(worktree: string): void {
+  const gitignore = path.join(worktree, ".gitignore");
+  const entry = ".opencode/state/";
+  const current = fs.existsSync(gitignore) ? fs.readFileSync(gitignore, "utf8") : "";
+  if (current.split(/\r?\n/).includes(entry)) return;
+  fs.writeFileSync(gitignore, `${current}${current.endsWith("\n") || current === "" ? "" : "\n"}${entry}\n`);
+}
+
+function readPersistedClaimableLeases(worktree?: string): Record<string, RgrCycle & { delegatedFromSessionID?: string }> {
+  return withStateDb(worktree, (db) => {
+    const rows = db.prepare(`
+      select token, payload_json
+      from rgr_events offered
+      where event_type = 'implementation_lease_offered'
+        and not exists (
+          select 1 from rgr_events claimed
+          where claimed.event_type = 'implementation_lease_claimed'
+            and claimed.token = offered.token
+        )
+    `).all() as Array<{ token: string; payload_json: string }>;
+    return Object.fromEntries(rows.map((row) => [row.token, JSON.parse(row.payload_json)]));
+  }) ?? {};
+}
+
+function persistClaimableImplementationEditLease(token: string, lease: RgrCycle & { delegatedFromSessionID?: string }, worktree?: string): void {
+  withStateDb(worktree, (db) => {
+    db.prepare("insert into rgr_events (event_type, token, session_id, payload_json) values (?, ?, ?, ?)")
+      .run("implementation_lease_offered", token, lease.delegatedFromSessionID ?? null, JSON.stringify(lease));
+  });
+}
+
+function loadClaimableImplementationEditLeases(worktree?: string): void {
+  for (const [token, lease] of Object.entries(readPersistedClaimableLeases(worktree))) {
+    if (!claimableImplementationEditLeases.has(token)) claimableImplementationEditLeases.set(token, lease);
+  }
+}
+
+function removePersistedClaimableImplementationEditLease(token: string, worktree?: string): void {
+  withStateDb(worktree, (db) => {
+    db.prepare("insert into rgr_events (event_type, token, session_id, payload_json) values (?, ?, ?, ?)")
+      .run("implementation_lease_claimed", token, null, "{}");
+  });
 }
 
 export function consumeDelegatedImplementationEditLease(sessionID: string): RgrCycle | undefined {

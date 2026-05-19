@@ -11,6 +11,7 @@
 .DS_Store
 /.remember/
 /.opencode/node_modules/
+/.opencode/state/
 # Nix dev environment
 /.direnv/
 /.dependencies/

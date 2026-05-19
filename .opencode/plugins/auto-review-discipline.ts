@@ -1,8 +1,9 @@
 import { tool, type Plugin } from "@opencode-ai/plugin";
 import cp from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import path from "node:path";
-import { assertCleanWorktree, getCycle, claimDelegatedImplementationEditLease, consumeDelegatedImplementationEditLease, consumeImplementationReviewVetoRecovery, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordDelegatedImplementationEditLease, recordImplementationReviewVetoRecovery, recordTouchedFile, setCycle, clearCycle, recordVerification, sessionContext, validateRgrRedEvidence } from "./lib/shared.ts";
+import { assertCleanWorktree, getCycle, claimDelegatedImplementationEditLease, consumeDelegatedImplementationEditLease, consumeImplementationReviewVetoRecovery, isNonBehavioralPath, isProductionRustPath, isLikelyTestPath, recordDelegatedImplementationEditLease, recordImplementationReviewVetoRecovery, recordTouchedFile, refreshParentDelegatedClaims, setCycle, clearCycle, recordVerification, sessionContext, validateRgrRedEvidence } from "./lib/shared.ts";
 
 function filePathFromArgs(args: unknown): string | undefined {
   if (!args || typeof args !== "object") return undefined;
@@ -285,7 +286,7 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
       },
       async execute(args, context) {
         assertCleanWorktree(worktree);
-        setCycle(context.sessionID, { behavior: args.behavior, test: args.test, stage: "red_started" });
+        setCycle(context.sessionID, { cycleID: randomUUID(), behavior: args.behavior, test: args.test, stage: "red_started" });
         return `RGR cycle started for ${args.behavior}. Record observed RED output before production edits.`;
       },
     }),
@@ -398,12 +399,13 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
     }),
     rgr_claim_implementation_lease: tool({
       description: "Claim a delegated implementation lease from the parent RGR session.",
-      args: {
-        claimToken: tool.schema.string().min(1).describe("Delegated implementation lease token"),
-      },
+      args: {},
       async execute(args, context) {
-        if (!claimDelegatedImplementationEditLease(args.claimToken, context.sessionID)) {
-          throw new Error("RGR gate: delegated implementation lease token is invalid or already claimed.");
+        if ("claimToken" in args) {
+          throw new Error("RGR gate: delegated implementation leases are claimed from central state; claimToken arguments are not accepted.");
+        }
+        if (!claimDelegatedImplementationEditLease(context.sessionID, worktree)) {
+          throw new Error("RGR gate: no eligible delegated implementation lease is available to claim.");
         }
         return "Delegated implementation lease claimed. One scoped production edit is allowed.";
       },
@@ -618,6 +620,7 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
         }
         throw new Error("RGR gate: production Rust edits under crates/*/src require RED review approval recorded with rgr_approve_red.");
       }
+      current = refreshParentDelegatedClaims(input.sessionID, current, worktree);
       if (isOnMainBranch(worktree)) {
         throw new Error("Branch gate: production Rust edits under crates/*/src require leaving main or calling the explicit override tool.");
       }
@@ -642,11 +645,7 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
     if (/^task$/i.test(input.tool) && isRgrDiagnosticImplementerTask(output.args)) {
       const current = getCycle(input.sessionID);
       if (!current?.reviewedRed) return;
-      const claimToken = recordDelegatedImplementationEditLease(delegatedSubagentSessionFromTaskArgs(output.args), input.sessionID, current);
-      if (claimToken && output && typeof output === "object") {
-        (output as Record<string, unknown>).claimToken = claimToken;
-        return { claimToken };
-      }
+      recordDelegatedImplementationEditLease(delegatedSubagentSessionFromTaskArgs(output.args), input.sessionID, current, worktree);
     }
   },
   "tool.execute.after": async (input, output) => {
