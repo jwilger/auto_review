@@ -365,13 +365,32 @@ fn release_prepare_creates_mergeable_release_pr_description() {
         !descriptions.is_empty()
             && descriptions.iter().all(|description| {
                 let lines: Vec<_> = description.lines().collect();
+                let trimmed = description.trim();
+                let is_trivial_two_sentence_body = trimmed
+                    .starts_with("Prepare release v$RELEASE_VERSION.")
+                    && trimmed.contains("CI builds Linux release-candidate tarball artifacts for review")
+                    && !trimmed.contains("scripts/release")
+                    && !trimmed.contains("semver")
+                    && !trimmed.contains("CHANGELOG")
+                    && !trimmed.contains("Cargo.lock")
+                    && !trimmed.contains("Cargo.toml");
+                let has_concrete_release_evidence = [
+                    "scripts/release",
+                    "semver",
+                    "CHANGELOG",
+                    "Cargo.toml",
+                    "Cargo.lock",
+                    "version bump",
+                    "release branch",
+                ]
+                .iter()
+                .any(|needle| description.contains(needle));
+
                 lines.iter().all(|line| !line.starts_with("    "))
-                    && lines.iter().any(|line| {
-                        line.contains("CI builds Linux release-candidate tarball artifacts for review")
-                            && line.contains("published only after merge to main")
-                    })
+                    && !is_trivial_two_sentence_body
+                    && has_concrete_release_evidence
             }),
-        "release-prepare should pass tea release PR descriptions as normal Markdown paragraphs that describe artifact/release behavior, not as four-space-indented code blocks: {descriptions:#?}"
+        "release-prepare should create substantive Markdown release PR descriptions with concrete release evidence; reject generic two-sentence bodies and four-space-indented code blocks: {descriptions:#?}"
     );
 }
 

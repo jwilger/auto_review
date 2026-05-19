@@ -342,13 +342,15 @@ fn has_clearly_acceptable_release_pr_metadata(title: &str, body: &str) -> bool {
 
     version.starts_with('v')
         && version[1..].chars().all(|c| c.is_ascii_digit() || c == '.')
-        && body.starts_with(&format!("Prepare release {version}."))
+        && body.starts_with(&format!("Prepare release {version} from branch "))
         && (body.contains(
             "binary package links on the PR; final release entries are created only \
              after merge to main.",
         ) || body.contains(
             "CI builds release PR artifacts for review; final release assets are rebuilt and \
              published only after merge to main.",
+        ) || body.contains(
+            "updates Cargo.toml, Cargo.lock, and CHANGELOG.md with semver-selected release metadata before merge to main.",
         ))
 }
 
@@ -1750,7 +1752,7 @@ mod tests {
             pr_number: 7,
             head_sha: "deadbeef",
             pr_title: "chore: release v0.9.0",
-            pr_body: "Prepare release v0.9.0.\n\nCI publishes PR-scoped Docker and binary package links on the PR; final release entries are created only after merge to main.",
+            pr_body: "Prepare release v0.9.0 from branch release/v0.9.0 using scripts/release prepare. This version bump updates Cargo.toml, Cargo.lock, and CHANGELOG.md with semver-selected release metadata before merge to main.",
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
@@ -1844,7 +1846,7 @@ mod tests {
             pr_number: 7,
             head_sha: "deadbeef",
             pr_title: "chore: release v0.10.0",
-            pr_body: "Prepare release v0.10.0.\n\nCI builds release PR artifacts for review; final release assets are rebuilt and published only after merge to main.",
+            pr_body: "Prepare release v0.10.0 from branch release/v0.10.0 using scripts/release prepare. This version bump updates Cargo.toml, Cargo.lock, and CHANGELOG.md with semver-selected release metadata before merge to main.",
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
@@ -1881,6 +1883,23 @@ mod tests {
             event != "REQUEST_CHANGES" && !review_body.contains("## Pre-merge checks"),
             "generated release PR metadata should not be over-blocked by a Cheap-tier false negative; \
              event was {event:?}, body was:\n{review_body}",
+        );
+    }
+
+    #[test]
+    fn release_pr_metadata_gate_accepts_concrete_release_prepare_body_without_weak_generic_bypass()
+    {
+        let title = "chore: release v0.10.0";
+        let concrete_release_prepare_body = "Prepare release v0.10.0 from branch release/v0.10.0 using scripts/release prepare. This version bump updates Cargo.toml, Cargo.lock, and CHANGELOG.md with semver-selected release metadata before merge to main.";
+        let weak_generic_body = "Prepare release v0.10.0.\n\nCI builds release PR artifacts for review; final release assets are rebuilt and published only after merge to main.";
+
+        assert!(
+            has_clearly_acceptable_release_pr_metadata(title, concrete_release_prepare_body),
+            "release metadata gate should accept concrete release-prep descriptions that include release evidence"
+        );
+        assert!(
+            !has_clearly_acceptable_release_pr_metadata(title, weak_generic_body),
+            "release metadata gate should not deterministically bypass weak generic release bodies"
         );
     }
 
