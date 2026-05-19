@@ -40,6 +40,8 @@ pub struct ReviewOutcome {
     /// Surfaces as a counter so operators can chart their
     /// hallucination rate over time.
     pub verifier_dropped: usize,
+    /// Estimated total USD consumed by LLM calls in this review.
+    pub estimated_total_cost_usd: f64,
 }
 
 /// Rank for ordered comparison: higher = more severe. Lets the
@@ -190,9 +192,9 @@ fn append_pre_merge_checks(body: &mut String, validation: &PrMetadataValidation)
 fn append_llm_usage_cost_footer(
     body: &mut String,
     usage: &[(ModelTier, String, String, u32, u32)],
-) {
+) -> f64 {
     if usage.is_empty() {
-        return;
+        return 0.0;
     }
 
     let pricing = ar_llm::pricing::default_openai_price_table();
@@ -238,7 +240,7 @@ fn append_llm_usage_cost_footer(
     }
 
     if lines.is_empty() {
-        return;
+        return 0.0;
     }
 
     if !body.is_empty() {
@@ -277,6 +279,8 @@ fn append_llm_usage_cost_footer(
     if !via.is_empty() {
         body.push_str(&format!("Estimated total USD: ${total_cost:.6} via {via}"));
     }
+
+    total_cost
 }
 
 fn validate_pr_metadata_title_length(title: &str) -> Option<PrMetadataValidation> {
@@ -437,6 +441,9 @@ pub struct ReviewArgs<'a> {
     pub pr_metadata_check: bool,
 }
 
+type UsageEntry = (ModelTier, String, String, u32, u32);
+type UsageLog = std::sync::Arc<std::sync::Mutex<Vec<UsageEntry>>>;
+
 /// End-to-end review activity for one PR.
 ///
 /// Fetches the diff and changed-file list, calls the reasoning LLM with
@@ -444,8 +451,7 @@ pub struct ReviewArgs<'a> {
 /// request, and posts it. The orchestrator is responsible for cloning the
 /// repo and preparing optional workspace context for RAG/agentic verification.
 pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, ReviewError> {
-    let usage: std::sync::Arc<std::sync::Mutex<Vec<(ModelTier, String, String, u32, u32)>>> =
-        std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let usage: UsageLog = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
     let llm = {
         let usage_capture = usage.clone();
         args.llm.clone().with_usage_collector(
@@ -564,7 +570,7 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
 
     let mut req = output_to_review_request(&output, args.head_sha);
     let usage = usage.lock().map(|u| u.clone()).unwrap_or_default();
-    append_llm_usage_cost_footer(&mut req.body, &usage);
+    let estimated_total_cost_usd = append_llm_usage_cost_footer(&mut req.body, &usage);
     if let Some(validation) = metadata_validation {
         if !validation.passed && !has_clearly_acceptable_pr_metadata(args.pr_title, args.pr_body) {
             append_pre_merge_checks(&mut req.body, &validation);
@@ -595,6 +601,7 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         warnings,
         notes,
         verifier_dropped,
+        estimated_total_cost_usd,
     })
 }
 
@@ -2152,7 +2159,7 @@ mod tests {
             r#"{"summary":"looks fine","findings":[]}"#,
         ]));
         let llm = router_with(provider.clone());
-        review_pull_request(ReviewArgs {
+        let _outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -2223,7 +2230,7 @@ mod tests {
             r#"{"summary":"looks fine","findings":[]}"#,
         ]));
         let llm = router_with(provider.clone());
-        review_pull_request(ReviewArgs {
+        let _outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -2282,7 +2289,7 @@ mod tests {
         ]));
         let llm = router_with(provider.clone());
 
-        review_pull_request(ReviewArgs {
+        let _outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -2371,7 +2378,7 @@ mod tests {
         ]));
         let llm = router_with(provider.clone());
 
-        review_pull_request(ReviewArgs {
+        let _outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -2852,7 +2859,7 @@ mod tests {
             "gpt-4o-mini",
         ));
 
-        let usage: Arc<Mutex<Vec<(ModelTier, String, String, u32, u32)>>> =
+        let usage: UsageLog =
             Arc::new(Mutex::new(Vec::new()));
         let usage_capture = usage.clone();
         let llm = Router::new()
@@ -2870,7 +2877,7 @@ mod tests {
                 },
             );
 
-        review_pull_request(ReviewArgs {
+        let outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -2962,6 +2969,11 @@ mod tests {
         let expected_cheap_fragment =
             format!("Cheap ({cheap_model}) in={cheap_in} out={cheap_out} cost=${cheap_cost:.6}");
         let total_cost = reasoning_cost + cheap_cost;
+        assert_eq!(
+            outcome.estimated_total_cost_usd,
+            total_cost,
+            "review outcome should expose the estimated total cost from usage footer"
+        );
         let expected_total_fragment = format!(
             "Estimated total USD: ${total_cost:.6} via {reasoning_base_url} and {cheap_base_url}"
         );

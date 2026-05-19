@@ -1191,6 +1191,7 @@ mod tests {
             warnings,
             notes,
             verifier_dropped: 0,
+            estimated_total_cost_usd: 0.0,
         }
     }
 
