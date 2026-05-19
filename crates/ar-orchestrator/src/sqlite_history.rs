@@ -199,6 +199,15 @@ impl ReviewHistory for SqliteReviewHistory {
         Ok(())
     }
 
+    async fn record_with_cost(
+        &self,
+        key: &PrKey,
+        sha: &str,
+        per_review_cost_usd: f64,
+    ) -> Result<(), HistoryError> {
+        SqliteReviewHistory::record_with_cost(self, key, sha, per_review_cost_usd).await
+    }
+
     async fn clear(&self, key: &PrKey) -> Result<(), HistoryError> {
         sqlx::query(
             "DELETE FROM review_history \

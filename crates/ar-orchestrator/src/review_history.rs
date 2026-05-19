@@ -34,6 +34,20 @@ pub trait ReviewHistory: Send + Sync {
     /// previous record for the same PR.
     async fn record(&self, key: &PrKey, sha: &str) -> Result<(), HistoryError>;
 
+    /// Record that we just posted a review at `sha`, including an
+    /// explicit per-review cost when the backend can persist it.
+    ///
+    /// Default implementation preserves existing behavior for
+    /// backends that only track SHA history.
+    async fn record_with_cost(
+        &self,
+        key: &PrKey,
+        sha: &str,
+        _per_review_cost_usd: f64,
+    ) -> Result<(), HistoryError> {
+        self.record(key, sha).await
+    }
+
     /// Drop the recorded SHA — used when a PR is closed or reopened
     /// to force the next review to be a full one.
     async fn clear(&self, key: &PrKey) -> Result<(), HistoryError>;
