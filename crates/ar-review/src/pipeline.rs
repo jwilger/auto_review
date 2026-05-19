@@ -283,6 +283,13 @@ fn append_llm_usage_cost_footer(
     total_cost
 }
 
+fn should_emit_cost_footer() -> bool {
+    !matches!(
+        std::env::var("AR_REVIEW_COST_FOOTER"),
+        Ok(value) if value.trim().eq_ignore_ascii_case("false")
+    )
+}
+
 fn validate_pr_metadata_title_length(title: &str) -> Option<PrMetadataValidation> {
     if title.chars().count() <= 72 {
         return None;
@@ -570,7 +577,11 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
 
     let mut req = output_to_review_request(&output, args.head_sha);
     let usage = usage.lock().map(|u| u.clone()).unwrap_or_default();
-    let estimated_total_cost_usd = append_llm_usage_cost_footer(&mut req.body, &usage);
+    let estimated_total_cost_usd = if should_emit_cost_footer() {
+        append_llm_usage_cost_footer(&mut req.body, &usage)
+    } else {
+        0.0
+    };
     if let Some(validation) = metadata_validation {
         if !validation.passed && !has_clearly_acceptable_pr_metadata(args.pr_title, args.pr_body) {
             append_pre_merge_checks(&mut req.body, &validation);
@@ -612,6 +623,7 @@ mod tests {
         CompleteRequest, CompleteResponse, Error as LlmError, LlmProvider, ModelTier, Router,
     };
     use async_trait::async_trait;
+    use std::env;
     use std::sync::{Arc, Mutex};
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -622,6 +634,35 @@ mod tests {
     struct CannedProvider {
         responses: Mutex<Vec<String>>,
         seen: Mutex<Vec<CompleteRequest>>,
+    }
+
+    struct EnvVarRestoreGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarRestoreGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = env::var(key).ok();
+            // SAFETY: test-only process environment mutation for focused test setup.
+            unsafe { env::set_var(key, value) };
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarRestoreGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => {
+                    // SAFETY: restoring prior environment value for test cleanup.
+                    unsafe { env::set_var(self.key, value) };
+                }
+                None => {
+                    // SAFETY: restoring prior environment absence for test cleanup.
+                    unsafe { env::remove_var(self.key) };
+                }
+            }
+        }
     }
 
     impl CannedProvider {
@@ -2983,6 +3024,97 @@ mod tests {
                 && review_body.contains(&expected_cheap_fragment)
                 && review_body.contains(&expected_total_fragment),
             "review body should include a usage/cost footer from LLM provider usage. body was:\n{review_body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn review_pull_request_omits_llm_usage_cost_footer_when_disabled_by_env() {
+        let _footer_env = EnvVarRestoreGuard::set("AR_REVIEW_COST_FOOTER", "false");
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("diff --git a/src/x.rs b/src/x.rs\n@@ -1 +1 @@\n-old\n+new\n"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 910,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CostAwareProvider::new(
+            vec![
+                (
+                    r#"{"verdicts":[{"finding_index":0,"keep":true,"reasoning":"ok"}]}"#,
+                    120,
+                    34,
+                ),
+                (
+                    r#"{"summary":"looks fine","findings":[{"path":"src/x.rs","line_start":1,"severity":"warning","message":"found issue"}]}"#,
+                    640,
+                    80,
+                ),
+            ],
+            "gpt-4o-mini",
+        ));
+
+        let llm = Router::new()
+            .with(ModelTier::Reasoning, provider.clone())
+            .with(ModelTier::Cheap, provider.clone());
+
+        review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "sha",
+            pr_title: "t",
+            pr_body: "b",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+            pr_metadata_check: false,
+        })
+        .await
+        .expect("review ok");
+
+        let received = server.received_requests().await.expect("requests");
+        let posted_review = received
+            .iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("posted review");
+        let body: serde_json::Value =
+            serde_json::from_slice(&posted_review.body).expect("review body json");
+        let review_body = body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review body");
+
+        assert!(
+            !review_body.contains("## LLM usage and cost")
+                && !review_body.contains("Estimated total USD:"),
+            "review body should omit usage/cost footer when AR_REVIEW_COST_FOOTER=false; body was:\n{review_body}",
         );
     }
 }
