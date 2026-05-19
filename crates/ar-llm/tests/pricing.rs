@@ -1,6 +1,5 @@
 use std::error::Error;
 use std::fs;
-use std::path::PathBuf;
 
 #[test]
 fn openai_price_table_has_defaults_and_operator_overrides() -> Result<(), Box<dyn Error>> {
@@ -12,7 +11,7 @@ fn openai_price_table_has_defaults_and_operator_overrides() -> Result<(), Box<dy
     assert!(defaults.contains("\"gpt-4o-mini\""));
     assert!(defaults.contains("\"text-embedding-3-small\""));
 
-    let mut override_path = PathBuf::from(std::env::temp_dir());
+    let mut override_path = std::env::temp_dir();
     let pid = std::process::id();
     override_path.push(format!("ar-llm-openai-pricing-test-{pid}.override.json"));
 
@@ -56,7 +55,7 @@ fn price_table_estimates_usage_by_provider_and_model() {
 #[test]
 fn estimate_usage_uses_provider_qualified_override_before_model_fallback(
 ) -> Result<(), Box<dyn Error>> {
-    let mut override_path = PathBuf::from(std::env::temp_dir());
+    let mut override_path = std::env::temp_dir();
     let pid = std::process::id();
     override_path.push(format!(
         "ar-llm-openai-pricing-provider-override-test-{pid}.override.json"

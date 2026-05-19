@@ -196,7 +196,7 @@ async fn router_usage_collector_records_provider_and_model_names() {
     let _ = router
         .embed(
             ModelTier::Embedding,
-            &vec!["left".to_string(), "right".to_string()],
+            &["left".to_string(), "right".to_string()],
         )
         .await
         .expect("embedding should succeed");
@@ -254,7 +254,7 @@ async fn router_usage_collector_records_embedding_prompt_tokens_from_openai_resp
         .with(ModelTier::Embedding, Arc::new(provider));
 
     let vectors = router
-        .embed(ModelTier::Embedding, &vec!["alpha".into(), "beta".into()])
+        .embed(ModelTier::Embedding, &["alpha".into(), "beta".into()])
         .await
         .expect("embedding should succeed");
 
