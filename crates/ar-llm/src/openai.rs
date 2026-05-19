@@ -121,6 +121,10 @@ impl LlmProvider for OpenAiProvider {
     }
 
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, Error> {
+        Ok(self.embed_with_usage(texts).await?.0)
+    }
+
+    async fn embed_with_usage(&self, texts: &[String]) -> Result<(Vec<Vec<f32>>, u32, u32), Error> {
         let model = self.embedding_model.as_deref().ok_or(Error::Unsupported)?;
         let body = EmbedRequest {
             model,
@@ -139,7 +143,9 @@ impl LlmProvider for OpenAiProvider {
         }
         let parsed: EmbedResponse = serde_json::from_str(&text)
             .map_err(|e| Error::Decode(format!("{e}: {}", cap_for_error(&text))))?;
-        Ok(parsed.data.into_iter().map(|d| d.embedding).collect())
+        let vectors = parsed.data.into_iter().map(|d| d.embedding).collect();
+        let usage = parsed.usage.unwrap_or_default();
+        Ok((vectors, usage.prompt_tokens, usage.completion_tokens))
     }
 
     fn provider_base_url(&self) -> String {
@@ -292,6 +298,8 @@ struct EmbedOptions {
 #[derive(Debug, Deserialize)]
 struct EmbedResponse {
     data: Vec<EmbedDatum>,
+    #[serde(default)]
+    usage: Option<Usage>,
 }
 
 #[derive(Debug, Deserialize)]

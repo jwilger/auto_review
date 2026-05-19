@@ -1,9 +1,13 @@
-use ar_llm::{CompleteRequest, CompleteResponse, Error, LlmProvider, Message, ModelTier, Router};
+use ar_llm::{
+    CompleteRequest, CompleteResponse, Error, LlmProvider, Message, ModelTier, OpenAiProvider, Router,
+};
 use async_trait::async_trait;
 use std::sync::{
     atomic::{AtomicU32, Ordering},
     Arc, Mutex,
 };
+use wiremock::matchers::{body_partial_json, method, path};
+use wiremock::{Mock, MockServer, ResponseTemplate};
 
 struct UsageProbeProvider {
     calls: AtomicU32,
@@ -193,4 +197,55 @@ async fn router_usage_collector_records_provider_and_model_names() {
     assert_eq!(observed[1].0, ModelTier::Embedding);
     assert_eq!(observed[1].1, "https://embeddings.example");
     assert_eq!(observed[1].2, "text-embedding-ada-002");
+}
+
+#[tokio::test]
+async fn router_usage_collector_records_embedding_prompt_tokens_from_openai_response() {
+    let server = MockServer::start().await;
+    let provider = OpenAiProvider::new(&server.uri(), None, "ignored")
+        .expect("provider")
+        .with_embedding_model("text-embedding-3-small");
+
+    Mock::given(method("POST"))
+        .and(path("/v1/embeddings"))
+        .and(body_partial_json(serde_json::json!({
+            "model": "text-embedding-3-small",
+            "input": ["alpha", "beta"]
+        })))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "data": [
+                    {"embedding": [0.1, 0.2]},
+                    {"embedding": [0.3, 0.4]}
+                ],
+                "usage": {"prompt_tokens": 17, "completion_tokens": 0, "total_tokens": 17}
+            })),
+        )
+        .mount(&server)
+        .await;
+
+    let observed = Arc::new(Mutex::new(Vec::<(ModelTier, String, u32, u32)>::new()));
+    let observed_for_cb = observed.clone();
+
+    let router = Router::new()
+        .with_usage_collector(move |_tier, _provider_base_url, model, input_tokens, output_tokens| {
+            observed_for_cb
+                .lock()
+                .unwrap()
+                .push((_tier, model.to_string(), input_tokens, output_tokens));
+        })
+        .with(ModelTier::Embedding, Arc::new(provider));
+
+    let vectors = router
+        .embed(ModelTier::Embedding, &vec!["alpha".into(), "beta".into()])
+        .await
+        .expect("embedding should succeed");
+
+    assert_eq!(vectors, vec![vec![0.1, 0.2], vec![0.3, 0.4]]);
+
+    let observed = observed.lock().unwrap();
+    assert_eq!(observed.len(), 1);
+    assert_eq!(observed[0].0, ModelTier::Embedding);
+    assert_eq!(observed[0].2, 17);
+    assert_eq!(observed[0].3, 0);
 }

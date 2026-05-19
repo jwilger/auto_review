@@ -50,9 +50,9 @@ impl Router {
 
     pub async fn embed(&self, tier: ModelTier, texts: &[String]) -> Result<Vec<Vec<f32>>, Error> {
         let provider = self.provider(tier)?;
-        let resp = provider.embed(texts).await?;
-        self.record_usage(&**provider, tier, 0, 0);
-        Ok(resp)
+        let (vectors, input_tokens, output_tokens) = provider.embed_with_usage(texts).await?;
+        self.record_usage(&**provider, tier, input_tokens, output_tokens);
+        Ok(vectors)
     }
 
     fn record_usage(
