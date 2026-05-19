@@ -45,19 +45,20 @@ inline-comment schema doesn't carry an end line.
 ## Talking to the bot
 
 The bot listens for `@<bot_name>` mentions on the PR conversation.
-The default name is `auto_review` but operators can rename it; see
-the bot's account in your Forgejo instance for the exact handle.
+The default mention handle is `auto-review`; `auto_review` is still accepted as
+a compatibility alias. Operators can rename the bot, so check the bot's account
+in your Forgejo instance for the exact handle.
 
 | Command | What it does |
 |---------|--------------|
 | `@<bot> help` | List every available command. |
 | `@<bot> re-review` | Re-run the full review against the current head SHA, even if it was already reviewed. |
-| `@<bot> remember <text>` | Save a guideline to the repo's learnings store. Future reviews retrieve relevant entries via RAG. |
-| `@<bot> forget <id>` | Delete a learnings entry. The bot lists ids in `help` output. |
-| `@<bot> autofix` | Generate suggested patches for the bot's own findings as a comment. The bot does not push commits — you decide what to apply. |
-| `@<bot> docstring` | Suggest docstrings for newly-added public APIs. Same: comment-only, you apply. |
-| `@<bot> tests` | Suggest scaffolded test cases for added code. Same. |
-| `@<bot> <freeform>` | Anything else gets routed to the cheap-tier model as a free-form Q&A about the PR. |
+| `@<bot> remember <text>` | Save a guideline to the repo's learnings store. Future semantic retrieval requires an embedding tier (`LLM_EMBEDDING_MODEL`); otherwise the entry is stored but not retrieved by similarity search. |
+| `@<bot> forget <id>` | Delete a learnings entry. The id is printed when `remember` stores the entry; operators can also audit ids with `auto-review learnings list`. |
+| `@<bot> autofix` | Ask the cheap-tier model for diff-based inline patch suggestions. The bot does not push commits — you decide what to apply. |
+| `@<bot> docstring` | Suggest docstrings for newly-added public APIs. Requires the cheap-tier model (`LLM_CHEAP_MODEL`). Same: comment-only, you apply. |
+| `@<bot> tests` | Suggest scaffolded test cases for added code. Requires the cheap-tier model. Same. |
+| `@<bot> <freeform>` | Anything else gets routed to the cheap-tier model as a free-form Q&A about the PR; if that tier is not configured, the bot replies that the feature is disabled. |
 
 Mentions inside an inline review thread (replies to a finding) are
 picked up by the bot's polling loop, typically within a minute.
@@ -76,7 +77,8 @@ The bot's findings are advisory. If you think a finding is wrong:
    ```
    The next review will see the rule. Or use
    `@<bot> remember the unsafe blocks in src/foo/ are vetted` to
-   add it without editing the file.
+    add it without editing the file. Semantic retrieval of remembered guidance
+    in future reviews requires an embedding tier.
 
 There's no "this comment is wrong" button. The right escalation is
 a guideline (durable) or a reply (per-PR).
@@ -102,7 +104,12 @@ status without reviewing.
 
 ## Repo config
 
-`.auto_review.yaml` at the repo root configures the bot per-repo:
+`.auto_review.yaml` at the repo root configures the bot per-repo. The loader
+also accepts `.auto_review.yml`; when both are present, `.auto_review.yaml`
+takes precedence. Runtime loading caps the config file at 64 KiB, rejects
+malformed YAML by falling back to defaults, and skips malformed ignored-path
+globs. Use `--strict` locally to catch unknown keys before that permissive
+runtime fallback hides a typo.
 
 ```yaml
 # Top-level switch. False = the bot skips reviewing this repo.

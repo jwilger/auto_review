@@ -1,12 +1,9 @@
-//! Single-pass review pipeline.
+//! Review pipeline activities.
 //!
-//! For Milestone 1 the activity is monolithic: fetch the PR diff, render the
-//! prompt, call the LLM with JSON-schema response format, run the self-heal
-//! loop on the output, map findings to a Forgejo review request, and post.
-//!
-//! Later milestones split this into discrete orchestrator activities
-//! (triage → summarize → review → verify), with the pipeline becoming a thin
-//! coordinator over them.
+//! This crate owns workspace preparation, repository config loading, deterministic
+//! triage, RAG context construction, prompt rendering, JSON self-heal, severity
+//! filtering, verification, PR metadata checks, and Forgejo review mapping. The
+//! orchestrator crate coordinates when these activities run for each PR.
 
 pub mod agentic_verify;
 pub mod config;

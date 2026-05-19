@@ -57,7 +57,7 @@ auto-review ops status --gateway-url https://reviewer.example.com
 
 | Command | Purpose |
 |---|---|
-| `review once` | Runs the full review pipeline against one PR without the gateway. `--dry-run` prints the rendered LLM prompt and exits. |
+| `review once` | Runs a one-shot reasoning-path review against one PR without the gateway. It does not wire every gateway runtime store or optional LLM tier. `--dry-run` prints the base rendered LLM prompt and exits without clone/RAG/repo-config loading/posting. |
 | `bench run` | Replays PR fixtures through the LLM review path. `--baseline FILE` compares against an earlier JSON run; `--fail-on-regression` exits non-zero on configured precision/recall/latency regressions. |
 
 Benchmark fixture details live in [Benchmarks](./BENCHMARKS.md).

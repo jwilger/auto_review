@@ -6,7 +6,8 @@ A self-hosted, AI-driven pull-request reviewer for [Forgejo](https://forgejo.org
 closed-source AI reviewers: it runs on infrastructure you control, supports local
 or cloud OpenAI-compatible LLM endpoints, waits for your CI checks, reviews PRs
 semantically, verifies findings before posting, and talks to authors through
-`@auto_review` chat commands.
+`@auto-review` chat commands (`@auto_review` remains accepted as a
+compatibility alias).
 
 ## TL;DR: install and run
 
@@ -68,23 +69,27 @@ Full setup: [Quickstart](./docs/QUICKSTART.md). Deployment options:
 
 ## Current status
 
-**Beta.** `auto_review` has been successfully reviewing its own PRs for some
-time. The end-to-end review pipeline works:
+`auto_review` is being prepared for the 1.0.0 release. The documented runtime
+contract is the supported single-binary Forgejo reviewer path: CI triggers
+semantic review, the gateway isolates workspace handling, and the bot posts
+verified review output back to Forgejo.
 
 ```text
 Forgejo webhook / CI trigger
   -> gateway HMAC + token validation
   -> shallow clone
-  -> triage + RAG context + learnings
+  -> deterministic triage + RAG context + learnings
   -> reasoning-tier LLM strict JSON output
-  -> self-heal + cheap-tier verification
-  -> severity floor
+  -> self-heal
+  -> pre-verifier severity floor
+  -> cheap-tier verification
+  -> post-verifier floor + path guard
   -> inline review comments + commit status
 ```
 
 The gateway accepts low-cost PR webhooks for intake and chat bookkeeping. Normal
 semantic reviews are dispatched by `POST /reviews/ci` after repository-selected
-CI prerequisites pass. Explicit `@auto_review re-review` can force a review.
+CI prerequisites pass. Explicit `@auto-review re-review` can force a review.
 
 The chat handler supports `help`, `remember <text>`, `forget <id>`, `re-review`,
 `autofix`, `docstring`, `tests`, and free-form questions. The `bench` command
@@ -98,9 +103,11 @@ belong in CI before the semantic-review trigger.
 
 A Forgejo webhook lands at the gateway, which HMAC-verifies PR intake and chat
 commands. The optional CI endpoint verifies a bearer token and re-checks the PR
-head SHA before dispatch. The orchestrator runs clone → triage → context curation
-(tree-sitter symbols, embeddings, co-change context, learnings) → review
-generation → verifier → severity filtering → Forgejo review/status posting. LLM
+head SHA before dispatch. The orchestrator runs clone → deterministic triage →
+context curation (diff, changed paths, repo guidelines, indexed symbols, and
+available learnings/RAG context) → review generation → self-heal → pre-verifier
+severity filtering → verifier → post-verifier floor/path guard → Forgejo
+review/status posting. LLM
 workspace tools are read-only and path-confined. LLM calls go through a tiered
 OpenAI-compatible provider abstraction that works with hosted OpenAI-compatible
 providers, Ollama, vLLM, OpenRouter, Together, Groq, and similar endpoints.
@@ -129,10 +136,10 @@ providers, Ollama, vLLM, OpenRouter, Together, Groq, and similar endpoints.
 | `ar-orchestrator` | Per-PR state machine, job dispatch, review history, lifecycle observations |
 | `ar-forgejo` | Forgejo REST client |
 | `ar-llm` | LLM provider trait and tier router |
-| `ar-index` | Tree-sitter symbols, embeddings, co-change graph, learnings store |
+| `ar-index` | Tree-sitter symbols, embeddings, vector stores, co-change graph, learnings store |
 | `ar-prompts` | Prompt templates and JSON schemas |
 | `ar-review` | Review pipeline activities |
-| `ar-chat` | `@auto_review` chat handling |
+| `ar-chat` | `@auto-review` chat handling |
 | `ar-cli` | `auto-review` operator command |
 
 ## License

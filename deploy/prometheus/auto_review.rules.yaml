@@ -34,6 +34,8 @@ groups:
               + rate(auto_review_reviews_failed_workspace_total[5m])
               + rate(auto_review_reviews_failed_llm_total[5m])
               + rate(auto_review_reviews_failed_unhealable_total[5m])
+              + rate(auto_review_reviews_failed_panic_total[5m])
+              + rate(auto_review_reviews_failed_unknown_total[5m])
           )
 
       # Combined chat-command intake rate (webhook + poller).
@@ -71,7 +73,7 @@ groups:
             the WEBHOOK_SECRET drifted between gateway and Forgejo,
             or an external party is probing /webhooks/forgejo with
             invalid signatures.
-            Run `auto_review test-webhook --gateway-url <URL>
+            Run `auto-review webhook test --gateway-url <URL>
             --webhook-secret "$WEBHOOK_SECRET"` to confirm the local
             secret. If that passes, check Forgejo's webhook config
             and rotate per OPERATIONS.md §6.3.
@@ -198,7 +200,7 @@ groups:
             histogram_quantile(0.95) over the duration histogram is
             above 120s for 15m. Check:
               1. The LLM endpoint's GPU / queue health.
-              2. `auto_review doctor --llm-base-url <URL>
+              2. `auto-review ops doctor --llm-base-url <URL>
                  --llm-reasoning-model <model>` to confirm the
                  model is still loaded.
               3. Whether a large PR (or many synchronized commits)
@@ -233,6 +235,6 @@ groups:
           summary: "auto_review: llm-class failures spiking"
           description: |
             LLM provider returning errors for 10m. Run
-            `auto_review doctor --llm-base-url <URL>
+            `auto-review ops doctor --llm-base-url <URL>
             --llm-reasoning-model "$LLM_REASONING_MODEL"` to
             confirm the model is loaded and reachable.

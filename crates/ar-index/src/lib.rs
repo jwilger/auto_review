@@ -1,8 +1,8 @@
-//! Repo indexing.
+//! Repository indexing and retrieval support.
 //!
-//! Currently provides tree-sitter symbol extraction (Milestone 2 RAG
-//! groundwork). Embeddings + LanceDB + co-change graph land in
-//! follow-up commits.
+//! Provides tree-sitter symbol extraction, embedding helpers, SQLite and
+//! in-memory vector stores, co-change graph utilities, and learnings stores used
+//! by review context construction and chat `remember`/`forget` workflows.
 
 pub mod co_change;
 pub mod embed;

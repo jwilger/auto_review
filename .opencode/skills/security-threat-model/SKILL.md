@@ -13,7 +13,7 @@ Read `docs/THREAT-MODEL.md` and the relevant ADRs before changing security-sensi
 
 ## Review Questions
 
-- Does untrusted PR code execute only through `ar-sandbox`?
+- Does the normal review path avoid executing untrusted PR code, and do any new execution features introduce a feature-specific sandbox before enabling them?
 - Are webhook payloads authenticated before processing?
 - Are LLM-issued workspace tools isolated and logged?
 - Are secrets kept out of prompts, logs, commits, and review comments?

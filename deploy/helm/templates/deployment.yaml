@@ -27,6 +27,8 @@ spec:
           env:
             - name: AR_GATEWAY_BIND
               value: "0.0.0.0:8080"
+            - name: AR_GATEWAY_EXTERNAL_ISOLATION
+              value: "container"
             - name: RUST_LOG
               value: {{ .Values.logging.rustLog | quote }}
             - name: FORGEJO_BASE_URL

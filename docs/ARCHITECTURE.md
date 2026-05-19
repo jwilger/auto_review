@@ -31,7 +31,7 @@ The gateway owns external request boundaries:
 Normal semantic review is gated behind repository-selected CI prerequisites.
 Regular Forgejo webhooks perform low-cost intake, bookkeeping, status updates,
 and chat routing; they do not normally start expensive semantic review. Explicit
-chat commands such as `@auto_review re-review` may force a review.
+chat commands such as `@auto-review re-review` may force a review.
 
 ## Review pipeline
 
@@ -40,14 +40,20 @@ LLM agent:
 
 ```text
 clone workspace
-  -> triage
+  -> deterministic triage
   -> context curation
   -> review generation
   -> self-heal JSON/schema validation
+  -> pre-verifier severity-floor filtering
   -> verification
-  -> severity-floor filtering
+  -> post-verifier severity-floor filtering + path guard
+  -> optional PR metadata quality check
   -> inline review and commit-status posting
 ```
+
+The cheap-tier LLM triage module exists as an implementation seam, but the 1.0
+runtime path relies on deterministic trivial-PR/file triage unless a later ADR and
+code change wire LLM triage back into dispatch.
 
 Deterministic linters, tests, and builds belong in CI before semantic review is
 requested. The normal review runtime does not execute bundled linters, tests,
@@ -76,8 +82,10 @@ stores persist review history, learnings, vector embeddings, and webhook deliver
 deduplication state across restarts. In-memory stores remain appropriate for
 tests and development paths where persistence is not the behavior under test.
 
-Repository context uses tree-sitter symbols, embeddings, co-change information,
-and persistent learnings. The review pipeline depends on the `VectorStore`
+Repository context uses the diff, changed paths, tree-sitter symbols, embeddings
+when an embedding tier is configured, and persistent learnings. Co-change graph
+support exists in `ar-index`, but the 1.0 review pipeline does not inject
+co-change data into prompts. The review pipeline depends on the `VectorStore`
 abstraction; `SqliteVectorStore` is the current persistent default. LanceDB or
 another dedicated vector database should be revisited only when measured scale,
 latency, or filtering requirements justify it.

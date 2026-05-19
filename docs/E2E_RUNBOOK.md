@@ -6,8 +6,8 @@ this when:
 
 - Cutting a release.
 - Investigating a "review never posts" report from an operator.
-- Validating a new Forgejo version (the test matrix in
-  docs/OPERATIONS.md tracks which Forgejo majors we've verified).
+- Validating a new Forgejo version before updating your own operator support
+  matrix or release notes.
 
 The synthetic e2e tests at `crates/ar-orchestrator/tests/synthetic_e2e.rs`
 cover the review-pipeline wiring bugs (dispatch hand-off and review-comment

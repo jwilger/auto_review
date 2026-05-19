@@ -28,9 +28,12 @@ AR_CI_REVIEW_TOKEN=<openssl rand -hex 32>
 LLM_BASE_URL=http://ollama.example.internal:11434
 LLM_REASONING_MODEL=qwen2.5-coder:32b
 
-# Optional persistence
+# Optional explicit persistence paths. If unset, the gateway chooses SQLite
+# paths under its state directory; use :memory: only for volatile evaluation.
 AR_LEARNINGS_DB=/var/lib/auto_review/learnings.db
 AR_HISTORY_DB=/var/lib/auto_review/review_history.db
+AR_VECTOR_DB=/var/lib/auto_review/vector.db
+AR_DEDUP_DB=/var/lib/auto_review/webhook_dedup.db
 
 # Optional LLM cost attribution overrides
 # AR_PRICE_TABLE_PATH=/etc/auto_review/prices.json
@@ -48,7 +51,9 @@ No official `auto_review` gateway image is published. If your production boundar
 is Docker, Podman, Kubernetes, or a platform that consumes OCI images, build and
 publish an operator-owned image that runs `auto-review gateway`, includes `git`,
 listens on `0.0.0.0:8080`, and stores persistent state under
-`/var/lib/auto_review`.
+`/var/lib/auto_review`. Set `AR_GATEWAY_EXTERNAL_ISOLATION=container` in the
+image or deployment environment so the gateway reports the container boundary
+instead of trying to enter the packaged embedded OCI launcher.
 
 Example with an operator-owned Podman or Docker image:
 
@@ -56,6 +61,7 @@ Example with an operator-owned Podman or Docker image:
 podman run -d --name auto-review \
   --restart unless-stopped \
   --env-file /etc/auto_review/auto_review.env \
+  -e AR_GATEWAY_EXTERNAL_ISOLATION=container \
   -p 127.0.0.1:8080:8080 \
   -v auto-review-state:/var/lib/auto_review \
   registry.example.com/auto-review/ar-gateway:latest
@@ -203,9 +209,10 @@ helm install auto-review ./deploy/helm \
   --set secrets.secretRef=auto-review-creds
 ```
 
-The chart wires liveness to `/healthz` and readiness to `/readyz`. Add a PVC or
-hostPath for `/var/lib/auto_review` if you set `AR_LEARNINGS_DB` or
-`AR_HISTORY_DB` to persistent paths.
+The chart sets `AR_GATEWAY_EXTERNAL_ISOLATION=container` and wires liveness to
+`/healthz` and readiness to `/readyz`. Add a PVC or hostPath for the gateway
+state directory if you want SQLite learnings, review history, vector snippets,
+and webhook dedup state to survive pod replacement.
 
 ## Forgejo Actions semantic-review trigger
 

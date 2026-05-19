@@ -56,6 +56,17 @@ impl SqliteReviewHistory {
             .execute(&pool)
             .await
             .map_err(|e| HistoryError::Storage(e.to_string()))?;
+        if let Err(e) = sqlx::query(
+            "ALTER TABLE review_history ADD COLUMN per_review_cost_usd REAL NOT NULL DEFAULT 0.42",
+        )
+        .execute(&pool)
+        .await
+        {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column name") {
+                return Err(HistoryError::Storage(msg));
+            }
+        }
         sqlx::query(SCHEMA_INDEX)
             .execute(&pool)
             .await
@@ -431,5 +442,55 @@ mod tests {
             h.last_reviewed(&k).await.unwrap().as_deref(),
             Some("persisted")
         );
+    }
+
+    #[tokio::test]
+    async fn open_upgrades_legacy_table_without_cost_column_for_record_with_cost() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("review_history.db");
+        let legacy_opts =
+            SqliteConnectOptions::from_str(&format!("sqlite://{}", path.to_string_lossy()))
+                .unwrap()
+                .create_if_missing(true);
+
+        let legacy_pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(legacy_opts)
+            .await
+            .unwrap();
+        sqlx::query(
+            "CREATE TABLE review_history (
+                owner TEXT NOT NULL,
+                repo TEXT NOT NULL,
+                pr_number INTEGER NOT NULL,
+                head_sha TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (owner, repo, pr_number)
+            )",
+        )
+        .execute(&legacy_pool)
+        .await
+        .unwrap();
+        drop(legacy_pool);
+
+        let history = SqliteReviewHistory::open(&path).await.unwrap();
+        let k = key("o", "r", 1);
+        history
+            .record_with_cost(&k, "deadbeef", 1.23)
+            .await
+            .unwrap();
+
+        let cost: f64 = sqlx::query_scalar(
+            "SELECT per_review_cost_usd FROM review_history \
+             WHERE owner = ?1 AND repo = ?2 AND pr_number = ?3",
+        )
+        .bind(&k.owner)
+        .bind(&k.repo)
+        .bind(k.pr_number as i64)
+        .fetch_one(&history.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(cost, 1.23);
     }
 }

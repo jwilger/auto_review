@@ -80,6 +80,7 @@ What an attacker would target, and what protects each:
 | Reviewer host (root filesystem, host PATs of other tools) | Lateral movement                                                                                                                                                                                                                                                                                            | Runtime does not execute repo-supplied linter/tool configs; gateway runs as non-root                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Other repos the bot can write to                          | Cross-repo blast radius                                                                                                                                                                                                                                                                                     | Bot PAT scoping; per-repo `enabled: false`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 | Learnings store (SQLite)                                  | LLM-prompt injection vector if poisoned                                                                                                                                                                                                                                                                     | Append-only; chat command surface gated to repo collaborators                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Vector/RAG store (SQLite)                                 | May retain source snippets and embeddings from reviewed repositories                                                                                                                                                                                                                                         | Stored in the gateway state directory; operators can choose `:memory:` for volatile operation; snippets are framed as untrusted data before LLM use                                                                                                                                                                                                                                                                                                                                                                                            |
 | Release preparation PAT                                   | Can prepare release PR metadata                                                                                                                                                                                                                                                                             | Forgejo Actions secret `RELEASE_PREPARE_TOKEN`; release preparation PAT blast radius is to prepare release PR branches and release PRs only in `jwilger/auto_review`                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Release publishing PAT                                    | Can publish Linux binary archives, provenance metadata, and Forgejo Releases; managed PR body edit/PR description updates now reference binary artifacts | Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`; release publishing PAT blast radius is to attach the Linux x86_64 `auto-review` binary release asset/checksums/signatures/SBOM-provenance metadata and create Forgejo Releases only in `jwilger/auto_review`, and update release PR body/description with binary artifact links |
 | Binary release assets and provenance                      | Direct-download operators rely on archive integrity and origin                                                                                                                                                                                                                                              | Linux x86_64 archives ship with SHA-256 checksums, SSH signatures, SBOM/provenance metadata, and release notes verification commands such as `sha256sum -c SHA256SUMS` and `ssh-keygen -Y verify -f allowed-signers -I <release-bot-email> -n file -s SHA256SUMS.sig < SHA256SUMS` |
@@ -178,9 +179,11 @@ _Path:_ Send a crafted `pull_request` event to `/webhooks/forgejo`
 without HMAC, replay an old one, or call `/reviews/ci` with a stale
 or forged PR head.
 _Mitigation:_ Constant-time HMAC-SHA256 verify against
-`X-Forgejo-Signature`. Unsigned/invalid → 401, no further work.
-Replays are accepted (Forgejo doesn't sign nonces); deduped by
-`(repo, pr_number, head_sha)` in the orchestrator's history table.
+`X-Forgejo-Signature`. Missing signatures or mismatches return 401; malformed
+hex returns 400. No further work happens before a valid signature. Verified
+webhook delivery ids (`X-Forgejo-Delivery`) are deduped before dispatch; semantic
+review work is also deduped by `(repo, pr_number, head_sha)` in the
+orchestrator's history table.
 Effect of replay: re-runs a review the operator already paid for
 once; bounded spend. CI-triggered review requests require a separate
 strong bearer action token (`AR_CI_REVIEW_TOKEN`, 32+ bytes/chars at
@@ -291,11 +294,12 @@ artifact set was approved by the release bot key.
 _Residual risk:_ Release-runner trust is out of scope for the gateway runtime;
 release operators own runner provisioning, isolation, and audit logs.
 
-### T6. Learnings-store poisoning
+### T6. Learnings/vector-store poisoning and retention
 
 _Attacker:_ A2.
 _Path:_ Repeatedly invoke `@auto-review remember <malicious text>`
-to inject prompt-fragments that future reviews retrieve.
+to inject prompt-fragments that future reviews retrieve, or rely on reviewed
+source snippets being persisted in the vector/RAG store.
 _Mitigation:_ Chat commands are gated to authenticated PR
 participants by Forgejo's permission model. Stored learnings are
 plain text and pass through the same untrusted-data framing in the
@@ -303,7 +307,21 @@ review prompt as any other repo content. The `forget` command
 allows operators to purge entries.
 _Residual risk:_ a collaborator with write access can already merge
 malicious code; learnings poisoning is a strictly weaker capability
-for them.
+for them. Operators using cloud embedding providers should treat embedded
+snippets like other LLM-bound repository content and choose `AR_VECTOR_DB=:memory:`
+or rotate/delete the SQLite store if long-term snippet retention is undesirable.
+
+### T6a. Unauthenticated operator endpoints
+
+_Attacker:_ A4.
+_Path:_ Query `/healthz`, `/readyz`, `/version`, `/info`, or `/metrics` to learn
+runtime posture, configured model names, or high-level activity counters.
+_Mitigation:_ These endpoints intentionally expose only non-secret operational
+state; secrets, tokens, webhook secrets, and API keys are not returned. Deployers
+should still restrict them at a reverse proxy, firewall, or service mesh when the
+gateway is internet-facing.
+_Residual risk:_ public metrics and posture can aid traffic analysis or targeted
+misconfiguration probes.
 
 ### T7. Resource exhaustion (large workspace, webhook flood, slow LLM)
 

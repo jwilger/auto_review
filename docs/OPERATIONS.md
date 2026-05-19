@@ -219,11 +219,11 @@ skip paths, webhook intake, and chat surface.
   begins post-dedup. Compare against `jobs_dispatched_total`; the
   gap is reviews short-circuited by the `same_sha`/`trivial`/
   `disabled` skip paths (see `*_skipped_*_total` counters below).
-- `auto_review_reviews_succeeded_total` and the four
+- `auto_review_reviews_succeeded_total` and the six
   `auto_review_reviews_failed_<class>_total` counters
-  (`forgejo`, `workspace`, `llm`, `unhealable`). Track success
+  (`forgejo`, `workspace`, `llm`, `unhealable`, `panic`, `unknown`). Track success
   rate as
-  `succeeded / (succeeded + failed_forgejo + failed_workspace + failed_llm + failed_unhealable)`.
+  `succeeded / (succeeded + failed_forgejo + failed_workspace + failed_llm + failed_unhealable + failed_panic + failed_unknown)`.
   A spike in a single class points at one subsystem.
 - `auto_review_review_duration_seconds` is a proper Prometheus
   histogram with buckets at 1s, 5s, 15s, 30s, 60s, 120s, 300s,
@@ -602,8 +602,9 @@ to-noise expectation.
 
 ## 8. Learnings store
 
-When `AR_LEARNINGS_DB` is set to a file path, learnings persist across
-restarts.
+By default, learnings persist in the gateway's SQLite state path. Set
+`AR_LEARNINGS_DB` to a file path to choose the location explicitly, or to
+`:memory:` for volatile local evaluation.
 
 **Backup:**
 ```bash
@@ -636,8 +637,10 @@ wipes without going through Forgejo.
 
 ## 9. Upgrade
 
-Semver: pre-1.0, minor versions can break configuration. Always
-read the [CHANGELOG](../CHANGELOG.md) before bumping.
+Semver: 1.x minor releases should preserve documented configuration and CLI
+contracts. Breaking operator-facing changes require a major release or an
+explicit migration note. Always read the [CHANGELOG](../CHANGELOG.md) before
+bumping.
 
 ```bash
 # Build the new version with the pinned Nix toolchain

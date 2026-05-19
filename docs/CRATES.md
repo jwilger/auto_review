@@ -10,7 +10,7 @@ instructions live in [Quickstart](./QUICKSTART.md) and [Deployment](./DEPLOYMENT
 | `ar-orchestrator` | `JobDispatcher`, production `SpawningDispatcher`, review history, per-PR lifecycle observations for metrics. |
 | `ar-forgejo` | Forgejo REST client, webhook DTOs, review/comment/status/webhook APIs, Basic-auth bootstrap client. |
 | `ar-llm` | Provider trait, OpenAI-compatible provider, and tier router for `Reasoning`, `Cheap`, and `Embedding`. |
-| `ar-index` | Tree-sitter symbols, embeddings, co-change graph, and in-memory/SQLite learnings store. |
+| `ar-index` | Tree-sitter symbols, embeddings, SQLite/in-memory vector stores, co-change graph utilities, and in-memory/SQLite learnings store. |
 | `ar-prompts` | Prompt templates, JSON schemas, DTOs, and validators for review, triage, and verification LLM calls. |
 | `ar-review` | Review activities: workspace prep, repo config, RAG context, prompt rendering, self-heal, verification, severity filtering, Forgejo review mapping. |
 | `ar-chat` | `@<bot>` parser and handlers for `help`, `remember`, `forget`, `re-review`, `autofix`, `docstring`, `tests`, and free-form Q&A. |
@@ -22,12 +22,13 @@ instructions live in [Quickstart](./QUICKSTART.md) and [Deployment](./DEPLOYMENT
 Forgejo webhook / CI trigger
   -> ar-gateway
   -> ar-orchestrator job dispatch
-  -> ar-review workspace/context/review/verify pipeline
+  -> ar-review workspace/context/review/self-heal/filter/verify pipeline
   -> ar-forgejo review + commit status
 ```
 
 LLM calls flow through `ar-llm::Router`. Review prompts and schemas come from
-`ar-prompts`. RAG context and persistent learnings come from `ar-index`.
+`ar-prompts`. RAG context, persistent learnings, and vector storage come from
+`ar-index`.
 
 ## Test conventions
 

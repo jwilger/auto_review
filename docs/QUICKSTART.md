@@ -199,15 +199,20 @@ $AUTO_REVIEW review once \
 
 ## Configuration reference
 
-Required gateway env vars:
+Required gateway startup env vars:
 
 | Env var | Notes |
 |---|---|
 | `FORGEJO_BASE_URL` | Forgejo base URL, e.g. `https://forgejo.example.com` |
 | `AR_FORGEJO_TOKEN` | Bot user's PAT |
 | `WEBHOOK_SECRET` | HMAC secret shared with Forgejo webhooks |
-| `AR_CI_REVIEW_TOKEN` | Bearer token for CI-triggered review requests |
 | `LLM_BASE_URL` | OpenAI-compatible endpoint root |
+
+Required for CI-triggered semantic reviews:
+
+| Env var | Notes |
+|---|---|
+| `AR_CI_REVIEW_TOKEN` | Bearer token accepted by `POST /reviews/ci`; if unset, that endpoint is disabled |
 
 Common optional env vars:
 
@@ -215,18 +220,26 @@ Common optional env vars:
 |---|---|---|
 | `LLM_API_KEY` | — | Omit for local Ollama/vLLM when not required |
 | `LLM_REASONING_MODEL` | `qwen2.5-coder:32b` | Review-generation model |
-| `LLM_CHEAP_MODEL` | — | Triage / verifier tier |
+| `LLM_CHEAP_MODEL` | — | Verifier and chat-assist tier (`autofix`, `docstring`, `tests`, free-form Q&A) |
+| `LLM_CHEAP_BASE_URL` / `LLM_CHEAP_API_KEY` | `=LLM_BASE_URL` / `=LLM_API_KEY` | Optional cheap-tier endpoint override |
 | `LLM_EMBEDDING_MODEL` | — | Enables RAG context retrieval |
+| `LLM_EMBEDDING_BASE_URL` / `LLM_EMBEDDING_API_KEY` | `=LLM_BASE_URL` / `=LLM_API_KEY` | Optional embedding endpoint override |
 | `AR_GATEWAY_BIND` | `0.0.0.0:8080` | Listen address |
 | `AR_BOT_LOGIN` | `auto-review` | Forgejo username for self-loop detection |
 | `AR_BOT_NAME` | `=AR_BOT_LOGIN` | Mention handle |
-| `AR_LEARNINGS_DB` | — | SQLite learnings path; unset is in-memory |
-| `AR_HISTORY_DB` | — | SQLite review-history path; unset is in-memory |
+| `AR_LEARNINGS_DB` | XDG state path | SQLite learnings path; use `:memory:` for volatile local evaluation |
+| `AR_HISTORY_DB` | XDG state path | SQLite review-history path; use `:memory:` for volatile local evaluation |
+| `AR_VECTOR_DB` | XDG state path | SQLite vector/RAG snippet store path; use `:memory:` to avoid persistence |
+| `AR_DEDUP_DB` | XDG state path | SQLite webhook delivery dedup store path; use `:memory:` for volatile dedup |
+| `AR_DEDUP_CAPACITY` | implementation default | Max delivery ids retained by the dedup store |
+| `AR_EMBED_INPUT_CAP_BYTES` / `AR_EMBED_BATCH_SIZE` / `AR_EMBED_NUM_CTX` | implementation defaults | Embedding request shaping and local-model context controls |
 | `AR_PRICE_TABLE_PATH` | — | JSON price override file for LLM cost estimates |
 | `AR_REVIEW_COST_FOOTER` | `true` | Set `false` to persist cost without posting usage footer |
 | `AR_POLL_INTERVAL_SECS` | `60` | Inline-thread mention poll cadence; `0` disables |
 | `AR_SEVERITY_FLOOR` | `warning` | `note`, `warning`, or `error` |
 | `AR_REVIEW_CONCURRENCY` | — | Cap concurrent reviews |
+| `AR_GATEWAY_BARE` | `false` | Skip the embedded OCI launcher when intentionally using a different isolation boundary |
+| `AR_GATEWAY_EXTERNAL_ISOLATION` | — | Set to `container` for operator-owned container deployments |
 | `AR_WEBHOOK_RATE_PER_SEC` / `AR_WEBHOOK_BURST` | — | Optional webhook rate limiter |
 | `AR_READINESS_TTL_SECS` | `10` | `/readyz` Forgejo probe cache TTL |
 | `RUST_LOG` | `info,ar_gateway=debug` | Logging filter |

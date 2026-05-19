@@ -109,7 +109,7 @@ pub enum ChatError {
 }
 
 const HELP_TEXT: &str = "\
-**auto_review chat commands** (mention me with `@auto_review`):
+**auto_review chat commands** (mention me with `@auto-review`; `@auto_review` also works):
 
 - `remember <text>` — store project-specific guidance. I'll inject \
 matching learnings into future review prompts.
@@ -307,7 +307,7 @@ impl ChatHandler<'_> {
         if self.llm.provider(ModelTier::Cheap).is_err() {
             let msg = format!(
                 "{} needs an LLM_CHEAP_MODEL configured. Try \
-                 `@auto_review help` for the structured commands.",
+                 `@auto-review help` for the structured commands.",
                 kind.label()
             );
             self.post(ctx, &msg).await?;
@@ -451,7 +451,7 @@ impl ChatHandler<'_> {
             self.post(
                 ctx,
                 "Test scaffolding needs an LLM_CHEAP_MODEL configured. \
-                 Try `@auto_review help` for the structured commands.",
+                 Try `@auto-review help` for the structured commands.",
             )
             .await?;
             return Ok(());
@@ -552,7 +552,7 @@ impl ChatHandler<'_> {
             self.post(
                 ctx,
                 "Conversational replies need an LLM_CHEAP_MODEL configured. \
-                 Try `@auto_review help` for the structured commands.",
+                 Try `@auto-review help` for the structured commands.",
             )
             .await?;
             return Ok(());
@@ -632,7 +632,7 @@ impl ChatHandler<'_> {
             .add(text.to_string(), LearningSource::Chat, embedding, now)
             .await?;
         let reply = format!(
-            "Remembered as learning #{}. To revoke later: `@auto_review forget {}`.",
+            "Remembered as learning #{}. To revoke later: `@auto-review forget {}`.",
             record.id, record.id
         );
         self.post(ctx, &reply).await
@@ -1155,7 +1155,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
             .and(body_partial_json(serde_json::json!({
-                "body": "Remembered as learning #1. To revoke later: `@auto_review forget 1`."
+                "body": "Remembered as learning #1. To revoke later: `@auto-review forget 1`."
             })))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
             .mount(&server)
@@ -2059,7 +2059,7 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
             .and(body_partial_json(
-                serde_json::json!({"body": "Docstrings needs an LLM_CHEAP_MODEL configured. Try `@auto_review help` for the structured commands."}),
+                serde_json::json!({"body": "Docstrings needs an LLM_CHEAP_MODEL configured. Try `@auto-review help` for the structured commands."}),
             ))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
             .mount(&server)

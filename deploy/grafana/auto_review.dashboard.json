@@ -146,7 +146,9 @@
         {"expr": "rate(auto_review_reviews_failed_forgejo_total[5m])", "legendFormat": "failed: forgejo", "refId": "B"},
         {"expr": "rate(auto_review_reviews_failed_workspace_total[5m])", "legendFormat": "failed: workspace", "refId": "C"},
         {"expr": "rate(auto_review_reviews_failed_llm_total[5m])", "legendFormat": "failed: llm", "refId": "D"},
-        {"expr": "rate(auto_review_reviews_failed_unhealable_total[5m])", "legendFormat": "failed: unhealable", "refId": "E"}
+        {"expr": "rate(auto_review_reviews_failed_unhealable_total[5m])", "legendFormat": "failed: unhealable", "refId": "E"},
+        {"expr": "rate(auto_review_reviews_failed_panic_total[5m])", "legendFormat": "failed: panic", "refId": "F"},
+        {"expr": "rate(auto_review_reviews_failed_unknown_total[5m])", "legendFormat": "failed: unknown", "refId": "G"}
       ],
       "fieldConfig": {
         "defaults": {

@@ -9,7 +9,13 @@ permission:
   glob: allow
   grep: allow
   bash: allow
-  edit: allow
+  edit:
+    ".env": deny
+    ".env.*": deny
+    "**/.env*": deny
+    "**/*.key": deny
+    "**/*.pem": deny
+    "*": allow
 ---
 
 You process Forgejo PR feedback for `auto_review`.

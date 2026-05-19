@@ -67,8 +67,8 @@ everyone (and CI) picks up the same versions.
 1. Open an issue first for anything beyond a trivial fix. Architectural
    choices benefit from discussion in the open.
 2. Write tests first. The repo follows TDD discipline (red → green →
-   refactor) and `tdd:test-driven-development` is the preferred
-   approach for new features and bugfixes.
+   refactor) and the `outside-in-tdd` / `outside-in-rgr-microcycle`
+   workflow is the preferred approach for new features and bugfixes.
 3. Keep commits small and focused. Each commit should leave the tree
    green (tests pass, clippy clean, fmt clean).
 4. Mention rationale in the commit body, not just the what. The

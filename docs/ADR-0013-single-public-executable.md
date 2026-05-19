@@ -65,3 +65,7 @@ trace how artifacts were built.
 
 ADR-0015 temporarily narrows the direct binary release target assumptions in this
 ADR to Linux `x86_64` only.
+
+ADR-0018 supersedes this ADR's Docker/OCI image publication requirement. The
+single public executable remains the operator contract; official release
+artifacts are binary-first rather than project-published images.

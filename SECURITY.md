@@ -30,7 +30,8 @@ please re-send — assume mail got lost rather than ignored.
 
 ## Disclosure timeline
 
-Pre-1.0 we don't make rigid commitments, but the working norms are:
+For the 1.x line, the project targets the following coordinated-disclosure
+timeline for confirmed vulnerabilities:
 
 | Phase | Target |
 |-------|--------|
@@ -47,15 +48,15 @@ unilaterally.
 
 In scope:
 - Anything in this repository's `crates/` source tree.
-- The shipped deploy artefacts under `deploy/`, the Nix-built OCI
-  image, Helm chart, systemd unit, and Forgejo Action template.
+- The shipped deploy artefacts under `deploy/`, the Nix-built binary/embedded
+  runtime packaging, Helm chart, systemd unit, and Forgejo Action template.
 - Default configurations and example env files.
 - The bundled prompts and JSON schemas under
   `crates/ar-prompts/`.
 
 Out of scope (these are upstream / operator concerns):
 - Forgejo, Gitea, or any other Git forge the bot talks to.
-- Specific LLM providers (OpenAI, Anthropic, Ollama, vLLM).
+- Specific LLM providers (OpenAI-compatible hosted APIs, Ollama, vLLM, and similar endpoints).
 - CI-owned linters/tests/build tools — report those to their respective
   upstreams or to the operator's CI environment owner.
 - Operator-controlled configuration: an operator who sets

@@ -51,15 +51,15 @@ pub async fn init(args: InitArgs) -> Result<()> {
     println!("        --gateway-url https://reviewer.example.com \\");
     println!("        --webhook-secret \"$(openssl rand -hex 32)\"");
     println!();
-    println!("(register-webhook rejects secrets shorter than 16 bytes; the");
+    println!("(webhook register rejects secrets shorter than 16 bytes; the");
     println!(" gateway warns when WEBHOOK_SECRET is similarly short.)");
     Ok(())
 }
 
-/// Run the full review pipeline once against a specific PR. Builds the
-/// same Forgejo client + LLM router the gateway uses and invokes
-/// orchestrator::run_review_job synchronously (no spawn) so the user can
-/// observe the outcome in their terminal.
+/// Run a one-shot reasoning-path review against a specific PR. This builds a
+/// Forgejo client plus reasoning-tier LLM provider and invokes the orchestrator
+/// synchronously (no spawn) so the user can observe the outcome in their
+/// terminal; it does not wire every gateway runtime store or optional tier.
 pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
     let forgejo =
         Arc::new(Client::new(&args.forgejo_url, &args.token).context("build forgejo client")?);
@@ -166,7 +166,7 @@ async fn print_dry_run_prompt(
 
 /// List every webhook installed on the repo. Operators use this
 /// to audit which webhooks the bot's PAT can see and to find the
-/// id `unregister-webhook` needs.
+/// id `webhook unregister` needs.
 pub async fn list_webhooks(args: ListWebhooksArgs) -> Result<()> {
     let client = Client::new(&args.forgejo_url, &args.token).context("build forgejo client")?;
     let hooks = client
@@ -1186,8 +1186,8 @@ fn stub_pr_event_body() -> Vec<u8> {
         "number": 0,
         "pull_request": {
             "number": 0,
-            "title": "auto_review test-webhook (stub event)",
-            "body": "synthetic event from `auto_review test-webhook`",
+            "title": "auto-review webhook test (stub event)",
+            "body": "synthetic event from `auto-review webhook test`",
             "draft": false,
             "user": {"login": "auto_review-test", "id": 0},
             "head": {"ref": "test", "sha": "0000000000000000000000000000000000000000"},

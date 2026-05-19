@@ -44,24 +44,25 @@ tea pr create --repo jwilger/auto_review --head <branch> --base main --title "..
 
 opencode also configures a local `forgejo` MCP server in `opencode.json`. It runs `forgejo-mcp` from the Nix dev shell against `https://git.johnwilger.com` and expects `FORGEJO_TOKEN` in the environment; never hardcode or commit the token.
 
-Branch protection requires a PR for every merge to `main`. CI in `.forgejo/workflows/ci.yml` runs the project verification gates on every PR.
+Branch protection requires a PR for every merge to `main`. CI in `.forgejo/workflows/ci.yml` path-classifies changes: application changes run the Rust verification gates, while `.opencode/**` and `opencode.json` changes run `just opencode-test`.
 
 ## Architecture
 
-A Forgejo webhook lands at `ar-gateway`, which HMAC-verifies the payload and handles low-cost PR intake plus chat commands. Normal semantic review dispatch comes from the CI action path after repository-selected prerequisites pass; explicit chat commands such as `@auto_review re-review` can force a review. The review pipeline is:
+A Forgejo webhook lands at `ar-gateway`, which HMAC-verifies the payload and handles low-cost PR intake plus chat commands. Normal semantic review dispatch comes from the CI action path after repository-selected prerequisites pass; explicit chat commands such as `@auto-review re-review` can force a review. The review pipeline is:
 
 ```text
 clone (workspace.rs)
-  -> triage (triage.rs, llm_triage.rs)
+  -> deterministic triage (triage.rs)
   -> context curation (context_builder.rs)
   -> review generation (pipeline.rs)
   -> self-heal validation (heal.rs)
+  -> pre-verifier severity-floor filter (pipeline.rs)
   -> verification (verify.rs, agentic_verify.rs)
-  -> severity-floor filter (dispatcher.rs)
+  -> post-verifier severity/path filter (pipeline.rs)
   -> post inline review + commit status (mapping.rs)
 ```
 
-The `@auto_review` chat handler in `ar-chat` runs a poller plus webhook path and supports `help`, `remember <text>`, `forget <id>`, `re-review`, `autofix`, `docstring`, `tests`, and free-form questions. Polling exists because Forgejo does not reliably fire inline-thread reply webhooks.
+The `@auto-review` chat handler in `ar-chat` runs a poller plus webhook path and supports `help`, `remember <text>`, `forget <id>`, `re-review`, `autofix`, `docstring`, `tests`, and free-form questions. `@auto_review` remains a compatibility alias. Polling exists because Forgejo does not reliably fire inline-thread reply webhooks.
 
 Deterministic linters/tests/builds run in CI before semantic review. Runtime workspace tools are read-only and constrained to the clone root; the retired linter sandbox/runtime-tool execution code was removed in the issue #46 rescope.
 
@@ -79,15 +80,15 @@ Deterministic linters/tests/builds run in CI before semantic review. Runtime wor
 | `ar-review` | review, verify, self-heal, RAG context, repo config |
 | `ar-cli` | `auto-review` operator command and gateway entrypoint |
 | `ar-chat` | chat command handling |
-| `ar-index` | tree-sitter symbols, embeddings, co-change graph, learnings store |
+| `ar-index` | tree-sitter symbols, embeddings, vector stores, co-change graph, learnings store |
 
 Crate-level documentation is centralized in `docs/CRATES.md`; open it before
 changing public behavior. The CLI command reference lives in `docs/CLI.md`.
 
 ## Development Discipline
 
-- TDD is mandatory. For behavior changes, use the specialist RGR agents: `rgr-test-author` for one focused RED, `rgr-test-reviewer` and `rgr_approve_red` before production edits, `rgr-diagnostic-implementer` for one minimum GREEN edit per current diagnostic, and `rgr-implementation-reviewer` before REFACTOR or broader verification. Multi-failure RED output is invalid; split or narrow tests until one failure drives one edit.
-- After one behavioral production edit, rerun the focused command and record the changed RED or GREEN before editing again. Commit each approved GREEN/refactor checkpoint before starting the next RED.
+- TDD is mandatory. For behavior changes, start with `rgr_start`, then use the specialist RGR agents: `rgr-test-author` for one focused RED, `rgr-test-reviewer` and `rgr_approve_red` before production edits, `rgr-diagnostic-implementer` for one minimum GREEN edit per current diagnostic, and `rgr-implementation-reviewer` before REFACTOR or broader verification. Multi-failure RED output is invalid; split or narrow tests until one failure drives one edit.
+- After one behavioral production edit, rerun the focused command and record a changed diagnostic with `rgr_record_changed_diagnostic`/`rgr_approve_changed_diagnostic` or passing proof with `rgr_record_proof_of_work_verification` and `rgr_mark_green` before editing again. Commit each approved GREEN/refactor checkpoint before starting the next RED.
 - Plans and todo lists for behavior work must be RGR-shaped, not component waterfalls.
 - Pure parsing and formatting helpers get adjacent `#[cfg(test)] mod tests`; HTTP integration tests use `wiremock`; LLM tests use `CannedProvider` or `ScriptedProvider` fakes.
 - Do not add deterministic tests that assert documentation wording for docs-only content. Keep tests for executable behavior, generated docs, public CLI/contracts, schemas, deployment artifacts, and security red-team boundaries; justify any docs-reading contract test near the test.
@@ -122,8 +123,8 @@ changing public behavior. The CLI command reference lives in `docs/CLI.md`.
 - `.opencode/agents/` contains specialist primary and subagents.
 - `.opencode/commands/` contains slash-command workflows.
 - `.opencode/plugins/` contains enforceable project-local behavior and its
-  adjacent Node test suite. Run `just opencode-test` for these harness/plugin
-  tests; `just test` remains the Rust application test suite.
+  adjacent Node test suite. Run `just opencode-test` for any `.opencode/**` or
+  `opencode.json` change; `just test` remains the Rust application test suite.
 
 ## Reference Docs
 

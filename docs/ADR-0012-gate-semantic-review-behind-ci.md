@@ -40,7 +40,7 @@ repository-selected prerequisite checks have passed. This makes deterministic
 project gates the readiness signal for LLM review and keeps the expensive review
 pipeline behind checks the project owner controls.
 
-Explicit chat commands, such as `@auto_review re-review`, may force a semantic
+Explicit chat commands, such as `@auto-review re-review`, may force a semantic
 review even when the normal CI-gated path would not dispatch. This preserves
 operator control for retries, manual investigation, and exceptional workflows.
 

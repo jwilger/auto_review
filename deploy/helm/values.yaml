@@ -22,10 +22,9 @@ config:
   # — the chart's default `ephemeralStorage:` block only covers
   # /tmp. Add a PVC or hostPath mount at /data via a custom
   # template overlay if you want survival; without it, leave
-  # both fields as "" and accept the volatile-in-memory path.
-  # The bot still works either way; the in-memory path just
-  # means every restart re-reviews open PRs from scratch and
-  # forgets every `@<bot> remember` entry.
+  # fields as "" to take the gateway's default state paths. In a pod without a
+  # mounted persistent volume those defaults are still lost on pod replacement.
+  # Use explicit `:memory:` values only for volatile local evaluation.
   learningsDb: ""        # e.g. "/data/learnings.sqlite"
   historyDb: ""          # e.g. "/data/review_history.sqlite"
   # Bot identity. Operators usually want a dedicated Forgejo user
@@ -94,8 +93,8 @@ resources:
     cpu: 1000m
     memory: 1Gi
 
-# Pod security: run as non-root, drop capabilities. The image
-# already creates a `auto` user; these settings reinforce.
+# Pod security: run as non-root, drop capabilities. Operator-owned images must
+# provide a user/group matching these ids or override the values below.
 podSecurityContext:
   runAsNonRoot: true
   runAsUser: 10001

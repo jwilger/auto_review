@@ -65,3 +65,7 @@ isolation or under the explicit bare-process opt-out.
 
 ADR-0015 temporarily narrows target support to Linux `x86_64` for direct binary
 releases while trusted `aarch64` build provenance remains unavailable.
+
+ADR-0018 supersedes this ADR's Docker-first release framing. Embedded OCI remains
+the direct-binary isolation posture, while official distribution is binary-first
+and operator-owned images are optional.

@@ -74,10 +74,10 @@ pub enum WebhookCommand {
 
     /// List webhooks installed on a repository. Useful for auditing
     /// which webhooks point at the gateway and for finding the id
-    /// `unregister-webhook` needs.
+    /// `webhook unregister` needs.
     List(ListWebhooksArgs),
 
-    /// Delete a webhook by id. Pair with `list-webhooks` to find
+    /// Delete a webhook by id. Pair with `webhook list` to find
     /// the id, or use `--match-url` to delete the one whose
     /// `config.url` matches a substring (typically the gateway's
     /// public hostname). The `--match-url` form is the safe choice
@@ -88,7 +88,7 @@ pub enum WebhookCommand {
     /// print the response. Smoke-tests the intake path (network
     /// reachability + signature secret + header forwarding through
     /// any reverse-proxy) without firing a real review. Run after
-    /// `register-webhook` to confirm the deploy works before waiting
+    /// `webhook register` to confirm the deploy works before waiting
     /// for an actual PR.
     Test(TestWebhookArgs),
 }
@@ -105,9 +105,10 @@ pub enum ConfigCommand {
 
 #[derive(Subcommand, Debug)]
 pub enum ReviewCommand {
-    /// Run the full review pipeline once against a specific PR. No
+    /// Run a one-shot reasoning-path review against a specific PR. No
     /// gateway or webhook required — useful for development, demos, and
-    /// reproducing reported issues.
+    /// reproducing reported issues. This does not wire every gateway runtime
+    /// store or optional tier.
     Once(ReviewOnceArgs),
 }
 
@@ -127,14 +128,14 @@ pub enum OpsCommand {
     /// sanity-check the webhook secret. Reports per-check pass /
     /// fail / skip with diagnostic detail. Exit 0 only when every
     /// non-skipped check passes — drop into a deploy script before
-    /// `register-webhook`.
+    /// `webhook register`.
     Doctor(DoctorArgs),
 
     /// Pull `/version`, `/info`, and `/metrics` from a running
     /// gateway and render a one-screen operational summary —
     /// runtime config, review-success rate, key counters,
     /// throttle activity. Complements `doctor` (outbound deps)
-    /// and `test-webhook` (intake) with the live-state view.
+    /// and `webhook test` (intake) with the live-state view.
     Status(StatusArgs),
 }
 
@@ -170,7 +171,7 @@ pub enum LearningsCommand {
     /// Delete a learning by id. Same effect as `@<bot> forget`
     /// but operates directly on the SQLite store, so operators
     /// can script bulk wipes without going through Forgejo.
-    /// Use `list-learnings` to find the id.
+    /// Use `learnings list` to find the id.
     Forget(ForgetLearningArgs),
 }
 
@@ -225,9 +226,9 @@ pub struct ReviewOnceArgs {
     #[arg(long, env = "LLM_REASONING_MODEL", default_value = "qwen2.5-coder:32b")]
     pub llm_model: String,
 
-    /// Print the rendered LLM prompt and exit. Skips clone, lint, LLM,
-    /// and posting. Useful for tuning .auto_review.yaml or debugging
-    /// prompt content without burning tokens or touching the PR.
+    /// Print the rendered base LLM prompt and exit. Skips clone, RAG context,
+    /// repo config loading, LLM calls, and posting. Useful for debugging prompt
+    /// shape without burning tokens or touching the PR.
     #[arg(long)]
     pub dry_run: bool,
 }
@@ -252,7 +253,7 @@ pub struct ForgetLearningArgs {
     #[arg(long, env = "AR_LEARNINGS_DB")]
     pub learnings_db: std::path::PathBuf,
 
-    /// Learning id, as printed by `list-learnings`.
+    /// Learning id, as printed by `learnings list`.
     #[arg(long)]
     pub id: u64,
 }
@@ -304,7 +305,7 @@ pub struct ResetPrArgs {
 #[derive(clap::Args, Debug)]
 pub struct StatusArgs {
     /// Gateway URL the status request goes to. Same value as
-    /// `register-webhook --gateway-url` minus the
+    /// `webhook register --gateway-url` minus the
     /// `/webhooks/forgejo` suffix.
     #[arg(long)]
     pub gateway_url: String,
@@ -370,7 +371,7 @@ pub struct DoctorArgs {
 #[derive(clap::Args, Debug)]
 pub struct TestWebhookArgs {
     /// Gateway URL the webhook should be POSTed to. The path
-    /// `/webhooks/forgejo` is appended (mirroring `register-webhook`).
+    /// `/webhooks/forgejo` is appended (mirroring `webhook register`).
     #[arg(long)]
     pub gateway_url: String,
 
@@ -438,7 +439,7 @@ pub struct BenchArgs {
     pub json: bool,
 
     /// Path to a previous bench run's JSON aggregate (typically
-    /// from `auto_review bench --json > baseline.json`). When set,
+    /// from `auto-review bench run --json > baseline.json`). When set,
     /// the current run is compared against this baseline and the
     /// deltas — precision, recall, success rate, mean/p99 latency,
     /// total findings — are printed alongside the aggregate.
@@ -487,8 +488,8 @@ pub struct UnregisterWebhookArgs {
     #[arg(long)]
     pub repo: String,
 
-    /// Webhook id, as printed by `register-webhook` or
-    /// `list-webhooks`. Mutually exclusive with `--match-url`.
+    /// Webhook id, as printed by `webhook register` or
+    /// `webhook list`. Mutually exclusive with `--match-url`.
     #[arg(long, conflicts_with = "match_url")]
     pub id: Option<u64>,
 

@@ -24,6 +24,9 @@ Result:
 Next control owner:
 ```
 
+Start the project-local guardrail cycle with `rgr_start` before dispatching
+`rgr-test-author`. Use `rgr_status` when resuming or diagnosing a blocked cycle.
+
 ## RED
 
 RED is valid when a focused command was run and produced an observed failure that is expected for the requested behavior. Compiler errors count as RED when the test intentionally pressures a missing API, missing type, or crate boundary.
@@ -46,7 +49,7 @@ Each implementer handoff must name the current diagnostic and the allowed immedi
 
 An approved RED test can require multiple GREEN implementation turns. The implementer is not required to make the whole test pass in one edit. It must make exactly one smallest edit that removes or changes the current diagnostic, then stop.
 
-When the same focused command still fails with a new expected diagnostic from the same approved test, the orchestrator records that changed output with `rgr_record_red` using the same focused command and gets `rgr_approve_red` again. That refreshes the single-edit allowance for the next GREEN turn without asking `rgr-test-author` to write a new test.
+When the same focused command still fails with a new expected diagnostic from the same approved test, the orchestrator records that changed output with `rgr_record_changed_diagnostic` using the same focused command and gets `rgr_approve_changed_diagnostic`. That refreshes the single-edit allowance for the next GREEN turn without asking `rgr-test-author` to write a new test.
 
 Do not start a new outer RED cycle just because the approved test still fails differently. Start a new RED only when the next required behavior is not covered by the approved test, the failure is unrelated, or implementation review identifies a missing behavior outside the passing test.
 
@@ -60,15 +63,15 @@ If the current diagnostic does not identify one concrete code change, write or r
 
 ## GREEN
 
-GREEN means the focused command for the current test passes after the smallest demanded implementation change. When the observed failure changes but the test still fails, stop the implementer turn and return control to the orchestrator with the new diagnostic.
+GREEN means the focused command for the current test passes after the smallest demanded implementation change. Before marking GREEN, record the passing command/output with `rgr_record_proof_of_work_verification`, then call `rgr_mark_green`. When the observed failure changes but the test still fails, stop the implementer turn and return control to the orchestrator with the new diagnostic.
 
 ## Implementation Review
 
-After GREEN, send the production diff to `rgr-implementation-reviewer`. A reviewer veto blocks refactor, broader verification, and handoff until the implementer addresses mandatory notes about minimality, type correctness, error handling, security boundaries, crate patterns, or style. If the reviewer finds a missing behavior not covered by the GREEN test, it returns to the orchestrator as a new RED instead of becoming an untested implementation request.
+After GREEN, send the production diff to `rgr-implementation-reviewer`. A reviewer veto blocks refactor, broader verification, and handoff until the implementer addresses mandatory notes about minimality, type correctness, error handling, security boundaries, crate patterns, or style. Use `rgr_recover_implementation_review_veto` only for the documented recovery path. If the reviewer finds a missing behavior not covered by the GREEN test, it returns to the orchestrator as a new RED instead of becoming an untested implementation request.
 
 ## REFACTOR
 
-Refactor only after GREEN and implementation review approval. Refactors must preserve behavior and keep the focused command green. Avoid abstractions not demanded by the current behavior.
+Refactor only after GREEN and implementation review approval. Refactors must preserve behavior and keep the focused command green. Avoid abstractions not demanded by the current behavior. Call `rgr_mark_refactor` after an approved refactor checkpoint.
 
 ## Control Transfer
 
