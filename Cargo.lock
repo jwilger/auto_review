@@ -75,7 +75,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "ar-chat"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "ar-forgejo",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "ar-cli"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "ar-forgejo",
@@ -121,7 +121,7 @@ dependencies = [
 
 [[package]]
 name = "ar-forgejo"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -138,7 +138,7 @@ dependencies = [
 
 [[package]]
 name = "ar-gateway"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "ar-chat",
@@ -168,7 +168,7 @@ dependencies = [
 
 [[package]]
 name = "ar-index"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "ar-llm",
@@ -189,7 +189,7 @@ dependencies = [
 
 [[package]]
 name = "ar-llm"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -205,7 +205,7 @@ dependencies = [
 
 [[package]]
 name = "ar-orchestrator"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "ar-forgejo",
@@ -231,7 +231,7 @@ dependencies = [
 
 [[package]]
 name = "ar-prompts"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -241,7 +241,7 @@ dependencies = [
 
 [[package]]
 name = "ar-review"
-version = "0.14.1"
+version = "0.15.0"
 dependencies = [
  "anyhow",
  "ar-forgejo",
