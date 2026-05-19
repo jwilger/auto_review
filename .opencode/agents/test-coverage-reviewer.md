@@ -1,6 +1,7 @@
 ---
 description: Read-only reviewer for test coverage, RGR evidence, and whether new production behavior was demanded by tests.
 mode: subagent
+model: "openai/gpt-5.3-codex-standard"
 steps: 200
 color: "#D6A100"
 permission:

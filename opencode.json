@@ -28,6 +28,9 @@
           "options": {
             "reasoningEffort": "high"
           }
+        },
+        "gpt-5.3-codex-standard": {
+          "id": "gpt-5.3-codex"
         }
       }
     }
@@ -40,25 +43,25 @@
       "model": "openai/gpt-5.5-high"
     },
     "rgr-test-author": {
-      "model": "openai/gpt-5.3-codex-spark"
+      "model": "openai/gpt-5.3-codex-standard"
     },
     "rgr-test-reviewer": {
-      "model": "openai/gpt-5.3-codex-spark"
+      "model": "openai/gpt-5.3-codex-standard"
     },
     "rgr-implementation-reviewer": {
-      "model": "openai/gpt-5.3-codex-spark"
+      "model": "openai/gpt-5.3-codex-standard"
     },
     "rgr-diagnostic-implementer": {
-      "model": "openai/gpt-5.3-codex-spark"
+      "model": "openai/gpt-5.3-codex-standard"
     },
     "test-coverage-reviewer": {
-      "model": "openai/gpt-5.3-codex-spark"
+      "model": "openai/gpt-5.3-codex-standard"
     },
     "docs-operator-reviewer": {
-      "model": "openai/gpt-5.3-codex-spark"
+      "model": "openai/gpt-5.3-codex-standard"
     },
     "forgejo-feedback-processor": {
-      "model": "openai/gpt-5.3-codex-spark"
+      "model": "openai/gpt-5.3-codex-standard"
     },
     "architecture-reviewer": {
       "model": "openai/gpt-5.5-high"

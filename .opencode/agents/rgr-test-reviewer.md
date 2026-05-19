@@ -1,6 +1,7 @@
 ---
 description: Read-only reviewer for RED test fit, API pressure, and architecture before production edits.
 mode: subagent
+model: "openai/gpt-5.3-codex-standard"
 steps: 200
 color: "#8A63D2"
 permission:

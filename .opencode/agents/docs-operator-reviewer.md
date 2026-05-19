@@ -1,6 +1,7 @@
 ---
 description: Optional read-only reviewer for operator docs, deployment files, systemd env examples, and CHANGELOG consistency.
 mode: subagent
+model: "openai/gpt-5.3-codex-standard"
 steps: 200
 color: "#28A745"
 permission:
