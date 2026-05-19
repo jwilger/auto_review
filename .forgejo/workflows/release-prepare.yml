@@ -133,18 +133,18 @@ jobs:
             curl -fsS \
             -H "Authorization: token $GITEA_SERVER_TOKEN" \
             -H "Accept: application/json" \
-            "$GITEA_SERVER_URL/api/v1/repos/jwilger/auto_review/pulls?state=open" \
+            "$GITEA_SERVER_URL/api/v1/repos/Slipstream/auto_review/pulls?state=open" \
             | jq -c '\''[.[] | {index: .number, head: .head.ref}]'\'' > "$OPEN_PRS_JSON"'
           nix develop --command bash -c 'set -euo pipefail
             open_prs="$(<"$OPEN_PRS_JSON")"
             superseded_prs="$(printf "%s\n" "$open_prs" | jq -r --arg branch "$RELEASE_BRANCH" --arg prefix "release/v" ".[] | select(.head | startswith(\$prefix)) | select(.head != \$branch) | .index")"
             for superseded_pr in $superseded_prs; do
-              tea pr close --login "$TEA_LOGIN" --repo jwilger/auto_review "$superseded_pr"
+              tea pr close --login "$TEA_LOGIN" --repo Slipstream/auto_review "$superseded_pr"
             done
             existing_pr="$(printf "%s\n" "$open_prs" | jq -r --arg branch "$RELEASE_BRANCH" ".[] | select(.head == \$branch) | .index" | head -n 1)"
             if [ -z "$existing_pr" ]; then
-              tea pr create --login "$TEA_LOGIN" --repo jwilger/auto_review --head "$RELEASE_BRANCH" --base main --title "chore: release v$RELEASE_VERSION" --description "Prepare release v$RELEASE_VERSION from branch $RELEASE_BRANCH using scripts/release prepare. This version bump updates Cargo.toml, Cargo.lock, and CHANGELOG.md with semver-selected release metadata before merge to main."
+              tea pr create --login "$TEA_LOGIN" --repo Slipstream/auto_review --head "$RELEASE_BRANCH" --base main --title "chore: release v$RELEASE_VERSION" --description "Prepare release v$RELEASE_VERSION from branch $RELEASE_BRANCH using scripts/release prepare. This version bump updates Cargo.toml, Cargo.lock, and CHANGELOG.md with semver-selected release metadata before merge to main."
             else
               printf "release PR already open: #%s\n" "$existing_pr"
-              tea pr edit --login "$TEA_LOGIN" --repo jwilger/auto_review "$existing_pr" --description "Prepare release v$RELEASE_VERSION from branch $RELEASE_BRANCH using scripts/release prepare. This version bump updates Cargo.toml, Cargo.lock, and CHANGELOG.md with semver-selected release metadata before merge to main."
+              tea pr edit --login "$TEA_LOGIN" --repo Slipstream/auto_review "$existing_pr" --description "Prepare release v$RELEASE_VERSION from branch $RELEASE_BRANCH using scripts/release prepare. This version bump updates Cargo.toml, Cargo.lock, and CHANGELOG.md with semver-selected release metadata before merge to main."
             fi'

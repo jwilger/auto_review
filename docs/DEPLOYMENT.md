@@ -78,9 +78,9 @@ promote them with your normal platform controls.
 Build or install the current program:
 
 ```sh
-nix build git+https://git.johnwilger.com/jwilger/auto_review
-nix profile install git+https://git.johnwilger.com/jwilger/auto_review
-nix shell git+https://git.johnwilger.com/jwilger/auto_review -c auto-review --help
+nix build git+https://git.johnwilger.com/Slipstream/auto_review
+nix profile install git+https://git.johnwilger.com/Slipstream/auto_review
+nix shell git+https://git.johnwilger.com/Slipstream/auto_review -c auto-review --help
 ```
 
 The flake also ships a NixOS module for direct-host deployments and for installing
@@ -88,7 +88,7 @@ only the CLI:
 
 ```nix
 {
-  inputs.auto-review.url = "git+https://git.johnwilger.com/jwilger/auto_review";
+  inputs.auto-review.url = "git+https://git.johnwilger.com/Slipstream/auto_review";
 
   outputs = { nixpkgs, auto-review, ... }: {
     nixosConfigurations.reviewer = nixpkgs.lib.nixosSystem {
@@ -110,6 +110,18 @@ only the CLI:
 The module's gateway service intentionally sets `AR_GATEWAY_BARE=true`; it is a
 systemd/direct-host deployment path with systemd hardening rather than embedded
 OCI isolation.
+
+When the gateway is enabled, the module also creates the dedicated
+`auto_review` system user and group, runs the service under that account, binds
+to `127.0.0.1:8080` by default for a reverse proxy, persists SQLite state under
+the systemd `StateDirectory=auto_review`, and applies the same restart,
+resource-limit, journald, and hardening baseline as the direct-host systemd unit
+below. Keep the configured `environmentFile` out of Git and out of the Nix store;
+use `/run/secrets/...` or your NixOS secret manager.
+
+Embedded OCI isolation for NixOS deployments with durable host persistence is
+tracked separately; until that lands, this module is the hardened bare/systemd
+service path.
 
 To install the CLI without enabling the service:
 
@@ -220,8 +232,12 @@ and webhook dedup state to survive pod replacement.
 review locally, call LLM providers, or execute linters; it only authenticates to
 `POST /reviews/ci` after your prerequisite jobs pass.
 
-Configure the gateway with `AR_CI_REVIEW_TOKEN`, store the same value as an
-Actions secret such as `AUTO_REVIEW_ACTION_TOKEN`, then add a gated job:
+Configure the gateway with `AR_CI_REVIEW_TOKEN`, store the gateway base URL as
+an Actions variable such as `AUTO_REVIEW_GATEWAY_URL`, and store the same token
+value as the Actions secret `AR_CI_REVIEW_TOKEN`. For this project,
+configure those values on `Slipstream/auto_review` after repository ownership
+changes; a stale or missing token secret reaches the gateway but receives HTTP
+401 from `POST /reviews/ci`. Then add a gated job:
 
 ```yaml
 semantic-review:
@@ -229,10 +245,10 @@ semantic-review:
   needs: [fmt, clippy, test]
   if: ${{ github.event_name == 'pull_request' }}
   steps:
-    - uses: https://git.johnwilger.com/jwilger/auto_review/deploy/forgejo-action@main
+    - uses: https://git.johnwilger.com/Slipstream/auto_review/deploy/forgejo-action@main
       with:
         gateway-url: https://reviewer.example.com
-        action-token: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
+        action-token: ${{ secrets.AR_CI_REVIEW_TOKEN }}
         owner: ${{ github.repository_owner }}
         repo: ${{ github.event.repository.name }}
         pr-number: ${{ github.event.pull_request.number }}

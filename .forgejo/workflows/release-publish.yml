@@ -259,17 +259,17 @@ jobs:
               "dataLicense": "CC0-1.0",
               "SPDXID": "SPDXRef-DOCUMENT",
               "name": f"auto-review-{version}-binary-release",
-              "documentNamespace": f"https://git.johnwilger.com/jwilger/auto_review/releases/v{version}/sbom",
+              "documentNamespace": f"https://git.johnwilger.com/Slipstream/auto_review/releases/v{version}/sbom",
               "creationInfo": {
                   "created": generated_at,
-                  "creators": ["Tool: auto_review-release-workflow", "Organization: jwilger/auto_review"],
+                  "creators": ["Tool: auto_review-release-workflow", "Organization: Slipstream/auto_review"],
               },
               "packages": [
                   {
                       "SPDXID": "SPDXRef-Package-auto-review",
                       "name": "auto-review",
                       "versionInfo": version,
-                      "downloadLocation": f"https://git.johnwilger.com/jwilger/auto_review/releases/tag/v{version}",
+                      "downloadLocation": f"https://git.johnwilger.com/Slipstream/auto_review/releases/tag/v{version}",
                       "filesAnalyzed": True,
                       "packageVerificationCode": {"packageVerificationCodeValue": package_verification_code(file_sha1s)},
                       "licenseConcluded": "NOASSERTION",
@@ -297,16 +297,16 @@ jobs:
               "predicateType": "https://slsa.dev/provenance/v1",
               "predicate": {
                   "buildDefinition": {
-                      "buildType": "https://git.johnwilger.com/jwilger/auto_review/.forgejo/workflows/release-publish.yml@v1",
+                      "buildType": "https://git.johnwilger.com/Slipstream/auto_review/.forgejo/workflows/release-publish.yml@v1",
                       "externalParameters": {"releaseVersion": version, "releaseMergeSha": source},
                       "internalParameters": {},
                       "resolvedDependencies": [
-                          {"uri": "git+https://git.johnwilger.com/jwilger/auto_review", "digest": {"gitCommit": source}},
+                          {"uri": "git+https://git.johnwilger.com/Slipstream/auto_review", "digest": {"gitCommit": source}},
                           {"uri": "nix-store:" + x86_out, "name": "packages.x86_64-linux.ar-cli-portable-release-root"},
                       ],
                   },
                   "runDetails": {
-                      "builder": {"id": "https://git.johnwilger.com/jwilger/auto_review/actions/release-publish"},
+                      "builder": {"id": "https://git.johnwilger.com/Slipstream/auto_review/actions/release-publish"},
                       "metadata": {"invocationId": source, "startedOn": generated_at, "finishedOn": generated_at},
                   },
               },
@@ -336,7 +336,7 @@ jobs:
           "$TEA" login add --name "$tea_login" --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
           "$TEA" release create \
             --login "$tea_login" \
-            --repo jwilger/auto_review \
+            --repo Slipstream/auto_review \
             --tag v$RELEASE_VERSION \
             --target "$RELEASE_MERGE_SHA" \
             --title "v$RELEASE_VERSION" \

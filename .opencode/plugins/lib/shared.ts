@@ -65,7 +65,12 @@ export function commandText(args: unknown): string {
 }
 
 export function blocksForgejoInlineReply(command: string): boolean {
-  return /\bgh\s+pr\s+comment\b/.test(command) || /\btea\s+comment\s+\d+\b/.test(command) || /\/pulls\/\d+\/comments\b/.test(command);
+  return (
+    /\bgh\s+pr\s+comment\b/.test(command)
+    || /\btea\s+comment\s+\d+\b/.test(command)
+    || /\/pulls\/\d+\/comments\b/.test(command)
+    || /\/issues\/\d+\/comments\b/.test(command)
+  );
 }
 
 export function blocksUnsafeToolchainCommand(command: string): boolean {

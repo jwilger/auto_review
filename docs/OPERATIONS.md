@@ -87,8 +87,8 @@ disables caching, but typical values are 10-30s).
 The normal semantic-review trigger can be driven by Forgejo Actions after
 your deterministic checks pass. Enable the gateway endpoint by setting a
 strong `AR_CI_REVIEW_TOKEN` (generate it independently from
-`WEBHOOK_SECRET`) and storing the same value as an Actions secret, for
-example `AUTO_REVIEW_ACTION_TOKEN`.
+`WEBHOOK_SECRET`) and storing the same value as the Actions secret
+`AR_CI_REVIEW_TOKEN`.
 
 Projects choose their own prerequisites in workflow YAML. A review job should
 depend on required checks and then use the project action wrapper, which calls
@@ -124,10 +124,10 @@ jobs:
     needs: [fmt, clippy, test]
     if: ${{ github.event_name == 'pull_request' }}
     steps:
-      - uses: https://git.johnwilger.com/jwilger/auto_review/deploy/forgejo-action@main
+      - uses: https://git.johnwilger.com/Slipstream/auto_review/deploy/forgejo-action@main
         with:
           gateway-url: https://reviewer.example.com
-          action-token: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
+          action-token: ${{ secrets.AR_CI_REVIEW_TOKEN }}
           owner: ${{ github.repository_owner }}
           repo: ${{ github.event.repository.name }}
           pr-number: ${{ github.event.pull_request.number }}
@@ -163,16 +163,16 @@ waiting-for-CI/action-triggered lifecycle.
 
 ## 0.4 Project release automation credentials
 
-This section is for maintainers of `jwilger/auto_review`, not for normal gateway
+This section is for maintainers of `Slipstream/auto_review`, not for normal gateway
 operators. Keep release credentials out of the gateway systemd environment and
 out of deployment env files.
 
-Configure the release preparation credential as Forgejo Actions secret `RELEASE_PREPARE_TOKEN`. Its release preparation PAT blast radius is to prepare release PR branches and release PRs only in `jwilger/auto_review` for trusted `main` push runs.
+Configure the release preparation credential as Forgejo Actions secret `RELEASE_PREPARE_TOKEN`. Its release preparation PAT blast radius is to prepare release PR branches and release PRs only in `Slipstream/auto_review` for trusted `main` push runs.
 
 Create a dedicated release bot Forgejo user for release PR commits. Add its
 public SSH signing key to that account, store the private key as Forgejo Actions secret `RELEASE_SIGNING_KEY`, and set repository variables `RELEASE_BOT_NAME` and `RELEASE_BOT_EMAIL` to the bot identity attached to the signing key. Release publish also uses that SSH signing key to sign `SHA256SUMS`.
 
-Configure the release publishing credential as Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`, owned by the same release bot named in `RELEASE_BOT_NAME`. Its release publishing PAT blast radius is to publish Linux binary artifacts, checksums, signatures, SBOM/provenance metadata, and Forgejo Releases only in `jwilger/auto_review`; it also covers managed PR body/description edit for binary artifact links.
+Configure the release publishing credential as Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`, owned by the same release bot named in `RELEASE_BOT_NAME`. Its release publishing PAT blast radius is to publish Linux binary artifacts, checksums, signatures, SBOM/provenance metadata, and Forgejo Releases only in `Slipstream/auto_review`; it also covers managed PR body/description edit for binary artifact links.
 
 The PR publishing credential model keeps `RELEASE_PUBLISH_TOKEN` out of
 checkout/build steps and exposes it only after artifacts exist. CI verifies PR

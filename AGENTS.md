@@ -38,8 +38,8 @@ forgejo_list_repo_issues --owner jwilger --repo auto_review
 forgejo_create_pull_request --owner jwilger --repo auto_review --base main --head <branch> --title "..." --body "..."
 
 # CLI fallback
-tea issue view <N> --repo jwilger/auto_review
-tea pr create --repo jwilger/auto_review --head <branch> --base main --title "..." --description "..."
+tea issue view <N> --repo Slipstream/auto_review
+tea pr create --repo Slipstream/auto_review --head <branch> --base main --title "..." --description "..."
 ```
 
 opencode also configures a local `forgejo` MCP server in `opencode.json`. It runs `forgejo-mcp` from the Nix dev shell against `https://git.johnwilger.com` and expects `FORGEJO_TOKEN` in the environment; never hardcode or commit the token.

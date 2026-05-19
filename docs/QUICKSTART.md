@@ -25,7 +25,7 @@ Use a release asset when possible:
 Or build from source with the pinned Nix toolchain:
 
 ```sh
-git clone https://git.johnwilger.com/jwilger/auto_review
+git clone https://git.johnwilger.com/Slipstream/auto_review
 cd auto_review
 nix build .
 export AUTO_REVIEW="$PWD/result/bin/auto-review"
@@ -68,8 +68,8 @@ LLM_REASONING_MODEL=qwen2.5-coder:32b
 # LLM_REASONING_MODEL=gpt-4o-mini
 ```
 
-`AR_CI_REVIEW_TOKEN` enables `POST /reviews/ci`; store the same value as a Forgejo
-Actions secret such as `AUTO_REVIEW_ACTION_TOKEN`.
+`AR_CI_REVIEW_TOKEN` enables `POST /reviews/ci`; store the same value as the Forgejo
+Actions secret `AR_CI_REVIEW_TOKEN`.
 
 ## 4. Run the gateway
 
@@ -161,10 +161,10 @@ jobs:
     needs: [fmt, clippy, test, deny, build]
     if: ${{ github.event_name == 'pull_request' }}
     steps:
-      - uses: https://git.johnwilger.com/jwilger/auto_review/deploy/forgejo-action@main
+      - uses: https://git.johnwilger.com/Slipstream/auto_review/deploy/forgejo-action@main
         with:
           gateway-url: https://reviewer.example.com
-          action-token: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
+          action-token: ${{ secrets.AR_CI_REVIEW_TOKEN }}
           owner: ${{ github.repository_owner }}
           repo: ${{ github.event.repository.name }}
           pr-number: ${{ github.event.pull_request.number }}

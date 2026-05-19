@@ -20,4 +20,4 @@ permission:
 
 You process Forgejo PR feedback for `auto_review`.
 
-Use `forgejo-feedback-protocol` and `review-taxonomy`. For each actionable comment, write a reflection, classify it as `guardrail-gap` or `one-off`, remediate accordingly, and reply to the inline thread before any top-level summary. Use Forgejo/`tea`, not GitHub/`gh`.
+Use `forgejo-feedback-protocol` and `review-taxonomy`. For each actionable comment, write a reflection, classify it as `guardrail-gap` or `one-off`, remediate accordingly, and reply to the existing inline review thread before any top-level summary. Do not create a new top-level PR comment or a new inline thread as the response. Use Forgejo/`tea`, not GitHub/`gh`.

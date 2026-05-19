@@ -66,15 +66,65 @@
             })
 
             (lib.mkIf gatewayCfg.enable {
+              users.groups.auto_review = { };
+              users.users.auto_review = {
+                isSystemUser = true;
+                group = "auto_review";
+              };
+
               systemd.services.auto-review-gateway = {
                 description = "auto_review gateway";
                 wantedBy = [ "multi-user.target" ];
                 after = [ "network-online.target" ];
                 wants = [ "network-online.target" ];
                 environment.AR_GATEWAY_BARE = "true";
+                environment.AR_GATEWAY_BIND = "127.0.0.1:8080";
                 serviceConfig = {
                   ExecStart = "${gatewayCfg.package}/bin/auto-review gateway";
                   StateDirectory = "auto_review";
+                  Type = "exec";
+                  RuntimeDirectory = "auto_review";
+                  RuntimeDirectoryMode = "0700";
+                  StateDirectoryMode = "0700";
+                  ReadWritePaths = [ "/var/lib/auto_review" ];
+                  Restart = "on-failure";
+                  RestartSec = "5s";
+                  KillSignal = "SIGTERM";
+                  TimeoutStopSec = "30s";
+                  LimitNOFILE = 4096;
+                  TasksMax = 512;
+                  StandardOutput = "journal";
+                  StandardError = "journal";
+                  SyslogIdentifier = "auto_review";
+                  User = "auto_review";
+                  Group = "auto_review";
+                  NoNewPrivileges = true;
+                  ProtectSystem = "strict";
+                  ProtectHome = true;
+                  ProtectKernelTunables = true;
+                  ProtectKernelModules = true;
+                  ProtectKernelLogs = true;
+                  ProtectControlGroups = true;
+                  ProtectClock = true;
+                  ProtectHostname = true;
+                  ProtectProc = "invisible";
+                  PrivateTmp = true;
+                  PrivateDevices = true;
+                  PrivateUsers = true;
+                  RestrictAddressFamilies = [
+                    "AF_UNIX"
+                    "AF_INET"
+                    "AF_INET6"
+                  ];
+                  RestrictNamespaces = true;
+                  RestrictRealtime = true;
+                  RestrictSUIDSGID = true;
+                  LockPersonality = true;
+                  MemoryDenyWriteExecute = false;
+                  SystemCallFilter = [ "@system-service" ];
+                  SystemCallArchitectures = "native";
+                  CapabilityBoundingSet = [ "" ];
+                  AmbientCapabilities = [ "" ];
                 }
                 // lib.optionalAttrs (gatewayCfg.environmentFile != null) {
                   EnvironmentFile = gatewayCfg.environmentFile;
@@ -554,6 +604,51 @@
               }/bin/auto-review gateway";
               gatewayEnvironmentFiles = lib.toList gatewayServiceConfig.EnvironmentFile;
               gatewayStateDirectories = lib.toList gatewayServiceConfig.StateDirectory;
+              gatewayUser = gatewayServiceConfig.User or null;
+              gatewayGroup = gatewayServiceConfig.Group or null;
+              gatewayDeclaredUsers = gatewaySystem.config.users.users;
+              gatewayDeclaredGroups = gatewaySystem.config.users.groups;
+              gatewayServiceAccount = gatewayDeclaredUsers.auto_review or { };
+              gatewayHasProductionHardeningBaseline =
+                (gatewayServiceConfig.NoNewPrivileges or null) == true
+                && (gatewayServiceConfig.ProtectSystem or null) == "strict"
+                && (gatewayServiceConfig.ProtectHome or null) == true
+                && (gatewayServiceConfig.ProtectKernelTunables or null) == true
+                && (gatewayServiceConfig.ProtectKernelModules or null) == true
+                && (gatewayServiceConfig.ProtectKernelLogs or null) == true
+                && (gatewayServiceConfig.ProtectControlGroups or null) == true
+                && (gatewayServiceConfig.ProtectClock or null) == true
+                && (gatewayServiceConfig.ProtectHostname or null) == true
+                && (gatewayServiceConfig.ProtectProc or null) == "invisible"
+                && (gatewayServiceConfig.PrivateTmp or null) == true
+                && (gatewayServiceConfig.PrivateDevices or null) == true
+                && (gatewayServiceConfig.PrivateUsers or null) == true
+                && (gatewayServiceConfig.RestrictAddressFamilies or [ ]) == [ "AF_UNIX" "AF_INET" "AF_INET6" ]
+                && (gatewayServiceConfig.RestrictNamespaces or null) == true
+                && (gatewayServiceConfig.RestrictRealtime or null) == true
+                && (gatewayServiceConfig.RestrictSUIDSGID or null) == true
+                && (gatewayServiceConfig.LockPersonality or null) == true
+                && (gatewayServiceConfig.MemoryDenyWriteExecute or null) == false
+                && (gatewayServiceConfig.SystemCallFilter or [ ]) == [ "@system-service" ]
+                && (gatewayServiceConfig.SystemCallArchitectures or null) == "native"
+                && (gatewayServiceConfig.CapabilityBoundingSet or [ ]) == [ "" ]
+                && (gatewayServiceConfig.AmbientCapabilities or [ ]) == [ "" ];
+              gatewayReadWritePaths = lib.toList (gatewayServiceConfig.ReadWritePaths or [ ]);
+              gatewayHasProductionOperationalControls =
+                (gatewayServiceConfig.Type or null) == "exec"
+                && (gatewayServiceConfig.RuntimeDirectory or null) == "auto_review"
+                && (gatewayServiceConfig.RuntimeDirectoryMode or null) == "0700"
+                && (gatewayServiceConfig.StateDirectoryMode or null) == "0700"
+                && builtins.elem "/var/lib/auto_review" gatewayReadWritePaths
+                && (gatewayServiceConfig.Restart or null) == "on-failure"
+                && (gatewayServiceConfig.RestartSec or null) == "5s"
+                && (gatewayServiceConfig.KillSignal or null) == "SIGTERM"
+                && (gatewayServiceConfig.TimeoutStopSec or null) == "30s"
+                && (gatewayServiceConfig.LimitNOFILE or null) == 4096
+                && (gatewayServiceConfig.TasksMax or null) == 512
+                && (gatewayServiceConfig.StandardOutput or null) == "journal"
+                && (gatewayServiceConfig.StandardError or null) == "journal"
+                && (gatewayServiceConfig.SyslogIdentifier or null) == "auto_review";
 
               contract =
                 assert lib.asserts.assertMsg (
@@ -575,6 +670,22 @@
                 assert lib.asserts.assertMsg (
                   (gatewayEnvironment.AR_GATEWAY_BARE or null) == "true"
                 ) "gateway service must set AR_GATEWAY_BARE=true for the bare systemd deployment path";
+                assert lib.asserts.assertMsg (
+                  (gatewayEnvironment.AR_GATEWAY_BIND or null) == "127.0.0.1:8080"
+                ) "gateway service must default AR_GATEWAY_BIND to 127.0.0.1:8080";
+                assert lib.asserts.assertMsg (
+                  gatewayUser == "auto_review" && gatewayGroup == "auto_review"
+                ) "gateway service must run as the dedicated non-root auto_review user/group by default";
+                assert lib.asserts.assertMsg (
+                  builtins.hasAttr "auto_review" gatewayDeclaredUsers
+                  && builtins.hasAttr "auto_review" gatewayDeclaredGroups
+                  && (gatewayServiceAccount.isSystemUser or false)
+                  && (gatewayServiceAccount.group or null) == "auto_review"
+                ) "gateway module must provision dedicated auto_review user/group when enabled";
+                assert lib.asserts.assertMsg gatewayHasProductionHardeningBaseline
+                  "gateway service must include the direct-host production systemd hardening baseline";
+                assert lib.asserts.assertMsg gatewayHasProductionOperationalControls
+                  "gateway service must include direct-host production operational controls for execution mode, runtime/state directories, write paths, restart/stop behavior, resource limits, and journald identity";
                 true;
             in
             pkgs.runCommand "auto-review-nixos-module-contract" { inherit contract; } ''

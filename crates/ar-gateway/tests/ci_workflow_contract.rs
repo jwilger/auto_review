@@ -13,6 +13,12 @@ fn pr_ci_exposes_separate_just_based_deterministic_jobs() {
         CI_WORKFLOW.contains("  pull_request:"),
         ".forgejo/workflows/ci.yml should run for pull_request events",
     );
+    require(
+        &mut contract_errors,
+        CI_WORKFLOW.contains("  contents: read")
+            && CI_WORKFLOW.contains("  pull-requests: read"),
+        ".forgejo/workflows/ci.yml should explicitly grant contents and pull-requests read permissions for org-owned PR checkout and metadata access",
+    );
 
     for gate in ["fmt", "clippy", "test", "deny", "build"] {
         let Some(job) = workflow_job(gate) else {
@@ -178,6 +184,17 @@ fn pr_ci_classifier_treats_root_opencode_json_as_opencode_and_fails_closed_to_ap
 
     require(
         &mut contract_errors,
+        detect_paths_step
+            .iter()
+            .any(|line| line.contains("/api/v1/repos/$owner/$repo/pulls/$pr_number/files"))
+            && detect_paths_step
+                .iter()
+                .any(|line| line.contains("Authorization: token $FORGEJO_TOKEN")),
+        "path-classification should use the Forgejo PR files API with the workflow token instead of checkout/fetch",
+    );
+
+    require(
+        &mut contract_errors,
         case_patterns
             .iter()
             .any(|pattern| pattern.contains("opencode.json")),
@@ -199,6 +216,14 @@ fn pr_ci_classifier_treats_root_opencode_json_as_opencode_and_fails_closed_to_ap
         &mut contract_errors,
         fail_closed_to_app_ci,
         "path-classification should default app_ci='true' before diff iteration to fail closed when no file list can be resolved",
+    );
+
+    require(
+        &mut contract_errors,
+        detect_paths_step
+            .iter()
+            .all(|line| !line.contains("git fetch")),
+        "path-classification should not require git fetch before emitting CI routing outputs",
     );
 
     assert!(contract_errors.is_empty(), "{}", contract_errors.join("\n"));
@@ -264,8 +289,8 @@ fn release_prepare_uses_forgejo_api_json_for_open_pr_lookup() {
 
     assert!(
         !job.contains("tea pr ls")
-            && job.contains("/api/v1/repos/jwilger/auto_review/pulls?state=open"),
-        "release-prepare should query Forgejo pulls API JSON at /api/v1/repos/jwilger/auto_review/pulls?state=open instead of piping tea pr ls output into jq"
+            && job.contains("/api/v1/repos/Slipstream/auto_review/pulls?state=open"),
+        "release-prepare should query Forgejo pulls API JSON at /api/v1/repos/Slipstream/auto_review/pulls?state=open instead of piping tea pr ls output into jq"
     );
 }
 
@@ -455,7 +480,7 @@ fn shell_case_patterns<'a>(step_lines: &'a [&'a str]) -> Vec<String> {
             break;
         }
 
-        if trimmed.ends_with(")") {
+        if trimmed.ends_with(')') {
             patterns.push(trimmed.to_owned());
         }
     }

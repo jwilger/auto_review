@@ -6,6 +6,7 @@ on:
 
 permissions:
   contents: read
+  pull-requests: read
 
 jobs:
   path-classification:
@@ -17,34 +18,47 @@ jobs:
       app_ci: ${{ steps.changed-paths.outputs.app_ci }}
       opencode_ci: ${{ steps.changed-paths.outputs.opencode_ci }}
     steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-          fetch-depth: 0
-
       - name: Detect changed paths
         id: changed-paths
+        env:
+          FORGEJO_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          base_sha="${{ github.event.pull_request.base.sha }}"
-          head_sha="${{ github.event.pull_request.head.sha }}"
 
-          git fetch --no-tags --depth=1 origin "$base_sha" "$head_sha"
+          owner="${{ github.repository_owner }}"
+          repo="${{ github.event.repository.name }}"
+          pr_number="${{ github.event.pull_request.number }}"
+          files_url="${{ github.server_url }}/api/v1/repos/$owner/$repo/pulls/$pr_number/files"
 
-          app_ci="true"
-          opencode_ci="false"
+          files_json="$({
+            curl -fsS --connect-timeout 5 --max-time 30 \
+              -H "Authorization: token $FORGEJO_TOKEN" \
+              -H "Accept: application/json" \
+              "$files_url"
+          } || true)"
 
-          while IFS= read -r file; do
-            case "$file" in
-              .opencode/*|opencode.json)
-                opencode_ci="true"
-                app_ci="false"
-                ;;
-              *)
-                app_ci="true"
-                ;;
-            esac
-          done < <(git diff --name-only "$base_sha" "$head_sha")
+          if [ -z "$files_json" ]; then
+            echo "path classification failed to fetch changed files; running all CI gates" >&2
+            app_ci="true"
+            opencode_ci="true"
+          else
+            changed_files="$(printf '%s' "$files_json" | python3 -c 'import json,sys; print("\n".join(item.get("filename", "") for item in json.load(sys.stdin)))')"
+
+            app_ci="true"
+            opencode_ci="false"
+
+            while IFS= read -r file; do
+              case "$file" in
+                .opencode/*|opencode.json)
+                  opencode_ci="true"
+                  app_ci="false"
+                  ;;
+                *)
+                  app_ci="true"
+                  ;;
+              esac
+            done <<< "$changed_files"
+          fi
 
           echo "app_ci=$app_ci" >> "$GITHUB_OUTPUT"
           echo "opencode_ci=$opencode_ci" >> "$GITHUB_OUTPUT"
@@ -329,25 +343,37 @@ jobs:
     needs: [path-classification]
     if: ${{ github.event_name == 'pull_request' }}
     env:
-      AUTO_REVIEW_GATEWAY_URL: ${{ secrets.AUTO_REVIEW_GATEWAY_URL }}
-      AUTO_REVIEW_ACTION_TOKEN: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
+      AUTO_REVIEW_GATEWAY_URL: ${{ vars.AUTO_REVIEW_GATEWAY_URL }}
+      AR_CI_REVIEW_TOKEN: ${{ secrets.AR_CI_REVIEW_TOKEN }}
     steps:
-      - name: Skip when auto_review secrets are not configured
-        if: ${{ env.AUTO_REVIEW_GATEWAY_URL == '' || env.AUTO_REVIEW_ACTION_TOKEN == '' || env.AUTO_REVIEW_GATEWAY_URL == github.server_url }}
+      - name: Skip when auto_review configuration is not available
+        if: ${{ env.AUTO_REVIEW_GATEWAY_URL == '' || env.AR_CI_REVIEW_TOKEN == '' || env.AUTO_REVIEW_GATEWAY_URL == github.server_url }}
         run: |
-          echo "auto_review semantic review skipped: AUTO_REVIEW_GATEWAY_URL must point at ar-gateway, AUTO_REVIEW_ACTION_TOKEN must be configured, and the gateway URL must not be the Forgejo server URL"
+          echo "auto_review semantic review skipped: repository variable AUTO_REVIEW_GATEWAY_URL must point at ar-gateway, secret AR_CI_REVIEW_TOKEN must match the gateway AR_CI_REVIEW_TOKEN, and the gateway URL must not be the Forgejo server URL"
 
       - name: Request auto_review review
         continue-on-error: true
-        if: ${{ env.AUTO_REVIEW_GATEWAY_URL != '' && env.AUTO_REVIEW_ACTION_TOKEN != '' && env.AUTO_REVIEW_GATEWAY_URL != github.server_url }}
+        if: ${{ env.AUTO_REVIEW_GATEWAY_URL != '' && env.AR_CI_REVIEW_TOKEN != '' && env.AUTO_REVIEW_GATEWAY_URL != github.server_url }}
         run: |
           set -euo pipefail
           json_payload='{"owner":"${{ github.repository_owner }}","repo":"${{ github.event.repository.name }}","pr_number":${{ github.event.pull_request.number }},"head_sha":"${{ github.event.pull_request.head.sha }}"}'
-          curl -fsS --connect-timeout 5 --max-time 30 -X POST \
-            -H "Authorization: Bearer $AUTO_REVIEW_ACTION_TOKEN" \
+          response_file="$(mktemp)"
+          status="$(curl -sS --connect-timeout 5 --max-time 30 -o "$response_file" -w '%{http_code}' -X POST \
+            -H "Authorization: Bearer $AR_CI_REVIEW_TOKEN" \
             -H "Content-Type: application/json" \
             --data "$json_payload" \
-            "${AUTO_REVIEW_GATEWAY_URL%/}/reviews/ci"
+            "${AUTO_REVIEW_GATEWAY_URL%/}/reviews/ci")"
+
+          if [ "$status" -eq 401 ] || [ "$status" -eq 403 ]; then
+            echo "auto_review semantic review authorization failed with HTTP $status; verify the Slipstream/auto_review AR_CI_REVIEW_TOKEN secret matches production AR_CI_REVIEW_TOKEN" >&2
+            exit 1
+          fi
+
+          if [ "$status" -lt 200 ] || [ "$status" -ge 300 ]; then
+            echo "auto_review semantic review request failed with HTTP $status" >&2
+            cat "$response_file" >&2
+            exit 1
+          fi
 
   pr-artifact-build:
     name: Build PR artifacts (no token)

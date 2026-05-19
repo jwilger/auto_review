@@ -67,3 +67,33 @@ test("non issue-linked branches can skip trailer requirement", async () => {
     }),
   );
 });
+
+test("blocks top-level Forgejo issue comments as inline feedback replies", async () => {
+  const hooks = await AutoReviewForgejoPlugin();
+  const sessionID = `forgejo-top-level-comment-${Date.now()}`;
+
+  await assert.rejects(
+    () =>
+      hooks["tool.execute.before"]?.(buildInput(sessionID), {
+        args: {
+          command:
+            "curl -X POST https://git.johnwilger.com/api/v1/repos/jwilger/auto_review/issues/271/comments -d '{\"body\":\"Addressed\"}'",
+        },
+      }),
+    /inline feedback replies must use the existing review comment thread/,
+  );
+});
+
+test("allows existing Forgejo review-thread comment replies", async () => {
+  const hooks = await AutoReviewForgejoPlugin();
+  const sessionID = `forgejo-inline-reply-${Date.now()}`;
+
+  await assert.doesNotReject(() =>
+    hooks["tool.execute.before"]?.(buildInput(sessionID), {
+      args: {
+        command:
+          "curl -X POST https://git.johnwilger.com/api/v1/repos/jwilger/auto_review/pulls/271/reviews/2652/comments -d '{\"body\":\"@auto-review Addressed\",\"path\":\"flake.nix\",\"new_position\":69,\"old_position\":0}'",
+      },
+    }),
+  );
+});
