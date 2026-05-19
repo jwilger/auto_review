@@ -14,3 +14,4 @@ export const AutoReviewToolchainPlugin: Plugin = async ({ worktree }) => ({
 });
 
 export default AutoReviewToolchainPlugin;
+export const server = AutoReviewToolchainPlugin;

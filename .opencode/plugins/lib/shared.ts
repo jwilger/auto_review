@@ -1,8 +1,8 @@
 import { execFileSync } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import fs from "node:fs";
+import { createRequire } from "node:module";
 import path from "node:path";
-import { DatabaseSync } from "node:sqlite";
 
 export type RgrStage =
   | "idle"
@@ -199,12 +199,59 @@ function statePath(worktree?: string): string | undefined {
   return path.join(worktree, ".opencode", "state", "rgr.sqlite");
 }
 
-function withStateDb<T>(worktree: string | undefined, fn: (db: DatabaseSync) => T): T | undefined {
+type StateDb = {
+  exec(sql: string): void;
+  prepare(sql: string): {
+    all(...params: unknown[]): unknown[];
+    run(...params: unknown[]): unknown;
+  };
+  close(): void;
+};
+
+function openStateDb(file: string): StateDb {
+  try {
+    const DatabaseSync = createRequire(import.meta.url)("node:sqlite").DatabaseSync;
+    return new DatabaseSync(file);
+  } catch {
+    // opencode loads plugins in Bun, whose SQLite module is `bun:sqlite` rather
+    // than Node's experimental `node:sqlite`. Keep the Node path for the test
+    // harness and use Bun's synchronous Database API at runtime.
+    try {
+      const { Database } = createRequire(import.meta.url)("bun:sqlite");
+      const db = new Database(file);
+      return {
+        exec(sql: string) {
+          db.run(sql);
+        },
+        prepare(sql: string) {
+          const query = db.query(sql);
+          return {
+            all(...params: unknown[]) {
+              return query.all(...params);
+            },
+            run(...params: unknown[]) {
+              return query.run(...params);
+            },
+          };
+        },
+        close() {
+          db.close();
+        },
+      };
+    } catch (bunError) {
+      throw new Error(
+        `RGR state requires SQLite persistence, but neither node:sqlite nor bun:sqlite could be loaded: ${bunError}`,
+      );
+    }
+  }
+}
+
+function withStateDb<T>(worktree: string | undefined, fn: (db: StateDb) => T): T | undefined {
   const file = statePath(worktree);
   if (!file || !worktree) return undefined;
   fs.mkdirSync(path.dirname(file), { recursive: true, mode: 0o700 });
   ensureStateGitignore(worktree);
-  const db = new DatabaseSync(file);
+  const db = openStateDb(file);
   try {
     db.exec(`
       create table if not exists rgr_events (

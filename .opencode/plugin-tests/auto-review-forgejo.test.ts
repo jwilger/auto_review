@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AutoReviewForgejoPlugin } from "./auto-review-forgejo.ts";
+import { AutoReviewForgejoPlugin } from "../plugins/auto-review-forgejo.ts";
 
 const buildInput = (sessionID: string) => ({
   tool: "bash",

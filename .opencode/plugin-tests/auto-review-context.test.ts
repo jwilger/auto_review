@@ -1,9 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AutoReviewContextPlugin } from "./auto-review-context.ts";
-import { AutoReviewDisciplinePlugin } from "./auto-review-discipline.ts";
-import { clearCycle, setCycle } from "./lib/shared.ts";
+import { AutoReviewContextPlugin } from "../plugins/auto-review-context.ts";
+import { AutoReviewDisciplinePlugin } from "../plugins/auto-review-discipline.ts";
+import { clearCycle, setCycle } from "../plugins/lib/shared.ts";
 
 test("context plugin owns compaction context when discipline plugin is also loaded", async () => {
   const sessionID = `context-owner-${Date.now()}`;

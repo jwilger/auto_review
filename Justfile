@@ -13,7 +13,7 @@ test:
 
 opencode-test:
 	npm --prefix .opencode ci --ignore-scripts
-	node --test .opencode/plugins/*.test.ts
+	node --test .opencode/plugin-tests/*.test.ts
 
 deny:
 	cargo deny check licenses bans sources

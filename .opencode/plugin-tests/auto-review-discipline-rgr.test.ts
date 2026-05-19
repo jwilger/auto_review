@@ -5,7 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { AutoReviewDisciplinePlugin } from "./auto-review-discipline.ts";
+import { AutoReviewDisciplinePlugin } from "../plugins/auto-review-discipline.ts";
 
 function createDirtyWorktree() {
   const worktree = fs.mkdtempSync(path.join(os.tmpdir(), "auto-review-rgr-veto-"));

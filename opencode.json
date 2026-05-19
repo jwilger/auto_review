@@ -6,7 +6,11 @@
   "model": "openai/gpt-5.5",
   "default_agent": "build",
   "plugin": [
-    "opencode-rtk"
+    "opencode-rtk",
+    "./.opencode/plugins/auto-review-discipline.ts",
+    "./.opencode/plugins/auto-review-forgejo.ts",
+    "./.opencode/plugins/auto-review-context.ts",
+    "./.opencode/plugins/auto-review-toolchain.ts"
   ],
   "command": {
     "issue": {

@@ -16,3 +16,4 @@ export const AutoReviewContextPlugin: Plugin = async () => ({
 });
 
 export default AutoReviewContextPlugin;
+export const server = AutoReviewContextPlugin;

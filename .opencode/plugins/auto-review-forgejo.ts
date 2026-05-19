@@ -90,3 +90,4 @@ export const AutoReviewForgejoPlugin: Plugin = async () => ({
 });
 
 export default AutoReviewForgejoPlugin;
+export const server = AutoReviewForgejoPlugin;

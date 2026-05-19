@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 
-import { AutoReviewDisciplinePlugin } from "./auto-review-discipline.ts";
+import { AutoReviewDisciplinePlugin } from "../plugins/auto-review-discipline.ts";
 
 test("adr_accept appends supersession notes to partially superseded ADRs", async (t) => {
   const originalCwd = process.cwd();

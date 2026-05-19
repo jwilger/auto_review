@@ -657,3 +657,4 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
 });
 
 export default AutoReviewDisciplinePlugin;
+export const server = AutoReviewDisciplinePlugin;
