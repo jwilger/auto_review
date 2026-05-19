@@ -1,6 +1,7 @@
 ---
 description: Edit-capable subagent for writing or activating the next smallest RED test in outside-in RGR workflows.
 mode: subagent
+model: "openai/gpt-5.3-codex-standard"
 steps: 200
 color: "#B45AF2"
 permission:

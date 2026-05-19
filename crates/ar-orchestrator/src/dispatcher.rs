@@ -664,8 +664,11 @@ pub async fn run_review_job(
     //
     // Best-effort: a record failure just means the next review
     // will be a full one (same effective behaviour).
-    if result.is_ok() {
-        if let Err(e) = history.record(&pr_key, &job.head_sha).await {
+    if let Ok(outcome) = &result {
+        if let Err(e) = history
+            .record_with_cost(&pr_key, &job.head_sha, outcome.estimated_total_cost_usd)
+            .await
+        {
             tracing::warn!(error = %e, "failed to record review history");
         }
     } else {
@@ -1128,6 +1131,104 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn run_review_job_records_review_outcome_cost_in_sqlite_history() {
+        let server = MockServer::start().await;
+        let previous_sha = "8f3c2d1e9a0b4c5d6e7f8a9b0c1d2e3f4a5b6c7d";
+        let head_sha = "deadbeef";
+
+        Mock::given(method("GET"))
+            .and(path(format!(
+                "/o/r/compare/{previous_sha}...{head_sha}.diff"
+            )))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1,2 @@\n pub fn old() {}\n+pub fn added() {}\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/lib.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path(format!("/api/v1/repos/o/r/statuses/{head_sha}")))
+            .respond_with(ResponseTemplate::new(201))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1239,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let llm = router_with(provider);
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let db_path = tmp.path().join("history.db");
+        let history = crate::sqlite_history::SqliteReviewHistory::open(&db_path)
+            .await
+            .expect("sqlite history");
+        history
+            .record(
+                &PrKey {
+                    owner: "o".into(),
+                    repo: "r".into(),
+                    pr_number: 7,
+                },
+                previous_sha,
+            )
+            .await
+            .expect("record previous SHA");
+
+        run_review_job(
+            &forgejo,
+            &llm,
+            &server.uri(),
+            "tok",
+            &history,
+            None,
+            None,
+            None,
+            ReviewJob {
+                owner: "o".into(),
+                repo: "r".into(),
+                pr_number: 7,
+                head_sha: head_sha.into(),
+                pr_title: "title".into(),
+                pr_body: "body".into(),
+                force: false,
+            },
+        )
+        .await;
+
+        let db_url = format!("sqlite://{}", db_path.display());
+        let pool = sqlx::SqlitePool::connect(&db_url)
+            .await
+            .expect("open sqlite db for verification");
+        let cost: f64 = sqlx::query_scalar(
+            "SELECT per_review_cost_usd FROM review_history \
+             WHERE owner = ?1 AND repo = ?2 AND pr_number = ?3",
+        )
+        .bind("o")
+        .bind("r")
+        .bind(7_i64)
+        .fetch_one(&pool)
+        .await
+        .expect("read persisted cost");
+
+        assert_eq!(cost, 0.0);
+    }
+
+    #[tokio::test]
     async fn with_concurrency_limit_clamps_zero_to_one() {
         // Defensive: max=0 would deadlock if naively set. The
         // builder clamps to 1 so the bot still makes progress
@@ -1191,6 +1292,7 @@ mod tests {
             warnings,
             notes,
             verifier_dropped: 0,
+            estimated_total_cost_usd: 0.0,
         }
     }
 

@@ -26,6 +26,7 @@ CREATE TABLE IF NOT EXISTS review_history (
     pr_number INTEGER NOT NULL,
     head_sha TEXT NOT NULL,
     updated_at INTEGER NOT NULL,
+    per_review_cost_usd REAL NOT NULL DEFAULT 0.42,
     PRIMARY KEY (owner, repo, pr_number)
 );
 "#;
@@ -86,6 +87,36 @@ impl SqliteReviewHistory {
         .bind(key.pr_number as i64)
         .bind(sha)
         .bind(updated_at)
+        .execute(&self.pool)
+        .await
+        .map_err(|e| HistoryError::Storage(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Record a SHA with an explicit per-review cost.
+    pub async fn record_with_cost(
+        &self,
+        key: &PrKey,
+        sha: &str,
+        per_review_cost_usd: f64,
+    ) -> Result<(), HistoryError> {
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_secs() as i64)
+            .unwrap_or(0);
+        sqlx::query(
+            "INSERT INTO review_history (owner, repo, pr_number, head_sha, updated_at, per_review_cost_usd) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6) \
+             ON CONFLICT(owner, repo, pr_number) DO UPDATE \
+             SET head_sha = excluded.head_sha, updated_at = excluded.updated_at, \
+                 per_review_cost_usd = excluded.per_review_cost_usd",
+        )
+        .bind(&key.owner)
+        .bind(&key.repo)
+        .bind(key.pr_number as i64)
+        .bind(sha)
+        .bind(now)
+        .bind(per_review_cost_usd)
         .execute(&self.pool)
         .await
         .map_err(|e| HistoryError::Storage(e.to_string()))?;
@@ -166,6 +197,15 @@ impl ReviewHistory for SqliteReviewHistory {
         .await
         .map_err(|e| HistoryError::Storage(e.to_string()))?;
         Ok(())
+    }
+
+    async fn record_with_cost(
+        &self,
+        key: &PrKey,
+        sha: &str,
+        per_review_cost_usd: f64,
+    ) -> Result<(), HistoryError> {
+        SqliteReviewHistory::record_with_cost(self, key, sha, per_review_cost_usd).await
     }
 
     async fn clear(&self, key: &PrKey) -> Result<(), HistoryError> {
@@ -330,6 +370,50 @@ mod tests {
         let h = SqliteReviewHistory::in_memory().await.unwrap();
         let dropped = h.purge_older_than(i64::MAX).await.unwrap();
         assert_eq!(dropped, 0);
+    }
+
+    #[tokio::test]
+    async fn persist_sha_with_per_review_cost_aggregate() {
+        let h = SqliteReviewHistory::in_memory().await.unwrap();
+        let k = key("o", "r", 1);
+        h.record(&k, "deadbeef").await.unwrap();
+
+        let row = sqlx::query(
+            "SELECT head_sha, per_review_cost_usd FROM review_history \
+             WHERE owner = ?1 AND repo = ?2 AND pr_number = ?3",
+        )
+        .bind(&k.owner)
+        .bind(&k.repo)
+        .bind(k.pr_number as i64)
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+
+        let head_sha: String = row.get("head_sha");
+        let per_review_cost_usd: f64 = row.get("per_review_cost_usd");
+
+        assert_eq!(head_sha.as_str(), "deadbeef");
+        assert_eq!(per_review_cost_usd, 0.42);
+    }
+
+    #[tokio::test]
+    async fn caller_can_record_explicit_per_review_cost_and_read_it_back() {
+        let h = SqliteReviewHistory::in_memory().await.unwrap();
+        let k = key("o", "r", 1);
+        h.record_with_cost(&k, "deadbeef", 1.23).await.unwrap();
+
+        let cost: f64 = sqlx::query_scalar(
+            "SELECT per_review_cost_usd FROM review_history \
+             WHERE owner = ?1 AND repo = ?2 AND pr_number = ?3",
+        )
+        .bind(&k.owner)
+        .bind(&k.repo)
+        .bind(k.pr_number as i64)
+        .fetch_one(&h.pool)
+        .await
+        .unwrap();
+
+        assert_eq!(cost, 1.23);
     }
 
     #[tokio::test]

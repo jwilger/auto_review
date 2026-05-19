@@ -1,6 +1,7 @@
 ---
 description: Read-only reviewer for GREEN implementation minimality, architecture fit, and test demand in RGR microcycles.
 mode: subagent
+model: "openai/gpt-5.3-codex-standard"
 steps: 200
 color: "#0969DA"
 permission:

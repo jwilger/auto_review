@@ -2,6 +2,8 @@ use crate::types::{CompleteRequest, CompleteResponse, Error, LlmProvider, ModelT
 use std::collections::HashMap;
 use std::sync::Arc;
 
+type UsageCollector = Arc<dyn Fn(ModelTier, &str, &str, u32, u32) + Send + Sync>;
+
 /// Maps `ModelTier` → provider instance.
 ///
 /// Activities don't talk to providers directly — they ask the router for a
@@ -10,6 +12,7 @@ use std::sync::Arc;
 #[derive(Clone, Default)]
 pub struct Router {
     providers: HashMap<ModelTier, Arc<dyn LlmProvider>>,
+    usage_collector: Option<UsageCollector>,
 }
 
 impl Router {
@@ -22,6 +25,35 @@ impl Router {
         self
     }
 
+    pub fn with_usage_collector<F>(mut self, collector: F) -> Self
+    where
+        F: Fn(ModelTier, &str, &str, u32, u32) + Send + Sync + 'static,
+    {
+        let collector = Arc::new(collector);
+        self.usage_collector = match self.usage_collector {
+            Some(existing) => Some(Arc::new(
+                move |tier, provider_base_url, model_name, input_tokens, output_tokens| {
+                    existing(
+                        tier,
+                        provider_base_url,
+                        model_name,
+                        input_tokens,
+                        output_tokens,
+                    );
+                    collector(
+                        tier,
+                        provider_base_url,
+                        model_name,
+                        input_tokens,
+                        output_tokens,
+                    );
+                },
+            )),
+            None => Some(collector),
+        };
+        self
+    }
+
     pub fn provider(&self, tier: ModelTier) -> Result<&Arc<dyn LlmProvider>, Error> {
         self.providers.get(&tier).ok_or(Error::NoProvider(tier))
     }
@@ -31,11 +63,37 @@ impl Router {
         tier: ModelTier,
         req: CompleteRequest,
     ) -> Result<CompleteResponse, Error> {
-        self.provider(tier)?.complete(req).await
+        let provider = self.provider(tier)?;
+        let resp = provider.complete(req).await?;
+        self.record_usage(&**provider, tier, resp.input_tokens, resp.output_tokens);
+        Ok(resp)
     }
 
     pub async fn embed(&self, tier: ModelTier, texts: &[String]) -> Result<Vec<Vec<f32>>, Error> {
-        self.provider(tier)?.embed(texts).await
+        let provider = self.provider(tier)?;
+        let (vectors, input_tokens, output_tokens) = provider.embed_with_usage(texts).await?;
+        self.record_usage(&**provider, tier, input_tokens, output_tokens);
+        Ok(vectors)
+    }
+
+    fn record_usage(
+        &self,
+        provider: &dyn LlmProvider,
+        tier: ModelTier,
+        input_tokens: u32,
+        output_tokens: u32,
+    ) {
+        if let Some(collector) = &self.usage_collector {
+            let provider_base_url = provider.provider_base_url();
+            let model_name = provider.provider_model_name(tier);
+            collector(
+                tier,
+                &provider_base_url,
+                &model_name,
+                input_tokens,
+                output_tokens,
+            );
+        }
     }
 }
 

@@ -1,6 +1,7 @@
 ---
 description: Edit-capable subagent for clearing exactly one current RGR diagnostic with the smallest demanded change.
 mode: subagent
+model: "openai/gpt-5.3-codex-standard"
 steps: 200
 color: "#2DA44E"
 permission:

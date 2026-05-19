@@ -40,6 +40,8 @@ pub struct ReviewOutcome {
     /// Surfaces as a counter so operators can chart their
     /// hallucination rate over time.
     pub verifier_dropped: usize,
+    /// Estimated total USD consumed by LLM calls in this review.
+    pub estimated_total_cost_usd: f64,
 }
 
 /// Rank for ordered comparison: higher = more severe. Lets the
@@ -185,6 +187,114 @@ fn append_pre_merge_checks(body: &mut String, validation: &PrMetadataValidation)
     body.push_str(validation.rationale.trim());
     body.push_str("\n- Offending text: ");
     body.push_str(validation.offending_text.trim());
+}
+
+fn append_llm_usage_cost_footer(
+    body: &mut String,
+    usage: &[(ModelTier, String, String, u32, u32)],
+) -> f64 {
+    if usage.is_empty() {
+        return 0.0;
+    }
+
+    let pricing = std::env::var("AR_PRICE_TABLE_PATH")
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| std::path::PathBuf::from(trimmed))
+        })
+        .and_then(|path| ar_llm::pricing::load_openai_price_table(Some(path.as_path())).ok())
+        .unwrap_or_else(ar_llm::pricing::default_openai_price_table);
+    let mut aggregated: Vec<(ModelTier, String, String, u32, u32)> = Vec::new();
+    for (tier, base_url, model, in_tokens, out_tokens) in usage.iter().cloned() {
+        if let Some((_, _, _, existing_in, existing_out)) = aggregated
+            .iter_mut()
+            .find(|(t, u, m, _, _)| *t == tier && *u == base_url && *m == model)
+        {
+            *existing_in = existing_in.saturating_add(in_tokens);
+            *existing_out = existing_out.saturating_add(out_tokens);
+            continue;
+        }
+        aggregated.push((tier, base_url, model, in_tokens, out_tokens));
+    }
+
+    let mut lines = Vec::new();
+    let mut total_cost = 0.0;
+    let mut footer_base_urls = Vec::new();
+
+    for tier in [ModelTier::Reasoning, ModelTier::Cheap, ModelTier::Embedding] {
+        for (entry_tier, base_url, model, in_tokens, out_tokens) in aggregated
+            .iter()
+            .filter(|(entry_tier, _, _, _, _)| *entry_tier == tier)
+        {
+            let Some(cost) =
+                pricing.estimate_usage_usd(base_url, model, *in_tokens, *out_tokens, 0)
+            else {
+                continue;
+            };
+
+            let label = match entry_tier {
+                ModelTier::Cheap => "Cheap",
+                ModelTier::Reasoning => "Reasoning",
+                ModelTier::Embedding => "Embedding",
+            };
+            lines.push(format!(
+                "- {label} ({model}) in={in_tokens} out={out_tokens} cost=${cost:.6}"
+            ));
+            total_cost += cost;
+            footer_base_urls.push(base_url.clone());
+        }
+    }
+
+    if lines.is_empty() {
+        return 0.0;
+    }
+
+    if !body.is_empty() {
+        body.push_str("\n\n");
+    }
+    body.push_str("## LLM usage and cost\n\n");
+    body.push_str(&lines.join("\n"));
+    body.push('\n');
+
+    let mut via = String::new();
+    match footer_base_urls.as_slice() {
+        [] => {}
+        [single] => {
+            via.push_str(single);
+        }
+        [first, second] => {
+            via.push_str(first);
+            via.push_str(" and ");
+            via.push_str(second);
+        }
+        many => {
+            for (idx, url) in many.iter().enumerate() {
+                if idx == many.len() - 1 {
+                    via.push_str(" and ");
+                    via.push_str(url);
+                } else if idx > 0 {
+                    via.push_str(", ");
+                    via.push_str(url);
+                } else {
+                    via.push_str(url);
+                }
+            }
+        }
+    }
+
+    if !via.is_empty() {
+        body.push_str(&format!("Estimated total USD: ${total_cost:.6} via {via}"));
+    }
+
+    total_cost
+}
+
+fn should_emit_cost_footer() -> bool {
+    !matches!(
+        std::env::var("AR_REVIEW_COST_FOOTER"),
+        Ok(value) if value.trim().eq_ignore_ascii_case("false")
+    )
 }
 
 fn validate_pr_metadata_title_length(title: &str) -> Option<PrMetadataValidation> {
@@ -345,6 +455,9 @@ pub struct ReviewArgs<'a> {
     pub pr_metadata_check: bool,
 }
 
+type UsageEntry = (ModelTier, String, String, u32, u32);
+type UsageLog = std::sync::Arc<std::sync::Mutex<Vec<UsageEntry>>>;
+
 /// End-to-end review activity for one PR.
 ///
 /// Fetches the diff and changed-file list, calls the reasoning LLM with
@@ -352,6 +465,24 @@ pub struct ReviewArgs<'a> {
 /// request, and posts it. The orchestrator is responsible for cloning the
 /// repo and preparing optional workspace context for RAG/agentic verification.
 pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, ReviewError> {
+    let usage: UsageLog = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let llm = {
+        let usage_capture = usage.clone();
+        args.llm.clone().with_usage_collector(
+            move |tier, base_url, model, input_tokens, output_tokens| {
+                if let Ok(mut usage) = usage_capture.lock() {
+                    usage.push((
+                        tier,
+                        base_url.to_string(),
+                        model.to_string(),
+                        input_tokens,
+                        output_tokens,
+                    ));
+                }
+            },
+        )
+    };
+
     let raw_diff = match args.diff_override {
         Some(d) => d.to_string(),
         None => {
@@ -414,14 +545,14 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
     // Track the post-floor / pre-verifier count so we can report how many
     // findings the verifier dropped.
     let mut output =
-        generate_with_self_heal(args.llm, system_prompt(), &prompt, HealConfig::default()).await?;
+        generate_with_self_heal(&llm, system_prompt(), &prompt, HealConfig::default()).await?;
     apply_severity_floor(&mut output, args.min_severity);
     let pre_verify_count = output.findings.len();
     output = match (args.verify_mode, args.workspace_path) {
         (VerifyMode::Agentic, Some(workspace)) => {
-            verify_findings_agentic(args.llm, output, workspace, &diff).await?
+            verify_findings_agentic(&llm, output, workspace, &diff).await?
         }
-        _ => verify_findings(args.llm, output, &diff).await?,
+        _ => verify_findings(&llm, output, &diff).await?,
     };
     // Snapshot the post-verifier count BEFORE the severity-floor /
     // path-guard passes. `verifier_dropped` reports specifically
@@ -445,13 +576,20 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         if let Some(validation) = validate_pr_metadata_title_length(args.pr_title) {
             Some(validation)
         } else {
-            validate_pr_metadata_quality(args.llm, args.pr_title, args.pr_body).await
+            validate_pr_metadata_quality(&llm, args.pr_title, args.pr_body).await
         }
     } else {
         None
     };
 
     let mut req = output_to_review_request(&output, args.head_sha);
+    let usage = usage.lock().map(|u| u.clone()).unwrap_or_default();
+    let mut suppressed_footer = String::new();
+    let estimated_total_cost_usd = if should_emit_cost_footer() {
+        append_llm_usage_cost_footer(&mut req.body, &usage)
+    } else {
+        append_llm_usage_cost_footer(&mut suppressed_footer, &usage)
+    };
     if let Some(validation) = metadata_validation {
         if !validation.passed && !has_clearly_acceptable_pr_metadata(args.pr_title, args.pr_body) {
             append_pre_merge_checks(&mut req.body, &validation);
@@ -482,6 +620,7 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         warnings,
         notes,
         verifier_dropped,
+        estimated_total_cost_usd,
     })
 }
 
@@ -492,6 +631,7 @@ mod tests {
         CompleteRequest, CompleteResponse, Error as LlmError, LlmProvider, ModelTier, Router,
     };
     use async_trait::async_trait;
+    use std::env;
     use std::sync::{Arc, Mutex};
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -502,6 +642,35 @@ mod tests {
     struct CannedProvider {
         responses: Mutex<Vec<String>>,
         seen: Mutex<Vec<CompleteRequest>>,
+    }
+
+    struct EnvVarRestoreGuard {
+        key: &'static str,
+        original: Option<String>,
+    }
+
+    impl EnvVarRestoreGuard {
+        fn set(key: &'static str, value: &str) -> Self {
+            let original = env::var(key).ok();
+            // SAFETY: test-only process environment mutation for focused test setup.
+            unsafe { env::set_var(key, value) };
+            Self { key, original }
+        }
+    }
+
+    impl Drop for EnvVarRestoreGuard {
+        fn drop(&mut self) {
+            match &self.original {
+                Some(value) => {
+                    // SAFETY: restoring prior environment value for test cleanup.
+                    unsafe { env::set_var(self.key, value) };
+                }
+                None => {
+                    // SAFETY: restoring prior environment absence for test cleanup.
+                    unsafe { env::remove_var(self.key) };
+                }
+            }
+        }
     }
 
     impl CannedProvider {
@@ -2039,7 +2208,7 @@ mod tests {
             r#"{"summary":"looks fine","findings":[]}"#,
         ]));
         let llm = router_with(provider.clone());
-        review_pull_request(ReviewArgs {
+        let _outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -2110,7 +2279,7 @@ mod tests {
             r#"{"summary":"looks fine","findings":[]}"#,
         ]));
         let llm = router_with(provider.clone());
-        review_pull_request(ReviewArgs {
+        let _outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -2169,7 +2338,7 @@ mod tests {
         ]));
         let llm = router_with(provider.clone());
 
-        review_pull_request(ReviewArgs {
+        let _outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -2258,7 +2427,7 @@ mod tests {
         ]));
         let llm = router_with(provider.clone());
 
-        review_pull_request(ReviewArgs {
+        let _outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -2357,7 +2526,7 @@ mod tests {
         ]));
         let llm = router_with(provider.clone());
 
-        review_pull_request(ReviewArgs {
+        let _outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -2582,7 +2751,7 @@ mod tests {
             r#"{"summary":"lint summary","findings":[]}"#,
         ]));
         let llm = router_with(provider.clone());
-        review_pull_request(ReviewArgs {
+        let _outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -2637,6 +2806,463 @@ mod tests {
                 && !review_body.contains("eslint — skipped")
                 && !review_body.contains("markdownlint — failed"),
             "full semantic review body should not include linter summary section; body was:\n{review_body}",
+        );
+    }
+
+    struct CostAwareProvider {
+        responses: Mutex<Vec<(String, u32, u32)>>,
+        seen: Mutex<Vec<CompleteRequest>>,
+        model: String,
+        base_url: String,
+    }
+
+    impl CostAwareProvider {
+        fn new(responses: Vec<(&str, u32, u32)>, model: &str) -> Self {
+            Self {
+                responses: Mutex::new(
+                    responses
+                        .into_iter()
+                        .map(|(content, input_tokens, output_tokens)| {
+                            (content.to_string(), input_tokens, output_tokens)
+                        })
+                        .collect(),
+                ),
+                seen: Mutex::new(Vec::new()),
+                model: model.to_string(),
+                base_url: "https://api.openai.com/v1".to_string(),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl LlmProvider for CostAwareProvider {
+        async fn complete(&self, req: CompleteRequest) -> Result<CompleteResponse, LlmError> {
+            self.seen.lock().unwrap().push(req);
+            let (content, input_tokens, output_tokens) = self
+                .responses
+                .lock()
+                .unwrap()
+                .pop()
+                .unwrap_or_else(|| ("{}".to_string(), 0, 0));
+
+            Ok(CompleteResponse {
+                content,
+                input_tokens,
+                output_tokens,
+            })
+        }
+
+        fn provider_base_url(&self) -> String {
+            self.base_url.clone()
+        }
+
+        fn completion_model_name(&self) -> String {
+            self.model.clone()
+        }
+    }
+
+    #[tokio::test]
+    async fn review_pull_request_posts_review_with_llm_usage_cost_footer() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("diff --git a/src/x.rs b/src/x.rs\n@@ -1 +1 @@\n-old\n+new\n"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 909,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+
+        // Reverse order: the mocked router pops the last entry first,
+        // so Reasoning should consume the second tuple and Cheap the first.
+        let provider = Arc::new(CostAwareProvider::new(
+            vec![
+                (
+                    r#"{"verdicts":[{"finding_index":0,"keep":true,"reasoning":"ok"}]}"#,
+                    120,
+                    34,
+                ),
+                (
+                    r#"{"summary":"looks fine","findings":[{"path":"src/x.rs","line_start":1,"severity":"warning","message":"found issue"}]}"#,
+                    640,
+                    80,
+                ),
+            ],
+            "gpt-4o-mini",
+        ));
+
+        let usage: UsageLog = Arc::new(Mutex::new(Vec::new()));
+        let usage_capture = usage.clone();
+        let llm = Router::new()
+            .with(ModelTier::Reasoning, provider.clone())
+            .with(ModelTier::Cheap, provider.clone())
+            .with_usage_collector(
+                move |tier, provider_base_url, model_name, input_tokens, output_tokens| {
+                    usage_capture.lock().unwrap().push((
+                        tier,
+                        provider_base_url.to_string(),
+                        model_name.to_string(),
+                        input_tokens,
+                        output_tokens,
+                    ));
+                },
+            );
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "sha",
+            pr_title: "t",
+            pr_body: "b",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+            pr_metadata_check: false,
+        })
+        .await
+        .expect("review ok");
+
+        let received = server.received_requests().await.expect("requests");
+        let posted_review = received
+            .iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("posted review");
+        let body: serde_json::Value =
+            serde_json::from_slice(&posted_review.body).expect("review body json");
+        let review_body = body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review body");
+
+        let captured = usage.lock().unwrap().clone();
+        let pricing = ar_llm::pricing::default_openai_price_table();
+        let maybe_reasoning = captured
+            .iter()
+            .find(|(tier, _, _, _, _)| matches!(tier, ModelTier::Reasoning))
+            .map(
+                |(_, provider_base_url, model, input_tokens, output_tokens)| {
+                    (
+                        provider_base_url.as_str(),
+                        model,
+                        *input_tokens,
+                        *output_tokens,
+                        pricing
+                            .estimate_usage_usd(
+                                provider_base_url,
+                                model,
+                                *input_tokens,
+                                *output_tokens,
+                                0,
+                            )
+                            .expect("reasoning model should have price entry"),
+                    )
+                },
+            );
+        let maybe_cheap = captured
+            .iter()
+            .find(|(tier, _, _, _, _)| matches!(tier, ModelTier::Cheap))
+            .map(
+                |(_, provider_base_url, model, input_tokens, output_tokens)| {
+                    (
+                        provider_base_url.as_str(),
+                        model,
+                        *input_tokens,
+                        *output_tokens,
+                        pricing
+                            .estimate_usage_usd(
+                                provider_base_url,
+                                model,
+                                *input_tokens,
+                                *output_tokens,
+                                0,
+                            )
+                            .expect("cheap model should have price entry"),
+                    )
+                },
+            );
+
+        let (reasoning_base_url, reasoning_model, reasoning_in, reasoning_out, reasoning_cost) =
+            maybe_reasoning.expect("reasoning usage should be recorded");
+        let (cheap_base_url, cheap_model, cheap_in, cheap_out, cheap_cost) =
+            maybe_cheap.expect("cheap usage should be recorded");
+
+        let expected_reasoning_fragment = format!(
+            "Reasoning ({reasoning_model}) in={reasoning_in} out={reasoning_out} cost=${reasoning_cost:.6}"
+        );
+        let expected_cheap_fragment =
+            format!("Cheap ({cheap_model}) in={cheap_in} out={cheap_out} cost=${cheap_cost:.6}");
+        let total_cost = reasoning_cost + cheap_cost;
+        assert_eq!(
+            outcome.estimated_total_cost_usd, total_cost,
+            "review outcome should expose the estimated total cost from usage footer"
+        );
+        let expected_total_fragment = format!(
+            "Estimated total USD: ${total_cost:.6} via {reasoning_base_url} and {cheap_base_url}"
+        );
+
+        assert!(
+            review_body.contains(&expected_reasoning_fragment)
+                && review_body.contains(&expected_cheap_fragment)
+                && review_body.contains(&expected_total_fragment),
+            "review body should include a usage/cost footer from LLM provider usage. body was:\n{review_body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn review_pull_request_omits_llm_usage_cost_footer_when_disabled_by_env() {
+        let _footer_env = EnvVarRestoreGuard::set("AR_REVIEW_COST_FOOTER", "false");
+
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("diff --git a/src/x.rs b/src/x.rs\n@@ -1 +1 @@\n-old\n+new\n"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 910,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CostAwareProvider::new(
+            vec![
+                (
+                    r#"{"verdicts":[{"finding_index":0,"keep":true,"reasoning":"ok"}]}"#,
+                    120,
+                    34,
+                ),
+                (
+                    r#"{"summary":"looks fine","findings":[{"path":"src/x.rs","line_start":1,"severity":"warning","message":"found issue"}]}"#,
+                    640,
+                    80,
+                ),
+            ],
+            "gpt-4o-mini",
+        ));
+
+        let usage: UsageLog = Arc::new(Mutex::new(Vec::new()));
+        let usage_capture = usage.clone();
+        let llm = Router::new()
+            .with(ModelTier::Reasoning, provider.clone())
+            .with(ModelTier::Cheap, provider.clone())
+            .with_usage_collector(
+                move |tier, provider_base_url, model_name, input_tokens, output_tokens| {
+                    usage_capture.lock().unwrap().push((
+                        tier,
+                        provider_base_url.to_string(),
+                        model_name.to_string(),
+                        input_tokens,
+                        output_tokens,
+                    ));
+                },
+            );
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "sha",
+            pr_title: "t",
+            pr_body: "b",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+            pr_metadata_check: false,
+        })
+        .await
+        .expect("review ok");
+
+        let captured = usage.lock().unwrap().clone();
+        let pricing = ar_llm::pricing::default_openai_price_table();
+        let expected_total = captured
+            .iter()
+            .map(
+                |(_, provider_base_url, model, input_tokens, output_tokens)| {
+                    pricing
+                        .estimate_usage_usd(
+                            provider_base_url,
+                            model,
+                            *input_tokens,
+                            *output_tokens,
+                            0,
+                        )
+                        .expect("test usage should have price entry")
+                },
+            )
+            .sum::<f64>();
+        assert!(
+            expected_total > 0.0,
+            "mocked usage/pricing should produce a non-zero estimated cost"
+        );
+        assert_eq!(
+            outcome.estimated_total_cost_usd,
+            expected_total,
+            "review outcome should keep estimated cost attribution even when AR_REVIEW_COST_FOOTER=false"
+        );
+
+        let received = server.received_requests().await.expect("requests");
+        let posted_review = received
+            .iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("posted review");
+        let body: serde_json::Value =
+            serde_json::from_slice(&posted_review.body).expect("review body json");
+        let review_body = body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review body");
+
+        assert!(
+            !review_body.contains("## LLM usage and cost")
+                && !review_body.contains("Estimated total USD:"),
+            "review body should omit usage/cost footer when AR_REVIEW_COST_FOOTER=false; body was:\n{review_body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn review_pull_request_cost_footer_uses_price_table_override_from_env_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("diff --git a/src/x.rs b/src/x.rs\n@@ -1 +1 @@\n-old\n+new\n"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 911,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let override_path = std::env::temp_dir().join(format!(
+            "ar-review-price-override-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be after unix epoch")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &override_path,
+            r#"{"gpt-4o-mini":{"input":100.0,"output":200.0,"embedding":0.0}}"#,
+        )
+        .expect("write price override json");
+        let _override_env = EnvVarRestoreGuard::set(
+            "AR_PRICE_TABLE_PATH",
+            override_path
+                .to_str()
+                .expect("override path should be valid utf-8"),
+        );
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CostAwareProvider::new(
+            vec![
+                (
+                    r#"{"verdicts":[{"finding_index":0,"keep":true,"reasoning":"ok"}]}"#,
+                    120,
+                    34,
+                ),
+                (
+                    r#"{"summary":"looks fine","findings":[{"path":"src/x.rs","line_start":1,"severity":"warning","message":"found issue"}]}"#,
+                    640,
+                    80,
+                ),
+            ],
+            "gpt-4o-mini",
+        ));
+
+        let llm = Router::new()
+            .with(ModelTier::Reasoning, provider.clone())
+            .with(ModelTier::Cheap, provider.clone());
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "sha",
+            pr_title: "t",
+            pr_body: "b",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+            pr_metadata_check: false,
+        })
+        .await
+        .expect("review ok");
+
+        // Both Reasoning and Cheap tiers use gpt-4o-mini in this test.
+        // Total tokens: input=760, output=114.
+        let expected_override_total =
+            (760.0_f64 * 100.0_f64 + 114.0_f64 * 200.0_f64) / 1_000_000.0_f64;
+        let _ = std::fs::remove_file(&override_path);
+        assert_eq!(
+            outcome.estimated_total_cost_usd, expected_override_total,
+            "review outcome should use AR_PRICE_TABLE_PATH override pricing instead of defaults"
         );
     }
 }

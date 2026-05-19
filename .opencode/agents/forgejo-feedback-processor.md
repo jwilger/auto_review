@@ -1,6 +1,7 @@
 ---
 description: Subagent for Forgejo PR feedback. Reflects, classifies, remediates, and prepares inline thread replies.
 mode: subagent
+model: "openai/gpt-5.3-codex-standard"
 steps: 200
 color: "#F66A0A"
 permission:
