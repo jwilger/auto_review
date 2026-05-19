@@ -2908,8 +2908,7 @@ mod tests {
             "gpt-4o-mini",
         ));
 
-        let usage: UsageLog =
-            Arc::new(Mutex::new(Vec::new()));
+        let usage: UsageLog = Arc::new(Mutex::new(Vec::new()));
         let usage_capture = usage.clone();
         let llm = Router::new()
             .with(ModelTier::Reasoning, provider.clone())
@@ -3019,8 +3018,7 @@ mod tests {
             format!("Cheap ({cheap_model}) in={cheap_in} out={cheap_out} cost=${cheap_cost:.6}");
         let total_cost = reasoning_cost + cheap_cost;
         assert_eq!(
-            outcome.estimated_total_cost_usd,
-            total_cost,
+            outcome.estimated_total_cost_usd, total_cost,
             "review outcome should expose the estimated total cost from usage footer"
         );
         let expected_total_fragment = format!(
@@ -3124,11 +3122,19 @@ mod tests {
         let pricing = ar_llm::pricing::default_openai_price_table();
         let expected_total = captured
             .iter()
-            .map(|(_, provider_base_url, model, input_tokens, output_tokens)| {
-                pricing
-                    .estimate_usage_usd(provider_base_url, model, *input_tokens, *output_tokens, 0)
-                    .expect("test usage should have price entry")
-            })
+            .map(
+                |(_, provider_base_url, model, input_tokens, output_tokens)| {
+                    pricing
+                        .estimate_usage_usd(
+                            provider_base_url,
+                            model,
+                            *input_tokens,
+                            *output_tokens,
+                            0,
+                        )
+                        .expect("test usage should have price entry")
+                },
+            )
             .sum::<f64>();
         assert!(
             expected_total > 0.0,
@@ -3201,7 +3207,9 @@ mod tests {
         .expect("write price override json");
         let _override_env = EnvVarRestoreGuard::set(
             "AR_PRICE_TABLE_PATH",
-            override_path.to_str().expect("override path should be valid utf-8"),
+            override_path
+                .to_str()
+                .expect("override path should be valid utf-8"),
         );
 
         let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
@@ -3249,11 +3257,11 @@ mod tests {
 
         // Both Reasoning and Cheap tiers use gpt-4o-mini in this test.
         // Total tokens: input=760, output=114.
-        let expected_override_total = (760.0_f64 * 100.0_f64 + 114.0_f64 * 200.0_f64) / 1_000_000.0_f64;
+        let expected_override_total =
+            (760.0_f64 * 100.0_f64 + 114.0_f64 * 200.0_f64) / 1_000_000.0_f64;
         let _ = std::fs::remove_file(&override_path);
         assert_eq!(
-            outcome.estimated_total_cost_usd,
-            expected_override_total,
+            outcome.estimated_total_cost_usd, expected_override_total,
             "review outcome should use AR_PRICE_TABLE_PATH override pricing instead of defaults"
         );
     }
