@@ -584,10 +584,11 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
 
     let mut req = output_to_review_request(&output, args.head_sha);
     let usage = usage.lock().map(|u| u.clone()).unwrap_or_default();
+    let mut suppressed_footer = String::new();
     let estimated_total_cost_usd = if should_emit_cost_footer() {
         append_llm_usage_cost_footer(&mut req.body, &usage)
     } else {
-        0.0
+        append_llm_usage_cost_footer(&mut suppressed_footer, &usage)
     };
     if let Some(validation) = metadata_validation {
         if !validation.passed && !has_clearly_acceptable_pr_metadata(args.pr_title, args.pr_body) {
@@ -3080,9 +3081,22 @@ mod tests {
             "gpt-4o-mini",
         ));
 
+        let usage: UsageLog = Arc::new(Mutex::new(Vec::new()));
+        let usage_capture = usage.clone();
         let llm = Router::new()
             .with(ModelTier::Reasoning, provider.clone())
-            .with(ModelTier::Cheap, provider.clone());
+            .with(ModelTier::Cheap, provider.clone())
+            .with_usage_collector(
+                move |tier, provider_base_url, model_name, input_tokens, output_tokens| {
+                    usage_capture.lock().unwrap().push((
+                        tier,
+                        provider_base_url.to_string(),
+                        model_name.to_string(),
+                        input_tokens,
+                        output_tokens,
+                    ));
+                },
+            );
 
         let outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
@@ -3106,10 +3120,24 @@ mod tests {
         .await
         .expect("review ok");
 
+        let captured = usage.lock().unwrap().clone();
+        let pricing = ar_llm::pricing::default_openai_price_table();
+        let expected_total = captured
+            .iter()
+            .map(|(_, provider_base_url, model, input_tokens, output_tokens)| {
+                pricing
+                    .estimate_usage_usd(provider_base_url, model, *input_tokens, *output_tokens, 0)
+                    .expect("test usage should have price entry")
+            })
+            .sum::<f64>();
+        assert!(
+            expected_total > 0.0,
+            "mocked usage/pricing should produce a non-zero estimated cost"
+        );
         assert_eq!(
             outcome.estimated_total_cost_usd,
-            0.0,
-            "review outcome should report zero estimated cost when AR_REVIEW_COST_FOOTER=false"
+            expected_total,
+            "review outcome should keep estimated cost attribution even when AR_REVIEW_COST_FOOTER=false"
         );
 
         let received = server.received_requests().await.expect("requests");
