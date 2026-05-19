@@ -29,7 +29,28 @@ impl Router {
     where
         F: Fn(ModelTier, &str, &str, u32, u32) + Send + Sync + 'static,
     {
-        self.usage_collector = Some(Arc::new(collector));
+        let collector = Arc::new(collector);
+        self.usage_collector = match self.usage_collector {
+            Some(existing) => Some(Arc::new(
+                move |tier, provider_base_url, model_name, input_tokens, output_tokens| {
+                    existing(
+                        tier,
+                        provider_base_url,
+                        model_name,
+                        input_tokens,
+                        output_tokens,
+                    );
+                    collector(
+                        tier,
+                        provider_base_url,
+                        model_name,
+                        input_tokens,
+                        output_tokens,
+                    );
+                },
+            )),
+            None => Some(collector),
+        };
         self
     }
 
