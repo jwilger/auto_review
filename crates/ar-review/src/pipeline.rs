@@ -197,7 +197,14 @@ fn append_llm_usage_cost_footer(
         return 0.0;
     }
 
-    let pricing = ar_llm::pricing::default_openai_price_table();
+    let pricing = std::env::var("AR_PRICE_TABLE_PATH")
+        .ok()
+        .and_then(|value| {
+            let trimmed = value.trim();
+            (!trimmed.is_empty()).then(|| std::path::PathBuf::from(trimmed))
+        })
+        .and_then(|path| ar_llm::pricing::load_openai_price_table(Some(path.as_path())).ok())
+        .unwrap_or_else(ar_llm::pricing::default_openai_price_table);
     let mut aggregated: Vec<(ModelTier, String, String, u32, u32)> = Vec::new();
     for (tier, base_url, model, in_tokens, out_tokens) in usage.iter().cloned() {
         if let Some((_, _, _, existing_in, existing_out)) = aggregated
@@ -2518,7 +2525,7 @@ mod tests {
         ]));
         let llm = router_with(provider.clone());
 
-        let outcome = review_pull_request(ReviewArgs {
+        let _outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -2743,7 +2750,7 @@ mod tests {
             r#"{"summary":"lint summary","findings":[]}"#,
         ]));
         let llm = router_with(provider.clone());
-        let outcome = review_pull_request(ReviewArgs {
+        let _outcome = review_pull_request(ReviewArgs {
             forgejo: &forgejo,
             llm: &llm,
             owner: "o",
@@ -3121,6 +3128,105 @@ mod tests {
             !review_body.contains("## LLM usage and cost")
                 && !review_body.contains("Estimated total USD:"),
             "review body should omit usage/cost footer when AR_REVIEW_COST_FOOTER=false; body was:\n{review_body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn review_pull_request_cost_footer_uses_price_table_override_from_env_path() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("diff --git a/src/x.rs b/src/x.rs\n@@ -1 +1 @@\n-old\n+new\n"),
+            )
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 911,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let override_path = std::env::temp_dir().join(format!(
+            "ar-review-price-override-{}-{}.json",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .expect("clock should be after unix epoch")
+                .as_nanos()
+        ));
+        std::fs::write(
+            &override_path,
+            r#"{"gpt-4o-mini":{"input":100.0,"output":200.0,"embedding":0.0}}"#,
+        )
+        .expect("write price override json");
+        let _override_env = EnvVarRestoreGuard::set(
+            "AR_PRICE_TABLE_PATH",
+            override_path.to_str().expect("override path should be valid utf-8"),
+        );
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let provider = Arc::new(CostAwareProvider::new(
+            vec![
+                (
+                    r#"{"verdicts":[{"finding_index":0,"keep":true,"reasoning":"ok"}]}"#,
+                    120,
+                    34,
+                ),
+                (
+                    r#"{"summary":"looks fine","findings":[{"path":"src/x.rs","line_start":1,"severity":"warning","message":"found issue"}]}"#,
+                    640,
+                    80,
+                ),
+            ],
+            "gpt-4o-mini",
+        ));
+
+        let llm = Router::new()
+            .with(ModelTier::Reasoning, provider.clone())
+            .with(ModelTier::Cheap, provider.clone());
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "sha",
+            pr_title: "t",
+            pr_body: "b",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+            pr_metadata_check: false,
+        })
+        .await
+        .expect("review ok");
+
+        // Both Reasoning and Cheap tiers use gpt-4o-mini in this test.
+        // Total tokens: input=760, output=114.
+        let expected_override_total = (760.0_f64 * 100.0_f64 + 114.0_f64 * 200.0_f64) / 1_000_000.0_f64;
+        let _ = std::fs::remove_file(&override_path);
+        assert_eq!(
+            outcome.estimated_total_cost_usd,
+            expected_override_total,
+            "review outcome should use AR_PRICE_TABLE_PATH override pricing instead of defaults"
         );
     }
 }
