@@ -55,10 +55,11 @@ pub fn load_openai_price_table(path: Option<&Path>) -> Result<PriceTable, Error>
             path: path.display().to_string(),
             source,
         })?;
-        let overrides: PriceTable = serde_json::from_str(&body).map_err(|source| Error::Decode {
-            path: path.display().to_string(),
-            source,
-        })?;
+        let overrides: PriceTable =
+            serde_json::from_str(&body).map_err(|source| Error::Decode {
+                path: path.display().to_string(),
+                source,
+            })?;
         table.extend(overrides);
     }
     Ok(table)
@@ -67,31 +68,31 @@ pub fn load_openai_price_table(path: Option<&Path>) -> Result<PriceTable, Error>
 pub fn default_openai_price_table() -> PriceTable {
     PriceTable {
         models: BTreeMap::from([
-        (
-            "gpt-4o".to_string(),
-            ModelPrice {
-                input: 5.0,
-                output: 15.0,
-                embedding: 0.0,
-            },
-        ),
-        (
-            "gpt-4o-mini".to_string(),
-            ModelPrice {
-                input: 0.15,
-                output: 0.60,
-                embedding: 0.0,
-            },
-        ),
-        (
-            "text-embedding-3-small".to_string(),
-            ModelPrice {
-                input: 0.0,
-                output: 0.0,
-                embedding: 0.02,
-            },
-        ),
-    ]),
+            (
+                "gpt-4o".to_string(),
+                ModelPrice {
+                    input: 5.0,
+                    output: 15.0,
+                    embedding: 0.0,
+                },
+            ),
+            (
+                "gpt-4o-mini".to_string(),
+                ModelPrice {
+                    input: 0.15,
+                    output: 0.60,
+                    embedding: 0.0,
+                },
+            ),
+            (
+                "text-embedding-3-small".to_string(),
+                ModelPrice {
+                    input: 0.0,
+                    output: 0.0,
+                    embedding: 0.02,
+                },
+            ),
+        ]),
     }
 }
 

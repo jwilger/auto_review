@@ -1,5 +1,6 @@
 use ar_llm::{
-    CompleteRequest, CompleteResponse, Error, LlmProvider, Message, ModelTier, OpenAiProvider, Router,
+    CompleteRequest, CompleteResponse, Error, LlmProvider, Message, ModelTier, OpenAiProvider,
+    Router,
 };
 use async_trait::async_trait;
 use std::sync::{
@@ -80,12 +81,16 @@ async fn router_usage_collector_records_complete_and_embedding_calls() {
     let observed_for_cb = observed.clone();
 
     let router = Router::new()
-        .with_usage_collector(move |tier, _provider_base_url, model, input_tokens, output_tokens| {
-            observed_for_cb
-                .lock()
-                .unwrap()
-                .push((tier, model.to_string(), input_tokens, output_tokens));
-        })
+        .with_usage_collector(
+            move |tier, _provider_base_url, model, input_tokens, output_tokens| {
+                observed_for_cb.lock().unwrap().push((
+                    tier,
+                    model.to_string(),
+                    input_tokens,
+                    output_tokens,
+                ));
+            },
+        )
         .with(
             ModelTier::Cheap,
             Arc::new(UsageProbeProvider::with_response(CompleteResponse {
@@ -131,16 +136,23 @@ async fn router_usage_collector_records_complete_and_embedding_calls() {
 
 #[tokio::test]
 async fn router_usage_collector_records_provider_and_model_names() {
-    let observed = Arc::new(Mutex::new(Vec::<(ModelTier, String, String, u32, u32)>::new()));
+    let observed = Arc::new(Mutex::new(
+        Vec::<(ModelTier, String, String, u32, u32)>::new(),
+    ));
     let observed_for_cb = observed.clone();
 
     let router = Router::new()
-        .with_usage_collector(move |tier, provider_base_url, model, input_tokens, output_tokens| {
-            observed_for_cb
-                .lock()
-                .unwrap()
-                .push((tier, provider_base_url.to_string(), model.to_string(), input_tokens, output_tokens));
-        })
+        .with_usage_collector(
+            move |tier, provider_base_url, model, input_tokens, output_tokens| {
+                observed_for_cb.lock().unwrap().push((
+                    tier,
+                    provider_base_url.to_string(),
+                    model.to_string(),
+                    input_tokens,
+                    output_tokens,
+                ));
+            },
+        )
         .with(
             ModelTier::Cheap,
             Arc::new(MetadataProbeProvider {
@@ -182,7 +194,10 @@ async fn router_usage_collector_records_provider_and_model_names() {
         .expect("completion should succeed");
 
     let _ = router
-        .embed(ModelTier::Embedding, &vec!["left".to_string(), "right".to_string()])
+        .embed(
+            ModelTier::Embedding,
+            &vec!["left".to_string(), "right".to_string()],
+        )
         .await
         .expect("embedding should succeed");
 
@@ -212,15 +227,13 @@ async fn router_usage_collector_records_embedding_prompt_tokens_from_openai_resp
             "model": "text-embedding-3-small",
             "input": ["alpha", "beta"]
         })))
-        .respond_with(
-            ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "data": [
-                    {"embedding": [0.1, 0.2]},
-                    {"embedding": [0.3, 0.4]}
-                ],
-                "usage": {"prompt_tokens": 17, "completion_tokens": 0, "total_tokens": 17}
-            })),
-        )
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "data": [
+                {"embedding": [0.1, 0.2]},
+                {"embedding": [0.3, 0.4]}
+            ],
+            "usage": {"prompt_tokens": 17, "completion_tokens": 0, "total_tokens": 17}
+        })))
         .mount(&server)
         .await;
 
@@ -228,12 +241,16 @@ async fn router_usage_collector_records_embedding_prompt_tokens_from_openai_resp
     let observed_for_cb = observed.clone();
 
     let router = Router::new()
-        .with_usage_collector(move |_tier, _provider_base_url, model, input_tokens, output_tokens| {
-            observed_for_cb
-                .lock()
-                .unwrap()
-                .push((_tier, model.to_string(), input_tokens, output_tokens));
-        })
+        .with_usage_collector(
+            move |_tier, _provider_base_url, model, input_tokens, output_tokens| {
+                observed_for_cb.lock().unwrap().push((
+                    _tier,
+                    model.to_string(),
+                    input_tokens,
+                    output_tokens,
+                ));
+            },
+        )
         .with(ModelTier::Embedding, Arc::new(provider));
 
     let vectors = router

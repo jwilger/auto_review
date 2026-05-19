@@ -96,10 +96,7 @@ pub trait LlmProvider: Send + Sync {
         Err(Error::Unsupported)
     }
 
-    async fn embed_with_usage(
-        &self,
-        texts: &[String],
-    ) -> Result<(Vec<Vec<f32>>, u32, u32), Error> {
+    async fn embed_with_usage(&self, texts: &[String]) -> Result<(Vec<Vec<f32>>, u32, u32), Error> {
         let vectors = self.embed(texts).await?;
         Ok((vectors, 0, 0))
     }

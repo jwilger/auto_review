@@ -157,7 +157,9 @@ impl LlmProvider for OpenAiProvider {
     }
 
     fn embedding_model_name(&self) -> String {
-        self.embedding_model.clone().unwrap_or_else(|| "embedding-model".to_string())
+        self.embedding_model
+            .clone()
+            .unwrap_or_else(|| "embedding-model".to_string())
     }
 }
 
