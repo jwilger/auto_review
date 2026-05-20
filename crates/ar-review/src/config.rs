@@ -123,6 +123,9 @@ const KNOWN_KEYS: &[&str] = &[
     "pr_metadata_check",
 ];
 
+const KNOWN_PR_METADATA_CHECK_KEYS: &[&str] = &["enabled", "checks", "additional_rules"];
+const KNOWN_PR_METADATA_CHECKS_KEYS: &[&str] = &["body_required"];
+
 /// Strict parser: surfaces unknown top-level keys as errors so a
 /// typo like `enabld: true` (missing `e`) is caught at validation
 /// time instead of silently parsing as default values.
@@ -145,6 +148,33 @@ pub fn parse_repo_config_strict(yaml: &str) -> Result<RepoConfig, RepoConfigStri
                 }
             }
         }
+
+        if let Some(pr_metadata_check) = map.get(serde_yaml::Value::String("pr_metadata_check".into()))
+        {
+            if let Some(pr_metadata_check_map) = pr_metadata_check.as_mapping() {
+                for (k, v) in pr_metadata_check_map {
+                    if let Some(key_str) = k.as_str() {
+                        if !KNOWN_PR_METADATA_CHECK_KEYS.contains(&key_str) {
+                            unknown.push(format!("pr_metadata_check.{key_str}"));
+                        }
+                        if key_str == "checks" {
+                            if let Some(checks_map) = v.as_mapping() {
+                                for (check_key, _) in checks_map {
+                                    if let Some(check_key_str) = check_key.as_str() {
+                                        if !KNOWN_PR_METADATA_CHECKS_KEYS.contains(&check_key_str) {
+                                            unknown.push(format!(
+                                                "pr_metadata_check.checks.{check_key_str}"
+                                            ));
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         if !unknown.is_empty() {
             unknown.sort();
             return Err(RepoConfigStrictError::UnknownKeys(unknown));
@@ -389,6 +419,33 @@ ignored_paths:
     }
 
     #[test]
+    fn strict_metadata_allowlists_match_struct_fields() {
+        let pr_metadata_check = PrMetadataCheck::default();
+        let value = serde_yaml::to_value(&pr_metadata_check).unwrap();
+        let map = value.as_mapping().unwrap();
+        let serialised_check_keys: std::collections::BTreeSet<&str> =
+            map.iter().filter_map(|(k, _)| k.as_str()).collect();
+        let allowed_check_keys: std::collections::BTreeSet<&str> =
+            KNOWN_PR_METADATA_CHECK_KEYS.iter().copied().collect();
+        assert_eq!(
+            serialised_check_keys, allowed_check_keys,
+            "PrMetadataCheck fields and KNOWN_PR_METADATA_CHECK_KEYS allow-list have drifted"
+        );
+
+        let pr_metadata_checks = PrMetadataChecks::default();
+        let value = serde_yaml::to_value(&pr_metadata_checks).unwrap();
+        let map = value.as_mapping().unwrap();
+        let serialised_checks_keys: std::collections::BTreeSet<&str> =
+            map.iter().filter_map(|(k, _)| k.as_str()).collect();
+        let allowed_checks_keys: std::collections::BTreeSet<&str> =
+            KNOWN_PR_METADATA_CHECKS_KEYS.iter().copied().collect();
+        assert_eq!(
+            serialised_checks_keys, allowed_checks_keys,
+            "PrMetadataChecks fields and KNOWN_PR_METADATA_CHECKS_KEYS allow-list have drifted"
+        );
+    }
+
+    #[test]
     fn strict_parses_known_config_cleanly() {
         let yaml = "enabled: true\npr_metadata_check: false\nignored_paths:\n  - vendor/**\n";
         let cfg = parse_repo_config_strict(yaml).expect("ok");
@@ -440,6 +497,26 @@ ignored_paths:
         let yaml = "enabled: not_a_bool\n";
         let err = parse_repo_config_strict(yaml).expect_err("should fail");
         assert!(matches!(err, RepoConfigStrictError::Parse(_)));
+    }
+
+    #[test]
+    fn strict_rejects_unknown_pr_metadata_check_keys() {
+        let yaml =
+            "pr_metadata_check:\n  checks:\n    body_requred: true\n    unsupported_nested: true\n";
+
+        let err = parse_repo_config_strict(yaml).expect_err("should fail");
+        match err {
+            RepoConfigStrictError::UnknownKeys(keys) => {
+                assert!(keys.iter().any(|k| k.contains("pr_metadata_check.checks")))
+            }
+            RepoConfigStrictError::Parse(parse_err) => {
+                let msg = parse_err.to_string();
+                assert!(
+                    msg.contains("body_requred") || msg.contains("unsupported_nested"),
+                    "{msg}"
+                );
+            }
+        }
     }
 
     #[test]
