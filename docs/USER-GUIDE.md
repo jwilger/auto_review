@@ -130,6 +130,17 @@ ignored_paths:
   - "vendor/**"
   - "src/generated/**"
 
+# PR metadata quality gate. The legacy boolean form still works:
+# `pr_metadata_check: true` or `false`.
+pr_metadata_check:
+  enabled: true
+  checks:
+    # Allow empty PR bodies without disabling title/custom metadata checks.
+    body_required: true
+  additional_rules:
+    - "Security-sensitive changes must describe the threat model impact."
+    - "Schema migrations must mention rollback risk."
+
 ```
 
 Validate locally before committing:
@@ -139,8 +150,9 @@ auto-review config validate .auto_review.yaml
 ```
 
 A failing validation exits non-zero, so this fits cleanly in a
-pre-commit hook. Add `--strict` to also reject unknown top-level
-keys — that catches typos like `enabld:` (missing `e`) that the
+pre-commit hook. Add `--strict` to also reject unknown keys — that
+catches top-level typos like `enabld:` and nested metadata-control
+typos like `pr_metadata_check.checks.body_requred` that the
 permissive runtime loader silently ignores. Recommended for
 pre-commit hooks where a typo would silently disable a setting:
 

@@ -7,10 +7,18 @@
 # status and return without calling the LLM.
 enabled: true
 
-# Qualitative PR metadata check. When true, auto_review asks the Cheap-tier
-# model whether the PR title/body are specific enough before merge; when false,
-# that pre-merge metadata check is skipped for this repo.
-pr_metadata_check: true
+# Qualitative PR metadata check. Existing repos may keep the boolean form
+# (`pr_metadata_check: true/false`). Use object form to tune individual
+# expectations while keeping the gate enabled.
+pr_metadata_check:
+  enabled: true
+  checks:
+    # When false, an empty PR body is allowed, but other metadata failures
+    # such as bad titles or mixed title/body failures still block.
+    body_required: true
+  additional_rules:
+    - "Security-sensitive changes must describe the threat model impact."
+    - "Schema migrations must mention rollback risk."
 
 # Free-form text injected into the LLM system prompt as authoritative
 # project conventions. Use sparingly — every byte costs tokens, and the
