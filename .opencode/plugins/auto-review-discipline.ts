@@ -235,6 +235,14 @@ function isRgrDiagnosticImplementerTask(args: unknown): boolean {
   return (args as Record<string, unknown>).subagent_type === "rgr-diagnostic-implementer";
 }
 
+function taskResultText(output: unknown): string {
+  if (!output || typeof output !== "object") return "";
+  const result = (output as Record<string, unknown>).result;
+  if (typeof result === "string") return result;
+  if (result == null) return "";
+  return JSON.stringify(result);
+}
+
 const pendingTestAuthorEditLeases = new Set<string>();
 const testAuthorEditLeases = new Set<string>();
 
@@ -685,6 +693,9 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
     }
   },
   "tool.execute.after": async (input, output) => {
+    if (/^task$/i.test(input.tool) && isRgrTestAuthorTask(output.args) && taskResultText(output).trim() === "") {
+      throw new Error("RGR task gate: rgr-test-author returned no ledger-ready RED output; stop instead of retrying the same delegation.");
+    }
     if (!/^task$/i.test(input.tool) || !isRgrDiagnosticImplementerTask(output.args)) return;
     const current = getCycle(input.sessionID);
     if (!current) return;
