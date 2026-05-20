@@ -537,7 +537,7 @@ pub async fn run_review_job(
                     String::new(),
                     String::new(),
                     None,
-                    true,
+                    ar_review::config::PrMetadataCheck::default(),
                 )
             }
         };
@@ -699,7 +699,7 @@ struct WorkspacePrepOutput {
     /// failed during workspace/context prep (we degrade-but-continue;
     /// the pipeline will refetch and likely also fail consistently).
     raw_diff: String,
-    pr_metadata_check: bool,
+    pr_metadata_check: ar_review::config::PrMetadataCheck,
     /// Held by the orchestrator until the review pipeline finishes
     /// so the agentic verifier (when enabled) can inspect the
     /// cloned working tree. `None` when workspace prep exited
@@ -726,7 +726,7 @@ async fn prepare_workspace_context(
             skipped_by_config: true,
             ignored_paths,
             guidelines,
-            pr_metadata_check: config.pr_metadata_check.enabled,
+            pr_metadata_check: config.pr_metadata_check.clone(),
             repo_context: String::new(),
             raw_diff: String::new(),
             workspace: None,
@@ -773,7 +773,7 @@ async fn prepare_workspace_context(
         guidelines,
         repo_context,
         raw_diff,
-        pr_metadata_check: config.pr_metadata_check.enabled,
+        pr_metadata_check: config.pr_metadata_check,
         workspace: Some(workspace),
     })
 }
