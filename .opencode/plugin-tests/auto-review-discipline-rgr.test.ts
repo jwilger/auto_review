@@ -1638,3 +1638,34 @@ test("rejects empty rgr-test-author task results instead of silently continuing"
     /RGR task gate: rgr-test-author returned no ledger-ready RED output; stop instead of retrying the same delegation\./,
   );
 });
+
+test("rgr-test-author can claim a fallback test edit lease when task has no delegated session id", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  const parentHooks = await AutoReviewDisciplinePlugin({ worktree });
+  const childHooks = await AutoReviewDisciplinePlugin({ worktree });
+  const parentSessionID = "parent-with-fallback-test-author-lease";
+  const childSessionID = "child-with-fallback-test-author-lease";
+
+  await parentHooks.tool.rgr_start.execute(
+    {
+      behavior: "rgr-test-author fallback leases support task tools that do not expose subagent session ids",
+      test: "rgr-test-author can claim a fallback test edit lease when task has no delegated session id",
+    },
+    { sessionID: parentSessionID },
+  );
+
+  await parentHooks["tool.execute.before"](
+    { tool: "task", sessionID: parentSessionID },
+    {
+      args: {
+        subagent_type: "rgr-test-author",
+        prompt: "Write exactly one focused RED test.",
+      },
+    },
+  );
+
+  await assert.doesNotReject(
+    childHooks.tool.rgr_claim_test_author_lease.execute({}, { sessionID: childSessionID }),
+  );
+});

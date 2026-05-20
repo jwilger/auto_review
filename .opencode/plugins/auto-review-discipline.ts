@@ -245,6 +245,7 @@ function taskResultText(output: unknown): string {
 
 const pendingTestAuthorEditLeases = new Set<string>();
 const testAuthorEditLeases = new Set<string>();
+const fallbackTestAuthorEditLeases: string[] = [];
 
 function delegatedSubagentSessionFromTaskArgs(args: unknown): string | undefined {
   if (!args || typeof args !== "object") return undefined;
@@ -433,7 +434,10 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
       args: {},
       async execute(_args, context) {
         if (!pendingTestAuthorEditLeases.delete(context.sessionID)) {
-          throw new Error("RGR gate: no eligible delegated test-author lease is available to claim.");
+          const fallback = fallbackTestAuthorEditLeases.shift();
+          if (!fallback) {
+            throw new Error("RGR gate: no eligible delegated test-author lease is available to claim.");
+          }
         }
         testAuthorEditLeases.add(context.sessionID);
         return "Delegated test-author lease claimed. Test-only edits for the next RED are allowed.";
@@ -689,7 +693,11 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
     }
     if (/^task$/i.test(input.tool) && isRgrTestAuthorTask(output.args)) {
       const delegated = delegatedSubagentSessionFromTaskArgs(output.args);
-      if (delegated) pendingTestAuthorEditLeases.add(delegated);
+      if (delegated) {
+        pendingTestAuthorEditLeases.add(delegated);
+      } else {
+        fallbackTestAuthorEditLeases.push(input.sessionID);
+      }
     }
   },
   "tool.execute.after": async (input, output) => {
