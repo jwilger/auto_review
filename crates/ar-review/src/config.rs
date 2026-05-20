@@ -149,7 +149,8 @@ pub fn parse_repo_config_strict(yaml: &str) -> Result<RepoConfig, RepoConfigStri
             }
         }
 
-        if let Some(pr_metadata_check) = map.get(serde_yaml::Value::String("pr_metadata_check".into()))
+        if let Some(pr_metadata_check) =
+            map.get(serde_yaml::Value::String("pr_metadata_check".into()))
         {
             if let Some(pr_metadata_check_map) = pr_metadata_check.as_mapping() {
                 for (k, v) in pr_metadata_check_map {
@@ -286,7 +287,8 @@ mod tests {
 
     #[test]
     fn parses_object_pr_metadata_check_enabled_false() {
-        let cfg = parse_repo_config("pr_metadata_check:\n  enabled: false\n").expect("parse config");
+        let cfg =
+            parse_repo_config("pr_metadata_check:\n  enabled: false\n").expect("parse config");
         let value = serde_yaml::to_value(&cfg).unwrap();
         let map = value.as_mapping().unwrap();
         let metadata_check = map
