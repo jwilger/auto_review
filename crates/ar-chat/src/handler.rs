@@ -248,6 +248,32 @@ impl ChatHandler<'_> {
         ctx: ChatContext<'_>,
         correction: &str,
     ) -> Result<(), ChatError> {
+        if self.llm.provider(ModelTier::Cheap).is_ok() {
+            let req = CompleteRequest {
+                system: Some(
+                    "Classify whether this review-correction message asks for approval. Return JSON only."
+                        .to_string(),
+                ),
+                messages: vec![Message::user(correction.to_string())],
+                response_format: Some(ResponseFormat::JsonSchema {
+                    name: "review_correction_classification".into(),
+                    schema: json!({
+                        "type": "object",
+                        "additionalProperties": false,
+                        "properties": {
+                            "requests_approval": {"type": "boolean"}
+                        },
+                        "required": ["requests_approval"]
+                    }),
+                }),
+                temperature: Some(0.0),
+                ..Default::default()
+            };
+            if let Err(error) = self.llm.complete(ModelTier::Cheap, req).await {
+                tracing::warn!(%error, "review correction classification failed; continuing");
+            }
+        }
+
         let embedding_text = format!(
             "Repository {}/{} only. Review correction from PR feedback: treat the user's \
              explanation as repository-specific guidance for future reviews. User feedback: {correction}",

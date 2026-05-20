@@ -235,6 +235,9 @@ function isRgrDiagnosticImplementerTask(args: unknown): boolean {
   return (args as Record<string, unknown>).subagent_type === "rgr-diagnostic-implementer";
 }
 
+const pendingTestAuthorEditLeases = new Set<string>();
+const testAuthorEditLeases = new Set<string>();
+
 function delegatedSubagentSessionFromTaskArgs(args: unknown): string | undefined {
   if (!args || typeof args !== "object") return undefined;
   const record = args as Record<string, unknown>;
@@ -274,6 +277,13 @@ function pathsWithinAllowedSet(paths: string[], allowedPaths: string[] | undefin
   if (!allowedPaths?.length) return paths.length <= 1;
   const allowed = new Set(allowedPaths.map((p) => p.replaceAll("\\", "/")));
   return paths.every((p) => allowed.has(p.replaceAll("\\", "/")));
+}
+
+function hasInSourceRustTestModule(filePath: string, worktree: string | undefined): boolean {
+  const fullPath = path.isAbsolute(filePath) ? filePath : path.join(worktree ?? process.cwd(), filePath);
+  if (!fs.existsSync(fullPath)) return false;
+  const text = fs.readFileSync(fullPath, "utf8");
+  return /#\s*\[\s*cfg\s*\(\s*test\s*\)\s*\]\s*mod\s+tests\b/.test(text);
 }
 
 export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => ({
@@ -408,6 +418,17 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
           throw new Error("RGR gate: no eligible delegated implementation lease is available to claim.");
         }
         return "Delegated implementation lease claimed. One scoped production edit is allowed.";
+      },
+    }),
+    rgr_claim_test_author_lease: tool({
+      description: "Claim a delegated test-author lease for writing the next RED test only.",
+      args: {},
+      async execute(_args, context) {
+        if (!pendingTestAuthorEditLeases.delete(context.sessionID)) {
+          throw new Error("RGR gate: no eligible delegated test-author lease is available to claim.");
+        }
+        testAuthorEditLeases.add(context.sessionID);
+        return "Delegated test-author lease claimed. Test-only edits for the next RED are allowed.";
       },
     }),
     rgr_status: tool({
@@ -604,6 +625,17 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
         return;
       }
 
+      if (testAuthorEditLeases.has(input.sessionID)) {
+        if (productionRustPaths.length !== 1) {
+          throw new Error("RGR gate: delegated rgr-test-author Rust source edits are limited to one target file.");
+        }
+        if (!productionRustPaths.every((p) => hasInSourceRustTestModule(p, worktree))) {
+          throw new Error("RGR gate: delegated rgr-test-author Rust source edits require an in-source #[cfg(test)] mod tests in the target file.");
+        }
+        testAuthorEditLeases.delete(input.sessionID);
+        return;
+      }
+
       let current = getCycle(input.sessionID);
       if (!current) {
         current = consumeDelegatedImplementationEditLease(input.sessionID);
@@ -646,6 +678,10 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
       const current = getCycle(input.sessionID);
       if (!current?.reviewedRed) return;
       recordDelegatedImplementationEditLease(delegatedSubagentSessionFromTaskArgs(output.args), input.sessionID, current, worktree);
+    }
+    if (/^task$/i.test(input.tool) && isRgrTestAuthorTask(output.args)) {
+      const delegated = delegatedSubagentSessionFromTaskArgs(output.args);
+      if (delegated) pendingTestAuthorEditLeases.add(delegated);
     }
   },
   "tool.execute.after": async (input, output) => {

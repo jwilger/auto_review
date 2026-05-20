@@ -129,6 +129,7 @@ fn parse_review_correction(
         || lower.contains("invalid")
         || lower.contains("fine")
         || lower.contains("accept")
+        || lower.contains("approv")
         || lower.contains("wrong")
         || lower.contains("correct")
         || lower.contains("false positive"))

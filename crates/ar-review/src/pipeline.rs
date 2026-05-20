@@ -314,6 +314,26 @@ fn has_clearly_acceptable_pr_metadata(title: &str, body: &str) -> bool {
         return true;
     }
 
+    let has_substantive_body = markdown_section_has_content(body, "Summary")
+        && (markdown_section_has_content(body, "Why")
+            || markdown_section_has_content(body, "Verification"));
+
+    if title.chars().count() <= 72
+        && !title.contains(':')
+        && title
+            .split_whitespace()
+            .next()
+            .and_then(|word| word.chars().next().map(|first| (first, &word[1..])))
+            .is_some_and(|(first, rest)| {
+                first.is_ascii_uppercase()
+                    && !rest.is_empty()
+                    && rest.chars().all(|c| c.is_ascii_lowercase())
+            })
+        && has_substantive_body
+    {
+        return true;
+    }
+
     let Some((prefix, description)) = title.split_once(": ") else {
         return false;
     };
@@ -330,9 +350,7 @@ fn has_clearly_acceptable_pr_metadata(title: &str, body: &str) -> bool {
             .chars()
             .next()
             .is_some_and(|c| c.is_ascii_lowercase())
-        && markdown_section_has_content(body, "Summary")
-        && (markdown_section_has_content(body, "Why")
-            || markdown_section_has_content(body, "Verification"))
+        && has_substantive_body
 }
 
 fn has_clearly_acceptable_release_pr_metadata(title: &str, body: &str) -> bool {
@@ -1504,6 +1522,100 @@ mod tests {
         assert!(
             event != "REQUEST_CHANGES" && !review_body.contains("## Pre-merge checks"),
             "clearly acceptable PR metadata should not be over-blocked by a Cheap-tier false negative; \
+             event was {event:?}, body was:\n{review_body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn imperative_pr_metadata_does_not_request_changes_when_cheap_model_over_blocks() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/.forgejo/workflows/ci.yml b/.forgejo/workflows/ci.yml\n\
+                 index 1111111..2222222 100644\n\
+                 --- a/.forgejo/workflows/ci.yml\n\
+                 +++ b/.forgejo/workflows/ci.yml\n\
+                 @@ -1 +1,2 @@\n\
+                 +name: ci\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": ".forgejo/workflows/ci.yml", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1249,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let reasoning = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let cheap = Arc::new(CannedProvider::new(vec![
+            r###"{
+                "passed": false,
+                "rationale": "PR body lacks a dedicated Why section.",
+                "offending_text": "## Summary"
+            }"###,
+        ]));
+        let llm = Router::new()
+            .with(ModelTier::Reasoning, reasoning)
+            .with(ModelTier::Cheap, cheap);
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "deadbeef",
+            pr_title: "Add auto_review CI trigger",
+            pr_body: "## Summary\n\n- Trigger the auto_review workflow when a pull request transitions to ready_for_review.\n- Wire AUTO_REVIEW_GATEWAY_URL and AR_CI_REVIEW_TOKEN into the workflow dispatch step.\n- Keep the deterministic CI gate and emit clearer diagnostics when checks fail.\n\n## Verification\n\n- `actionlint .forgejo/workflows/ci.yml`",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+            pr_metadata_check: true,
+        })
+        .await
+        .expect("review ok");
+
+        assert_eq!(outcome.review_id, 1249);
+        assert_eq!(outcome.findings_count, 0);
+
+        let received = server.received_requests().await.expect("requests");
+        let posted_review = received
+            .iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("posted review");
+        let body: serde_json::Value =
+            serde_json::from_slice(&posted_review.body).expect("review body json");
+        let event = body
+            .get("event")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review event");
+        let review_body = body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review body");
+
+        assert!(
+            event != "REQUEST_CHANGES" && !review_body.contains("## Pre-merge checks"),
+            "imperative PR metadata with substantive Summary and Verification should not be over-blocked by a Cheap-tier false negative; \
              event was {event:?}, body was:\n{review_body}",
         );
     }

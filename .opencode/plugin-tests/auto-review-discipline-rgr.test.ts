@@ -320,6 +320,139 @@ test("allows other task delegations that mention rgr-test-author", async () => {
   );
 });
 
+test("rgr-test-author can claim a delegated Rust in-source test edit lease before RED approval", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-test-author-lease"], { stdio: "ignore" });
+  fs.writeFileSync(
+    path.join(worktree, "crates", "demo", "src", "lib.rs"),
+    "pub fn demo() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn existing_unit_test() {\n        assert_eq!(2 + 2, 4);\n    }\n}\n",
+  );
+  cp.execFileSync("git", ["-C", worktree, "add", "crates/demo/src/lib.rs"]);
+  cp.execFileSync("git", ["-C", worktree, "commit", "-m", "add unit test module"], { stdio: "ignore" });
+  const hooks = await AutoReviewDisciplinePlugin({ worktree });
+  const sessionID = "session-with-rust-in-source-red-test-author";
+  const subagentSessionID = "session-rust-in-source-red-test-author-subagent";
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior: "Rust unit RED tests may live inside source files",
+      test: "rgr-test-author delegation may request Rust in-source unit test edits before RED approval",
+    },
+    { sessionID },
+  );
+
+  await assert.doesNotReject(
+    hooks["tool.execute.before"](
+      { tool: "task", sessionID },
+      {
+        args: {
+          subagent_type: "rgr-test-author",
+          sessionID: subagentSessionID,
+          prompt:
+            "Write only the next RED test. The test may be an adjacent Rust unit test inside #[cfg(test)] mod tests in crates/ar-review/src/pipeline.rs. Do not edit production code.",
+        },
+      },
+    ),
+  );
+
+  await hooks.tool.rgr_claim_test_author_lease.execute({}, { sessionID: subagentSessionID });
+
+  await assert.doesNotReject(
+    hooks["tool.execute.before"](
+      { tool: "edit", sessionID: subagentSessionID },
+      { args: { filePath: "crates/demo/src/lib.rs" } },
+    ),
+  );
+});
+
+test("delegated rgr-test-author lease rejects Rust source edits without in-source tests", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-test-author-lease-scope"], { stdio: "ignore" });
+  const hooks = await AutoReviewDisciplinePlugin({ worktree });
+  const sessionID = "session-with-test-author-scope-parent";
+  const subagentSessionID = "session-with-test-author-scope-subagent";
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior: "rgr-test-author lease is scoped to in-source Rust test modules",
+      test: "delegated rgr-test-author lease rejects Rust source edits without in-source tests",
+    },
+    { sessionID },
+  );
+  await hooks["tool.execute.before"](
+    { tool: "task", sessionID },
+    {
+      args: {
+        subagent_type: "rgr-test-author",
+        sessionID: subagentSessionID,
+        prompt: "Write only the next RED test in a Rust #[cfg(test)] module. Do not edit production code.",
+      },
+    },
+  );
+  await hooks.tool.rgr_claim_test_author_lease.execute({}, { sessionID: subagentSessionID });
+
+  await assert.rejects(
+    hooks["tool.execute.before"](
+      { tool: "edit", sessionID: subagentSessionID },
+      { args: { filePath: "crates/demo/src/lib.rs" } },
+    ),
+    /RGR gate: delegated rgr-test-author Rust source edits require an in-source #\[cfg\(test\)\]\s*mod tests in the target file\./,
+  );
+});
+
+test("delegated rgr-test-author lease rejects multi-file Rust source edits", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-test-author-lease-one-file"], { stdio: "ignore" });
+  fs.writeFileSync(
+    path.join(worktree, "crates", "demo", "src", "lib.rs"),
+    "pub fn demo() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn existing_unit_test() {\n        assert_eq!(2 + 2, 4);\n    }\n}\n",
+  );
+  fs.writeFileSync(
+    path.join(worktree, "crates", "demo", "src", "other.rs"),
+    "pub fn other() {}\n\n#[cfg(test)]\nmod tests {\n    #[test]\n    fn existing_unit_test() {\n        assert_eq!(2 + 2, 4);\n    }\n}\n",
+  );
+  cp.execFileSync("git", ["-C", worktree, "add", "crates/demo/src/lib.rs", "crates/demo/src/other.rs"]);
+  cp.execFileSync("git", ["-C", worktree, "commit", "-m", "add unit test modules"], { stdio: "ignore" });
+  const hooks = await AutoReviewDisciplinePlugin({ worktree });
+  const sessionID = "session-with-test-author-one-file-parent";
+  const subagentSessionID = "session-with-test-author-one-file-subagent";
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior: "rgr-test-author lease is limited to one Rust source file",
+      test: "delegated rgr-test-author lease rejects multi-file Rust source edits",
+    },
+    { sessionID },
+  );
+  await hooks["tool.execute.before"](
+    { tool: "task", sessionID },
+    {
+      args: {
+        subagent_type: "rgr-test-author",
+        sessionID: subagentSessionID,
+        prompt: "Write only one next RED test in a Rust #[cfg(test)] module. Do not edit production code.",
+      },
+    },
+  );
+  await hooks.tool.rgr_claim_test_author_lease.execute({}, { sessionID: subagentSessionID });
+
+  await assert.rejects(
+    hooks["tool.execute.before"](
+      { tool: "apply_patch", sessionID: subagentSessionID },
+      {
+        args: {
+          patchText:
+            "*** Begin Patch\n*** Update File: crates/demo/src/lib.rs\n@@\n pub fn demo() {}\n*** Update File: crates/demo/src/other.rs\n@@\n pub fn other() {}\n*** End Patch",
+        },
+      },
+    ),
+    /RGR gate: delegated rgr-test-author Rust source edits are limited to one target file\./,
+  );
+});
+
 test("prevents parent edit after delegated implementation lease is consumed", async (t) => {
   const worktree = createCleanMainWorktree();
   t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
