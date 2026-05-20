@@ -30,8 +30,25 @@ pub struct RepoConfig {
     #[serde(default)]
     pub ignored_paths: Vec<String>,
 
-    #[serde(default = "default_true")]
+    #[serde(default = "default_true", deserialize_with = "deserialize_pr_metadata_check")]
     pub pr_metadata_check: bool,
+}
+
+fn deserialize_pr_metadata_check<'de, D>(deserializer: D) -> Result<bool, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum PrMetadataCheckConfig {
+        Bool(bool),
+        Object { enabled: bool },
+    }
+
+    Ok(match PrMetadataCheckConfig::deserialize(deserializer)? {
+        PrMetadataCheckConfig::Bool(value) => value,
+        PrMetadataCheckConfig::Object { enabled } => enabled,
+    })
 }
 
 fn default_true() -> bool {
@@ -188,6 +205,17 @@ mod tests {
     #[test]
     fn parses_pr_metadata_check_false() {
         let cfg = parse_repo_config("pr_metadata_check: false\n").expect("parse config");
+        let value = serde_yaml::to_value(&cfg).unwrap();
+        let map = value.as_mapping().unwrap();
+        let metadata_check = map
+            .get(serde_yaml::Value::String("pr_metadata_check".into()))
+            .and_then(serde_yaml::Value::as_bool);
+        assert_eq!(metadata_check, Some(false));
+    }
+
+    #[test]
+    fn parses_object_pr_metadata_check_enabled_false() {
+        let cfg = parse_repo_config("pr_metadata_check:\n  enabled: false\n").expect("parse config");
         let value = serde_yaml::to_value(&cfg).unwrap();
         let map = value.as_mapping().unwrap();
         let metadata_check = map
