@@ -30,11 +30,45 @@ pub struct RepoConfig {
     #[serde(default)]
     pub ignored_paths: Vec<String>,
 
-    #[serde(default = "default_true", deserialize_with = "deserialize_pr_metadata_check")]
-    pub pr_metadata_check: bool,
+    #[serde(default, deserialize_with = "deserialize_pr_metadata_check")]
+    pub pr_metadata_check: PrMetadataCheck,
 }
 
-fn deserialize_pr_metadata_check<'de, D>(deserializer: D) -> Result<bool, D::Error>
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrMetadataCheck {
+    #[serde(default = "default_true")]
+    pub enabled: bool,
+    #[serde(default)]
+    pub checks: PrMetadataChecks,
+    #[serde(default)]
+    pub additional_rules: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PrMetadataChecks {
+    #[serde(default = "default_true")]
+    pub body_required: bool,
+}
+
+impl Default for PrMetadataCheck {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            checks: PrMetadataChecks::default(),
+            additional_rules: Vec::new(),
+        }
+    }
+}
+
+impl Default for PrMetadataChecks {
+    fn default() -> Self {
+        Self {
+            body_required: true,
+        }
+    }
+}
+
+fn deserialize_pr_metadata_check<'de, D>(deserializer: D) -> Result<PrMetadataCheck, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -42,12 +76,15 @@ where
     #[serde(untagged)]
     enum PrMetadataCheckConfig {
         Bool(bool),
-        Object { enabled: bool },
+        Object(PrMetadataCheck),
     }
 
     Ok(match PrMetadataCheckConfig::deserialize(deserializer)? {
-        PrMetadataCheckConfig::Bool(value) => value,
-        PrMetadataCheckConfig::Object { enabled } => enabled,
+        PrMetadataCheckConfig::Bool(value) => PrMetadataCheck {
+            enabled: value,
+            ..PrMetadataCheck::default()
+        },
+        PrMetadataCheckConfig::Object(value) => value,
     })
 }
 
@@ -61,7 +98,7 @@ impl Default for RepoConfig {
             enabled: true,
             guidelines: String::new(),
             ignored_paths: Vec::new(),
-            pr_metadata_check: true,
+            pr_metadata_check: PrMetadataCheck::default(),
         }
     }
 }
@@ -198,6 +235,8 @@ mod tests {
         let map = value.as_mapping().unwrap();
         let metadata_check = map
             .get(serde_yaml::Value::String("pr_metadata_check".into()))
+            .and_then(serde_yaml::Value::as_mapping)
+            .and_then(|m| m.get(serde_yaml::Value::String("enabled".into())))
             .and_then(serde_yaml::Value::as_bool);
         assert_eq!(metadata_check, Some(true));
     }
@@ -209,6 +248,8 @@ mod tests {
         let map = value.as_mapping().unwrap();
         let metadata_check = map
             .get(serde_yaml::Value::String("pr_metadata_check".into()))
+            .and_then(serde_yaml::Value::as_mapping)
+            .and_then(|m| m.get(serde_yaml::Value::String("enabled".into())))
             .and_then(serde_yaml::Value::as_bool);
         assert_eq!(metadata_check, Some(false));
     }
@@ -220,6 +261,8 @@ mod tests {
         let map = value.as_mapping().unwrap();
         let metadata_check = map
             .get(serde_yaml::Value::String("pr_metadata_check".into()))
+            .and_then(serde_yaml::Value::as_mapping)
+            .and_then(|m| m.get(serde_yaml::Value::String("enabled".into())))
             .and_then(serde_yaml::Value::as_bool);
         assert_eq!(metadata_check, Some(false));
     }
@@ -355,6 +398,8 @@ ignored_paths:
         let map = value.as_mapping().unwrap();
         let metadata_check = map
             .get(serde_yaml::Value::String("pr_metadata_check".into()))
+            .and_then(serde_yaml::Value::as_mapping)
+            .and_then(|m| m.get(serde_yaml::Value::String("enabled".into())))
             .and_then(serde_yaml::Value::as_bool);
         assert_eq!(metadata_check, Some(false));
     }

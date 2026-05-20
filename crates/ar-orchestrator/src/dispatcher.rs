@@ -726,7 +726,7 @@ async fn prepare_workspace_context(
             skipped_by_config: true,
             ignored_paths,
             guidelines,
-            pr_metadata_check: config.pr_metadata_check,
+            pr_metadata_check: config.pr_metadata_check.enabled,
             repo_context: String::new(),
             raw_diff: String::new(),
             workspace: None,
@@ -773,7 +773,7 @@ async fn prepare_workspace_context(
         guidelines,
         repo_context,
         raw_diff,
-        pr_metadata_check: config.pr_metadata_check,
+        pr_metadata_check: config.pr_metadata_check.enabled,
         workspace: Some(workspace),
     })
 }
