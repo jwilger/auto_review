@@ -189,6 +189,13 @@ fn append_pre_merge_checks(body: &mut String, validation: &PrMetadataValidation)
     body.push_str(validation.offending_text.trim());
 }
 
+fn is_empty_body_specific_metadata_failure(validation: &PrMetadataValidation) -> bool {
+    let rationale = validation.rationale.to_ascii_lowercase();
+    validation.offending_text.trim().is_empty()
+        && (rationale.contains("body is required") || rationale.contains("description is required"))
+        && !rationale.contains("title")
+}
+
 fn append_llm_usage_cost_footer(
     body: &mut String,
     usage: &[(ModelTier, String, String, u32, u32)],
@@ -472,7 +479,7 @@ pub struct ReviewArgs<'a> {
     /// problems — useful for low-noise operations on big diffs
     /// where stylistic notes drown out real issues.
     pub min_severity: ReviewSeverity,
-    pub pr_metadata_check: bool,
+    pub pr_metadata_check: crate::config::PrMetadataCheck,
 }
 
 type UsageEntry = (ModelTier, String, String, u32, u32);
@@ -592,7 +599,7 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
 
     let findings_count = output.findings.len();
 
-    let metadata_validation = if args.pr_metadata_check {
+    let metadata_validation = if args.pr_metadata_check.enabled {
         if let Some(validation) = validate_pr_metadata_title_length(args.pr_title) {
             Some(validation)
         } else {
@@ -611,7 +618,12 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         append_llm_usage_cost_footer(&mut suppressed_footer, &usage)
     };
     if let Some(validation) = metadata_validation {
-        if !validation.passed && !has_clearly_acceptable_pr_metadata(args.pr_title, args.pr_body) {
+        if !validation.passed
+            && !has_clearly_acceptable_pr_metadata(args.pr_title, args.pr_body)
+            && !(args.pr_body.trim().is_empty()
+                && !args.pr_metadata_check.checks.body_required
+                && is_empty_body_specific_metadata_failure(&validation))
+        {
             append_pre_merge_checks(&mut req.body, &validation);
             req.event = ReviewEvent::RequestChanges;
         }
@@ -895,7 +907,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Warning,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -975,7 +990,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Warning,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -1050,7 +1068,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Error,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -1105,7 +1126,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -1191,7 +1215,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -1284,7 +1311,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -1392,7 +1422,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -1495,7 +1528,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -1589,7 +1625,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -1684,7 +1723,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -1779,7 +1821,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -1873,7 +1918,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -1967,7 +2015,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -2144,7 +2195,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: false,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: false,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -2175,6 +2229,208 @@ mod tests {
         assert!(
             event != "REQUEST_CHANGES" && !review_body.contains("## Pre-merge checks"),
             "disabled metadata check should not request changes or emit pre-merge checks even when Cheap would fail; \
+             event was {event:?}, body was:\n{review_body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_body_required_check_allows_empty_body_metadata() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/x.rs b/src/x.rs\n\
+                 index 1111111..2222222 100644\n\
+                 --- a/src/x.rs\n\
+                 +++ b/src/x.rs\n\
+                 @@ -1 +1,2 @@\n\
+                 +pub fn added() {}\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1245,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let reasoning = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let cheap = Arc::new(CannedProvider::new(vec![
+            r#"{
+                "passed": false,
+                "rationale": "PR body is required for metadata checks.",
+                "offending_text": ""
+            }"#,
+        ]));
+        let llm = Router::new()
+            .with(ModelTier::Reasoning, reasoning)
+            .with(ModelTier::Cheap, cheap.clone());
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "deadbeef",
+            pr_title: "fix(review): allow empty body when configured",
+            pr_body: "",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                checks: crate::config::PrMetadataChecks {
+                    body_required: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("review ok");
+
+        assert_eq!(outcome.review_id, 1245);
+        assert_eq!(outcome.findings_count, 0);
+        assert_eq!(cheap.seen_count(), 1, "metadata gate remains enabled");
+
+        let received = server.received_requests().await.expect("requests");
+        let posted_review = received
+            .iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("posted review");
+        let body: serde_json::Value =
+            serde_json::from_slice(&posted_review.body).expect("review body json");
+        let event = body
+            .get("event")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review event");
+        let review_body = body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review body");
+        assert!(
+            event != "REQUEST_CHANGES" && !review_body.contains("## Pre-merge checks"),
+            "body_required=false should prevent empty PR body from failing metadata gate while the gate remains enabled; \
+             event was {event:?}, body was:\n{review_body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn disabled_body_required_check_preserves_mixed_metadata_failures() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/x.rs b/src/x.rs\n\
+                 index 1111111..2222222 100644\n\
+                 --- a/src/x.rs\n\
+                 +++ b/src/x.rs\n\
+                 @@ -1 +1,2 @@\n\
+                 +pub fn added() {}\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1246,
+                "state": "REQUEST_CHANGES"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let reasoning = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let cheap = Arc::new(CannedProvider::new(vec![
+            r#"{
+                "passed": false,
+                "rationale": "Title is vague and body is required.",
+                "offending_text": ""
+            }"#,
+        ]));
+        let llm = Router::new()
+            .with(ModelTier::Reasoning, reasoning)
+            .with(ModelTier::Cheap, cheap.clone());
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 7,
+            head_sha: "deadbeef",
+            pr_title: "fix stuff",
+            pr_body: "",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                checks: crate::config::PrMetadataChecks {
+                    body_required: false,
+                    ..Default::default()
+                },
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("review ok");
+
+        assert_eq!(outcome.review_id, 1246);
+        assert_eq!(outcome.findings_count, 0);
+        assert_eq!(cheap.seen_count(), 1, "metadata gate remains enabled");
+
+        let received = server.received_requests().await.expect("requests");
+        let posted_review = received
+            .iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("posted review");
+        let body: serde_json::Value =
+            serde_json::from_slice(&posted_review.body).expect("review body json");
+        let event = body
+            .get("event")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review event");
+        let review_body = body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review body");
+        assert!(
+            event == "REQUEST_CHANGES" && review_body.contains("## Pre-merge checks"),
+            "mixed metadata rationale should still block when body_required=false only exempts empty-body-specific failures; \
              event was {event:?}, body was:\n{review_body}",
         );
     }
@@ -2258,7 +2514,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -2356,7 +2615,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -2427,7 +2689,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -2488,7 +2753,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -2575,7 +2843,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -2674,7 +2945,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -2744,7 +3018,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -2792,7 +3069,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect_err("err");
@@ -2848,7 +3128,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("ok");
@@ -2899,7 +3182,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: true,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
         })
         .await
         .expect("ok");
@@ -3073,7 +3359,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: false,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: false,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -3244,7 +3533,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: false,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: false,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
@@ -3381,7 +3673,10 @@ mod tests {
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Note,
-            pr_metadata_check: false,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: false,
+                ..Default::default()
+            },
         })
         .await
         .expect("review ok");
