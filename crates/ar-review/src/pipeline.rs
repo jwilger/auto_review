@@ -2400,7 +2400,6 @@ mod tests {
                 enabled: true,
                 checks: crate::config::PrMetadataChecks {
                     body_required: false,
-                    ..Default::default()
                 },
                 ..Default::default()
             },
@@ -2501,7 +2500,6 @@ mod tests {
                 enabled: true,
                 checks: crate::config::PrMetadataChecks {
                     body_required: false,
-                    ..Default::default()
                 },
                 ..Default::default()
             },
