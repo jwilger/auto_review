@@ -230,6 +230,11 @@ function isRgrTestAuthorTask(args: unknown): boolean {
   return (args as Record<string, unknown>).subagent_type === "rgr-test-author";
 }
 
+function isRgrTestReviewerTask(args: unknown): boolean {
+  if (!args || typeof args !== "object") return false;
+  return (args as Record<string, unknown>).subagent_type === "rgr-test-reviewer";
+}
+
 function isRgrDiagnosticImplementerTask(args: unknown): boolean {
   if (!args || typeof args !== "object") return false;
   return (args as Record<string, unknown>).subagent_type === "rgr-diagnostic-implementer";
@@ -246,6 +251,7 @@ function taskResultText(output: unknown): string {
 const pendingTestAuthorEditLeases = new Set<string>();
 const testAuthorEditLeases = new Set<string>();
 const fallbackTestAuthorEditLeases: string[] = [];
+const redApprovalReviewerSessions = new Map<string, string>();
 
 function delegatedSubagentSessionFromTaskArgs(args: unknown): string | undefined {
   if (!args || typeof args !== "object") return undefined;
@@ -327,9 +333,14 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
       description: "Approve the recorded RED evidence before production edits.",
       args: {},
       async execute(_args, context) {
-        const current = getCycle(context.sessionID);
+        const approvedParentSessionID = redApprovalReviewerSessions.get(context.sessionID);
+        if (!approvedParentSessionID) {
+          throw new Error("RGR gate: RED approval must be issued by a delegated rgr-test-reviewer session.");
+        }
+        redApprovalReviewerSessions.delete(context.sessionID);
+        const current = getCycle(approvedParentSessionID);
         if (!current?.failingOutput) throw new Error("Cannot approve RED before observed RED is recorded.");
-        setCycle(context.sessionID, { ...current, reviewedRed: true, stage: "red_approved" });
+        setCycle(approvedParentSessionID, { ...current, reviewedRed: true, stage: "red_approved" });
         return "RED approved. Minimum production edits are now allowed for this cycle.";
       },
     }),
@@ -684,6 +695,21 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
       if (!consumeImplementationReviewVetoRecovery(input.sessionID)) {
         throw new Error("RGR task gate: start an RGR cycle with rgr_start before delegating to rgr-test-author; recover by starting the cycle or asking the orchestrator to do so.");
       }
+    }
+
+    if (/^task$/i.test(input.tool) && isRgrTestReviewerTask(output.args)) {
+      const current = getCycle(input.sessionID);
+      if (!current?.failingOutput) {
+        throw new Error("RGR task gate: record RED with rgr_record_red before delegating to rgr-test-reviewer.");
+      }
+      const record = output.args as Record<string, unknown>;
+      const delegated = delegatedSubagentSessionFromTaskArgs(output.args);
+      if (delegated) {
+        redApprovalReviewerSessions.set(delegated, input.sessionID);
+      }
+      const prompt = typeof record.prompt === "string" ? record.prompt : "";
+      record.prompt = `${prompt}\n\nRGR parent RED context:\n- rgr_record_red has been called in parent session ${input.sessionID}.\n- Focused command: ${current.command ?? "(not recorded)"}\n- Observed RED output:\n${current.failingOutput}`;
+      return output;
     }
 
     if (/^task$/i.test(input.tool) && isRgrDiagnosticImplementerTask(output.args)) {

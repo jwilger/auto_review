@@ -105,7 +105,17 @@ await hooks.tool.rgr_record_red.execute(
   },
   { sessionID },
 );
-await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+await hooks["tool.execute.before"](
+  { tool: "task", sessionID },
+  {
+    args: {
+      subagent_type: "rgr-test-reviewer",
+      sessionID: sessionID + "-reviewer",
+      prompt: "Approve RED for fresh-process test setup.",
+    },
+  },
+);
+await hooks.tool.rgr_approve_red.execute({}, { sessionID: sessionID + "-reviewer" });
 await hooks.tool.rgr_record_changed_diagnostic.execute(
   {
     command: focusedCommand,
@@ -149,6 +159,26 @@ console.log("RGR_TEST_TOKENLESS_DELEGATION_OK");
   });
 }
 
+async function approveRedViaDelegatedReviewer(
+  hooks: Awaited<ReturnType<typeof AutoReviewDisciplinePlugin>>,
+  parentSessionID: string,
+  reviewerSessionID: string,
+  reviewerPrompt: string,
+) {
+  await hooks["tool.execute.before"](
+    { tool: "task", sessionID: parentSessionID },
+    {
+      args: {
+        subagent_type: "rgr-test-reviewer",
+        sessionID: reviewerSessionID,
+        prompt: reviewerPrompt,
+      },
+    },
+  );
+
+  await hooks.tool.rgr_approve_red.execute({}, { sessionID: reviewerSessionID });
+}
+
 test("blocks production Rust edit tool changes on main after RED approval", async (t) => {
   const worktree = createCleanMainWorktree();
   t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
@@ -169,7 +199,12 @@ test("blocks production Rust edit tool changes on main after RED approval", asyn
     },
     { sessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+  await approveRedViaDelegatedReviewer(
+    hooks,
+    sessionID,
+    "session-on-main-with-red-approval-reviewer",
+    "Review the focused RED and decide whether to call rgr_approve_red.",
+  );
 
   await assert.rejects(
     hooks["tool.execute.before"](
@@ -203,7 +238,7 @@ test("blocks shell bypass editing production Rust file during active approved RE
     },
     { sessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+  await approveRedViaDelegatedReviewer(hooks, sessionID, `${sessionID}-reviewer`, "Approve RED for shell bypass test setup.");
 
   await assert.rejects(
     hooks["tool.execute.before"](
@@ -243,7 +278,7 @@ test("distinguishes read-only open from cat write redirection in shell bypass gu
     },
     { sessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+  await approveRedViaDelegatedReviewer(hooks, sessionID, `${sessionID}-reviewer`, "Approve RED for shell bypass granularity test setup.");
 
   let openRejected = false;
   let catRejected = false;
@@ -477,7 +512,7 @@ test("prevents parent edit after delegated implementation lease is consumed", as
     },
     { sessionID: parentSessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+  await approveRedViaDelegatedReviewer(hooks, parentSessionID, `${parentSessionID}-reviewer`, "Approve RED for delegated implementation lease test setup.");
 
   const delegation = {
     args: {
@@ -583,7 +618,7 @@ test("grants one delegated implementation edit after parent-approved RED", async
     },
     { sessionID: parentSessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+  await approveRedViaDelegatedReviewer(hooks, parentSessionID, `${parentSessionID}-reviewer`, "Approve RED for delegated implementation edit test setup.");
 
   const delegation = {
     args: {
@@ -631,7 +666,7 @@ test("delegates changed-diagnostic implementation edit to a scoped subagent sess
     },
     { sessionID: parentSessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+  await approveRedViaDelegatedReviewer(hooks, parentSessionID, `${parentSessionID}-reviewer`, "Approve RED for changed diagnostic delegation test setup.");
 
   await assert.doesNotReject(
     hooks["tool.execute.before"]({ tool: "edit", sessionID: parentSessionID }, { args: { filePath: "crates/demo/src/lib.rs" } }),
@@ -707,7 +742,7 @@ test("issues claimable lease for changed-diagnostic delegation without explicit 
     },
     { sessionID: parentSessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+  await approveRedViaDelegatedReviewer(hooks, parentSessionID, `${parentSessionID}-reviewer`, "Approve RED for claimable changed diagnostic lease test setup.");
   await hooks.tool.rgr_record_changed_diagnostic.execute(
     {
       command: focusedCommand,
@@ -776,7 +811,7 @@ test("does not expose or accept claimToken for delegated implementation lease cl
     },
     { sessionID: parentSessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+  await approveRedViaDelegatedReviewer(hooks, parentSessionID, `${parentSessionID}-reviewer`, "Approve RED for tokenless claim test setup.");
 
   const delegation = await hooks["tool.execute.before"](
     { tool: "task", sessionID: parentSessionID },
@@ -836,7 +871,7 @@ test("supports tokenless delegated implementation lease across fresh plugin inst
     },
     { sessionID: parentSessionID },
   );
-  await parentHooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+  await approveRedViaDelegatedReviewer(parentHooks, parentSessionID, `${parentSessionID}-reviewer`, "Approve RED for fresh tokenless lease test setup.");
 
   await assert.doesNotReject(
     parentHooks["tool.execute.before"](
@@ -960,7 +995,7 @@ test("supports tokenless delegated implementation lease after a changed diagnost
     },
     { sessionID: parentSessionID },
   );
-  await parentHooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+  await approveRedViaDelegatedReviewer(parentHooks, parentSessionID, `${parentSessionID}-reviewer`, "Approve RED for changed diagnostic tokenless lease test setup.");
 
   await assert.doesNotReject(
     parentHooks["tool.execute.before"](
@@ -1038,7 +1073,7 @@ test("allows a new RGR cycle on the same parent session after a tokenless claim"
     },
     { sessionID },
   );
-  await parentHooks.tool.rgr_approve_red.execute({}, { sessionID });
+  await approveRedViaDelegatedReviewer(parentHooks, sessionID, `${sessionID}-reviewer`, "Approve RED for new cycle tokenless claim test setup.");
 
   await assert.doesNotReject(
     parentHooks["tool.execute.before"](
@@ -1078,7 +1113,7 @@ test("allows a new RGR cycle on the same parent session after a tokenless claim"
     },
     { sessionID },
   );
-  await parentHooks.tool.rgr_approve_red.execute({}, { sessionID });
+  await approveRedViaDelegatedReviewer(parentHooks, sessionID, `${sessionID}-reviewer`, "Approve RED for persisted tokenless lease test setup.");
 
   await assert.doesNotReject(
     parentHooks["tool.execute.before"](
@@ -1115,7 +1150,7 @@ test("reloads tokenless delegated implementation lease from persisted worktree s
     },
     { sessionID: parentSessionID },
   );
-  await parentHooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+  await approveRedViaDelegatedReviewer(parentHooks, parentSessionID, `${parentSessionID}-reviewer`, "Approve RED for parent edit rejection after tokenless claim test setup.");
 
   await assert.doesNotReject(
     parentHooks.tool.rgr_record_changed_diagnostic.execute(
@@ -1185,7 +1220,7 @@ test("rejects parent production Rust edits after tokenless fresh-process claim",
     },
     { sessionID: parentSessionID },
   );
-  await parentHooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+  await approveRedViaDelegatedReviewer(parentHooks, parentSessionID, `${parentSessionID}-reviewer`, "Approve RED for sqlite-backed lease test setup.");
 
   await assert.doesNotReject(
     parentHooks["tool.execute.before"](
@@ -1244,7 +1279,7 @@ test("requires sqlite-backed, gitignored RGR state for tokenless delegated lease
     },
     { sessionID: parentSessionID },
   );
-  await parentHooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+  await approveRedViaDelegatedReviewer(parentHooks, parentSessionID, `${parentSessionID}-reviewer`, "Approve RED for persisted worktree state test setup.");
 
   await assert.doesNotReject(
     parentHooks["tool.execute.before"](
@@ -1310,7 +1345,7 @@ test("permits a second production edit after changed RED verification is re-reco
     },
     { sessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+  await approveRedViaDelegatedReviewer(hooks, sessionID, `${sessionID}-reviewer`, "Approve RED for second edit verification test setup.");
 
   await assert.doesNotReject(
     hooks["tool.execute.before"]({ tool: "edit", sessionID }, { args: { filePath: "crates/demo/src/lib.rs" } }),
@@ -1323,7 +1358,7 @@ test("permits a second production edit after changed RED verification is re-reco
     },
     { sessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+  await approveRedViaDelegatedReviewer(hooks, sessionID, `${sessionID}-reviewer`, "Approve RED for changed diagnostic refresh test setup.");
 
   await assert.doesNotReject(
     hooks["tool.execute.before"]({ tool: "edit", sessionID }, { args: { filePath: "crates/demo/src/lib.rs" } }),
@@ -1354,7 +1389,7 @@ test("changed diagnostic tools refresh edit allowance without starting a new RED
     },
     { sessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+  await approveRedViaDelegatedReviewer(hooks, sessionID, `${sessionID}-reviewer`, "Approve RED for multi-file rejection test setup.");
 
   await assert.doesNotReject(
     hooks["tool.execute.before"]({ tool: "edit", sessionID }, { args: { filePath: "crates/demo/src/lib.rs" } }),
@@ -1418,7 +1453,7 @@ test("does not consume implementationEditToken when a multi-file apply_patch is 
     },
     { sessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+  await approveRedViaDelegatedReviewer(hooks, sessionID, `${sessionID}-reviewer`, "Approve RED for unscoped diagnostic lease test setup.");
 
   fs.writeFileSync(path.join(worktree, "crates/demo/src", "other.rs"), "pub fn demo_other() {}\n");
 
@@ -1464,7 +1499,7 @@ test("does not create consumable unscoped diagnostic lease without subagent sess
     },
     { sessionID: parentSessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+  await approveRedViaDelegatedReviewer(hooks, parentSessionID, `${parentSessionID}-reviewer`, "Approve RED for pending proof test setup.");
 
   const delegation = {
     args: {
@@ -1507,7 +1542,7 @@ test("blocks GREEN after edit-capable Task completion until proof-of-work verifi
     },
     { sessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+  await approveRedViaDelegatedReviewer(hooks, sessionID, `${sessionID}-reviewer`, "Approve RED for vague GREEN verification test setup.");
 
   if (typeof hooks["tool.execute.after"] === "function") {
     await hooks["tool.execute.after"](
@@ -1531,6 +1566,110 @@ test("blocks GREEN after edit-capable Task completion until proof-of-work verifi
   );
 });
 
+test("requires delegated reviewer approval and propagates parent RED context to rgr-test-reviewer", async (t) => {
+  const worktree = createCleanMainWorktree();
+  t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
+  cp.execFileSync("git", ["-C", worktree, "checkout", "-b", "feature/rgr-reviewer-approval-gate"], { stdio: "ignore" });
+
+  const hooks = await AutoReviewDisciplinePlugin({ worktree });
+  const fallbackParentSessionID = "rgr-parent-review-fallback-queue";
+  const parentSessionID = "rgr-parent-review-authorization";
+  const delegatedReviewerSessionID = "rgr-test-reviewer-delegated-session";
+  const unrelatedSessionID = "rgr-nondelegated-review-authorization";
+  const reviewerPrompt = "Review the focused RED and decide whether to call rgr_approve_red.";
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior: "fallback reviewer approval bootstrap",
+      test: "requires delegated reviewer approval and propagates parent RED context to rgr-test-reviewer",
+    },
+    { sessionID: fallbackParentSessionID },
+  );
+  await hooks.tool.rgr_record_red.execute(
+    {
+      command:
+        "node --test .opencode/plugin-tests/auto-review-discipline-rgr.test.ts --test-name-pattern 'requires delegated reviewer approval and propagates parent RED context to rgr-test-reviewer'",
+      output: "FAIL: fallback parent RED was recorded",
+    },
+    { sessionID: fallbackParentSessionID },
+  );
+  await hooks["tool.execute.before"](
+    { tool: "task", sessionID: fallbackParentSessionID },
+    {
+      args: {
+        subagent_type: "rgr-test-reviewer",
+        prompt: "Queue fallback approval for bootstrap reviewer delegation.",
+      },
+    },
+  );
+
+  await hooks.tool.rgr_start.execute(
+    {
+      behavior: "only delegated reviewer sessions can approve RED and reviewer sees parent RED evidence",
+      test: "requires delegated reviewer approval and propagates parent RED context to rgr-test-reviewer",
+    },
+    { sessionID: parentSessionID },
+  );
+  await hooks.tool.rgr_record_red.execute(
+    {
+      command:
+        "node --test .opencode/plugin-tests/auto-review-discipline-rgr.test.ts --test-name-pattern 'requires delegated reviewer approval and propagates parent RED context to rgr-test-reviewer'",
+      output: "FAIL: focused RED was recorded in parent session",
+    },
+    { sessionID: parentSessionID },
+  );
+
+  let parentApprovalBlocked = false;
+  try {
+    await hooks.tool.rgr_approve_red.execute({}, { sessionID: parentSessionID });
+  } catch {
+    parentApprovalBlocked = true;
+  }
+
+  const delegatedReviewer = await hooks["tool.execute.before"](
+    { tool: "task", sessionID: parentSessionID },
+    {
+      args: {
+        subagent_type: "rgr-test-reviewer",
+        sessionID: delegatedReviewerSessionID,
+        prompt: reviewerPrompt,
+      },
+    },
+  );
+
+  let unrelatedApprovalBlocked = false;
+  try {
+    await hooks.tool.rgr_approve_red.execute({}, { sessionID: unrelatedSessionID });
+  } catch {
+    unrelatedApprovalBlocked = true;
+  }
+
+  await assert.doesNotReject(
+    hooks.tool.rgr_approve_red.execute({}, { sessionID: delegatedReviewerSessionID }),
+  );
+
+  const parentStatus = await hooks.tool.rgr_status.execute({}, { sessionID: parentSessionID });
+  const delegatedApprovalUnlockedParent =
+    typeof parentStatus === "string" &&
+    parentStatus.includes('"reviewedRed":true') &&
+    parentStatus.includes('"stage":"red_approved"');
+
+  const delegatedPrompt =
+    typeof delegatedReviewer === "object" && delegatedReviewer !== null
+      ? (delegatedReviewer as { args?: { prompt?: unknown } }).args?.prompt
+      : undefined;
+  const reviewerCanSeeRecordedRed =
+    typeof delegatedPrompt === "string" &&
+    delegatedPrompt.includes("rgr_record_red") &&
+    delegatedPrompt.includes("focused RED was recorded in parent session");
+
+  assert.equal(
+    parentApprovalBlocked && unrelatedApprovalBlocked && reviewerCanSeeRecordedRed && delegatedApprovalUnlockedParent,
+    true,
+    `Expected coherent reviewer guardrail behavior (parentApprovalBlocked=${String(parentApprovalBlocked)}, unrelatedApprovalBlocked=${String(unrelatedApprovalBlocked)}, reviewerCanSeeRecordedRed=${String(reviewerCanSeeRecordedRed)}, delegatedApprovalUnlockedParent=${String(delegatedApprovalUnlockedParent)}, delegatedPrompt=${String(delegatedPrompt)}, parentStatus=${String(parentStatus)}).`,
+  );
+});
+
 test("rejects vague GREEN verification output without concrete command evidence", async (t) => {
   const worktree = createCleanMainWorktree();
   t.after(() => fs.rmSync(worktree, { recursive: true, force: true }));
@@ -1551,7 +1690,7 @@ test("rejects vague GREEN verification output without concrete command evidence"
     },
     { sessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+  await approveRedViaDelegatedReviewer(hooks, sessionID, `${sessionID}-reviewer`, "Approve RED for proof clearing test setup.");
 
   await assert.rejects(
     hooks.tool.rgr_mark_green.execute({ output: "tests pass" }, { sessionID }),
@@ -1579,7 +1718,7 @@ test("recording proof-of-work verification clears pending proof before GREEN", a
     },
     { sessionID },
   );
-  await hooks.tool.rgr_approve_red.execute({}, { sessionID });
+  await approveRedViaDelegatedReviewer(hooks, sessionID, `${sessionID}-reviewer`, "Approve RED for proof clearing test setup.");
   await hooks["tool.execute.after"](
     { tool: "task", sessionID },
     {

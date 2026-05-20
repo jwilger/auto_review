@@ -35,3 +35,29 @@ test("project-local plugins export the server entrypoint expected by opencode", 
     );
   }
 });
+
+test("only rgr-test-reviewer is instructed to invoke RED approval", () => {
+  const reviewerContract = fs.readFileSync(
+    ".opencode/agents/rgr-test-reviewer.md",
+    "utf8",
+  );
+  const nonReviewerContracts = [
+    ".opencode/agents/rgr-test-author.md",
+    ".opencode/agents/rgr-diagnostic-implementer.md",
+    ".opencode/agents/rgr-implementation-reviewer.md",
+  ].map((contractPath) => fs.readFileSync(contractPath, "utf8"));
+
+  assert.match(
+    reviewerContract,
+    /\brgr_approve_red\b/,
+    "rgr-test-reviewer must explicitly mention rgr_approve_red so RED approval authority is delegated to the reviewer role",
+  );
+
+  for (const contract of nonReviewerContracts) {
+    assert.doesNotMatch(
+      contract,
+      /\bcall\s+`?rgr_approve_red`?\b/i,
+      "non-reviewer RGR agents must not be instructed to call rgr_approve_red",
+    );
+  }
+});

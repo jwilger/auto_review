@@ -23,4 +23,4 @@ Use `outside-in-rgr-microcycle`, `outside-in-tdd`, `rgr-plan-structure`, and `ru
 
 Check whether the test uses existing types correctly, whether proposed new APIs fit crate boundaries and coding standards, and whether the failure is expected. Veto RED that reports multiple failing tests, pressures multiple diagnostics, or cannot name the one implementation decision it demands. Distinguish intentional API pressure from accidental misuse. Confirm the author changed only test code: Rust integration/acceptance tests may live under `tests/`, while adjacent Rust unit tests may live inside source files, but source-file RED edits must be limited to `#[cfg(test)] mod tests` and must not change production items.
 
-Approve or veto. If vetoing, provide mandatory changes and return control to `rgr-test-author`. Do not edit files.
+Approve or veto. If approving valid RED evidence, call `rgr_approve_red` to record the approval before handing control back. If vetoing, provide mandatory changes and return control to `rgr-test-author`. Do not edit files.
