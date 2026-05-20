@@ -235,8 +235,17 @@ function isRgrDiagnosticImplementerTask(args: unknown): boolean {
   return (args as Record<string, unknown>).subagent_type === "rgr-diagnostic-implementer";
 }
 
+function taskResultText(output: unknown): string {
+  if (!output || typeof output !== "object") return "";
+  const result = (output as Record<string, unknown>).result;
+  if (typeof result === "string") return result;
+  if (result == null) return "";
+  return JSON.stringify(result);
+}
+
 const pendingTestAuthorEditLeases = new Set<string>();
 const testAuthorEditLeases = new Set<string>();
+const fallbackTestAuthorEditLeases: string[] = [];
 
 function delegatedSubagentSessionFromTaskArgs(args: unknown): string | undefined {
   if (!args || typeof args !== "object") return undefined;
@@ -425,7 +434,10 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
       args: {},
       async execute(_args, context) {
         if (!pendingTestAuthorEditLeases.delete(context.sessionID)) {
-          throw new Error("RGR gate: no eligible delegated test-author lease is available to claim.");
+          const fallback = fallbackTestAuthorEditLeases.shift();
+          if (!fallback) {
+            throw new Error("RGR gate: no eligible delegated test-author lease is available to claim.");
+          }
         }
         testAuthorEditLeases.add(context.sessionID);
         return "Delegated test-author lease claimed. Test-only edits for the next RED are allowed.";
@@ -681,10 +693,17 @@ export const AutoReviewDisciplinePlugin: Plugin = async ({ worktree } = {}) => (
     }
     if (/^task$/i.test(input.tool) && isRgrTestAuthorTask(output.args)) {
       const delegated = delegatedSubagentSessionFromTaskArgs(output.args);
-      if (delegated) pendingTestAuthorEditLeases.add(delegated);
+      if (delegated) {
+        pendingTestAuthorEditLeases.add(delegated);
+      } else {
+        fallbackTestAuthorEditLeases.push(input.sessionID);
+      }
     }
   },
   "tool.execute.after": async (input, output) => {
+    if (/^task$/i.test(input.tool) && isRgrTestAuthorTask(output.args) && taskResultText(output).trim() === "") {
+      throw new Error("RGR task gate: rgr-test-author returned no ledger-ready RED output; stop instead of retrying the same delegation.");
+    }
     if (!/^task$/i.test(input.tool) || !isRgrDiagnosticImplementerTask(output.args)) return;
     const current = getCycle(input.sessionID);
     if (!current) return;
