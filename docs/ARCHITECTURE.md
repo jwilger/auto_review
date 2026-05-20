@@ -8,8 +8,8 @@ not a rationale log; historical context and supersession details live in the ADR
 
 `auto_review` is a single-tenant Forgejo pull-request review bot implemented as a
 Rust Cargo workspace of single-purpose crates. It is not a multi-tenant SaaS and
-does not currently target GitLab, Bitbucket, a web dashboard, or fine-tuned
-models.
+does not currently target GitLab, Bitbucket, a web dashboard, a web-based OAuth
+installer, or fine-tuned models.
 
 The primary runtime is a gateway service that receives Forgejo traffic, handles
 chat commands, exposes operator endpoints, and dispatches semantic review work.
