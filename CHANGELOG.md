@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [1.2.0] - 2026-05-28
+
+### Fixed
+
+- *(release)* resolve profile tools from flake lock (#284)
+
+### Other
+
+- release v1.1.0 (#282)
+
 ## [1.1.0] - 2026-05-20
 
 ### Added
