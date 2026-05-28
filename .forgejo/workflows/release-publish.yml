@@ -40,7 +40,7 @@ jobs:
                 -s /usr/sbin/nologin -c "Nix build user $i" "nixbld$i"
             fi
           done
-          PATH="$NIX_BIN_DIR:$PATH" nix profile install \
+          PATH="$NIX_BIN_DIR:$PATH" nix profile install --inputs-from . \
             nixpkgs#tea \
             nixpkgs#coreutils \
             nixpkgs#gawk \

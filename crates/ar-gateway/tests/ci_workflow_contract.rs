@@ -346,6 +346,41 @@ fn release_publish_rejects_non_release_metadata_file_diffs() {
 }
 
 #[test]
+fn release_publish_installs_profile_tools_from_repository_lock() {
+    let mut contract_errors = Vec::new();
+    let Some(job) = workflow_job_in(RELEASE_PUBLISH_WORKFLOW, "release-publish") else {
+        panic!(".forgejo/workflows/release-publish.yml should expose a `release-publish` job");
+    };
+
+    let Some(install_or_reuse_nix_step) = workflow_step_lines(job, "Install or reuse Nix") else {
+        panic!("release-publish should include an Install or reuse Nix step");
+    };
+    let install_or_reuse_nix_step = install_or_reuse_nix_step.join("\n");
+
+    require(
+        &mut contract_errors,
+        install_or_reuse_nix_step.contains("nix profile install")
+            && install_or_reuse_nix_step.contains("--inputs-from ."),
+        "Install or reuse Nix should install profile tools with `nix profile install --inputs-from .` so ad-hoc packages resolve from the repository lock instead of global flake registry state",
+    );
+
+    for package in [
+        "nixpkgs#tea",
+        "nixpkgs#coreutils",
+        "nixpkgs#gawk",
+        "nixpkgs#gnused",
+    ] {
+        require(
+            &mut contract_errors,
+            install_or_reuse_nix_step.contains(package),
+            format!("Install or reuse Nix should include `{package}` in nix profile install"),
+        );
+    }
+
+    assert!(contract_errors.is_empty(), "{}", contract_errors.join("\n"));
+}
+
+#[test]
 fn release_publish_creates_binary_release_assets_only() {
     let mut contract_errors = Vec::new();
     let Some(job) = workflow_job_in(RELEASE_PUBLISH_WORKFLOW, "release-publish") else {
