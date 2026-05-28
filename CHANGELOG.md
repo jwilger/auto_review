@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [1.1.0] - 2026-05-20
+
+### Added
+
+- *(config)* add fine-grained PR metadata controls (#281)
+
+### Fixed
+
+- *(opencode)* require delegated RGR RED approval (#283)
+
 ## [1.0.2] - 2026-05-20
 
 ### Fixed
