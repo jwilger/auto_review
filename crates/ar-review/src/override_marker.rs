@@ -35,7 +35,10 @@ pub fn apply_title_marker(title: &str) -> String {
 
 /// Remove the override marker prefix from `title`, if present.
 pub fn strip_title_marker(title: &str) -> String {
-    title.strip_prefix(TITLE_MARKER).unwrap_or(title).to_string()
+    title
+        .strip_prefix(TITLE_MARKER)
+        .unwrap_or(title)
+        .to_string()
 }
 
 /// Whether `body` already contains the override section.

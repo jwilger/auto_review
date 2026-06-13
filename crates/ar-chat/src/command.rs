@@ -350,10 +350,9 @@ mod tests {
              \n\
              This is a release PR, so the terse body is expected.";
         match parse_chat_command(body, "auto-review") {
-            ChatCommand::ReviewCorrection(text) => assert_eq!(
-                text,
-                "This is a release PR, so the terse body is expected."
-            ),
+            ChatCommand::ReviewCorrection(text) => {
+                assert_eq!(text, "This is a release PR, so the terse body is expected.")
+            }
             other => panic!("expected ReviewCorrection, got {other:?}"),
         }
     }

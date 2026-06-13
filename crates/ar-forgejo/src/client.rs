@@ -282,7 +282,12 @@ impl Client {
         ref_: &str,
     ) -> Result<Option<String>, Error> {
         let url = self.url(&format!("repos/{owner}/{repo}/raw/{file_path}?ref={ref_}"))?;
-        let resp = self.http.get(url).header(ACCEPT, "text/plain").send().await?;
+        let resp = self
+            .http
+            .get(url)
+            .header(ACCEPT, "text/plain")
+            .send()
+            .await?;
         let status = resp.status();
         if status.as_u16() == 404 {
             return Ok(None);

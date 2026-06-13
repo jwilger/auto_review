@@ -432,9 +432,7 @@ fn is_release_pr_title(title: &str) -> bool {
 
     let is_release_prefix = kind == "release"
         || (kind == "chore"
-            && (scope_is_release
-                || rest_lower == "release"
-                || rest_lower.starts_with("release ")));
+            && (scope_is_release || rest_lower == "release" || rest_lower.starts_with("release ")));
     if !is_release_prefix {
         return false;
     }

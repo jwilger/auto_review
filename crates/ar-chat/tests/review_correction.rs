@@ -111,7 +111,9 @@ async fn mount_blocking_bot_review(server: &MockServer, comments: serde_json::Va
         .mount(server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/api/v1/repos/alice/widgets/pulls/42/reviews/5/comments"))
+        .and(path(
+            "/api/v1/repos/alice/widgets/pulls/42/reviews/5/comments",
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(comments))
         .mount(server)
         .await;
@@ -207,12 +209,16 @@ async fn metadata_override_by_authorized_user_with_reason_approves_and_stamps_ma
     // carol is on the allow-list.
     Mock::given(method("GET"))
         .and(path("/api/v1/repos/alice/widgets/raw/.auto_review.yaml"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("override_approvers:\n  - carol\n"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string("override_approvers:\n  - carol\n"),
+        )
         .mount(&server)
         .await;
     Mock::given(method("POST"))
         .and(path("/api/v1/repos/alice/widgets/pulls/42/reviews"))
-        .and(body_partial_json(serde_json::json!({ "event": "APPROVED" })))
+        .and(body_partial_json(
+            serde_json::json!({ "event": "APPROVED" }),
+        ))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({"id": 199})))
         .mount(&server)
         .await;
@@ -352,7 +358,9 @@ async fn authorized_override_without_a_reason_asks_for_why_and_does_not_approve(
     .await;
     Mock::given(method("GET"))
         .and(path("/api/v1/repos/alice/widgets/raw/.auto_review.yaml"))
-        .respond_with(ResponseTemplate::new(200).set_body_string("override_approvers:\n  - carol\n"))
+        .respond_with(
+            ResponseTemplate::new(200).set_body_string("override_approvers:\n  - carol\n"),
+        )
         .mount(&server)
         .await;
     Mock::given(method("POST"))

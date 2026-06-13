@@ -443,7 +443,8 @@ impl ChatHandler<'_> {
             return Ok(());
         }
         if pr.state != "open" {
-            self.post(ctx, "I can't approve a closed or merged PR.").await?;
+            self.post(ctx, "I can't approve a closed or merged PR.")
+                .await?;
             return Ok(());
         }
 
@@ -452,8 +453,12 @@ impl ChatHandler<'_> {
         // Nothing to override — just approve (and remember the note).
         if !outstanding.blocked {
             self.remember_correction(&ctx, correction).await?;
-            self.approve(&ctx, &pr.head.sha, "Approved — there were no outstanding findings to override.")
-                .await?;
+            self.approve(
+                &ctx,
+                &pr.head.sha,
+                "Approved — there were no outstanding findings to override.",
+            )
+            .await?;
             return Ok(());
         }
 
@@ -487,13 +492,15 @@ impl ChatHandler<'_> {
         };
 
         self.remember_correction(&ctx, correction).await?;
-        let caveat = render_override_review_body(ctx.commenter_login, &reason, &outstanding.error_findings);
+        let caveat =
+            render_override_review_body(ctx.commenter_login, &reason, &outstanding.error_findings);
         self.approve(&ctx, &pr.head.sha, &caveat).await?;
 
         // Stamp the reversible override marker onto the PR so a maintainer's
         // squash commit (built from the PR title/body) records the override.
         let new_title = apply_title_marker(&pr.title);
-        let section = render_override_pr_section(ctx.commenter_login, &reason, &outstanding.error_findings);
+        let section =
+            render_override_pr_section(ctx.commenter_login, &reason, &outstanding.error_findings);
         let new_body = apply_body_section(&pr.body, &section);
         if let Err(error) = self
             .forgejo

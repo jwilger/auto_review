@@ -58,7 +58,12 @@ in your Forgejo instance for the exact handle.
 | `@<bot> autofix` | Ask the cheap-tier model for diff-based inline patch suggestions. The bot does not push commits — you decide what to apply. |
 | `@<bot> docstring` | Suggest docstrings for newly-added public APIs. Requires the cheap-tier model (`LLM_CHEAP_MODEL`). Same: comment-only, you apply. |
 | `@<bot> tests` | Suggest scaffolded test cases for added code. Requires the cheap-tier model. Same. |
-| `@<bot> <freeform>` | Anything else gets routed to the cheap-tier model as a free-form Q&A about the PR; if that tier is not configured, the bot replies that the feature is disabled. |
+| `@<bot> <freeform>` | Anything else is read for intent. A question is answered by the cheap-tier model; an approval request is handled as below; a request to re-review re-runs the review. If the cheap tier is not configured, it falls back to a free-form Q&A reply. |
+
+You don't have to phrase things a particular way. The bot reads the intent of a
+comment addressed to it, so "no, that's fine for a release PR — please approve"
+is understood as an approval request, and "take another look" as a re-review,
+without special syntax.
 
 Mentions inside an inline review thread (replies to a finding) are
 picked up by the bot's polling loop, typically within a minute.
@@ -80,8 +85,26 @@ The bot's findings are advisory. If you think a finding is wrong:
     add it without editing the file. Semantic retrieval of remembered guidance
     in future reviews requires an embedding tier.
 
+### Overriding the bot to force an approval
+
+When the bot is **requesting changes** and you want it to approve anyway, tell
+it so in a comment (e.g. "this is acceptable for a release PR, please approve").
+For the bot to override its own outstanding findings, two conditions must hold:
+
+1. **You must be authorized.** Your Forgejo login must be listed in the repo's
+   `.auto_review.yaml` under `override_approvers`. This is opt-in — if the list
+   is empty or absent, the bot declines and points you here. (A plain approval
+   when the bot has *no* outstanding findings needs no authorization.)
+2. **You must explain why.** The bot requires a substantive reason for the
+   override; if you only say "approve it", it asks you to explain. The reason is
+   recorded: the bot posts an approving review noting which findings are being
+   overridden, and stamps an `[override-approved]` marker plus an
+   "Approval override" section onto the PR title/body so the reason carries into
+   the squash/merge commit. If a later push genuinely fixes the findings and the
+   bot approves cleanly, the marker is removed automatically.
+
 There's no "this comment is wrong" button. The right escalation is
-a guideline (durable) or a reply (per-PR).
+a guideline (durable), an authorized override (per-PR, recorded), or a reply.
 
 Forgejo currently does not expose a PAT-authenticated REST endpoint
 that marks inline review conversations resolved. Even when a finding
@@ -140,6 +163,12 @@ pr_metadata_check:
   additional_rules:
     - "Security-sensitive changes must describe the threat model impact."
     - "Schema migrations must mention rollback risk."
+
+# Forgejo logins allowed to force an approval over the bot's outstanding
+# findings (see "Disagreeing with a finding"). Opt-in: when empty or omitted,
+# nobody may override. Matching is case-insensitive.
+override_approvers:
+  - "your-maintainer-login"
 
 ```
 
