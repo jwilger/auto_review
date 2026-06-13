@@ -12,6 +12,8 @@
 /.remember/
 /.opencode/node_modules/
 /.opencode/state/
+# Claude Code local (personal) settings
+/.claude/settings.local.json
 # Nix dev environment
 /.direnv/
 /.dependencies/

@@ -169,6 +169,8 @@ async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
         let owner = evt.repository.owner.login.clone();
         let repo = evt.repository.name.clone();
         let issue_number = evt.issue.number;
+        let commenter_login = evt.sender.login.clone();
+        let bot_login = state.bot_login.clone();
         let cmd_for_log = format!("{cmd:?}");
         let dispatcher = state.dispatcher.clone();
         tokio::spawn(async move {
@@ -182,6 +184,8 @@ async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
                 owner: &owner,
                 repo: &repo,
                 issue_number,
+                commenter_login: &commenter_login,
+                bot_login: &bot_login,
             };
             if let Err(e) = handler.handle(ctx, cmd).await {
                 tracing::error!(

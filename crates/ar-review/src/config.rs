@@ -32,6 +32,25 @@ pub struct RepoConfig {
 
     #[serde(default, deserialize_with = "deserialize_pr_metadata_check")]
     pub pr_metadata_check: PrMetadataCheck,
+
+    /// Forgejo logins permitted to force an override-approval over
+    /// auto-review's outstanding findings. Opt-in: when empty (the default),
+    /// no one may override — auto-review declines and explains how to
+    /// configure this key. Matching is case-insensitive.
+    #[serde(default)]
+    pub override_approvers: Vec<String>,
+}
+
+impl RepoConfig {
+    /// Whether `login` is authorized to force an override-approval over
+    /// outstanding findings. Opt-in: an empty `override_approvers` list
+    /// authorizes nobody. Matching is case-insensitive because Forgejo
+    /// usernames are case-insensitive.
+    pub fn is_override_approver(&self, login: &str) -> bool {
+        self.override_approvers
+            .iter()
+            .any(|u| u.eq_ignore_ascii_case(login))
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -99,6 +118,7 @@ impl Default for RepoConfig {
             guidelines: String::new(),
             ignored_paths: Vec::new(),
             pr_metadata_check: PrMetadataCheck::default(),
+            override_approvers: Vec::new(),
         }
     }
 }
@@ -121,6 +141,7 @@ const KNOWN_KEYS: &[&str] = &[
     "guidelines",
     "ignored_paths",
     "pr_metadata_check",
+    "override_approvers",
 ];
 
 const KNOWN_PR_METADATA_CHECK_KEYS: &[&str] = &["enabled", "checks", "additional_rules"];
@@ -297,6 +318,29 @@ mod tests {
             .and_then(|m| m.get(serde_yaml::Value::String("enabled".into())))
             .and_then(serde_yaml::Value::as_bool);
         assert_eq!(metadata_check, Some(false));
+    }
+
+    #[test]
+    fn parses_override_approvers_list() {
+        let cfg = parse_repo_config("override_approvers:\n  - jwilger\n  - alice\n")
+            .expect("parse config");
+        assert_eq!(cfg.override_approvers, vec!["jwilger", "alice"]);
+    }
+
+    #[test]
+    fn default_override_approvers_is_empty_opt_in() {
+        let cfg = RepoConfig::default();
+        assert!(cfg.override_approvers.is_empty());
+        // Opt-in: nobody is authorized when the list is empty.
+        assert!(!cfg.is_override_approver("jwilger"));
+    }
+
+    #[test]
+    fn override_approver_match_is_case_insensitive() {
+        let cfg = parse_repo_config("override_approvers:\n  - JWilger\n").expect("parse config");
+        assert!(cfg.is_override_approver("jwilger"));
+        assert!(cfg.is_override_approver("JWILGER"));
+        assert!(!cfg.is_override_approver("someone-else"));
     }
 
     #[test]

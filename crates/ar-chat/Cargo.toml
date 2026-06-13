@@ -18,6 +18,7 @@ ar-forgejo = { path = "../ar-forgejo" }
 ar-index = { path = "../ar-index" }
 ar-llm = { path = "../ar-llm" }
 ar-orchestrator = { path = "../ar-orchestrator" }
+ar-review = { path = "../ar-review" }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -194,6 +194,10 @@ pub struct PullReviewSummary {
     pub id: u64,
     #[serde(default)]
     pub state: String,
+    /// Review author. Used to single out auto-review's own reviews when
+    /// reconstructing outstanding findings for a human-override caveat.
+    #[serde(default)]
+    pub user: PrReviewCommentUser,
 }
 
 /// One inline review-thread comment on a pull request — what

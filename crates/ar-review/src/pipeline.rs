@@ -142,8 +142,10 @@ async fn validate_pr_metadata_quality(
          Recognize conventional commit title forms with optional scope, such as \
          `feat(scope): description` and `docs: apply threat model markdown formatting`. \
          release PR metadata may use a different acceptable shape, such as title \
-         `chore: release vX.Y.Z` and body `Prepare release vX.Y.Z.`. \
-         The description must be non-empty, not a title copy, and explains why the change is \
+         `chore: release vX.Y.Z` or `chore(release): vX.Y.Z`, with a terse body \
+         such as `Prepare release vX.Y.Z.` or a body that simply restates the \
+         release title (a title-mirroring body is acceptable for release PRs). \
+         For non-release PRs the description must be non-empty, not a title copy, and explains why the change is \
          needed. When failing, quote offending text verbatim in offending_text.\n\n\
          PR title:\n{title}\n\nPR body:\n{body}{additional_rules_section}"
     );
@@ -331,6 +333,15 @@ fn has_clearly_acceptable_pr_metadata(title: &str, body: &str) -> bool {
         return true;
     }
 
+    // Release PRs are intentionally terse: a `chore(release): vX.Y.Z` title
+    // with a body that merely restates it is acceptable. Recognize the release
+    // shape from the title alone, independent of body content, so the
+    // qualitative metadata check never drives REQUEST_CHANGES on a release PR
+    // (issue #287 / eventcore PR #396).
+    if is_release_pr_title(title) {
+        return true;
+    }
+
     let has_substantive_body = markdown_section_has_content(body, "Summary")
         && (markdown_section_has_content(body, "Why")
             || markdown_section_has_content(body, "Verification"));
@@ -387,6 +398,56 @@ fn has_clearly_acceptable_release_pr_metadata(title: &str, body: &str) -> bool {
         ) || body.contains(
             "updates Cargo.toml, Cargo.lock, and CHANGELOG.md with semver-selected release metadata before merge to main.",
         ))
+}
+
+/// Recognize a release-PR title regardless of body content. Accepts the
+/// conventional-commit release shapes auto-review and other release tooling
+/// produce — `chore(release): vX.Y.Z`, `chore: release vX.Y.Z`,
+/// `release: X.Y.Z` — requiring a release-typed prefix AND a semver-shaped
+/// version token so a generic `chore(deps): bump x to 1.2.3` is not mistaken
+/// for a release. Title is attacker-controlled, but the metadata-quality check
+/// it exempts is only PR hygiene — real bug/security findings are unaffected —
+/// so title-based detection is the right durable lever.
+fn is_release_pr_title(title: &str) -> bool {
+    // Tolerate a human-override marker prefix so release detection still works
+    // if one was ever stamped onto a release PR title.
+    let title = crate::override_marker::strip_title_marker(title.trim());
+    let Some((prefix, rest)) = title.trim().split_once(": ") else {
+        return false;
+    };
+    let rest = rest.trim();
+
+    let (kind, scope) = match prefix.split_once('(') {
+        Some((kind, scope)) => {
+            let Some(scope) = scope.strip_suffix(')') else {
+                return false;
+            };
+            (kind.trim(), Some(scope.trim()))
+        }
+        None => (prefix.trim(), None),
+    };
+    let kind = kind.to_ascii_lowercase();
+    let scope_is_release = scope.is_some_and(|s| s.eq_ignore_ascii_case("release"));
+    let rest_lower = rest.to_ascii_lowercase();
+
+    let is_release_prefix = kind == "release"
+        || (kind == "chore"
+            && (scope_is_release || rest_lower == "release" || rest_lower.starts_with("release ")));
+    if !is_release_prefix {
+        return false;
+    }
+
+    rest.split_whitespace().any(looks_like_release_version)
+}
+
+/// A semver-shaped version token, with an optional leading `v` (e.g. `v0.8.1`,
+/// `1.2.0`). Dot-separated numeric segments only; at least two segments.
+fn looks_like_release_version(token: &str) -> bool {
+    let token = token.trim_start_matches(['v', 'V']);
+    token.contains('.')
+        && token
+            .split('.')
+            .all(|seg| !seg.is_empty() && seg.chars().all(|c| c.is_ascii_digit()))
 }
 
 fn markdown_section_has_content(body: &str, heading: &str) -> bool {
@@ -642,6 +703,32 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         {
             append_pre_merge_checks(&mut req.body, &validation);
             req.event = ReviewEvent::RequestChanges;
+        }
+    }
+
+    // Reverse a prior human-override marker once the PR passes cleanly. If this
+    // review approves with no outstanding blocking findings and the PR still
+    // carries the override marker (title prefix and/or body section), strip it
+    // so a later merge commit no longer advertises an override that no longer
+    // applies. Best-effort: a failed edit must not fail the review.
+    if req.event != ReviewEvent::RequestChanges
+        && (crate::override_marker::title_has_marker(args.pr_title)
+            || crate::override_marker::body_has_section(args.pr_body))
+    {
+        let stripped_title = crate::override_marker::strip_title_marker(args.pr_title);
+        let stripped_body = crate::override_marker::strip_body_section(args.pr_body);
+        if let Err(error) = args
+            .forgejo
+            .update_pull_request(
+                args.owner,
+                args.repo,
+                args.pr_number,
+                Some(&stripped_title),
+                Some(&stripped_body),
+            )
+            .await
+        {
+            tracing::warn!(%error, "failed to strip override marker after clean approval");
         }
     }
 
@@ -1969,6 +2056,107 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn scoped_release_pr_metadata_with_title_mirroring_body_does_not_request_changes() {
+        // Regression for issue #287 / eventcore PR #396: a scoped release title
+        // (`chore(release): vX.Y.Z`) whose body simply mirrors the title must
+        // not be driven to REQUEST_CHANGES by a Cheap-tier metadata false
+        // negative. The deterministic release-title recognizer exempts it.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/8.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/x.rs b/src/x.rs\n\
+                 index 1111111..2222222 100644\n\
+                 --- a/src/x.rs\n\
+                 +++ b/src/x.rs\n\
+                 @@ -1 +1,2 @@\n\
+                 +pub fn added() {}\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/8/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/8/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1247,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let reasoning = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let cheap = Arc::new(CannedProvider::new(vec![
+            r#"{
+                "passed": false,
+                "rationale": "The title lacks a description after the version number and the body is a copy of the title.",
+                "offending_text": "chore(release): v0.8.1"
+            }"#,
+        ]));
+        let llm = Router::new()
+            .with(ModelTier::Reasoning, reasoning)
+            .with(ModelTier::Cheap, cheap);
+
+        let outcome = review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 8,
+            head_sha: "deadbeef",
+            pr_title: "chore(release): v0.8.1",
+            pr_body: "chore(release): v0.8.1",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("review ok");
+
+        assert_eq!(outcome.review_id, 1247);
+        assert_eq!(outcome.findings_count, 0);
+
+        let received = server.received_requests().await.expect("requests");
+        let posted_review = received
+            .iter()
+            .find(|request| request.method.as_str() == "POST")
+            .expect("posted review");
+        let body: serde_json::Value =
+            serde_json::from_slice(&posted_review.body).expect("review body json");
+        let event = body
+            .get("event")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review event");
+        let review_body = body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("posted review body");
+
+        assert!(
+            event != "REQUEST_CHANGES" && !review_body.contains("## Pre-merge checks"),
+            "scoped release PR metadata with a title-mirroring body must not be over-blocked; \
+             event was {event:?}, body was:\n{review_body}",
+        );
+    }
+
+    #[tokio::test]
     async fn generated_release_pr_metadata_does_not_request_changes_when_cheap_model_over_blocks() {
         let server = MockServer::start().await;
         Mock::given(method("GET"))
@@ -2065,6 +2253,174 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn clean_approval_strips_a_prior_override_marker_from_the_pr() {
+        // A PR previously force-approved (marked) now passes cleanly: the
+        // pipeline must strip the override marker from the title/body via PATCH
+        // so the marker no longer rides into the merge commit.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/11.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/x.rs b/src/x.rs\n\
+                 index 1111111..2222222 100644\n\
+                 --- a/src/x.rs\n\
+                 +++ b/src/x.rs\n\
+                 @@ -1 +1,2 @@\n\
+                 +pub fn added() {}\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/11/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/repos/o/r/pulls/11"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/11/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1251,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let reasoning = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"clean now","findings":[]}"#,
+        ]));
+        // No Cheap tier -> no metadata validation -> clean approval.
+        let llm = Router::new().with(ModelTier::Reasoning, reasoning);
+
+        let marked_title = crate::override_marker::apply_title_marker("fix: handle empty input");
+        let marked_body = crate::override_marker::apply_body_section(
+            "Handle the empty input case.",
+            "## Approval override\nReason: prior override.",
+        );
+
+        review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 11,
+            head_sha: "deadbeef",
+            pr_title: &marked_title,
+            pr_body: &marked_body,
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("review ok");
+
+        let received = server.received_requests().await.expect("requests");
+        let patch = received
+            .iter()
+            .find(|r| r.method.as_str() == "PATCH")
+            .expect("clean approval must PATCH to strip the marker");
+        let patch_body: serde_json::Value =
+            serde_json::from_slice(&patch.body).expect("patch json");
+        assert_eq!(
+            patch_body.get("title").and_then(serde_json::Value::as_str),
+            Some("fix: handle empty input"),
+            "title marker must be stripped"
+        );
+        let body = patch_body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("patched body");
+        assert!(
+            !body.contains("Approval override"),
+            "override section must be stripped, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_approval_without_a_marker_does_not_patch_the_pr() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/12.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/x.rs b/src/x.rs\n\
+                 index 1111111..2222222 100644\n\
+                 --- a/src/x.rs\n\
+                 +++ b/src/x.rs\n\
+                 @@ -1 +1,2 @@\n\
+                 +pub fn added() {}\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/12/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/12/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1252,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let reasoning = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"clean","findings":[]}"#,
+        ]));
+        let llm = Router::new().with(ModelTier::Reasoning, reasoning);
+
+        review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 12,
+            head_sha: "deadbeef",
+            pr_title: "fix: ordinary change",
+            pr_body: "An ordinary PR body explaining the change.",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("review ok");
+
+        let received = server.received_requests().await.expect("requests");
+        assert!(
+            !received.iter().any(|r| r.method.as_str() == "PATCH"),
+            "no marker present -> pipeline must not edit the PR"
+        );
+    }
+
     #[test]
     fn release_pr_metadata_gate_accepts_concrete_release_prepare_body_without_weak_generic_bypass()
     {
@@ -2080,6 +2436,37 @@ mod tests {
             !has_clearly_acceptable_release_pr_metadata(title, weak_generic_body),
             "release metadata gate should not deterministically bypass weak generic release bodies"
         );
+    }
+
+    #[test]
+    fn is_release_pr_title_recognizes_scoped_and_unscoped_release_titles() {
+        // Scoped conventional-commit release title — the form that regressed
+        // on issue #287 / eventcore PR #396.
+        assert!(is_release_pr_title("chore(release): v0.8.1"));
+        // Unscoped colon form.
+        assert!(is_release_pr_title("chore: release v0.9.0"));
+        // Bare `release` type, and versions without a leading `v`.
+        assert!(is_release_pr_title("release: 1.2.0"));
+        assert!(is_release_pr_title("chore(release): 2.0.0"));
+
+        // Non-release titles must NOT be exempted, even when they contain a
+        // version-looking token.
+        assert!(!is_release_pr_title("feat(scope): add a thing"));
+        assert!(!is_release_pr_title("chore(deps): bump serde to 1.0.200"));
+        assert!(!is_release_pr_title("fix stuff"));
+        assert!(!is_release_pr_title("chore: update release notes"));
+        // A release-shaped prefix without a version token is not a release PR.
+        assert!(!is_release_pr_title("chore(release): cut the next one"));
+    }
+
+    #[test]
+    fn release_pr_metadata_gate_accepts_scoped_release_title_with_title_mirroring_body() {
+        // The exact issue #287 case: a scoped release title whose body mirrors
+        // the title must be acceptable metadata regardless of body content.
+        assert!(has_clearly_acceptable_pr_metadata(
+            "chore(release): v0.8.1",
+            "chore(release): v0.8.1"
+        ));
     }
 
     #[tokio::test]
@@ -2137,6 +2524,7 @@ mod tests {
                 && prompt.contains("release PR metadata")
                 && prompt.contains("different acceptable shape")
                 && prompt.contains("chore: release vX.Y.Z")
+                && prompt.contains("chore(release): vX.Y.Z")
                 && prompt.contains("Prepare release vX.Y.Z.")
                 && !prompt.contains("≤72 chars")
                 && prompt.contains("description")

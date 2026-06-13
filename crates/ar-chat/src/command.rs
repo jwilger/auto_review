@@ -113,6 +113,12 @@ fn parse_review_correction(
     if !after.trim_start().starts_with("wrote in ") {
         return None;
     }
+    // Any quote-reply to a bot finding with non-empty prose is a correction.
+    // We deliberately do NOT gate on a hardcoded keyword list here — whether
+    // the reply asks for approval, disputes a finding, or just asks a question
+    // is decided downstream by an LLM intent classifier in the handler, so a
+    // natural-language reply ("no, that's fine for a release PR") is understood
+    // without the user having to phrase it a particular way.
     let correction = lines
         .filter_map(|line| {
             let trimmed = line.trim();
@@ -124,17 +130,7 @@ fn parse_review_correction(
         })
         .collect::<Vec<_>>()
         .join("\n");
-    let lower = correction.to_ascii_lowercase();
-    (lower.contains("adequate")
-        || lower.contains("invalid")
-        || lower.contains("fine")
-        || lower.contains("accept")
-        || lower.contains("approv")
-        || lower.contains("wrong")
-        || lower.contains("correct")
-        || lower.contains("false positive"))
-    .then_some(correction)
-    .filter(|text| !text.is_empty())
+    (!correction.is_empty()).then_some(correction)
 }
 
 fn is_separator(c: char) -> bool {
@@ -342,6 +338,35 @@ mod tests {
         // still has to fire.
         assert_eq!(parse("@AUTOREVIEWER remember X"), ChatCommand::NotMentioned);
         assert_eq!(parse("@Auto_Reviewer help"), ChatCommand::NotMentioned);
+    }
+
+    #[test]
+    fn quote_reply_without_keywords_is_still_a_review_correction() {
+        // Previously this required a hardcoded keyword (fine/accept/wrong/...).
+        // Now any quote-reply with prose is a correction; intent is judged
+        // downstream by the handler.
+        let body = "@auto-review wrote in https://example.com/pulls/1#issuecomment-2:\n\
+             > PR metadata quality: failed\n\
+             \n\
+             This is a release PR, so the terse body is expected.";
+        match parse_chat_command(body, "auto-review") {
+            ChatCommand::ReviewCorrection(text) => {
+                assert_eq!(text, "This is a release PR, so the terse body is expected.")
+            }
+            other => panic!("expected ReviewCorrection, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn quote_reply_with_no_user_prose_is_not_a_correction() {
+        // A bare quote with nothing beneath it is not a correction; it falls
+        // through to the normal mention parser.
+        let body = "@auto-review wrote in https://example.com/pulls/1#issuecomment-2:\n\
+             > PR metadata quality: failed";
+        assert!(!matches!(
+            parse_chat_command(body, "auto-review"),
+            ChatCommand::ReviewCorrection(_)
+        ));
     }
 
     #[test]

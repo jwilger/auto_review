@@ -14,6 +14,7 @@ pub mod heal;
 pub mod ignored;
 pub mod llm_triage;
 pub mod mapping;
+pub mod override_marker;
 pub mod pipeline;
 pub mod rag_context;
 pub mod triage;

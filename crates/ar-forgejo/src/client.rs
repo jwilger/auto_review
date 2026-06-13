@@ -233,6 +233,75 @@ impl Client {
         json_get(&self.http, url).await
     }
 
+    /// Edit a pull request's title and/or body. Only the provided fields are
+    /// sent (Forgejo leaves omitted fields unchanged). Used to stamp — and
+    /// later strip — the human-override marker on the PR so it rides into the
+    /// squash/merge commit the maintainer creates from the PR title/body.
+    pub async fn update_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        n: u64,
+        title: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<(), Error> {
+        #[derive(Serialize)]
+        struct Req<'a> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            title: Option<&'a str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            body: Option<&'a str>,
+        }
+        let url = self.url(&format!("repos/{owner}/{repo}/pulls/{n}"))?;
+        let resp = self
+            .http
+            .patch(url)
+            .json(&Req { title, body })
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body: cap_for_error(&body),
+            });
+        }
+        Ok(())
+    }
+
+    /// Fetch a file's raw contents from the repo at `ref_` (a branch, tag, or
+    /// commit SHA). Returns `Ok(None)` when the file does not exist (404) so
+    /// callers can treat "no config" the same as "default config". Used by the
+    /// chat path to read `.auto_review.yaml` without cloning the repo.
+    pub async fn get_file_content(
+        &self,
+        owner: &str,
+        repo: &str,
+        file_path: &str,
+        ref_: &str,
+    ) -> Result<Option<String>, Error> {
+        let url = self.url(&format!("repos/{owner}/{repo}/raw/{file_path}?ref={ref_}"))?;
+        let resp = self
+            .http
+            .get(url)
+            .header(ACCEPT, "text/plain")
+            .send()
+            .await?;
+        let status = resp.status();
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+        let body = resp.text().await?;
+        if !status.is_success() {
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body: cap_for_error(&body),
+            });
+        }
+        Ok(Some(body))
+    }
+
     /// Fetch the unified diff between two commit SHAs (or branches).
     /// Used for incremental review: when a PR gets new commits, the
     /// orchestrator can ask for `previous_head..current_head` instead
@@ -800,6 +869,88 @@ mod tests {
             Error::Api { status, .. } => assert_eq!(status, 404),
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn update_pull_request_patches_title_and_body() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/repos/o/r/pulls/7"))
+            .and(body_json(serde_json::json!({
+                "title": "[override-approved] fix: thing",
+                "body": "details\n\n## Approval override\n…"
+            })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 7,
+                "title": "[override-approved] fix: thing"
+            })))
+            .mount(&server)
+            .await;
+
+        client
+            .update_pull_request(
+                "o",
+                "r",
+                7,
+                Some("[override-approved] fix: thing"),
+                Some("details\n\n## Approval override\n…"),
+            )
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn update_pull_request_omits_unset_fields() {
+        let (server, client) = mock_client().await;
+        // Only `title` is provided; the JSON body must NOT carry `body`.
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/repos/o/r/pulls/7"))
+            .and(body_json(serde_json::json!({ "title": "fix: thing" })))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+
+        client
+            .update_pull_request("o", "r", 7, Some("fix: thing"), None)
+            .await
+            .expect("ok");
+    }
+
+    #[tokio::test]
+    async fn get_file_content_returns_some_on_200() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/raw/.auto_review.yaml"))
+            .respond_with(
+                ResponseTemplate::new(200).set_body_string("override_approvers:\n  - jwilger\n"),
+            )
+            .mount(&server)
+            .await;
+
+        let contents = client
+            .get_file_content("o", "r", ".auto_review.yaml", "main")
+            .await
+            .expect("ok");
+        assert_eq!(
+            contents.as_deref(),
+            Some("override_approvers:\n  - jwilger\n")
+        );
+    }
+
+    #[tokio::test]
+    async fn get_file_content_returns_none_on_404() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/raw/.auto_review.yaml"))
+            .respond_with(ResponseTemplate::new(404).set_body_string("Not Found"))
+            .mount(&server)
+            .await;
+
+        let contents = client
+            .get_file_content("o", "r", ".auto_review.yaml", "main")
+            .await
+            .expect("ok");
+        assert!(contents.is_none());
     }
 
     #[tokio::test]
