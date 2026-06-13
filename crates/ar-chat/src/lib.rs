@@ -16,7 +16,6 @@
 
 pub mod command;
 pub mod handler;
-pub mod override_marker;
 
 pub use command::{parse_chat_command, ChatCommand};
 pub use handler::{ChatContext, ChatError, ChatHandler};

@@ -277,11 +277,9 @@ impl ChatPoller {
         }
 
         for id in &to_dispatch {
-            let body = comments
-                .iter()
-                .find(|c| c.id == *id)
-                .map(|c| c.body.clone())
-                .unwrap_or_default();
+            let comment = comments.iter().find(|c| c.id == *id);
+            let body = comment.map(|c| c.body.clone()).unwrap_or_default();
+            let commenter_login = comment.map(|c| c.user.login.clone()).unwrap_or_default();
             let command = parse_chat_command(&body, &self.bot_name);
             let handler = ChatHandler {
                 forgejo: &self.forgejo,
@@ -293,6 +291,8 @@ impl ChatPoller {
                 owner: &key.owner,
                 repo: &key.repo,
                 issue_number: key.pr_number,
+                commenter_login: &commenter_login,
+                bot_login: &self.bot_name,
             };
             match handler.handle(ctx, command).await {
                 Ok(()) => {

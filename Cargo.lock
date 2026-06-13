@@ -82,6 +82,7 @@ dependencies = [
  "ar-index",
  "ar-llm",
  "ar-orchestrator",
+ "ar-review",
  "async-trait",
  "serde",
  "serde_json",

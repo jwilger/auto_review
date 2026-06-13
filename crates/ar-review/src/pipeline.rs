@@ -409,6 +409,9 @@ fn has_clearly_acceptable_release_pr_metadata(title: &str, body: &str) -> bool {
 /// it exempts is only PR hygiene — real bug/security findings are unaffected —
 /// so title-based detection is the right durable lever.
 fn is_release_pr_title(title: &str) -> bool {
+    // Tolerate a human-override marker prefix so release detection still works
+    // if one was ever stamped onto a release PR title.
+    let title = crate::override_marker::strip_title_marker(title.trim());
     let Some((prefix, rest)) = title.trim().split_once(": ") else {
         return false;
     };
@@ -702,6 +705,32 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         {
             append_pre_merge_checks(&mut req.body, &validation);
             req.event = ReviewEvent::RequestChanges;
+        }
+    }
+
+    // Reverse a prior human-override marker once the PR passes cleanly. If this
+    // review approves with no outstanding blocking findings and the PR still
+    // carries the override marker (title prefix and/or body section), strip it
+    // so a later merge commit no longer advertises an override that no longer
+    // applies. Best-effort: a failed edit must not fail the review.
+    if req.event != ReviewEvent::RequestChanges
+        && (crate::override_marker::title_has_marker(args.pr_title)
+            || crate::override_marker::body_has_section(args.pr_body))
+    {
+        let stripped_title = crate::override_marker::strip_title_marker(args.pr_title);
+        let stripped_body = crate::override_marker::strip_body_section(args.pr_body);
+        if let Err(error) = args
+            .forgejo
+            .update_pull_request(
+                args.owner,
+                args.repo,
+                args.pr_number,
+                Some(&stripped_title),
+                Some(&stripped_body),
+            )
+            .await
+        {
+            tracing::warn!(%error, "failed to strip override marker after clean approval");
         }
     }
 
@@ -2223,6 +2252,174 @@ mod tests {
             event != "REQUEST_CHANGES" && !review_body.contains("## Pre-merge checks"),
             "generated release PR metadata should not be over-blocked by a Cheap-tier false negative; \
              event was {event:?}, body was:\n{review_body}",
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_approval_strips_a_prior_override_marker_from_the_pr() {
+        // A PR previously force-approved (marked) now passes cleanly: the
+        // pipeline must strip the override marker from the title/body via PATCH
+        // so the marker no longer rides into the merge commit.
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/11.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/x.rs b/src/x.rs\n\
+                 index 1111111..2222222 100644\n\
+                 --- a/src/x.rs\n\
+                 +++ b/src/x.rs\n\
+                 @@ -1 +1,2 @@\n\
+                 +pub fn added() {}\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/11/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("PATCH"))
+            .and(path("/api/v1/repos/o/r/pulls/11"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({})))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/11/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1251,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let reasoning = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"clean now","findings":[]}"#,
+        ]));
+        // No Cheap tier -> no metadata validation -> clean approval.
+        let llm = Router::new().with(ModelTier::Reasoning, reasoning);
+
+        let marked_title = crate::override_marker::apply_title_marker("fix: handle empty input");
+        let marked_body = crate::override_marker::apply_body_section(
+            "Handle the empty input case.",
+            "## Approval override\nReason: prior override.",
+        );
+
+        review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 11,
+            head_sha: "deadbeef",
+            pr_title: &marked_title,
+            pr_body: &marked_body,
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("review ok");
+
+        let received = server.received_requests().await.expect("requests");
+        let patch = received
+            .iter()
+            .find(|r| r.method.as_str() == "PATCH")
+            .expect("clean approval must PATCH to strip the marker");
+        let patch_body: serde_json::Value =
+            serde_json::from_slice(&patch.body).expect("patch json");
+        assert_eq!(
+            patch_body.get("title").and_then(serde_json::Value::as_str),
+            Some("fix: handle empty input"),
+            "title marker must be stripped"
+        );
+        let body = patch_body
+            .get("body")
+            .and_then(serde_json::Value::as_str)
+            .expect("patched body");
+        assert!(
+            !body.contains("Approval override"),
+            "override section must be stripped, got: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn clean_approval_without_a_marker_does_not_patch_the_pr() {
+        let server = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/12.diff"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(
+                "diff --git a/src/x.rs b/src/x.rs\n\
+                 index 1111111..2222222 100644\n\
+                 --- a/src/x.rs\n\
+                 +++ b/src/x.rs\n\
+                 @@ -1 +1,2 @@\n\
+                 +pub fn added() {}\n",
+            ))
+            .mount(&server)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/12/files"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                {"filename": "src/x.rs", "status": "modified"}
+            ])))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/o/r/pulls/12/reviews"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "id": 1252,
+                "state": "APPROVED"
+            })))
+            .mount(&server)
+            .await;
+
+        let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
+        let reasoning = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"clean","findings":[]}"#,
+        ]));
+        let llm = Router::new().with(ModelTier::Reasoning, reasoning);
+
+        review_pull_request(ReviewArgs {
+            forgejo: &forgejo,
+            llm: &llm,
+            owner: "o",
+            repo: "r",
+            pr_number: 12,
+            head_sha: "deadbeef",
+            pr_title: "fix: ordinary change",
+            pr_body: "An ordinary PR body explaining the change.",
+            ignored_paths: &GlobSet::empty(),
+            guidelines: "",
+            repo_context: "",
+            diff_override: None,
+            previous_review_sha: None,
+            verify_mode: VerifyMode::Simple,
+            workspace_path: None,
+            min_severity: ReviewSeverity::Note,
+            pr_metadata_check: crate::config::PrMetadataCheck {
+                enabled: true,
+                ..Default::default()
+            },
+        })
+        .await
+        .expect("review ok");
+
+        let received = server.received_requests().await.expect("requests");
+        assert!(
+            !received.iter().any(|r| r.method.as_str() == "PATCH"),
+            "no marker present -> pipeline must not edit the PR"
         );
     }
 
