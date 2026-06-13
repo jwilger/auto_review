@@ -46,3 +46,13 @@ ignored_paths:
   - "third_party/**"
   - "src/generated/**"
   - "*.snap"
+
+# Forgejo logins allowed to force an override-approval over auto-review's
+# outstanding findings (e.g. by commenting "@auto-review this is fine, please
+# approve"). Opt-in: when this list is empty or omitted, NO ONE may override —
+# auto-review declines and points here. Authorized overrides still require the
+# commenter to explain WHY (auto-review asks if no reason is given), and the
+# reason is recorded in the PR/merge-commit description. Matching is
+# case-insensitive.
+override_approvers:
+  - "jwilger"
