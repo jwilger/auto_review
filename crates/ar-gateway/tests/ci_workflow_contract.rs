@@ -381,6 +381,62 @@ fn release_publish_installs_profile_tools_from_repository_lock() {
 }
 
 #[test]
+fn release_publish_installs_profile_tools_after_checkout() {
+    let mut contract_errors = Vec::new();
+    let Some(job) = workflow_job_in(RELEASE_PUBLISH_WORKFLOW, "release-publish") else {
+        panic!(".forgejo/workflows/release-publish.yml should expose a `release-publish` job");
+    };
+
+    let job_lines: Vec<&str> = job.lines().collect();
+
+    let Some(install_or_reuse_nix_step) = workflow_step_lines(job, "Install or reuse Nix") else {
+        panic!("release-publish should include an Install or reuse Nix step");
+    };
+    let install_or_reuse_nix_step = install_or_reuse_nix_step.join("\n");
+
+    if install_or_reuse_nix_step.contains("nix profile install")
+        && install_or_reuse_nix_step.contains("--inputs-from .")
+    {
+        let install_step_index = line_index_with_prefix(&job_lines, "- name: Install or reuse Nix")
+            .or_else(|| line_index_with_prefix(&job_lines, "name: Install or reuse Nix"));
+
+        let push_checkout_index =
+            line_index_with_prefix(&job_lines, "name: Checkout pushed main commit");
+        let dispatch_checkout_index =
+            line_index_with_prefix(&job_lines, "name: Checkout dispatched release merge commit");
+
+        require(
+            &mut contract_errors,
+            install_step_index.is_some() && push_checkout_index.is_some() && dispatch_checkout_index.is_some(),
+            "release-publish should define Install or reuse Nix plus both conditional checkout steps",
+        );
+
+        if let (
+            Some(install_step_index),
+            Some(push_checkout_index),
+            Some(dispatch_checkout_index),
+        ) = (
+            install_step_index,
+            push_checkout_index,
+            dispatch_checkout_index,
+        ) {
+            require(
+                &mut contract_errors,
+                push_checkout_index < install_step_index,
+                "push checkout must precede nix profile install --inputs-from .",
+            );
+            require(
+                &mut contract_errors,
+                dispatch_checkout_index < install_step_index,
+                "workflow_dispatch checkout must precede nix profile install --inputs-from .",
+            );
+        }
+    }
+
+    assert!(contract_errors.is_empty(), "{}", contract_errors.join("\n"));
+}
+
+#[test]
 fn release_publish_creates_binary_release_assets_only() {
     let mut contract_errors = Vec::new();
     let Some(job) = workflow_job_in(RELEASE_PUBLISH_WORKFLOW, "release-publish") else {

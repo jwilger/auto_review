@@ -15,6 +15,20 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' && inputs.release_merge_sha != '' }}
     environment: release-publish
     steps:
+      - uses: actions/checkout@v4
+        name: Checkout pushed main commit
+        if: ${{ github.event_name == 'push' }}
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/checkout@v4
+        name: Checkout dispatched release merge commit
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        with:
+          ref: ${{ inputs.release_merge_sha }}
+          persist-credentials: false
+          fetch-depth: 0
       - name: Install or reuse Nix
         run: |
           set -euo pipefail
@@ -46,20 +60,6 @@ jobs:
             nixpkgs#gawk \
             nixpkgs#gnused
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
-      - uses: actions/checkout@v4
-        name: Checkout pushed main commit
-        if: ${{ github.event_name == 'push' }}
-        with:
-          ref: ${{ github.sha }}
-          persist-credentials: false
-          fetch-depth: 0
-      - uses: actions/checkout@v4
-        name: Checkout dispatched release merge commit
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        with:
-          ref: ${{ inputs.release_merge_sha }}
-          persist-credentials: false
-          fetch-depth: 0
       - name: Export pushed release context
         if: ${{ github.event_name == 'push' }}
         env:
