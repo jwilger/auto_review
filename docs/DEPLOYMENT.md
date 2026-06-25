@@ -73,6 +73,42 @@ Forgejo webhooks at `https://reviewer.example.com/webhooks/forgejo`.
 Treat operator-owned images as part of your deployment boundary: scan, sign, and
 promote them with your normal platform controls.
 
+## AWS Bedrock AgentCore runtime
+
+The AgentCore path is for CI-invoked semantic review without a dedicated gateway
+host. Build an operator-owned image that runs `auto-review agentcore serve` on
+port 9000, configure `/ping` as the health path, and invoke `/invocations` only
+after deterministic repository checks pass.
+
+Deployment examples live under `deploy/agentcore/`:
+
+- `Containerfile` shows the minimal runtime image shape.
+- `runtime-config.json` records the port, health path, invocation path, and
+  environment contract.
+- `iam-policy.md` lists the DynamoDB state-table permissions and TTL note.
+- `github-actions-oidc.yml` shows a GitHub Actions OIDC invocation.
+- `forgejo-actions.yml` shows a Forgejo Actions invocation.
+
+Set DynamoDB tables for cold-start-safe AgentCore state:
+
+```sh
+AGENTCORE_IDEMPOTENCY_DYNAMODB_TABLE=auto-review-agentcore-idempotency
+AGENTCORE_HISTORY_DYNAMODB_TABLE=auto-review-agentcore-history
+AGENTCORE_LEARNINGS_DYNAMODB_TABLE=auto-review-agentcore-learnings
+```
+
+Forgejo AgentCore review uses `FORGEJO_BASE_URL`, `AR_FORGEJO_TOKEN`, and
+`LLM_BASE_URL`. GitHub AgentCore review uses GitHub App credentials:
+`GITHUB_API_URL` (optional, defaults to `https://api.github.com`),
+`GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, and `LLM_BASE_URL`. For GitHub, pass
+the repository installation id in each CI invocation payload as
+`installation_id`; the runtime exchanges the app JWT for a repository-scoped
+installation token before fetching the PR and dispatching review.
+
+Keep the always-on gateway deployment available for Forgejo webhook and chat
+use cases. AgentCore is the no-dedicated-server path for CI-triggered semantic
+review.
+
 ## Nix and NixOS
 
 Build or install the current program:

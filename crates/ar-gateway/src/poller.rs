@@ -282,7 +282,7 @@ impl ChatPoller {
             let commenter_login = comment.map(|c| c.user.login.clone()).unwrap_or_default();
             let command = parse_chat_command(&body, &self.bot_name);
             let handler = ChatHandler {
-                forgejo: &self.forgejo,
+                host: self.forgejo.as_ref(),
                 llm: &self.llm,
                 learnings: self.learnings.as_ref(),
                 dispatcher: Some(self.dispatcher.clone()),

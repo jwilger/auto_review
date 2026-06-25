@@ -56,6 +56,7 @@ PR author┤ Forgejo (HTTPS)   │───────────────�
 | ------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
 | External PR author → Forgejo                                       | Untrusted. PR body, file contents, file paths, branch names                                                                                                                                                                                                                                                                                                                                                                                                     |
 | Forgejo → `ar-gateway` webhook                                     | Trusted iff HMAC verifies. Otherwise hard-rejected (401)                                                                                                                                                                                                                                                                                                                                                                                                        |
+| GitHub webhook payloads                                            | Future GitHub webhook ingress must verify `X-Hub-Signature-256` (`sha256=<hex>`) before parsing. The verifier lives in `ar-github`; CI-invoked AgentCore review does not currently expose GitHub webhook ingress.                                                                                                                                                                                                                                               |
 | Forgejo Actions → `ar-gateway` CI review endpoint                  | Trusted iff bearer token matches and PR head is re-verified with Forgejo                                                                                                                                                                                                                                                                                                                                                                                        |
 | Workspace clone → review tooling                                   | **Untrusted**: the clone is attacker-controlled by construction                                                                                                                                                                                                                                                                                                                                                                                                 |
 | LLM output → review pipeline                                       | Untrusted: schema-validated, then verifier-cross-checked                                                                                                                                                                                                                                                                                                                                                                                                        |
@@ -184,6 +185,9 @@ hex returns 400. No further work happens before a valid signature. Verified
 webhook delivery ids (`X-Forgejo-Delivery`) are deduped before dispatch; semantic
 review work is also deduped by `(repo, pr_number, head_sha)` in the
 orchestrator's history table.
+Future GitHub webhook ingress must use the GitHub `X-Hub-Signature-256` format
+and the same hard-reject posture; `ar-github` exposes a strict verifier for
+`sha256=<hex>` signatures.
 Effect of replay: re-runs a review the operator already paid for
 once; bounded spend. CI-triggered review requests require a separate
 strong bearer action token (`AR_CI_REVIEW_TOKEN`, 32+ bytes/chars at
@@ -410,6 +414,9 @@ threat-model claims fail CI when a regression slips in:
 - `crates/ar-gateway/src/webhook.rs` HMAC unit tests — cover T2
   (webhook forgery: missing-signature, wrong-secret, malformed
   hex).
+- `crates/ar-github/tests/webhook_signature.rs` — covers GitHub
+  `X-Hub-Signature-256` parsing and HMAC verification for T2 before
+  a GitHub webhook ingress route is added.
 - `crates/ar-review/src/workspace.rs` token-redactor tests —
   cover T5 (PAT compromise: tokens never appear in URL logs).
 - `crates/ar-gateway/src/startup.rs` OCI launcher/posture tests,

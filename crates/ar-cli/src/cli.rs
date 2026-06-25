@@ -16,6 +16,10 @@ pub enum Command {
     /// Gateway lifecycle commands.
     Gateway(GatewayArgs),
 
+    /// AWS Bedrock AgentCore runtime commands.
+    #[command(subcommand)]
+    Agentcore(AgentcoreCommand),
+
     /// Authentication and token setup commands.
     #[command(subcommand)]
     Auth(AuthCommand),
@@ -54,6 +58,84 @@ pub struct GatewayArgs {
     /// Run the gateway directly with only application-level controls.
     #[arg(long)]
     pub bare: bool,
+}
+
+#[derive(Subcommand, Debug)]
+pub enum AgentcoreCommand {
+    /// Serve the AgentCore-compatible runtime HTTP API.
+    Serve(AgentcoreServeArgs),
+}
+
+#[derive(clap::Args, Debug)]
+pub struct AgentcoreServeArgs {
+    /// Address for the AgentCore runtime HTTP server.
+    #[arg(long, default_value = "0.0.0.0:9000", env = "AGENTCORE_BIND")]
+    pub bind: String,
+
+    /// Forgejo base URL for semantic-review invocations.
+    #[arg(long = "forgejo-url", env = "FORGEJO_BASE_URL")]
+    pub forgejo_url: Option<String>,
+
+    /// Forgejo bot token for semantic-review invocations.
+    #[arg(long = "token", env = "AR_FORGEJO_TOKEN")]
+    pub token: Option<String>,
+
+    /// GitHub REST API base URL for semantic-review invocations.
+    #[arg(
+        long = "github-api-url",
+        default_value = "https://api.github.com",
+        env = "GITHUB_API_URL"
+    )]
+    pub github_api_url: String,
+
+    /// GitHub App id for semantic-review invocations.
+    #[arg(long = "github-app-id", env = "GITHUB_APP_ID")]
+    pub github_app_id: Option<u64>,
+
+    /// GitHub App private key PEM for semantic-review invocations.
+    #[arg(long = "github-app-private-key", env = "GITHUB_APP_PRIVATE_KEY")]
+    pub github_app_private_key: Option<String>,
+
+    /// OpenAI-compatible reasoning provider base URL.
+    #[arg(long, env = "LLM_BASE_URL")]
+    pub llm_base_url: Option<String>,
+
+    /// OpenAI-compatible API key for the reasoning provider.
+    #[arg(long, env = "LLM_API_KEY")]
+    pub llm_api_key: Option<String>,
+
+    /// Reasoning model name.
+    #[arg(long, default_value = "qwen2.5-coder:32b", env = "LLM_REASONING_MODEL")]
+    pub llm_model: String,
+
+    /// DynamoDB table for durable AgentCore invocation idempotency.
+    #[arg(
+        long = "idempotency-dynamodb-table",
+        env = "AGENTCORE_IDEMPOTENCY_DYNAMODB_TABLE"
+    )]
+    pub idempotency_dynamodb_table: Option<String>,
+
+    /// Seconds before DynamoDB idempotency records expire.
+    #[arg(
+        long = "idempotency-ttl-secs",
+        default_value_t = 86_400,
+        env = "AGENTCORE_IDEMPOTENCY_TTL_SECS"
+    )]
+    pub idempotency_ttl_secs: u64,
+
+    /// DynamoDB table for durable AgentCore review history.
+    #[arg(
+        long = "history-dynamodb-table",
+        env = "AGENTCORE_HISTORY_DYNAMODB_TABLE"
+    )]
+    pub history_dynamodb_table: Option<String>,
+
+    /// DynamoDB table for durable AgentCore learnings.
+    #[arg(
+        long = "learnings-dynamodb-table",
+        env = "AGENTCORE_LEARNINGS_DYNAMODB_TABLE"
+    )]
+    pub learnings_dynamodb_table: Option<String>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -1032,6 +1114,7 @@ mod tests {
         let cmd = Cli::command();
         let expected_groups = [
             "gateway",
+            "agentcore",
             "auth",
             "webhook",
             "config",
@@ -1084,6 +1167,175 @@ mod tests {
             "{}\nactual top-level commands: {:?}",
             failures.join("\n"),
             actual_groups
+        );
+    }
+
+    #[test]
+    fn agentcore_serve_parses_bind_address() {
+        let cli = Cli::try_parse_from([
+            "auto-review",
+            "agentcore",
+            "serve",
+            "--bind",
+            "0.0.0.0:9000",
+        ])
+        .expect("agentcore serve parses");
+
+        match cli.command {
+            Command::Agentcore(AgentcoreCommand::Serve(args)) => {
+                assert_eq!(args.bind, "0.0.0.0:9000");
+            }
+            other => panic!("expected agentcore serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agentcore_serve_parses_forgejo_review_runtime_inputs() {
+        let cli = Cli::try_parse_from([
+            "auto-review",
+            "agentcore",
+            "serve",
+            "--forgejo-url",
+            "https://git.example",
+            "--token",
+            "forgejo-token",
+            "--llm-base-url",
+            "https://llm.example/v1",
+            "--llm-model",
+            "review-model",
+        ])
+        .expect("agentcore serve parses runtime inputs");
+
+        match cli.command {
+            Command::Agentcore(AgentcoreCommand::Serve(args)) => {
+                assert_eq!(args.forgejo_url.as_deref(), Some("https://git.example"));
+                assert_eq!(args.token.as_deref(), Some("forgejo-token"));
+                assert_eq!(args.llm_base_url.as_deref(), Some("https://llm.example/v1"));
+                assert_eq!(args.llm_model, "review-model");
+            }
+            other => panic!("expected agentcore serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agentcore_serve_parses_github_app_review_runtime_inputs() {
+        let cli = Cli::try_parse_from([
+            "auto-review",
+            "agentcore",
+            "serve",
+            "--github-api-url",
+            "https://api.github.example",
+            "--github-app-id",
+            "12345",
+            "--github-app-private-key",
+            "private-key-pem",
+            "--llm-base-url",
+            "https://llm.example/v1",
+        ])
+        .expect("agentcore serve parses GitHub runtime inputs");
+
+        match cli.command {
+            Command::Agentcore(AgentcoreCommand::Serve(args)) => {
+                assert_eq!(args.github_api_url, "https://api.github.example");
+                assert_eq!(args.github_app_id, Some(12345));
+                assert_eq!(
+                    args.github_app_private_key.as_deref(),
+                    Some("private-key-pem")
+                );
+                assert_eq!(args.llm_base_url.as_deref(), Some("https://llm.example/v1"));
+            }
+            other => panic!("expected agentcore serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agentcore_serve_parses_dynamodb_idempotency_inputs() {
+        let cli = Cli::try_parse_from([
+            "auto-review",
+            "agentcore",
+            "serve",
+            "--idempotency-dynamodb-table",
+            "auto-review-agentcore-idempotency",
+            "--idempotency-ttl-secs",
+            "900",
+        ])
+        .expect("agentcore serve parses idempotency inputs");
+
+        match cli.command {
+            Command::Agentcore(AgentcoreCommand::Serve(args)) => {
+                assert_eq!(
+                    args.idempotency_dynamodb_table.as_deref(),
+                    Some("auto-review-agentcore-idempotency")
+                );
+                assert_eq!(args.idempotency_ttl_secs, 900);
+            }
+            other => panic!("expected agentcore serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agentcore_serve_parses_dynamodb_history_inputs() {
+        let cli = Cli::try_parse_from([
+            "auto-review",
+            "agentcore",
+            "serve",
+            "--history-dynamodb-table",
+            "auto-review-agentcore-history",
+        ])
+        .expect("agentcore serve parses history inputs");
+
+        match cli.command {
+            Command::Agentcore(AgentcoreCommand::Serve(args)) => {
+                assert_eq!(
+                    args.history_dynamodb_table.as_deref(),
+                    Some("auto-review-agentcore-history")
+                );
+            }
+            other => panic!("expected agentcore serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agentcore_serve_parses_dynamodb_learnings_inputs() {
+        let cli = Cli::try_parse_from([
+            "auto-review",
+            "agentcore",
+            "serve",
+            "--learnings-dynamodb-table",
+            "auto-review-agentcore-learnings",
+        ])
+        .expect("agentcore serve parses learnings inputs");
+
+        match cli.command {
+            Command::Agentcore(AgentcoreCommand::Serve(args)) => {
+                assert_eq!(
+                    args.learnings_dynamodb_table.as_deref(),
+                    Some("auto-review-agentcore-learnings")
+                );
+            }
+            other => panic!("expected agentcore serve command, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn agentcore_command_dispatches_through_runtime_startup_seam() {
+        let manifest = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let main_path = manifest.join("src/main.rs");
+        let commands_path = manifest.join("src/commands.rs");
+        let main = std::fs::read_to_string(&main_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", main_path.display()));
+        let commands = std::fs::read_to_string(&commands_path)
+            .unwrap_or_else(|e| panic!("read {}: {e}", commands_path.display()));
+
+        assert!(
+            main.contains("Command::Agentcore(AgentcoreCommand::Serve(args))"),
+            "`auto-review agentcore serve` should dispatch explicitly from main; actual main:\n{main}"
+        );
+        assert!(
+            commands.contains("ar_agentcore::ServeConfig")
+                && commands.contains("ar_agentcore::serve(")
+                && !commands.contains("agentcore serve runtime is not implemented yet"),
+            "`auto-review agentcore serve` should call the ar-agentcore startup seam, not a placeholder; actual commands.rs:\n{commands}"
         );
     }
 

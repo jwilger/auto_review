@@ -2,6 +2,7 @@ use crate::types::{
     ChangedFile, CommitStatus, CreateReviewRequest, CreateWebhookRequest, CreatedWebhook,
     PullRequestSummary,
 };
+pub use ar_forge::CreatedReview;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
@@ -41,6 +42,7 @@ pub(crate) const PAGINATION_MAX_PAGES: u32 = 100;
 pub struct Client {
     http: reqwest::Client,
     base: Url,
+    token: String,
 }
 
 impl Client {
@@ -78,7 +80,25 @@ impl Client {
         let http = reqwest::Client::builder()
             .default_headers(headers)
             .build()?;
-        Ok(Self { http, base })
+        Ok(Self {
+            http,
+            base,
+            token: token.to_string(),
+        })
+    }
+
+    pub fn clone_url(&self, owner: &str, repo: &str) -> Result<String, Error> {
+        let mut url = self.base.clone();
+        let path = {
+            let trimmed = url.path().trim_end_matches('/');
+            format!("{trimmed}/{owner}/{repo}.git")
+        };
+        url.set_path(&path);
+        url.set_username("oauth2")
+            .map_err(|_| Error::InvalidBaseUrl("failed to set clone username".into()))?;
+        url.set_password(Some(&self.token))
+            .map_err(|_| Error::InvalidBaseUrl("failed to set clone password".into()))?;
+        Ok(url.to_string())
     }
 
     fn url(&self, path: &str) -> Result<Url, Error> {
@@ -460,13 +480,6 @@ impl Client {
     }
 }
 
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct CreatedReview {
-    pub id: u64,
-    #[serde(default)]
-    pub state: String,
-}
-
 async fn json_get<T: for<'de> Deserialize<'de>>(
     http: &reqwest::Client,
     url: Url,
@@ -571,6 +584,16 @@ mod tests {
                 "input = {input}"
             );
         }
+    }
+
+    #[test]
+    fn clone_url_uses_oauth2_token_and_preserves_subpath() {
+        let client = Client::new("https://example.com/forgejo", "to/k:n#1").expect("client");
+        let url = client.clone_url("alice", "widgets").expect("clone url");
+        assert_eq!(
+            url,
+            "https://oauth2:to%2Fk%3An%231@example.com/forgejo/alice/widgets.git"
+        );
     }
 
     #[tokio::test]

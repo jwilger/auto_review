@@ -7,7 +7,7 @@
 //! this module is the testable building block.
 
 use crate::error::ReviewError;
-use ar_forgejo::ChangedFile;
+use ar_forge::ChangedFile;
 use ar_llm::{CompleteRequest, Message, ModelTier, ResponseFormat, Router};
 use ar_prompts::{
     triage_schema, triage_system_prompt, validate_triage_output, TriageClass, TriageOutput,

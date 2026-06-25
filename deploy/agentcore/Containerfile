@@ -1,0 +1,13 @@
+FROM debian:bookworm-slim
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY auto-review /usr/local/bin/auto-review
+
+ENV AGENTCORE_BIND=0.0.0.0:9000
+EXPOSE 9000
+
+# Runtime command: auto-review agentcore serve
+ENTRYPOINT ["/usr/local/bin/auto-review", "agentcore", "serve"]

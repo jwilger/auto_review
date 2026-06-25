@@ -175,7 +175,7 @@ async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
         let dispatcher = state.dispatcher.clone();
         tokio::spawn(async move {
             let handler = ChatHandler {
-                forgejo: &chat.forgejo,
+                host: chat.forgejo.as_ref(),
                 llm: &chat.llm,
                 learnings: chat.learnings.as_ref(),
                 dispatcher: Some(dispatcher),

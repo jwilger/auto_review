@@ -5,7 +5,7 @@
 //! by skipping them (with a log warning) so a single bad entry doesn't
 //! break the whole filter.
 
-use ar_forgejo::ChangedFile;
+use ar_forge::ChangedFile;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 /// Compile a list of glob patterns into a [`GlobSet`]. Patterns that fail

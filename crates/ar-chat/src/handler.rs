@@ -23,9 +23,7 @@
 //!   called us in this case.
 
 use crate::command::ChatCommand;
-use ar_forgejo::{
-    Client as ForgejoClient, CreateReviewRequest, PullRequestSummary, ReviewComment, ReviewEvent,
-};
+use ar_forge::{CreateReviewRequest, PullRequestSummary, ReviewComment, ReviewEvent, ReviewHost};
 use ar_index::{LearningSource, LearningsStore};
 use ar_llm::{CompleteRequest, Message, ModelTier, ResponseFormat, Router as LlmRouter};
 use ar_orchestrator::{JobDispatcher, ReviewJob};
@@ -215,8 +213,8 @@ keep replies brief.";
 
 #[derive(Debug, thiserror::Error)]
 pub enum ChatError {
-    #[error("forgejo: {0}")]
-    Forgejo(#[from] ar_forgejo::Error),
+    #[error("repository host: {0}")]
+    Host(#[from] ar_forge::HostError),
     #[error("learnings store: {0}")]
     Learnings(#[from] ar_index::LearningsError),
     #[error("LLM error: {0}")]
@@ -249,7 +247,7 @@ Anything else after the mention is treated as a freeform question.";
 /// Wire-up for the chat handler. Holds the dependencies it needs to
 /// dispatch a [`ChatCommand`].
 pub struct ChatHandler<'a> {
-    pub forgejo: &'a ForgejoClient,
+    pub host: &'a dyn ReviewHost,
     pub llm: &'a LlmRouter,
     pub learnings: &'a (dyn LearningsStore + Sync),
     /// Optional review dispatcher. When set, `ReReview` queues a
@@ -323,7 +321,7 @@ impl ChatHandler<'_> {
         };
         // Fetch the PR's current head SHA + metadata to build a job.
         let pr = self
-            .forgejo
+            .host
             .get_pull_request(ctx.owner, ctx.repo, ctx.issue_number)
             .await?;
         if pr.draft {
@@ -434,7 +432,7 @@ impl ChatHandler<'_> {
         correction: &str,
     ) -> Result<(), ChatError> {
         let pr = self
-            .forgejo
+            .host
             .get_pull_request(ctx.owner, ctx.repo, ctx.issue_number)
             .await?;
         if pr.draft {
@@ -503,7 +501,7 @@ impl ChatHandler<'_> {
             render_override_pr_section(ctx.commenter_login, &reason, &outstanding.error_findings);
         let new_body = apply_body_section(&pr.body, &section);
         if let Err(error) = self
-            .forgejo
+            .host
             .update_pull_request(
                 ctx.owner,
                 ctx.repo,
@@ -526,7 +524,7 @@ impl ChatHandler<'_> {
     /// failure degrades to "not blocked".
     async fn outstanding_findings(&self, ctx: &ChatContext<'_>) -> OutstandingFindings {
         let reviews = self
-            .forgejo
+            .host
             .list_pull_reviews(ctx.owner, ctx.repo, ctx.issue_number)
             .await
             .unwrap_or_default();
@@ -541,7 +539,7 @@ impl ChatHandler<'_> {
             return OutstandingFindings::clear();
         }
         let comments = self
-            .forgejo
+            .host
             .list_pull_review_comments(ctx.owner, ctx.repo, ctx.issue_number, review.id)
             .await
             .unwrap_or_default();
@@ -566,7 +564,7 @@ impl ChatHandler<'_> {
     ) -> RepoConfig {
         for name in [".auto_review.yaml", ".auto_review.yml"] {
             match self
-                .forgejo
+                .host
                 .get_file_content(ctx.owner, ctx.repo, name, &pr.base.ref_name)
                 .await
             {
@@ -666,7 +664,7 @@ impl ChatHandler<'_> {
             event: ReviewEvent::Approved,
             comments: Vec::new(),
         };
-        self.forgejo
+        self.host
             .create_review(ctx.owner, ctx.repo, ctx.issue_number, &request)
             .await?;
         Ok(())
@@ -690,7 +688,7 @@ impl ChatHandler<'_> {
             return Ok(());
         }
         let pr = self
-            .forgejo
+            .host
             .get_pull_request(ctx.owner, ctx.repo, ctx.issue_number)
             .await?;
         if pr.draft {
@@ -710,7 +708,7 @@ impl ChatHandler<'_> {
             return Ok(());
         }
         let diff = self
-            .forgejo
+            .host
             .get_pr_diff(ctx.owner, ctx.repo, ctx.issue_number)
             .await
             .unwrap_or_else(|e| {
@@ -816,7 +814,7 @@ impl ChatHandler<'_> {
             event: ReviewEvent::Comment,
             comments,
         };
-        self.forgejo
+        self.host
             .create_review(ctx.owner, ctx.repo, ctx.issue_number, &request)
             .await?;
         Ok(())
@@ -833,7 +831,7 @@ impl ChatHandler<'_> {
             return Ok(());
         }
         let pr = self
-            .forgejo
+            .host
             .get_pull_request(ctx.owner, ctx.repo, ctx.issue_number)
             .await?;
         if pr.draft {
@@ -850,7 +848,7 @@ impl ChatHandler<'_> {
             return Ok(());
         }
         let diff = self
-            .forgejo
+            .host
             .get_pr_diff(ctx.owner, ctx.repo, ctx.issue_number)
             .await
             .unwrap_or_else(|e| {
@@ -952,7 +950,7 @@ impl ChatHandler<'_> {
 
         // Best-effort diff fetch — we still answer if it fails.
         let diff = self
-            .forgejo
+            .host
             .get_pr_diff(ctx.owner, ctx.repo, ctx.issue_number)
             .await
             .unwrap_or_else(|e| {
@@ -1040,7 +1038,7 @@ impl ChatHandler<'_> {
     }
 
     async fn post(&self, ctx: ChatContext<'_>, body: &str) -> Result<(), ChatError> {
-        self.forgejo
+        self.host
             .post_issue_comment(ctx.owner, ctx.repo, ctx.issue_number, body)
             .await?;
         Ok(())
@@ -1470,12 +1468,13 @@ fn current_unix_seconds() -> Result<i64, ChatError> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use ar_forgejo::Client as ForgejoClient;
     use ar_index::InMemoryLearningsStore;
     use ar_llm::{
         CompleteRequest, CompleteResponse, Error as LlmError, LlmProvider, ModelTier, Router,
     };
     use async_trait::async_trait;
-    use std::sync::Arc;
+    use std::sync::{Arc, Mutex};
     use wiremock::matchers::{body_partial_json, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -1509,6 +1508,175 @@ mod tests {
         (server, forgejo, learnings, router)
     }
 
+    #[derive(Default)]
+    struct RecordingReviewHost {
+        comments: Mutex<Vec<(String, String, u64, String)>>,
+    }
+
+    #[async_trait]
+    impl ar_forge::ReviewHost for RecordingReviewHost {
+        async fn get_pull_request(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            pr_number: u64,
+        ) -> Result<ar_forge::PullRequestSummary, ar_forge::HostError> {
+            Ok(ar_forge::PullRequestSummary {
+                number: pr_number,
+                title: "title".to_string(),
+                body: "body".to_string(),
+                draft: false,
+                state: "open".to_string(),
+                head: ar_forge::PullRequestRefSummary {
+                    ref_name: "feature".to_string(),
+                    sha: "head".to_string(),
+                },
+                base: ar_forge::PullRequestRefSummary {
+                    ref_name: "main".to_string(),
+                    sha: "base".to_string(),
+                },
+            })
+        }
+
+        async fn get_pr_diff(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+        ) -> Result<String, ar_forge::HostError> {
+            Ok("diff --git a/src/lib.rs b/src/lib.rs\n+fn added() {}\n".to_string())
+        }
+
+        async fn get_compare_diff(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _base: &str,
+            _head: &str,
+        ) -> Result<String, ar_forge::HostError> {
+            Ok(String::new())
+        }
+
+        async fn list_changed_files(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+        ) -> Result<Vec<ar_forge::ChangedFile>, ar_forge::HostError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_pr_review_comments(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+        ) -> Result<Vec<ar_forge::PrReviewComment>, ar_forge::HostError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_pull_reviews(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+        ) -> Result<Vec<ar_forge::PullReviewSummary>, ar_forge::HostError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_pull_review_comments(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+            _review_id: u64,
+        ) -> Result<Vec<ar_forge::PrReviewComment>, ar_forge::HostError> {
+            Ok(Vec::new())
+        }
+
+        async fn get_file_content(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _file_path: &str,
+            _ref_: &str,
+        ) -> Result<Option<String>, ar_forge::HostError> {
+            Ok(None)
+        }
+
+        async fn update_pull_request(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+            _title: Option<&str>,
+            _body: Option<&str>,
+        ) -> Result<(), ar_forge::HostError> {
+            Ok(())
+        }
+
+        async fn post_commit_status(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _sha: &str,
+            _status: &ar_forge::CommitStatus,
+        ) -> Result<(), ar_forge::HostError> {
+            Ok(())
+        }
+
+        async fn create_review(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+            _request: &ar_forge::CreateReviewRequest,
+        ) -> Result<ar_forge::CreatedReview, ar_forge::HostError> {
+            Ok(ar_forge::CreatedReview {
+                id: 1,
+                state: "COMMENT".to_string(),
+            })
+        }
+
+        async fn post_issue_comment(
+            &self,
+            owner: &str,
+            repo: &str,
+            issue_number: u64,
+            body: &str,
+        ) -> Result<u64, ar_forge::HostError> {
+            self.comments.lock().unwrap().push((
+                owner.to_string(),
+                repo.to_string(),
+                issue_number,
+                body.to_string(),
+            ));
+            Ok(99)
+        }
+    }
+
+    #[tokio::test]
+    async fn help_posts_through_review_host_trait() {
+        let host = RecordingReviewHost::default();
+        let learnings = InMemoryLearningsStore::new();
+        let llm = Router::new();
+        let handler = ChatHandler {
+            host: &host,
+            llm: &llm,
+            learnings: &learnings,
+            dispatcher: None,
+        };
+
+        handler.handle(ctx(), ChatCommand::Help).await.expect("ok");
+
+        let comments = host.comments.lock().unwrap();
+        assert_eq!(comments.len(), 1);
+        assert_eq!(comments[0].0, "alice");
+        assert_eq!(comments[0].1, "widgets");
+        assert_eq!(comments[0].2, 42);
+        assert!(comments[0].3.contains("auto_review chat commands"));
+    }
+
     #[tokio::test]
     async fn help_posts_help_text() {
         let (server, forgejo, learnings, llm) = setup().await;
@@ -1519,7 +1687,7 @@ mod tests {
             .mount(&server)
             .await;
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &llm,
             learnings: &learnings,
             dispatcher: None,
@@ -1539,7 +1707,7 @@ mod tests {
             .mount(&server)
             .await;
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &llm,
             learnings: &learnings,
             dispatcher: None,
@@ -1569,7 +1737,7 @@ mod tests {
             .mount(&server)
             .await;
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &llm,
             learnings: &learnings,
             dispatcher: None,
@@ -1608,7 +1776,7 @@ mod tests {
             .mount(&server)
             .await;
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &llm,
             learnings: &learnings,
             dispatcher: None,
@@ -1629,7 +1797,7 @@ mod tests {
             .mount(&server)
             .await;
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &llm,
             learnings: &learnings,
             dispatcher: None,
@@ -1645,7 +1813,7 @@ mod tests {
         let (_server, forgejo, learnings, llm) = setup().await;
         // No mock mounted: any POST would fail. Verifies we don't try.
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &llm,
             learnings: &learnings,
             dispatcher: None,
@@ -1668,7 +1836,7 @@ mod tests {
             .mount(&server)
             .await;
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &router,
             learnings: &learnings,
             dispatcher: None,
@@ -1720,7 +1888,7 @@ mod tests {
         let dispatcher: Arc<dyn JobDispatcher> =
             Arc::new(RecordingDispatcher { seen: seen.clone() });
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &llm,
             learnings: &learnings,
             dispatcher: Some(dispatcher),
@@ -1764,7 +1932,7 @@ mod tests {
             .mount(&server)
             .await;
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &llm,
             learnings: &learnings,
             dispatcher: None,
@@ -1825,7 +1993,7 @@ mod tests {
             .await;
 
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &router,
             learnings: &learnings,
             dispatcher: None,
@@ -1870,7 +2038,7 @@ mod tests {
             .await;
 
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &router,
             learnings: &learnings,
             dispatcher: None,
@@ -1906,7 +2074,7 @@ mod tests {
             .mount(&server)
             .await;
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &router,
             learnings: &learnings,
             dispatcher: None,
@@ -1963,7 +2131,7 @@ mod tests {
         let dispatcher: Arc<dyn JobDispatcher> =
             Arc::new(RecordingDispatcher { seen: seen.clone() });
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &llm,
             learnings: &learnings,
             dispatcher: Some(dispatcher),
@@ -2007,7 +2175,7 @@ mod tests {
         let dispatcher: Arc<dyn JobDispatcher> =
             Arc::new(RecordingDispatcher { seen: seen.clone() });
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &llm,
             learnings: &learnings,
             dispatcher: Some(dispatcher),
@@ -2034,7 +2202,7 @@ mod tests {
             .mount(&server)
             .await;
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &llm,
             learnings: &learnings,
             dispatcher: None,
@@ -2078,7 +2246,7 @@ mod tests {
             .await;
 
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &router,
             learnings: &learnings,
             dispatcher: None,
@@ -2123,7 +2291,7 @@ mod tests {
             .await;
 
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &router,
             learnings: &learnings,
             dispatcher: None,
@@ -2185,7 +2353,7 @@ mod tests {
             .await;
 
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &router,
             learnings: &learnings,
             dispatcher: None,
@@ -2262,7 +2430,7 @@ mod tests {
             .await;
 
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &router,
             learnings: &learnings,
             dispatcher: None,
@@ -2312,7 +2480,7 @@ mod tests {
             .await;
 
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &router,
             learnings: &learnings,
             dispatcher: None,
@@ -2362,7 +2530,7 @@ mod tests {
             .await;
 
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &router,
             learnings: &learnings,
             dispatcher: None,
@@ -2420,7 +2588,7 @@ mod tests {
             .await;
 
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &router,
             learnings: &learnings,
             dispatcher: None,
@@ -2443,7 +2611,7 @@ mod tests {
             .mount(&server)
             .await;
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &llm,
             learnings: &learnings,
             dispatcher: None,
@@ -2487,7 +2655,7 @@ mod tests {
             .await;
 
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &router,
             learnings: &learnings,
             dispatcher: None,
@@ -2542,7 +2710,7 @@ mod tests {
             .await;
 
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &router,
             learnings: &learnings,
             dispatcher: None,
@@ -2563,7 +2731,7 @@ mod tests {
             .mount(&server)
             .await;
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &llm,
             learnings: &learnings,
             dispatcher: None,
@@ -2613,7 +2781,7 @@ mod tests {
             .await;
 
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &router,
             learnings: &learnings,
             dispatcher: None,
@@ -2989,7 +3157,7 @@ mod tests {
             .await;
 
         let handler = ChatHandler {
-            forgejo: &forgejo,
+            host: &forgejo,
             llm: &router,
             learnings: &learnings,
             dispatcher: None,

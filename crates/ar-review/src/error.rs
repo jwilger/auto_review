@@ -6,6 +6,8 @@ pub enum ReviewError {
     Llm(#[from] ar_llm::Error),
     #[error("Forgejo error: {0}")]
     Forgejo(#[from] ar_forgejo::Error),
+    #[error("repository host error: {0}")]
+    Host(#[from] ar_forge::HostError),
     #[error("LLM produced unhealable output after {attempts} attempts; last error: {last_error}")]
     Unhealable {
         attempts: u32,

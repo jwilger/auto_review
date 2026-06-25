@@ -6,8 +6,8 @@ mod cli;
 mod commands;
 
 use cli::{
-    AuthCommand, BenchCommand, Cli, Command, ConfigCommand, HistoryCommand, LearningsCommand,
-    OpsCommand, ReviewCommand, WebhookCommand,
+    AgentcoreCommand, AuthCommand, BenchCommand, Cli, Command, ConfigCommand, HistoryCommand,
+    LearningsCommand, OpsCommand, ReviewCommand, WebhookCommand,
 };
 
 #[tokio::main]
@@ -27,6 +27,7 @@ async fn main() -> Result<()> {
 
     match cli.command {
         Command::Gateway(_) => unreachable!("gateway command returned before CLI tracing init"),
+        Command::Agentcore(AgentcoreCommand::Serve(args)) => commands::agentcore_serve(args).await,
         Command::Auth(AuthCommand::Init(args)) => commands::init(args).await,
         Command::Webhook(WebhookCommand::Register(args)) => commands::register_webhook(args).await,
         Command::Webhook(WebhookCommand::List(args)) => commands::list_webhooks(args).await,

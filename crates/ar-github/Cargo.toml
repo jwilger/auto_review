@@ -1,0 +1,28 @@
+[package]
+name = "ar-github"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "GitHub App REST client for review host operations"
+
+[dependencies]
+ar-forge = { path = "../ar-forge" }
+async-trait.workspace = true
+hmac.workspace = true
+hex.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+sha2.workspace = true
+thiserror.workspace = true
+reqwest.workspace = true
+url.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+time = { version = "0.3", features = ["parsing"] }
+jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+
+[dev-dependencies]
+base64 = "0.22"
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+wiremock.workspace = true

@@ -9,7 +9,7 @@
 //! LLM-driven triage (CodeRabbit's cheap-model classifier) is a Milestone 2
 //! follow-up; the seam is here.
 
-use ar_forgejo::ChangedFile;
+use ar_forge::ChangedFile;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileClass {

@@ -1,4 +1,4 @@
-use ar_forgejo::{CreateReviewRequest, ReviewComment, ReviewEvent};
+use ar_forge::{CreateReviewRequest, ReviewComment, ReviewEvent};
 use ar_prompts::{ReviewFinding, ReviewOutput, ReviewSeverity};
 
 /// Map a validated [`ReviewOutput`] to a Forgejo [`CreateReviewRequest`].

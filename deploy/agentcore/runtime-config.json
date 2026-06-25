@@ -1,0 +1,27 @@
+{
+  "name": "auto-review-agentcore",
+  "description": "auto_review AgentCore runtime for CI-invoked semantic pull request review",
+  "protocol": "http",
+  "port": 9000,
+  "healthCheck": {
+    "path": "/ping"
+  },
+  "invocation": {
+    "path": "/invocations",
+    "contentType": "application/json"
+  },
+  "environment": [
+    "FORGEJO_BASE_URL",
+    "AR_FORGEJO_TOKEN",
+    "GITHUB_API_URL",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY",
+    "LLM_BASE_URL",
+    "LLM_API_KEY",
+    "LLM_REASONING_MODEL",
+    "AGENTCORE_IDEMPOTENCY_DYNAMODB_TABLE",
+    "AGENTCORE_IDEMPOTENCY_TTL_SECS",
+    "AGENTCORE_HISTORY_DYNAMODB_TABLE",
+    "AGENTCORE_LEARNINGS_DYNAMODB_TABLE"
+  ]
+}

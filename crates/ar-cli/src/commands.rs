@@ -1,23 +1,460 @@
 //! Implementations of the CLI subcommands.
 
 use crate::cli::{
-    DoctorArgs, ForgetLearningArgs, InitArgs, ListLearningsArgs, ListWebhooksArgs,
-    PurgeHistoryArgs, RegisterWebhookArgs, ResetPrArgs, ReviewOnceArgs, StatusArgs,
-    TestWebhookArgs, UnregisterWebhookArgs, ValidateConfigArgs,
+    AgentcoreServeArgs, DoctorArgs, ForgetLearningArgs, InitArgs, ListLearningsArgs,
+    ListWebhooksArgs, PurgeHistoryArgs, RegisterWebhookArgs, ResetPrArgs, ReviewOnceArgs,
+    StatusArgs, TestWebhookArgs, UnregisterWebhookArgs, ValidateConfigArgs,
 };
 use anyhow::{Context, Result};
+use ar_agentcore::{
+    InvocationError, InvocationErrorKind, InvocationHandler, InvocationKind, InvocationOutcome,
+    InvocationPayload, Provider,
+};
+use ar_chat::{parse_chat_command, ChatContext, ChatHandler};
+use ar_forge::ReviewHost;
 use ar_forgejo::{
     Client, CreateAccessTokenRequest, CreateWebhookRequest, InitClient, WebhookConfig,
 };
+use ar_github::{InstallationTokenRequest, Permission};
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
-use ar_orchestrator::{run_review_job, InMemoryReviewHistory, ReviewJob};
+use ar_orchestrator::{
+    run_review_job, InMemoryReviewHistory, InlineDispatcher, JobDispatcher, ReviewHistory,
+    ReviewJob,
+};
 use ar_prompts::{render_review_prompt, ReviewPromptInputs};
 use ar_review::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
+use async_trait::async_trait;
 use hmac::{Hmac, Mac};
 use sha2::Sha256;
 use std::sync::Arc;
 
 const WEBHOOK_PATH: &str = "/webhooks/forgejo";
+
+pub async fn agentcore_serve(args: AgentcoreServeArgs) -> Result<()> {
+    let stores = build_agentcore_stores(&args).await?;
+    ar_agentcore::serve(build_agentcore_serve_config(
+        args,
+        stores.idempotency,
+        stores.history,
+        stores.learnings,
+    )?)
+    .await
+}
+
+struct AgentcoreStores {
+    idempotency: Option<Arc<dyn ar_agentcore::InvocationIdempotency>>,
+    history: Option<Arc<dyn ar_orchestrator::ReviewHistory>>,
+    learnings: Option<Arc<dyn ar_index::LearningsStore>>,
+}
+
+async fn build_agentcore_stores(args: &AgentcoreServeArgs) -> Result<AgentcoreStores> {
+    if args.idempotency_dynamodb_table.is_none()
+        && args.history_dynamodb_table.is_none()
+        && args.learnings_dynamodb_table.is_none()
+    {
+        return Ok(AgentcoreStores {
+            idempotency: None,
+            history: None,
+            learnings: None,
+        });
+    }
+
+    let aws_config = aws_config::load_from_env().await;
+    let dynamodb = aws_sdk_dynamodb::Client::new(&aws_config);
+    let idempotency = args.idempotency_dynamodb_table.as_ref().map(|table_name| {
+        Arc::new(ar_agentcore::DynamoDbInvocationIdempotency::new(
+            dynamodb.clone(),
+            table_name.clone(),
+            args.idempotency_ttl_secs,
+        )) as Arc<dyn ar_agentcore::InvocationIdempotency>
+    });
+    let history = args.history_dynamodb_table.as_ref().map(|table_name| {
+        Arc::new(ar_orchestrator::DynamoDbReviewHistory::new(
+            dynamodb.clone(),
+            table_name.clone(),
+        )) as Arc<dyn ar_orchestrator::ReviewHistory>
+    });
+    let learnings = args.learnings_dynamodb_table.as_ref().map(|table_name| {
+        Arc::new(ar_index::DynamoDbLearningsStore::new(
+            dynamodb.clone(),
+            table_name.clone(),
+        )) as Arc<dyn ar_index::LearningsStore>
+    });
+
+    Ok(AgentcoreStores {
+        idempotency,
+        history,
+        learnings,
+    })
+}
+
+fn build_agentcore_serve_config(
+    args: AgentcoreServeArgs,
+    idempotency: Option<Arc<dyn ar_agentcore::InvocationIdempotency>>,
+    history: Option<Arc<dyn ar_orchestrator::ReviewHistory>>,
+    learnings: Option<Arc<dyn ar_index::LearningsStore>>,
+) -> Result<ar_agentcore::ServeConfig> {
+    let forgejo_configured = args.forgejo_url.is_some() || args.token.is_some();
+    let github_configured = args.github_app_id.is_some() || args.github_app_private_key.is_some();
+    let handler = match (
+        forgejo_configured,
+        github_configured,
+        args.llm_base_url.as_deref(),
+    ) {
+        (false, false, None) => None,
+        (true, false, Some(llm_base_url)) => {
+            let forgejo_url = args
+                .forgejo_url
+                .as_deref()
+                .context("agentcore serve Forgejo mode requires --forgejo-url")?;
+            let token = args
+                .token
+                .as_deref()
+                .context("agentcore serve Forgejo mode requires --token")?;
+            let forgejo =
+                Arc::new(Client::new(forgejo_url, token).context("build Forgejo client")?);
+            let llm =
+                build_reasoning_llm(llm_base_url, args.llm_api_key.as_deref(), &args.llm_model)?;
+            let host: Arc<dyn ReviewHost> = forgejo.clone();
+            let mut dispatcher = InlineDispatcher::new_with_host(host, llm.clone());
+            let chat_learnings = learnings
+                .clone()
+                .unwrap_or_else(|| Arc::new(ar_index::InMemoryLearningsStore::new()));
+            if let Some(history) = history {
+                dispatcher = dispatcher.with_history(history);
+            }
+            if let Some(learnings) = learnings {
+                dispatcher = dispatcher.with_learnings(learnings);
+            }
+            let dispatcher = Arc::new(dispatcher);
+            Some(Arc::new(ForgejoAgentcoreHandler {
+                host: forgejo,
+                dispatcher,
+                llm,
+                learnings: chat_learnings,
+            }) as Arc<dyn ar_agentcore::InvocationHandler>)
+        }
+        (false, true, Some(llm_base_url)) => {
+            let app_id = args
+                .github_app_id
+                .context("agentcore serve GitHub mode requires --github-app-id")?;
+            let private_key = args
+                .github_app_private_key
+                .as_deref()
+                .context("agentcore serve GitHub mode requires --github-app-private-key")?;
+            let private_key = normalize_pem_from_env(private_key);
+            let signer = ar_github::GitHubAppJwt::from_rsa_pem(app_id, private_key.as_bytes())
+                .context("build GitHub App JWT signer")?;
+            let llm =
+                build_reasoning_llm(llm_base_url, args.llm_api_key.as_deref(), &args.llm_model)?;
+            Some(Arc::new(GitHubAgentcoreSemanticReviewHandler {
+                api_url: args.github_api_url,
+                signer,
+                llm,
+                history: history.unwrap_or_else(|| Arc::new(InMemoryReviewHistory::new())),
+                learnings,
+            }) as Arc<dyn ar_agentcore::InvocationHandler>)
+        }
+        _ => {
+            anyhow::bail!(
+                "agentcore serve semantic-review mode requires either Forgejo (--forgejo-url, --token) or GitHub App (--github-app-id, --github-app-private-key) inputs plus --llm-base-url"
+            );
+        }
+    };
+    Ok(ar_agentcore::ServeConfig {
+        bind: args.bind,
+        handler,
+        idempotency,
+    })
+}
+
+fn build_reasoning_llm(
+    llm_base_url: &str,
+    llm_api_key: Option<&str>,
+    llm_model: &str,
+) -> Result<Arc<LlmRouter>> {
+    let provider = Arc::new(
+        OpenAiProvider::new(llm_base_url, llm_api_key, llm_model)
+            .context("build reasoning LLM provider")?,
+    );
+    Ok(Arc::new(
+        LlmRouter::new().with(ModelTier::Reasoning, provider),
+    ))
+}
+
+fn normalize_pem_from_env(raw: &str) -> String {
+    raw.replace("\\n", "\n")
+}
+
+struct ForgejoAgentcoreHandler {
+    host: Arc<dyn ReviewHost>,
+    dispatcher: Arc<dyn JobDispatcher>,
+    llm: Arc<LlmRouter>,
+    learnings: Arc<dyn ar_index::LearningsStore>,
+}
+
+#[async_trait]
+impl InvocationHandler for ForgejoAgentcoreHandler {
+    async fn handle(
+        &self,
+        payload: InvocationPayload,
+    ) -> std::result::Result<InvocationOutcome, InvocationError> {
+        if payload.provider != Provider::Forgejo {
+            return Err(InvocationError {
+                kind: InvocationErrorKind::InvalidPayload,
+                message: "Forgejo runtime only accepts forgejo provider invocations".to_string(),
+            });
+        }
+
+        match payload.kind {
+            InvocationKind::SemanticReview => {
+                handle_semantic_review(self.host.as_ref(), self.dispatcher.as_ref(), payload).await
+            }
+            InvocationKind::ChatCommand => {
+                let comment_body =
+                    payload
+                        .comment_body
+                        .as_deref()
+                        .ok_or_else(|| InvocationError {
+                            kind: InvocationErrorKind::InvalidPayload,
+                            message: "chat_command invocations require comment_body".to_string(),
+                        })?;
+                let command = parse_chat_command(comment_body, "auto-review");
+                let handler = ChatHandler {
+                    host: self.host.as_ref(),
+                    llm: self.llm.as_ref(),
+                    learnings: self.learnings.as_ref(),
+                    dispatcher: Some(self.dispatcher.clone()),
+                };
+                handler
+                    .handle(
+                        ChatContext {
+                            owner: &payload.owner,
+                            repo: &payload.repo,
+                            issue_number: payload.pr_number,
+                            commenter_login: "agentcore",
+                            bot_login: "auto-review",
+                        },
+                        command,
+                    )
+                    .await
+                    .map_err(|error| InvocationError {
+                        kind: InvocationErrorKind::ExecutionFailed,
+                        message: format!("handle chat command: {error}"),
+                    })?;
+
+                Ok(InvocationOutcome {
+                    status: "handled".to_string(),
+                    message: "chat command handled".to_string(),
+                })
+            }
+        }
+    }
+}
+
+async fn handle_semantic_review(
+    host: &dyn ReviewHost,
+    dispatcher: &dyn JobDispatcher,
+    payload: InvocationPayload,
+) -> std::result::Result<InvocationOutcome, InvocationError> {
+    let pr = host
+        .get_pull_request(&payload.owner, &payload.repo, payload.pr_number)
+        .await
+        .map_err(|error| InvocationError {
+            kind: InvocationErrorKind::ExecutionFailed,
+            message: format!("fetch pull request: {error}"),
+        })?;
+    if pr.head.sha != payload.head_sha {
+        return Err(InvocationError {
+            kind: InvocationErrorKind::StaleHead,
+            message: format!(
+                "payload head_sha {} does not match current PR head {}",
+                payload.head_sha, pr.head.sha
+            ),
+        });
+    }
+
+    dispatcher
+        .dispatch(ReviewJob {
+            owner: payload.owner,
+            repo: payload.repo,
+            pr_number: payload.pr_number,
+            head_sha: payload.head_sha,
+            pr_title: pr.title,
+            pr_body: pr.body,
+            force: payload.force.unwrap_or(false),
+        })
+        .await;
+
+    Ok(InvocationOutcome {
+        status: "completed".to_string(),
+        message: "semantic review completed".to_string(),
+    })
+}
+
+struct GitHubAgentcoreSemanticReviewHandler {
+    api_url: String,
+    signer: ar_github::GitHubAppJwt,
+    llm: Arc<LlmRouter>,
+    history: Arc<dyn ReviewHistory>,
+    learnings: Option<Arc<dyn ar_index::LearningsStore>>,
+}
+
+#[async_trait]
+impl InvocationHandler for GitHubAgentcoreSemanticReviewHandler {
+    async fn handle(
+        &self,
+        payload: InvocationPayload,
+    ) -> std::result::Result<InvocationOutcome, InvocationError> {
+        if payload.provider != Provider::Github {
+            return Err(InvocationError {
+                kind: InvocationErrorKind::InvalidPayload,
+                message: "GitHub runtime only accepts github provider invocations".to_string(),
+            });
+        }
+        match payload.kind {
+            InvocationKind::SemanticReview => self.handle_semantic_review(payload).await,
+            InvocationKind::ChatCommand => self.handle_chat_command(payload).await,
+        }
+    }
+}
+
+impl GitHubAgentcoreSemanticReviewHandler {
+    async fn host_for_payload(
+        &self,
+        payload: &InvocationPayload,
+    ) -> std::result::Result<Arc<dyn ReviewHost>, InvocationError> {
+        let installation_id = payload.installation_id.ok_or_else(|| InvocationError {
+            kind: InvocationErrorKind::InvalidPayload,
+            message: "github invocations require installation_id".to_string(),
+        })?;
+        let app_jwt = self.signer.jwt_now().map_err(|error| InvocationError {
+            kind: InvocationErrorKind::ExecutionFailed,
+            message: format!("sign GitHub App JWT: {error}"),
+        })?;
+        let github =
+            ar_github::Client::new(&self.api_url, &app_jwt).map_err(|error| InvocationError {
+                kind: InvocationErrorKind::ExecutionFailed,
+                message: format!("build GitHub client: {error}"),
+            })?;
+        let request = InstallationTokenRequest::for_repository(&payload.repo)
+            .with_permission("contents", Permission::Read)
+            .with_permission("issues", Permission::Write)
+            .with_permission("pull_requests", Permission::Write)
+            .with_permission("statuses", Permission::Write);
+        let token = github
+            .installation_token(installation_id, request)
+            .await
+            .map_err(|error| InvocationError {
+                kind: InvocationErrorKind::ExecutionFailed,
+                message: format!("create GitHub installation token: {error}"),
+            })?;
+        Ok(Arc::new(ar_github::InstallationReviewHost::new(
+            github,
+            token.token,
+        )))
+    }
+
+    async fn handle_semantic_review(
+        &self,
+        payload: InvocationPayload,
+    ) -> std::result::Result<InvocationOutcome, InvocationError> {
+        let host = self.host_for_payload(&payload).await?;
+        let pr = host
+            .get_pull_request(&payload.owner, &payload.repo, payload.pr_number)
+            .await
+            .map_err(|error| InvocationError {
+                kind: InvocationErrorKind::ExecutionFailed,
+                message: format!("fetch pull request: {error}"),
+            })?;
+        if pr.head.sha != payload.head_sha {
+            return Err(InvocationError {
+                kind: InvocationErrorKind::StaleHead,
+                message: format!(
+                    "payload head_sha {} does not match current PR head {}",
+                    payload.head_sha, pr.head.sha
+                ),
+            });
+        }
+
+        let mut dispatcher = InlineDispatcher::new_with_host(host, self.llm.clone())
+            .with_history(self.history.clone());
+        if let Some(learnings) = &self.learnings {
+            dispatcher = dispatcher.with_learnings(learnings.clone());
+        }
+        dispatcher
+            .dispatch(ReviewJob {
+                owner: payload.owner,
+                repo: payload.repo,
+                pr_number: payload.pr_number,
+                head_sha: payload.head_sha,
+                pr_title: pr.title,
+                pr_body: pr.body,
+                force: payload.force.unwrap_or(false),
+            })
+            .await;
+
+        Ok(InvocationOutcome {
+            status: "completed".to_string(),
+            message: "semantic review completed".to_string(),
+        })
+    }
+
+    async fn handle_chat_command(
+        &self,
+        payload: InvocationPayload,
+    ) -> std::result::Result<InvocationOutcome, InvocationError> {
+        let comment_body = payload
+            .comment_body
+            .as_deref()
+            .ok_or_else(|| InvocationError {
+                kind: InvocationErrorKind::InvalidPayload,
+                message: "chat_command invocations require comment_body".to_string(),
+            })?;
+        let host = self.host_for_payload(&payload).await?;
+        let command = parse_chat_command(comment_body, "auto-review");
+        let mut dispatcher = InlineDispatcher::new_with_host(host.clone(), self.llm.clone())
+            .with_history(self.history.clone());
+        if let Some(learnings) = &self.learnings {
+            dispatcher = dispatcher.with_learnings(learnings.clone());
+        }
+        let fallback_learnings;
+        let learnings: &dyn ar_index::LearningsStore = match self.learnings.as_deref() {
+            Some(learnings) => learnings,
+            None => {
+                fallback_learnings = ar_index::InMemoryLearningsStore::new();
+                &fallback_learnings
+            }
+        };
+        let handler = ChatHandler {
+            host: host.as_ref(),
+            llm: self.llm.as_ref(),
+            learnings,
+            dispatcher: Some(Arc::new(dispatcher)),
+        };
+        handler
+            .handle(
+                ChatContext {
+                    owner: &payload.owner,
+                    repo: &payload.repo,
+                    issue_number: payload.pr_number,
+                    commenter_login: "agentcore",
+                    bot_login: "auto-review",
+                },
+                command,
+            )
+            .await
+            .map_err(|error| InvocationError {
+                kind: InvocationErrorKind::ExecutionFailed,
+                message: format!("handle chat command: {error}"),
+            })?;
+
+        Ok(InvocationOutcome {
+            status: "handled".to_string(),
+            message: "chat command handled".to_string(),
+        })
+    }
+}
 
 pub async fn init(args: InitArgs) -> Result<()> {
     let password = match args.password {
@@ -109,7 +546,7 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
     // we want.
     let history = InMemoryReviewHistory::new();
     run_review_job(
-        &forgejo,
+        forgejo.as_ref(),
         &llm,
         &args.forgejo_url,
         &args.token,
@@ -1302,6 +1739,8 @@ fn expand_config_paths(paths: &[std::path::PathBuf]) -> Result<Vec<std::path::Pa
 #[cfg(test)]
 mod tests {
     use super::*;
+    use wiremock::matchers::{body_string_contains, method, path};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
     fn init_operator_guidance_uses_unified_cli_and_gateway_token_env() {
@@ -1315,6 +1754,318 @@ mod tests {
         assert!(source.contains(&nested_register_command));
         assert!(source.contains(&gateway_token_flag));
         assert!(!source.contains(&removed_flat_register_command));
+    }
+
+    #[test]
+    fn agentcore_serve_config_uses_forgejo_runtime_inputs_for_handler() {
+        let config = build_agentcore_serve_config(
+            AgentcoreServeArgs {
+                bind: "127.0.0.1:0".to_string(),
+                forgejo_url: Some("https://git.example".to_string()),
+                token: Some("forgejo-token".to_string()),
+                github_api_url: "https://api.github.com".to_string(),
+                github_app_id: None,
+                github_app_private_key: None,
+                llm_base_url: Some("https://llm.example/v1".to_string()),
+                llm_api_key: None,
+                llm_model: "review-model".to_string(),
+                idempotency_dynamodb_table: None,
+                idempotency_ttl_secs: 86_400,
+                history_dynamodb_table: None,
+                learnings_dynamodb_table: None,
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("serve config");
+
+        assert_eq!(config.bind, "127.0.0.1:0");
+        assert!(
+            config.handler.is_some(),
+            "Forgejo runtime inputs should produce a handler-backed AgentCore server"
+        );
+    }
+
+    #[test]
+    fn agentcore_serve_config_uses_github_app_runtime_inputs_for_handler() {
+        let config = build_agentcore_serve_config(
+            AgentcoreServeArgs {
+                bind: "127.0.0.1:0".to_string(),
+                forgejo_url: None,
+                token: None,
+                github_api_url: "https://api.github.example".to_string(),
+                github_app_id: Some(12345),
+                github_app_private_key: Some(test_github_private_key().to_string()),
+                llm_base_url: Some("https://llm.example/v1".to_string()),
+                llm_api_key: None,
+                llm_model: "review-model".to_string(),
+                idempotency_dynamodb_table: None,
+                idempotency_ttl_secs: 86_400,
+                history_dynamodb_table: None,
+                learnings_dynamodb_table: None,
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("serve config");
+
+        assert_eq!(config.bind, "127.0.0.1:0");
+        assert!(
+            config.handler.is_some(),
+            "GitHub App runtime inputs should produce a handler-backed AgentCore server"
+        );
+    }
+
+    #[tokio::test]
+    async fn forgejo_agentcore_chat_command_posts_help_comment() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_string_contains("auto_review chat commands"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let config = build_agentcore_serve_config(
+            AgentcoreServeArgs {
+                bind: "127.0.0.1:0".to_string(),
+                forgejo_url: Some(server.uri()),
+                token: Some("forgejo-token".to_string()),
+                github_api_url: "https://api.github.com".to_string(),
+                github_app_id: None,
+                github_app_private_key: None,
+                llm_base_url: Some("https://llm.example/v1".to_string()),
+                llm_api_key: None,
+                llm_model: "review-model".to_string(),
+                idempotency_dynamodb_table: None,
+                idempotency_ttl_secs: 86_400,
+                history_dynamodb_table: None,
+                learnings_dynamodb_table: None,
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("serve config");
+        let handler = config.handler.expect("handler");
+
+        let outcome = handler
+            .handle(InvocationPayload {
+                provider: Provider::Forgejo,
+                kind: InvocationKind::ChatCommand,
+                owner: "alice".to_string(),
+                repo: "widgets".to_string(),
+                pr_number: 42,
+                head_sha: "head-sha".to_string(),
+                installation_id: None,
+                force: None,
+                comment_id: Some(99),
+                comment_body: Some("@auto-review help".to_string()),
+            })
+            .await
+            .expect("chat command handled");
+
+        assert_eq!(outcome.status, "handled");
+        assert_eq!(outcome.message, "chat command handled");
+    }
+
+    #[tokio::test]
+    async fn github_agentcore_chat_command_posts_help_comment() {
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/app/installations/42/access_tokens"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+                "token": "installation-token",
+                "expires_at": "2099-01-01T00:00:00Z"
+            })))
+            .mount(&server)
+            .await;
+        Mock::given(method("POST"))
+            .and(path("/repos/alice/widgets/issues/42/comments"))
+            .and(body_string_contains("auto_review chat commands"))
+            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .mount(&server)
+            .await;
+
+        let config = build_agentcore_serve_config(
+            AgentcoreServeArgs {
+                bind: "127.0.0.1:0".to_string(),
+                forgejo_url: None,
+                token: None,
+                github_api_url: server.uri(),
+                github_app_id: Some(12345),
+                github_app_private_key: Some(test_github_private_key().to_string()),
+                llm_base_url: Some("https://llm.example/v1".to_string()),
+                llm_api_key: None,
+                llm_model: "review-model".to_string(),
+                idempotency_dynamodb_table: None,
+                idempotency_ttl_secs: 86_400,
+                history_dynamodb_table: None,
+                learnings_dynamodb_table: None,
+            },
+            None,
+            None,
+            None,
+        )
+        .expect("serve config");
+        let handler = config.handler.expect("handler");
+
+        let outcome = handler
+            .handle(InvocationPayload {
+                provider: Provider::Github,
+                kind: InvocationKind::ChatCommand,
+                owner: "alice".to_string(),
+                repo: "widgets".to_string(),
+                pr_number: 42,
+                head_sha: "head-sha".to_string(),
+                installation_id: Some(42),
+                force: None,
+                comment_id: Some(99),
+                comment_body: Some("@auto-review help".to_string()),
+            })
+            .await
+            .expect("chat command handled");
+
+        assert_eq!(outcome.status, "handled");
+        assert_eq!(outcome.message, "chat command handled");
+    }
+
+    fn test_github_private_key() -> &'static str {
+        let source = include_str!("../../ar-github/tests/app_jwt.rs");
+        source
+            .split("const TEST_PRIVATE_KEY: &str = r#\"")
+            .nth(1)
+            .and_then(|rest| rest.split("\"#;").next())
+            .expect("test key in ar-github app_jwt test")
+    }
+
+    #[tokio::test]
+    async fn github_agentcore_handler_requires_installation_id_before_network() {
+        let signer =
+            ar_github::GitHubAppJwt::from_rsa_pem(12345, test_github_private_key().as_bytes())
+                .expect("signer");
+        let handler = GitHubAgentcoreSemanticReviewHandler {
+            api_url: "https://api.github.invalid".to_string(),
+            signer,
+            llm: Arc::new(LlmRouter::new()),
+            history: Arc::new(InMemoryReviewHistory::new()),
+            learnings: None,
+        };
+
+        let error = handler
+            .handle(InvocationPayload {
+                provider: Provider::Github,
+                kind: InvocationKind::SemanticReview,
+                owner: "alice".to_string(),
+                repo: "widgets".to_string(),
+                pr_number: 42,
+                head_sha: "head-sha".to_string(),
+                installation_id: None,
+                force: None,
+                comment_id: None,
+                comment_body: None,
+            })
+            .await
+            .expect_err("missing installation_id should be rejected");
+
+        assert_eq!(error.kind, InvocationErrorKind::InvalidPayload);
+        assert!(
+            error.message.contains("installation_id"),
+            "operator-facing error should name the missing field, got: {}",
+            error.message
+        );
+    }
+
+    #[test]
+    fn agentcore_serve_config_carries_selected_idempotency_store() {
+        let config = build_agentcore_serve_config(
+            AgentcoreServeArgs {
+                bind: "127.0.0.1:0".to_string(),
+                forgejo_url: Some("https://git.example".to_string()),
+                token: Some("forgejo-token".to_string()),
+                github_api_url: "https://api.github.com".to_string(),
+                github_app_id: None,
+                github_app_private_key: None,
+                llm_base_url: Some("https://llm.example/v1".to_string()),
+                llm_api_key: None,
+                llm_model: "review-model".to_string(),
+                idempotency_dynamodb_table: Some("agentcore-idempotency".to_string()),
+                idempotency_ttl_secs: 900,
+                history_dynamodb_table: None,
+                learnings_dynamodb_table: None,
+            },
+            Some(Arc::new(ar_agentcore::InMemoryInvocationIdempotency::new())),
+            None,
+            None,
+        )
+        .expect("serve config");
+
+        assert!(
+            config.idempotency.is_some(),
+            "selected idempotency store should be passed to AgentCore runtime"
+        );
+    }
+
+    #[test]
+    fn agentcore_serve_config_accepts_selected_history_store() {
+        let config = build_agentcore_serve_config(
+            AgentcoreServeArgs {
+                bind: "127.0.0.1:0".to_string(),
+                forgejo_url: Some("https://git.example".to_string()),
+                token: Some("forgejo-token".to_string()),
+                github_api_url: "https://api.github.com".to_string(),
+                github_app_id: None,
+                github_app_private_key: None,
+                llm_base_url: Some("https://llm.example/v1".to_string()),
+                llm_api_key: None,
+                llm_model: "review-model".to_string(),
+                idempotency_dynamodb_table: None,
+                idempotency_ttl_secs: 86_400,
+                history_dynamodb_table: Some("agentcore-history".to_string()),
+                learnings_dynamodb_table: None,
+            },
+            None,
+            Some(Arc::new(ar_orchestrator::InMemoryReviewHistory::new())),
+            None,
+        )
+        .expect("serve config");
+
+        assert!(
+            config.handler.is_some(),
+            "selected history store should still produce a handler-backed AgentCore server"
+        );
+    }
+
+    #[test]
+    fn agentcore_serve_config_accepts_selected_learnings_store() {
+        let config = build_agentcore_serve_config(
+            AgentcoreServeArgs {
+                bind: "127.0.0.1:0".to_string(),
+                forgejo_url: Some("https://git.example".to_string()),
+                token: Some("forgejo-token".to_string()),
+                github_api_url: "https://api.github.com".to_string(),
+                github_app_id: None,
+                github_app_private_key: None,
+                llm_base_url: Some("https://llm.example/v1".to_string()),
+                llm_api_key: None,
+                llm_model: "review-model".to_string(),
+                idempotency_dynamodb_table: None,
+                idempotency_ttl_secs: 86_400,
+                history_dynamodb_table: None,
+                learnings_dynamodb_table: Some("agentcore-learnings".to_string()),
+            },
+            None,
+            None,
+            Some(Arc::new(ar_index::InMemoryLearningsStore::new())),
+        )
+        .expect("serve config");
+
+        assert!(
+            config.handler.is_some(),
+            "selected learnings store should still produce a handler-backed AgentCore server"
+        );
     }
 
     #[test]

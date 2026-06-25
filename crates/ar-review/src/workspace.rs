@@ -76,6 +76,19 @@ pub async fn prepare_workspace(
     repo: &str,
     head_sha: &str,
 ) -> Result<PreparedWorkspace, WorkspaceError> {
+    let url = build_clone_url(base, owner, repo, token)?;
+    prepare_workspace_from_clone_url(&url, head_sha).await
+}
+
+/// Clone an already-authenticated repository URL at `head_sha`.
+///
+/// This is the provider-neutral clone seam: host adapters prepare their own
+/// clone URL/auth material, while workspace preparation keeps the same hermetic
+/// git execution and SHA validation.
+pub async fn prepare_workspace_from_clone_url(
+    clone_url: &str,
+    head_sha: &str,
+) -> Result<PreparedWorkspace, WorkspaceError> {
     // Defence in depth: head_sha is interpolated into git argv
     // (`git fetch origin <sha>`, `git checkout <sha>`) and git
     // accepts intermingled `--option`-style args after positional
@@ -91,7 +104,6 @@ pub async fn prepare_workspace(
             "refusing to clone: head_sha {head_sha:?} is not a hex commit SHA"
         )));
     }
-    let url = build_clone_url(base, owner, repo, token)?;
     let dir = TempDir::new()?;
     let path = dir.path().to_owned();
 
@@ -99,7 +111,7 @@ pub async fn prepare_workspace(
         "clone",
         "--no-checkout",
         "--depth=1",
-        &url,
+        clone_url,
         path.to_str().expect("tempdir path is utf-8"),
     ])
     .await?;
@@ -301,6 +313,30 @@ mod tests {
         )
         .await
         .expect_err("must reject");
+        match err {
+            WorkspaceError::Git(msg) => {
+                assert!(
+                    msg.contains("not a hex commit SHA"),
+                    "expected validation message, got: {msg}"
+                );
+                assert!(
+                    msg.contains("upload-pack"),
+                    "expected the bad value echoed for diagnosis"
+                );
+            }
+            other => panic!("unexpected error class: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_workspace_from_clone_url_rejects_non_sha_head_before_invoking_git() {
+        let err = prepare_workspace_from_clone_url(
+            "https://oauth2:tok@forgejo.example.com/alice/widgets.git",
+            "--upload-pack=evil",
+        )
+        .await
+        .expect_err("must reject");
+
         match err {
             WorkspaceError::Git(msg) => {
                 assert!(

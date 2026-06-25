@@ -161,7 +161,7 @@ async fn directed_approval_with_nothing_outstanding_approves_and_stores_learning
         .await;
 
     let handler = ChatHandler {
-        forgejo: &forgejo,
+        host: &forgejo,
         llm: &llm,
         learnings: &learnings,
         dispatcher: None,
@@ -229,7 +229,7 @@ async fn metadata_override_by_authorized_user_with_reason_approves_and_stamps_ma
         .await;
 
     let handler = ChatHandler {
-        forgejo: &forgejo,
+        host: &forgejo,
         llm: &llm,
         learnings: &learnings,
         dispatcher: None,
@@ -302,7 +302,7 @@ async fn override_by_unauthorized_user_declines_without_approving() {
         .await;
 
     let handler = ChatHandler {
-        forgejo: &forgejo,
+        host: &forgejo,
         llm: &llm,
         learnings: &learnings,
         dispatcher: None,
@@ -370,7 +370,7 @@ async fn authorized_override_without_a_reason_asks_for_why_and_does_not_approve(
         .await;
 
     let handler = ChatHandler {
-        forgejo: &forgejo,
+        host: &forgejo,
         llm: &llm,
         learnings: &learnings,
         dispatcher: None,

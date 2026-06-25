@@ -1,11 +1,12 @@
 use crate::review_history::{InMemoryReviewHistory, PrKey, ReviewHistory};
+use ar_forge::ReviewHost;
 use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullRequestEvent};
 use ar_index::{LearningsStore, VectorStore};
 use ar_llm::Router as LlmRouter;
 use ar_review::{
     build_glob_set, build_review_context_with_store, load_repo_config, pr_is_skippable,
-    prepare_workspace, review_pull_request, GlobSet, PreparedWorkspace, ReviewArgs, ReviewError,
-    VerifyMode, WorkspaceError,
+    prepare_workspace_from_clone_url, review_pull_request, GlobSet, PreparedWorkspace, ReviewArgs,
+    ReviewError, VerifyMode, WorkspaceError,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -114,6 +115,70 @@ impl JobDispatcher for NoOpDispatcher {
     async fn dispatch(&self, _job: ReviewJob) {}
 }
 
+/// Synchronous dispatcher for runtimes that need the invocation to finish only
+/// after the review job has run to completion. Unlike [`SpawningDispatcher`],
+/// this does not spawn a background task.
+#[derive(Clone)]
+pub struct InlineDispatcher {
+    host: Arc<dyn ReviewHost>,
+    llm: Arc<LlmRouter>,
+    history: Arc<dyn ReviewHistory>,
+    learnings: Option<Arc<dyn LearningsStore>>,
+    vector_store: Option<Arc<dyn VectorStore>>,
+    observer: Option<Arc<dyn ReviewObserver>>,
+}
+
+impl InlineDispatcher {
+    pub fn new_with_host(host: Arc<dyn ReviewHost>, llm: Arc<LlmRouter>) -> Self {
+        Self {
+            host,
+            llm,
+            history: Arc::new(InMemoryReviewHistory::new()),
+            learnings: None,
+            vector_store: None,
+            observer: None,
+        }
+    }
+
+    pub fn with_history(mut self, history: Arc<dyn ReviewHistory>) -> Self {
+        self.history = history;
+        self
+    }
+
+    pub fn with_learnings(mut self, learnings: Arc<dyn LearningsStore>) -> Self {
+        self.learnings = Some(learnings);
+        self
+    }
+
+    pub fn with_vector_store(mut self, store: Arc<dyn VectorStore>) -> Self {
+        self.vector_store = Some(store);
+        self
+    }
+
+    pub fn with_observer(mut self, observer: Arc<dyn ReviewObserver>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+}
+
+#[async_trait]
+impl JobDispatcher for InlineDispatcher {
+    async fn dispatch(&self, job: ReviewJob) {
+        run_review_job(
+            self.host.as_ref(),
+            &self.llm,
+            "",
+            "",
+            self.history.as_ref(),
+            self.learnings.as_deref(),
+            self.vector_store.as_deref(),
+            self.observer.as_deref(),
+            job,
+        )
+        .await;
+    }
+}
+
 /// Production dispatcher: posts a "pending" commit status, spawns
 /// [`run_review_job`] in the background, and returns to the caller.
 ///
@@ -123,7 +188,7 @@ impl JobDispatcher for NoOpDispatcher {
 /// `compare_diff` instead of re-reviewing the whole PR.
 #[derive(Clone)]
 pub struct SpawningDispatcher {
-    forgejo: Arc<ForgejoClient>,
+    host: Arc<dyn ReviewHost>,
     llm: Arc<LlmRouter>,
     forgejo_base: Arc<String>,
     forgejo_token: Arc<String>,
@@ -151,8 +216,17 @@ impl SpawningDispatcher {
         forgejo_base: impl Into<String>,
         forgejo_token: impl Into<String>,
     ) -> Self {
+        Self::new_with_host(forgejo, llm, forgejo_base, forgejo_token)
+    }
+
+    pub fn new_with_host(
+        host: Arc<dyn ReviewHost>,
+        llm: Arc<LlmRouter>,
+        forgejo_base: impl Into<String>,
+        forgejo_token: impl Into<String>,
+    ) -> Self {
         Self {
-            forgejo,
+            host,
             llm,
             forgejo_base: Arc::new(forgejo_base.into()),
             forgejo_token: Arc::new(forgejo_token.into()),
@@ -214,7 +288,7 @@ impl SpawningDispatcher {
 #[async_trait]
 impl JobDispatcher for SpawningDispatcher {
     async fn dispatch(&self, job: ReviewJob) {
-        let forgejo = self.forgejo.clone();
+        let forgejo = self.host.clone();
         let llm = self.llm.clone();
         let base = self.forgejo_base.clone();
         let token = self.forgejo_token.clone();
@@ -272,7 +346,7 @@ impl JobDispatcher for SpawningDispatcher {
             let panic_started = Instant::now();
             let inner = tokio::spawn(async move {
                 run_review_job(
-                    &forgejo,
+                    forgejo.as_ref(),
                     &llm,
                     &base,
                     &token,
@@ -339,7 +413,7 @@ impl JobDispatcher for SpawningDispatcher {
 /// Errors are logged and swallowed; the gateway has already returned 202.
 #[allow(clippy::too_many_arguments)]
 pub async fn run_review_job(
-    forgejo: &ForgejoClient,
+    forgejo: &dyn ReviewHost,
     llm: &LlmRouter,
     forgejo_base: &str,
     forgejo_token: &str,
@@ -394,52 +468,22 @@ pub async fn run_review_job(
                 "force=true: full review (skipping compare-diff incremental path)"
             );
         } else {
-            tracing::info!(
-                repo = format!("{}/{}", job.owner, job.repo),
-                pr = job.pr_number,
-                previous = %prev,
-                current = %job.head_sha,
-                "incremental review: fetching compare diff",
-            );
-            match forgejo
-                .get_compare_diff(&job.owner, &job.repo, prev, &job.head_sha)
-                .await
-            {
-                Ok(d) => incremental_diff = Some(d),
-                Err(e) => match compare_diff_fallback_level(&e) {
-                    tracing::Level::INFO => {
-                        tracing::info!(error = %e, "compare_diff failed; falling back to full diff");
-                    }
-                    _ => {
-                        tracing::warn!(error = %e, "compare_diff failed; falling back to full diff");
-                    }
-                },
-            }
+            incremental_diff = fetch_incremental_diff(forgejo, &job, prev).await;
         }
     }
 
-    let _ = forgejo
-        .post_commit_status(
-            &job.owner,
-            &job.repo,
-            &job.head_sha,
-            &CommitStatus {
-                state: CommitStatusState::Pending,
-                target_url: String::new(),
-                description: "auto_review running".into(),
-                context: STATUS_CONTEXT.into(),
-            },
-        )
-        .await
-        .inspect_err(|e| tracing::warn!(error = %e, "failed to post pending status"));
+    post_review_status(
+        forgejo,
+        &job,
+        CommitStatusState::Pending,
+        "auto_review running".into(),
+    )
+    .await;
 
     // Triage: if every changed file is trivial (lockfile bumps, vendored,
     // generated), skip the LLM call entirely and post a success status.
     // Fetch once for the trivial-file skip check.
-    let changed_files = match forgejo
-        .list_changed_files(&job.owner, &job.repo, job.pr_number)
-        .await
-    {
+    let changed_files = match fetch_changed_files_for_triage(forgejo, &job).await {
         Ok(files) => Some(files),
         Err(e) => {
             tracing::warn!(error = %e, "triage file-list failed; proceeding to review");
@@ -453,20 +497,13 @@ pub async fn run_review_job(
                 pr = job.pr_number,
                 "skipping review: all changed files are trivial"
             );
-            let _ = forgejo
-                .post_commit_status(
-                    &job.owner,
-                    &job.repo,
-                    &job.head_sha,
-                    &CommitStatus {
-                        state: CommitStatusState::Success,
-                        target_url: String::new(),
-                        description: "auto_review: skipped (lockfile/vendored/generated only)"
-                            .into(),
-                        context: STATUS_CONTEXT.into(),
-                    },
-                )
-                .await;
+            post_review_status(
+                forgejo,
+                &job,
+                CommitStatusState::Success,
+                "auto_review: skipped (lockfile/vendored/generated only)".into(),
+            )
+            .await;
             observe(ReviewObservation::Skipped {
                 reason: "trivial_files",
             });
@@ -495,19 +532,13 @@ pub async fn run_review_job(
                     pr = job.pr_number,
                     "skipping review: disabled by .auto_review.yaml"
                 );
-                let _ = forgejo
-                    .post_commit_status(
-                        &job.owner,
-                        &job.repo,
-                        &job.head_sha,
-                        &CommitStatus {
-                            state: CommitStatusState::Success,
-                            target_url: String::new(),
-                            description: "auto_review: disabled by repo config".into(),
-                            context: STATUS_CONTEXT.into(),
-                        },
-                    )
-                    .await;
+                post_review_status(
+                    forgejo,
+                    &job,
+                    CommitStatusState::Success,
+                    "auto_review: disabled by repo config".into(),
+                )
+                .await;
                 observe(ReviewObservation::Skipped {
                     reason: "disabled_by_config",
                 });
@@ -576,7 +607,7 @@ pub async fn run_review_job(
     observe(ReviewObservation::Started);
 
     let result = review_pull_request(ReviewArgs {
-        forgejo,
+        host: forgejo,
         llm,
         owner: &job.owner,
         repo: &job.repo,
@@ -648,10 +679,7 @@ pub async fn run_review_job(
         }
     };
 
-    let _ = forgejo
-        .post_commit_status(&job.owner, &job.repo, &job.head_sha, &final_status)
-        .await
-        .inspect_err(|e| tracing::warn!(error = %e, "failed to post final status"));
+    post_review_status(forgejo, &job, final_status.state, final_status.description).await;
 
     // Record the SHA only on successful review. Recording a SHA we
     // never successfully reviewed would mean the NEXT incremental
@@ -683,6 +711,8 @@ pub async fn run_review_job(
 enum WorkspacePrepError {
     #[error("forgejo: {0}")]
     Forgejo(#[from] ar_forgejo::Error),
+    #[error("host: {0}")]
+    Host(#[from] ar_forge::HostError),
     #[error("workspace: {0}")]
     Workspace(#[from] WorkspaceError),
 }
@@ -709,15 +739,19 @@ struct WorkspacePrepOutput {
 
 #[allow(clippy::too_many_arguments)]
 async fn prepare_workspace_context(
-    forgejo: &ForgejoClient,
+    host: &dyn ReviewHost,
     llm: &LlmRouter,
-    base: &str,
-    token: &str,
+    _base: &str,
+    _token: &str,
     learnings: Option<&dyn LearningsStore>,
     vector_store: Option<&dyn VectorStore>,
     job: &ReviewJob,
 ) -> Result<WorkspacePrepOutput, WorkspacePrepError> {
-    let workspace = prepare_workspace(base, token, &job.owner, &job.repo, &job.head_sha).await?;
+    let clone_url = host
+        .clone_url(&job.owner, &job.repo)
+        .await
+        .map_err(WorkspacePrepError::Host)?;
+    let workspace = prepare_workspace_from_clone_url(&clone_url, &job.head_sha).await?;
     let config = load_repo_config(workspace.path());
     let ignored_paths = build_glob_set(&config.ignored_paths);
     let guidelines = config.guidelines.clone();
@@ -734,10 +768,7 @@ async fn prepare_workspace_context(
     }
     // Fetch the diff once for the RAG context build. Failure here just means we
     // skip optional context; the review still proceeds.
-    let raw_diff = match forgejo
-        .get_pr_diff(&job.owner, &job.repo, job.pr_number)
-        .await
-    {
+    let raw_diff = match fetch_context_diff(host, job).await {
         Ok(d) => d,
         Err(e) => {
             tracing::warn!(error = %e, "diff fetch for context failed; continuing");
@@ -818,17 +849,81 @@ fn review_summary(outcome: &ar_review::ReviewOutcome) -> String {
     format!("auto_review: {}", parts.join(", "))
 }
 
-fn compare_diff_fallback_level(err: &ar_forgejo::Error) -> tracing::Level {
-    match err {
-        ar_forgejo::Error::Api { status: 404, body }
-            if body.contains("The target couldn't be found.")
-                && body.contains("could not find '")
-                && body.contains("' to be a commit, branch or tag in the head repository")
-                && !body.contains(".diff'") =>
-        {
-            tracing::Level::INFO
+async fn fetch_incremental_diff(
+    host: &dyn ReviewHost,
+    job: &ReviewJob,
+    previous_sha: &str,
+) -> Option<String> {
+    tracing::info!(
+        repo = format!("{}/{}", job.owner, job.repo),
+        pr = job.pr_number,
+        previous = %previous_sha,
+        current = %job.head_sha,
+        "incremental review: fetching compare diff",
+    );
+    match host
+        .get_compare_diff(&job.owner, &job.repo, previous_sha, &job.head_sha)
+        .await
+    {
+        Ok(diff) => Some(diff),
+        Err(e) => {
+            match compare_diff_fallback_level(&e) {
+                tracing::Level::INFO => {
+                    tracing::info!(error = %e, "compare_diff failed; falling back to full diff");
+                }
+                _ => {
+                    tracing::warn!(error = %e, "compare_diff failed; falling back to full diff");
+                }
+            }
+            None
         }
-        _ => tracing::Level::WARN,
+    }
+}
+
+async fn post_review_status(
+    host: &dyn ReviewHost,
+    job: &ReviewJob,
+    state: CommitStatusState,
+    description: String,
+) {
+    let status = CommitStatus {
+        state,
+        target_url: String::new(),
+        description,
+        context: STATUS_CONTEXT.into(),
+    };
+    let _ = host
+        .post_commit_status(&job.owner, &job.repo, &job.head_sha, &status)
+        .await
+        .inspect_err(|e| tracing::warn!(error = %e, "failed to post commit status"));
+}
+
+async fn fetch_changed_files_for_triage(
+    host: &dyn ReviewHost,
+    job: &ReviewJob,
+) -> Result<Vec<ar_forge::ChangedFile>, ar_forge::HostError> {
+    host.list_changed_files(&job.owner, &job.repo, job.pr_number)
+        .await
+}
+
+async fn fetch_context_diff(
+    host: &dyn ReviewHost,
+    job: &ReviewJob,
+) -> Result<String, ar_forge::HostError> {
+    host.get_pr_diff(&job.owner, &job.repo, job.pr_number).await
+}
+
+fn compare_diff_fallback_level(err: &ar_forge::HostError) -> tracing::Level {
+    let body = err.message();
+    if body.contains("API error 404")
+        && body.contains("The target couldn't be found.")
+        && body.contains("could not find '")
+        && body.contains("' to be a commit, branch or tag in the head repository")
+        && !body.contains(".diff'")
+    {
+        tracing::Level::INFO
+    } else {
+        tracing::Level::WARN
     }
 }
 
@@ -899,7 +994,9 @@ fn truncate_status_description(s: &str) -> String {
 
 fn error_state(err: &ReviewError) -> CommitStatusState {
     match err {
-        ReviewError::Forgejo(_) | ReviewError::Workspace(_) => CommitStatusState::Error,
+        ReviewError::Forgejo(_) | ReviewError::Host(_) | ReviewError::Workspace(_) => {
+            CommitStatusState::Error
+        }
         ReviewError::Llm(_) | ReviewError::Unhealable { .. } => CommitStatusState::Failure,
     }
 }
@@ -909,7 +1006,7 @@ fn error_state(err: &ReviewError) -> CommitStatusState {
 /// can see `llm` vs `workspace` vs `forgejo` outage rates separately.
 fn error_class(err: &ReviewError) -> &'static str {
     match err {
-        ReviewError::Forgejo(_) => "forgejo",
+        ReviewError::Forgejo(_) | ReviewError::Host(_) => "forgejo",
         ReviewError::Workspace(_) => "workspace",
         ReviewError::Llm(_) => "llm",
         ReviewError::Unhealable { .. } => "unhealable",
@@ -970,6 +1067,208 @@ mod tests {
 
     fn router_with(provider: Arc<CannedProvider>) -> Router {
         Router::new().with(ModelTier::Reasoning, provider)
+    }
+
+    #[tokio::test]
+    async fn workspace_prep_gets_clone_url_from_review_host() {
+        let host = RecordingReviewHost::default();
+        let provider = Arc::new(CannedProvider::new(vec![]));
+        let llm = router_with(provider);
+        let job = ReviewJob {
+            owner: "alice".to_string(),
+            repo: "widgets".to_string(),
+            pr_number: 42,
+            head_sha: "not-a-sha".to_string(),
+            pr_title: "title".to_string(),
+            pr_body: String::new(),
+            force: false,
+        };
+
+        let result = prepare_workspace_context(
+            &host,
+            &llm,
+            "https://legacy.example",
+            "legacy-token",
+            None,
+            None,
+            &job,
+        )
+        .await;
+
+        assert!(result.is_err(), "invalid SHA should stop before git runs");
+        assert_eq!(
+            host.clone_url_requests.lock().unwrap().as_slice(),
+            &[("alice".to_string(), "widgets".to_string())]
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingReviewHost {
+        pr_diff_requests: Mutex<Vec<(String, String, u64)>>,
+        compare_requests: Mutex<Vec<(String, String, String, String)>>,
+        status_requests: Mutex<Vec<(String, String, String, CommitStatus)>>,
+        changed_file_requests: Mutex<Vec<(String, String, u64)>>,
+        clone_url_requests: Mutex<Vec<(String, String)>>,
+        review_requests: Mutex<Vec<(String, String, u64, ar_forge::CreateReviewRequest)>>,
+    }
+
+    #[async_trait]
+    impl ar_forge::ReviewHost for RecordingReviewHost {
+        async fn clone_url(&self, owner: &str, repo: &str) -> Result<String, ar_forge::HostError> {
+            self.clone_url_requests
+                .lock()
+                .unwrap()
+                .push((owner.to_string(), repo.to_string()));
+            Ok(format!("https://example.invalid/{owner}/{repo}.git"))
+        }
+
+        async fn get_pull_request(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            pr_number: u64,
+        ) -> Result<ar_forge::PullRequestSummary, ar_forge::HostError> {
+            Ok(ar_forge::PullRequestSummary {
+                number: pr_number,
+                title: "title".to_string(),
+                body: "body".to_string(),
+                draft: false,
+                state: "open".to_string(),
+                head: ar_forge::PullRequestRefSummary {
+                    ref_name: "feature".to_string(),
+                    sha: "head".to_string(),
+                },
+                base: ar_forge::PullRequestRefSummary {
+                    ref_name: "main".to_string(),
+                    sha: "base".to_string(),
+                },
+            })
+        }
+
+        async fn get_pr_diff(
+            &self,
+            owner: &str,
+            repo: &str,
+            pr_number: u64,
+        ) -> Result<String, ar_forge::HostError> {
+            self.pr_diff_requests.lock().unwrap().push((
+                owner.to_string(),
+                repo.to_string(),
+                pr_number,
+            ));
+            Ok("diff --git a/src/lib.rs b/src/lib.rs\n+context\n".to_string())
+        }
+
+        async fn get_compare_diff(
+            &self,
+            owner: &str,
+            repo: &str,
+            base: &str,
+            head: &str,
+        ) -> Result<String, ar_forge::HostError> {
+            self.compare_requests.lock().unwrap().push((
+                owner.to_string(),
+                repo.to_string(),
+                base.to_string(),
+                head.to_string(),
+            ));
+            Ok("diff --git a/src/lib.rs b/src/lib.rs\n+new\n".to_string())
+        }
+
+        async fn list_changed_files(
+            &self,
+            owner: &str,
+            repo: &str,
+            pr_number: u64,
+        ) -> Result<Vec<ar_forge::ChangedFile>, ar_forge::HostError> {
+            self.changed_file_requests.lock().unwrap().push((
+                owner.to_string(),
+                repo.to_string(),
+                pr_number,
+            ));
+            Ok(vec![ar_forge::ChangedFile {
+                filename: "src/lib.rs".to_string(),
+                status: "modified".to_string(),
+                additions: 1,
+                deletions: 0,
+                changes: 1,
+                patch: None,
+            }])
+        }
+
+        async fn list_pr_review_comments(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+        ) -> Result<Vec<ar_forge::PrReviewComment>, ar_forge::HostError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_pull_reviews(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+        ) -> Result<Vec<ar_forge::PullReviewSummary>, ar_forge::HostError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_pull_review_comments(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+            _review_id: u64,
+        ) -> Result<Vec<ar_forge::PrReviewComment>, ar_forge::HostError> {
+            Ok(Vec::new())
+        }
+
+        async fn update_pull_request(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+            _title: Option<&str>,
+            _body: Option<&str>,
+        ) -> Result<(), ar_forge::HostError> {
+            Ok(())
+        }
+
+        async fn post_commit_status(
+            &self,
+            owner: &str,
+            repo: &str,
+            sha: &str,
+            status: &CommitStatus,
+        ) -> Result<(), ar_forge::HostError> {
+            self.status_requests.lock().unwrap().push((
+                owner.to_string(),
+                repo.to_string(),
+                sha.to_string(),
+                status.clone(),
+            ));
+            Ok(())
+        }
+
+        async fn create_review(
+            &self,
+            owner: &str,
+            repo: &str,
+            pr_number: u64,
+            request: &ar_forge::CreateReviewRequest,
+        ) -> Result<ar_forge::CreatedReview, ar_forge::HostError> {
+            self.review_requests.lock().unwrap().push((
+                owner.to_string(),
+                repo.to_string(),
+                pr_number,
+                request.clone(),
+            ));
+            Ok(ar_forge::CreatedReview {
+                id: 1,
+                state: "COMMENT".to_string(),
+            })
+        }
     }
 
     struct RecordingDispatcher {
@@ -1040,6 +1339,119 @@ mod tests {
     async fn no_op_dispatcher_does_nothing_and_does_not_panic() {
         let d = NoOpDispatcher;
         d.dispatch(ReviewJob::from(&sample_event())).await;
+    }
+
+    #[tokio::test]
+    async fn incremental_compare_diff_fetches_through_review_host() {
+        let host = RecordingReviewHost::default();
+        let job = ReviewJob {
+            owner: "alice".into(),
+            repo: "widgets".into(),
+            pr_number: 42,
+            head_sha: "head-sha".into(),
+            pr_title: "fix".into(),
+            pr_body: String::new(),
+            force: false,
+        };
+
+        let diff = fetch_incremental_diff(&host, &job, "base-sha").await;
+
+        assert_eq!(
+            diff.as_deref(),
+            Some("diff --git a/src/lib.rs b/src/lib.rs\n+new\n")
+        );
+        assert_eq!(
+            host.compare_requests.lock().unwrap().as_slice(),
+            &[(
+                "alice".to_string(),
+                "widgets".to_string(),
+                "base-sha".to_string(),
+                "head-sha".to_string()
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn commit_status_posts_through_review_host() {
+        let host = RecordingReviewHost::default();
+        let job = ReviewJob {
+            owner: "alice".into(),
+            repo: "widgets".into(),
+            pr_number: 42,
+            head_sha: "head-sha".into(),
+            pr_title: "fix".into(),
+            pr_body: String::new(),
+            force: false,
+        };
+
+        post_review_status(
+            &host,
+            &job,
+            CommitStatusState::Pending,
+            "auto_review running".into(),
+        )
+        .await;
+
+        assert_eq!(
+            host.status_requests.lock().unwrap().as_slice(),
+            &[(
+                "alice".to_string(),
+                "widgets".to_string(),
+                "head-sha".to_string(),
+                CommitStatus {
+                    state: CommitStatusState::Pending,
+                    target_url: String::new(),
+                    description: "auto_review running".to_string(),
+                    context: STATUS_CONTEXT.to_string(),
+                }
+            )]
+        );
+    }
+
+    #[tokio::test]
+    async fn triage_changed_files_fetches_through_review_host() {
+        let host = RecordingReviewHost::default();
+        let job = ReviewJob {
+            owner: "alice".into(),
+            repo: "widgets".into(),
+            pr_number: 42,
+            head_sha: "head-sha".into(),
+            pr_title: "fix".into(),
+            pr_body: String::new(),
+            force: false,
+        };
+
+        let files = fetch_changed_files_for_triage(&host, &job)
+            .await
+            .expect("changed files");
+
+        assert_eq!(files[0].filename, "src/lib.rs");
+        assert_eq!(
+            host.changed_file_requests.lock().unwrap().as_slice(),
+            &[("alice".to_string(), "widgets".to_string(), 42)]
+        );
+    }
+
+    #[tokio::test]
+    async fn context_diff_fetches_through_review_host() {
+        let host = RecordingReviewHost::default();
+        let job = ReviewJob {
+            owner: "alice".into(),
+            repo: "widgets".into(),
+            pr_number: 42,
+            head_sha: "head-sha".into(),
+            pr_title: "fix".into(),
+            pr_body: String::new(),
+            force: false,
+        };
+
+        let diff = fetch_context_diff(&host, &job).await.expect("context diff");
+
+        assert_eq!(diff, "diff --git a/src/lib.rs b/src/lib.rs\n+context\n");
+        assert_eq!(
+            host.pr_diff_requests.lock().unwrap().as_slice(),
+            &[("alice".to_string(), "widgets".to_string(), 42)]
+        );
     }
 
     #[tokio::test]
@@ -1229,6 +1641,55 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn spawning_dispatcher_accepts_review_host_without_forgejo_client() {
+        let host: Arc<dyn ReviewHost> = Arc::new(RecordingReviewHost::default());
+        let llm = Arc::new(Router::new());
+
+        let dispatcher = SpawningDispatcher::new_with_host(host, llm, "", "");
+
+        assert!(
+            dispatcher.concurrency_limit.is_none(),
+            "new_with_host should construct the normal dispatcher with default runtime settings"
+        );
+    }
+
+    #[tokio::test]
+    async fn inline_dispatcher_completes_review_before_returning() {
+        let host = Arc::new(RecordingReviewHost::default());
+        let provider = Arc::new(CannedProvider::new(vec![
+            r#"{"summary":"looks fine","findings":[]}"#,
+        ]));
+        let llm = Arc::new(router_with(provider));
+        let dispatcher = InlineDispatcher::new_with_host(host.clone(), llm);
+
+        dispatcher
+            .dispatch(ReviewJob {
+                owner: "alice".to_string(),
+                repo: "widgets".to_string(),
+                pr_number: 42,
+                head_sha: "not-a-sha".to_string(),
+                pr_title: "title".to_string(),
+                pr_body: String::new(),
+                force: false,
+            })
+            .await;
+
+        assert_eq!(
+            host.review_requests.lock().unwrap().len(),
+            1,
+            "inline dispatcher should not return until the review job has posted its review"
+        );
+        assert!(
+            host.status_requests
+                .lock()
+                .unwrap()
+                .iter()
+                .any(|(_, _, _, status)| status.state == CommitStatusState::Success),
+            "inline dispatcher should not return before the final success status is posted"
+        );
+    }
+
+    #[tokio::test]
     async fn with_concurrency_limit_clamps_zero_to_one() {
         // Defensive: max=0 would deadlock if naively set. The
         // builder clamps to 1 so the bot still makes progress
@@ -1338,32 +1799,25 @@ mod tests {
 
     #[test]
     fn compare_diff_404_missing_target_is_unremarkable_fallback() {
-        let err = ar_forgejo::Error::Api {
-            status: 404,
-            body: r#"{"message":"The target couldn't be found.","url":"https://git.johnwilger.com/api/swagger","errors":"could not find 'd34db33f' to be a commit, branch or tag in the head repository jwilger/auto_review"}"#
-                .into(),
-        };
+        let err = ar_forge::HostError::new(
+            r#"API error 404: {"message":"The target couldn't be found.","url":"https://git.johnwilger.com/api/swagger","errors":"could not find 'd34db33f' to be a commit, branch or tag in the head repository jwilger/auto_review"}"#,
+        );
 
         assert_eq!(compare_diff_fallback_level(&err), tracing::Level::INFO);
     }
 
     #[test]
     fn compare_diff_old_api_construction_bug_404_is_warning() {
-        let err = ar_forgejo::Error::Api {
-            status: 404,
-            body: r#"{"message":"The target couldn't be found.","url":"https://git.johnwilger.com/api/swagger","errors":"could not find 'd34db33f.diff' to be a commit, branch or tag in the head repository jwilger/auto_review"}"#
-                .into(),
-        };
+        let err = ar_forge::HostError::new(
+            r#"API error 404: {"message":"The target couldn't be found.","url":"https://git.johnwilger.com/api/swagger","errors":"could not find 'd34db33f.diff' to be a commit, branch or tag in the head repository jwilger/auto_review"}"#,
+        );
 
         assert_eq!(compare_diff_fallback_level(&err), tracing::Level::WARN);
     }
 
     #[test]
     fn compare_diff_other_404_remains_warning() {
-        let err = ar_forgejo::Error::Api {
-            status: 404,
-            body: r#"{"message":"Not found"}"#.into(),
-        };
+        let err = ar_forge::HostError::new(r#"API error 404: {"message":"Not found"}"#);
 
         assert_eq!(compare_diff_fallback_level(&err), tracing::Level::WARN);
     }

@@ -1,0 +1,35 @@
+name: AgentCore semantic review
+
+on:
+  pull_request:
+    types: [opened, synchronized, reopened, ready_for_review]
+
+jobs:
+  semantic-review:
+    runs-on: docker
+    needs: [test]
+    if: ${{ github.event.pull_request.draft == false }}
+    steps:
+      - name: Invoke AgentCore runtime
+        env:
+          AWS_REGION: ${{ vars.AWS_REGION }}
+          AGENTCORE_RUNTIME_ARN: ${{ vars.AUTO_REVIEW_AGENTCORE_RUNTIME_ARN }}
+          AWS_ACCESS_KEY_ID: ${{ secrets.AUTO_REVIEW_AWS_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.AUTO_REVIEW_AWS_SECRET_ACCESS_KEY }}
+        run: |
+          # Payload contract includes: provider: forgejo, kind: semantic_review,
+          # owner, repo, pr_number, and head_sha.
+          payload="$(jq -nc \
+            --arg provider forgejo \
+            --arg kind semantic_review \
+            --arg owner "${{ github.repository_owner }}" \
+            --arg repo "${{ github.event.repository.name }}" \
+            --arg head_sha "${{ github.event.pull_request.head.sha }}" \
+            --argjson pr_number "${{ github.event.pull_request.number }}" \
+            '{provider:$provider, kind:$kind, owner:$owner, repo:$repo, pr_number:$pr_number, head_sha:$head_sha}')"
+          aws --region "$AWS_REGION" \
+            bedrock-agentcore-runtime invoke-agent-runtime \
+            --cli-binary-format raw-in-base64-out \
+            --runtime-session-id "${{ github.run_id }}-${{ github.run_attempt }}" \
+            --agent-runtime-arn "$AGENTCORE_RUNTIME_ARN" \
+            --payload "$payload"

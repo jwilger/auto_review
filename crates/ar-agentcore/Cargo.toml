@@ -1,0 +1,24 @@
+[package]
+name = "ar-agentcore"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+publish.workspace = true
+description = "AWS Bedrock AgentCore-compatible runtime HTTP surface"
+
+[dependencies]
+anyhow.workspace = true
+async-trait.workspace = true
+aws-sdk-dynamodb.workspace = true
+axum.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+ar-forge = { path = "../ar-forge" }
+ar-orchestrator = { path = "../ar-orchestrator" }
+
+[dev-dependencies]
+serde_json.workspace = true
+tower = { workspace = true, features = ["util"] }

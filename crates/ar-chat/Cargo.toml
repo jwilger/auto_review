@@ -14,6 +14,7 @@ serde_json.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
+ar-forge = { path = "../ar-forge" }
 ar-forgejo = { path = "../ar-forgejo" }
 ar-index = { path = "../ar-index" }
 ar-llm = { path = "../ar-llm" }
