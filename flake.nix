@@ -191,14 +191,11 @@
               && (
                 strPath == "${toString ./.}/tests"
                 || strPath == "${toString ./.}/scripts"
-                || strPath == "${toString ./.}/.opencode"
-                || strPath == "${toString ./.}/.opencode/agents"
-                || strPath == "${toString ./.}/.opencode/commands"
-                || strPath == "${toString ./.}/.opencode/plugins"
-                || strPath == "${toString ./.}/.opencode/plugins/lib"
-                || strPath == "${toString ./.}/.opencode/rules"
-                || strPath == "${toString ./.}/.opencode/skills"
-                || strPath == "${toString ./.}/.opencode/skills/rust-workspace-engineering"
+                || strPath == "${toString ./.}/.codex"
+                || strPath == "${toString ./.}/.codex/agents"
+                || strPath == "${toString ./.}/.codex/hooks"
+                || strPath == "${toString ./.}/.agents"
+                || strPath == "${toString ./.}/.agents/skills"
                 || strPath == "${toString ./.}/.forgejo"
                 || strPath == "${toString ./.}/.forgejo/workflows"
                 || strPath == "${toString ./.}/docs"
@@ -208,18 +205,12 @@
             )
             || (pkgs.lib.hasInfix "/tests/" strPath && pkgs.lib.hasSuffix ".sh" path)
             || (pkgs.lib.hasInfix "/tests/" strPath && pkgs.lib.hasSuffix ".mjs" path)
+            || (pkgs.lib.hasInfix "/tests/codex/" strPath && pkgs.lib.hasSuffix ".py" path)
             || (pkgs.lib.hasInfix "/scripts/" strPath)
+            || (pkgs.lib.hasInfix "/.codex/" strPath)
+            || (pkgs.lib.hasInfix "/.agents/skills/" strPath)
             || (pkgs.lib.hasInfix "/.forgejo/workflows/" strPath && pkgs.lib.hasSuffix ".yml" path)
             || strPath == "${toString ./.}/.forgejo/pull_request_template.md"
-            || strPath == "${toString ./.}/opencode.json"
-            || strPath == "${toString ./.}/.opencode/agents/build.md"
-            || strPath == "${toString ./.}/.opencode/agents/rgr-implementation-reviewer.md"
-            || strPath == "${toString ./.}/.opencode/commands/prepare-forgejo-pr.md"
-            || strPath == "${toString ./.}/.opencode/plugins/auto-review-toolchain.ts"
-            || strPath == "${toString ./.}/.opencode/plugins/auto-review-discipline.ts"
-            || strPath == "${toString ./.}/.opencode/plugins/lib/shared.ts"
-            || strPath == "${toString ./.}/.opencode/rules/scope-hygiene.md"
-            || strPath == "${toString ./.}/.opencode/skills/rust-workspace-engineering/SKILL.md"
             || strPath == "${toString ./.}/docs/OPERATIONS.md"
             || strPath == "${toString ./.}/docs/THREAT-MODEL.md"
             || strPath == "${toString ./.}/deploy/systemd/auto_review.env.example";

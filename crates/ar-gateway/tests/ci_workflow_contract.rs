@@ -66,32 +66,32 @@ fn pr_ci_classifies_changed_paths_before_expensive_gates() {
     let mut contract_errors = Vec::new();
 
     let jobs = workflow_jobs(CI_WORKFLOW);
-    let Some((classifier_job_name, _classifier_job, app_output_key, opencode_output_key)) =
+    let Some((classifier_job_name, _classifier_job, app_output_key, codex_output_key)) =
         jobs.iter().find_map(|(job_name, job_text)| {
             let output_keys = workflow_job_output_keys(job_text);
             let app_output_key = find_matching_output_key(&output_keys, &["app", "ci"])
                 .or_else(|| find_matching_output_key(&output_keys, &["app"]));
-            let opencode_output_key = find_matching_output_key(&output_keys, &["opencode", "ci"])
-                .or_else(|| find_matching_output_key(&output_keys, &["opencode"]));
+            let codex_output_key = find_matching_output_key(&output_keys, &["codex", "ci"])
+                .or_else(|| find_matching_output_key(&output_keys, &["codex"]));
 
-            match (app_output_key, opencode_output_key) {
-                (Some(app_output_key), Some(opencode_output_key)) => Some((
+            match (app_output_key, codex_output_key) {
+                (Some(app_output_key), Some(codex_output_key)) => Some((
                     job_name.as_str(),
                     *job_text,
                     app_output_key,
-                    opencode_output_key,
+                    codex_output_key,
                 )),
                 _ => None,
             }
         })
     else {
         panic!(
-            "CI workflow should define a path-classification job that exposes separate app and opencode CI output keys"
+            "CI workflow should define a path-classification job that exposes separate app and Codex CI output keys"
         );
     };
 
     let app_output_ref = format!("needs.{classifier_job_name}.outputs.{app_output_key}");
-    let opencode_output_ref = format!("needs.{classifier_job_name}.outputs.{opencode_output_key}");
+    let codex_output_ref = format!("needs.{classifier_job_name}.outputs.{codex_output_key}");
 
     for gate in ["fmt", "clippy", "test", "deny", "build"] {
         let Some(job) = workflow_job(gate) else {
@@ -117,21 +117,21 @@ fn pr_ci_classifies_changed_paths_before_expensive_gates() {
         );
     }
 
-    let Some(opencode_job) = workflow_job("opencode-test") else {
-        panic!(".forgejo/workflows/ci.yml should expose an `opencode-test` PR CI job");
+    let Some(codex_job) = workflow_job("codex-test") else {
+        panic!(".forgejo/workflows/ci.yml should expose a `codex-test` PR CI job");
     };
 
     require(
         &mut contract_errors,
-        workflow_job_needs(opencode_job).is_some_and(|needs| needs.contains(classifier_job_name)),
-        "opencode-test should depend on path-classification outputs so it can be selected from changes".to_string(),
+        workflow_job_needs(codex_job).is_some_and(|needs| needs.contains(classifier_job_name)),
+        "codex-test should depend on path-classification outputs so it can be selected from changes".to_string(),
     );
     require(
         &mut contract_errors,
-        workflow_job_if(opencode_job).is_some_and(|if_line| {
-            if_line.contains(&opencode_output_ref) && if_line.contains("'true'")
+        workflow_job_if(codex_job).is_some_and(|if_line| {
+            if_line.contains(&codex_output_ref) && if_line.contains("'true'")
         }),
-        "opencode-test should run only when opencode-related paths changed".to_string(),
+        "codex-test should run only when Codex-related paths changed".to_string(),
     );
 
     let Some(semantic_review_job) = workflow_job("semantic-review") else {
@@ -155,15 +155,14 @@ fn pr_ci_classifies_changed_paths_before_expensive_gates() {
         semantic_needs_tokens
             .iter()
             .all(|token| !matches!(token.as_str(), "fmt" | "clippy" | "test" | "deny" | "build")),
-        "semantic-review should not depend on full application gates; path-classified opencode-only PRs must still get semantic review", 
+        "semantic-review should not depend on full application gates; path-classified Codex-only PRs must still get semantic review",
     );
 
     assert!(contract_errors.is_empty(), "{}", contract_errors.join("\n"));
 }
 
 #[test]
-fn pr_ci_classifier_treats_root_opencode_json_as_opencode_and_fails_closed_to_app_ci_on_uncertain_diff(
-) {
+fn pr_ci_classifier_treats_codex_paths_as_codex_and_fails_closed_to_app_ci_on_uncertain_diff() {
     let mut contract_errors = Vec::new();
 
     let Some(classifier_job) = workflow_job("path-classification") else {
@@ -197,8 +196,17 @@ fn pr_ci_classifier_treats_root_opencode_json_as_opencode_and_fails_closed_to_ap
         &mut contract_errors,
         case_patterns
             .iter()
-            .any(|pattern| pattern.contains("opencode.json")),
-        "path-classification should treat root opencode.json as an opencode path",
+            .any(|pattern| pattern.contains(".codex/*"))
+            && case_patterns
+                .iter()
+                .any(|pattern| pattern.contains(".agents/*"))
+            && case_patterns
+                .iter()
+                .any(|pattern| pattern.contains("scripts/codex/*"))
+            && case_patterns
+                .iter()
+                .any(|pattern| pattern.contains("tests/codex/*")),
+        "path-classification should treat Codex config, skills, scripts, and tests as Codex paths",
     );
 
     let fail_closed_to_app_ci = match (

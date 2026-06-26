@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 10
     outputs:
       app_ci: ${{ steps.changed-paths.outputs.app_ci }}
-      opencode_ci: ${{ steps.changed-paths.outputs.opencode_ci }}
+      codex_ci: ${{ steps.changed-paths.outputs.codex_ci }}
     steps:
       - name: Detect changed paths
         id: changed-paths
@@ -40,17 +40,17 @@ jobs:
           if [ -z "$files_json" ]; then
             echo "path classification failed to fetch changed files; running all CI gates" >&2
             app_ci="true"
-            opencode_ci="true"
+            codex_ci="true"
           else
             changed_files="$(printf '%s' "$files_json" | python3 -c 'import json,sys; print("\n".join(item.get("filename", "") for item in json.load(sys.stdin)))')"
 
             app_ci="true"
-            opencode_ci="false"
+            codex_ci="false"
 
             while IFS= read -r file; do
               case "$file" in
-                .opencode/*|opencode.json)
-                  opencode_ci="true"
+                .codex/*|.agents/*|scripts/codex/*|tests/codex/*|AGENTS.md)
+                  codex_ci="true"
                   app_ci="false"
                   ;;
                 *)
@@ -61,7 +61,7 @@ jobs:
           fi
 
           echo "app_ci=$app_ci" >> "$GITHUB_OUTPUT"
-          echo "opencode_ci=$opencode_ci" >> "$GITHUB_OUTPUT"
+          echo "codex_ci=$codex_ci" >> "$GITHUB_OUTPUT"
 
   fmt:
     name: Format check
@@ -208,9 +208,9 @@ jobs:
           export PATH="/nix/var/nix/profiles/default/bin:$PATH"
           nix develop --command just test
 
-  opencode-test:
-    name: opencode plugin tests
-    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.path-classification.outputs.opencode_ci == 'true' }}
+  codex-test:
+    name: Codex policy tests
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.path-classification.outputs.codex_ci == 'true' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
     needs: [path-classification]
@@ -246,10 +246,10 @@ jobs:
           done
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
 
-      - name: Run just opencode-test
+      - name: Run just codex-test
         run: |
           export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-          nix develop --command just opencode-test
+          nix develop --command just codex-test
 
   deny:
     name: Dependency policy
@@ -378,7 +378,7 @@ jobs:
   pr-artifact-build:
     name: Build PR artifacts (no token)
     runs-on: docker-release
-    needs: [fmt, clippy, test, opencode-test, deny, build]
+    needs: [fmt, clippy, test, codex-test, deny, build]
     if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}

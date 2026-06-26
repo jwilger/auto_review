@@ -42,7 +42,7 @@ Choose the next smallest behavior from the checklist only after Cycle 1 is green
 - AgentCore HTTP tests for `/ping`, valid `/invocations`, stale head rejection, idempotent duplicate handling, and structured error responses.
 - DynamoDB-backed store tests behind local fakes for key shape, conditional put, TTL fields, and trait behavior; keep live AWS tests manual/documented.
 - Contract tests for new deploy action snippets and docs that are executable/public contracts.
-- Final verification: focused cycle commands as work proceeds, then `just fmt`, `just clippy`, `just test`, `just build`; run `just opencode-test` only if `.opencode/**` or `opencode.json` changes.
+- Final verification: focused cycle commands as work proceeds, then `just fmt`, `just clippy`, `just test`, `just build`; run `just codex-test` only if `.codex/**`, `.agents/**`, `scripts/codex/**`, or `tests/codex/**` changes.
 
 ## Assumptions
 

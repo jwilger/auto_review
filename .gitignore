@@ -1,6 +1,7 @@
 /target
 **/*.rs.bk
 *.pdb
+__pycache__/
 .env
 .env.local
 .envrc
@@ -10,8 +11,7 @@
 /.vscode
 .DS_Store
 /.remember/
-/.opencode/node_modules/
-/.opencode/state/
+/.codex/state/
 /.worktrees/
 # Claude Code local (personal) settings
 /.claude/settings.local.json
