@@ -39,7 +39,6 @@ Delete the comment block once you've filled the rest in.
 <!-- Tick what you did. -->
 
 - [ ] `just test`
-- [ ] `just opencode-test` (when changing `.opencode/` harness/plugins)
 - [ ] `just clippy`
 - [ ] `just fmt`
 - [ ] `just deny` (when bumping dependencies)

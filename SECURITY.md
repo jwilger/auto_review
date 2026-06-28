@@ -1,12 +1,13 @@
 # Security policy
 
-`auto_review` is a Forgejo PR-review bot that deliberately accepts
+`auto_review` is a Forgejo/GitHub PR-review bot that deliberately accepts
 attacker-controlled input (every PR), clones PR workspaces for semantic
-context, calls LLM providers, and holds a Forgejo PAT with write access
-to its watched repos. Deterministic linters/tests/builds run in CI, not
-inside the gateway review runtime. The threat surface is real. We take
-disclosures seriously and want vulnerability researchers to feel
-welcome.
+context, calls LLM providers, and holds forge write credentials — a Forgejo
+PAT, or short-lived repository-scoped GitHub App installation tokens — for its
+watched repos. It runs either as the gateway service or as an AWS Bedrock
+AgentCore runtime. Deterministic linters/tests/builds run in CI, not inside the
+review runtime. The threat surface is real. We take disclosures seriously and
+want vulnerability researchers to feel welcome.
 
 ## Reporting a vulnerability
 
@@ -50,6 +51,9 @@ In scope:
 - Anything in this repository's `crates/` source tree.
 - The shipped deploy artefacts under `deploy/`, the Nix-built binary/embedded
   runtime packaging, Helm chart, systemd unit, and Forgejo Action template.
+- The AgentCore runtime image and assets under `deploy/agentcore/`
+  (Containerfile, runtime-config.json, IAM policy, and the Forgejo/GitHub
+  Actions OIDC invocation templates).
 - Default configurations and example env files.
 - The bundled prompts and JSON schemas under
   `crates/ar-prompts/`.

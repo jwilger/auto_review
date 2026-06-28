@@ -211,8 +211,11 @@ INFO review posted repo=auto_review_bot/e2e-target pr=1 review_id=N findings=K
 And Forgejo's UI should show:
 
 - One review on PR #1 with K inline comments.
-- The HEAD SHA's commit status badge → "auto_review: ..." (success
-  if K == 0, request_changes if any Error-severity finding).
+- The HEAD SHA's commit status badge is success on any posted review —
+  description "auto_review: no findings" when K == 0, or
+  "auto_review: N error(s)/warning(s)/note(s)" otherwise.
+- The posted PR review verdict is "Approve" unless any finding is
+  Error-severity, in which case it is "Request changes".
 
 If any of those don't fire:
 
@@ -221,9 +224,9 @@ If any of those don't fire:
 2. Hit `/metrics` on the gateway: counters
    `auto_review_webhooks_pull_request_total` should be ≥ 1,
    `auto_review_jobs_dispatched_total` should be ≥ 1 after the `/reviews/ci`
-   request, and one of `reviews_succeeded_total` / `reviews_failed_*_total`
-   should be ≥ 1.
-3. If `reviews_failed_workspace_total` ticked, the clone phase
+   request, and one of `auto_review_reviews_succeeded_total` /
+   `auto_review_reviews_failed_*_total` should be ≥ 1.
+3. If `auto_review_reviews_failed_workspace_total` ticked, the clone phase
    failed — check that `host.docker.internal` (or the LAN IP) is
    reachable from the Forgejo container, and that the bot's PAT
    has `write:repository`.

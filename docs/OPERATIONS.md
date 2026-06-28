@@ -250,8 +250,8 @@ skip paths, webhook intake, and chat surface.
   Action: raise the cap, or scale horizontally with multiple
   gateway instances against a shared SQLite history.
 - `auto_review_reviews_skipped_<reason>_total` — `same_sha`
-  (incremental dedup), `trivial_files` (lockfiles / vendored /
-  generated), `disabled_by_config` (`enabled: false`). Operators
+  (incremental dedup), `trivial` (lockfiles / vendored /
+  generated), `disabled` (`enabled: false`). Operators
   shouldn't alert on these.
 
 *Background poller:*
@@ -347,8 +347,8 @@ quota) or 5xx (provider outage). `LLM_API_KEY` rotation: see §6.2.
 
 **Common causes:**
 - The bot's PAT was revoked or expired → re-mint (§6.1).
-- Disk pressure on the workspace tmpfs → bump the volume size or
-  reduce `AR_WORKSPACE_MAX_BYTES` if set.
+- Disk pressure on the workspace tmpfs → bump the volume size, or
+  reduce the number of concurrent reviews.
 - Network egress to the Forgejo instance blocked from the gateway.
 
 ---
