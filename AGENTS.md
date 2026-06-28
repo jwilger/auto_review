@@ -42,9 +42,9 @@ tea issue view <N> --repo Slipstream/auto_review
 tea pr create --repo Slipstream/auto_review --head <branch> --base main --title "..." --description "..."
 ```
 
-Codex configures a local `forgejo` MCP server in `.codex/config.toml`. It runs `forgejo-mcp` from the Nix dev shell against `https://git.johnwilger.com` and expects `FORGEJO_TOKEN` in the environment; never hardcode or commit the token.
+Forgejo MCP may be available from the surrounding Codex environment. If it is not available, use `tea` as the fallback. `FORGEJO_TOKEN` is the expected credential for Forgejo tooling; never hardcode or commit the token.
 
-Branch protection requires a PR for every merge to `main`. CI in `.forgejo/workflows/ci.yml` path-classifies changes: application changes run the Rust verification gates, while `.codex/**`, `.agents/**`, and `scripts/codex/**` changes run `just codex-test`.
+Branch protection requires a PR for every merge to `main`. CI in `.forgejo/workflows/ci.yml` path-classifies changes: application changes run the Rust verification gates, while `scripts/codex/**`, `tests/codex/**`, and `AGENTS.md` changes run `just codex-test`.
 
 ## Architecture
 
@@ -87,7 +87,7 @@ changing public behavior. The CLI command reference lives in `docs/CLI.md`.
 
 ## Development Discipline
 
-- TDD is mandatory. For behavior changes, start with `python3 scripts/codex/rgr.py --session <id> start --behavior <behavior> --test <test>`, then use the specialist RGR agents: `rgr-test-author` for one focused RED, `rgr-test-reviewer` and `python3 scripts/codex/rgr.py --session <id> approve-red` before production edits, `rgr-diagnostic-implementer` for one minimum GREEN edit per current diagnostic, and `rgr-implementation-reviewer` before REFACTOR or broader verification. Multi-failure RED output is invalid; split or narrow tests until one failure drives one edit.
+- TDD is mandatory. For behavior changes, start with `python3 scripts/codex/rgr.py --session <id> start --behavior <behavior> --test <test>`, create one focused RED, and run `python3 scripts/codex/rgr.py --session <id> approve-red` before production edits. Multi-failure RED output is invalid; split or narrow tests until one failure drives one edit.
 - After one behavioral production edit, rerun the focused command and record a changed diagnostic with `python3 scripts/codex/rgr.py --session <id> record-changed-diagnostic`/`approve-changed-diagnostic` or passing proof with `record-proof` and `mark-green` before editing again. Commit each approved GREEN/refactor checkpoint before starting the next RED.
 - Plans and todo lists for behavior work must be RGR-shaped, not component waterfalls.
 - Pure parsing and formatting helpers get adjacent `#[cfg(test)] mod tests`; HTTP integration tests use `wiremock`; LLM tests use `CannedProvider` or `ScriptedProvider` fakes.
@@ -117,12 +117,8 @@ changing public behavior. The CLI command reference lives in `docs/CLI.md`.
 
 ## Codex Project Layout
 
-- `.codex/config.toml` registers project Codex settings, Forgejo MCP, and agent limits.
-- `.codex/hooks.json` registers project-local Codex lifecycle hooks; changed hooks must be reviewed and trusted in Codex with `/hooks`.
-- `.codex/agents/` contains specialist Codex subagents.
-- `.agents/skills/` contains longer on-demand procedures.
-- `scripts/codex/` contains deterministic helper CLIs and hook policy code.
-- `tests/codex/` contains the Codex policy/config/helper test suite. Run `just codex-test` for any `.codex/**`, `.agents/**`, `scripts/codex/**`, `tests/codex/**`, or `AGENTS.md` change; `just test` remains the Rust application test suite.
+- `scripts/codex/` contains deterministic helper CLIs and policy code.
+- `tests/codex/` contains the Codex helper test suite. Run `just codex-test` for any `scripts/codex/**`, `tests/codex/**`, or `AGENTS.md` change; `just test` remains the Rust application test suite.
 
 ## Reference Docs
 
