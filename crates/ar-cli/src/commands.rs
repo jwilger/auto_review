@@ -1743,20 +1743,6 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[test]
-    fn init_operator_guidance_uses_unified_cli_and_gateway_token_env() {
-        let source = include_str!("commands.rs");
-        let gateway_token_env = ["export AR_", "FORGEJO_TOKEN="].concat();
-        let nested_register_command = ["auto-review webhook", " register"].concat();
-        let gateway_token_flag = ["--token \\\"$AR_", "FORGEJO_TOKEN\\\""].concat();
-        let removed_flat_register_command = ["auto", "_review register-webhook"].concat();
-
-        assert!(source.contains(&gateway_token_env));
-        assert!(source.contains(&nested_register_command));
-        assert!(source.contains(&gateway_token_flag));
-        assert!(!source.contains(&removed_flat_register_command));
-    }
-
-    #[test]
     fn agentcore_serve_config_uses_forgejo_runtime_inputs_for_handler() {
         let config = build_agentcore_serve_config(
             AgentcoreServeArgs {

@@ -11,9 +11,6 @@ clippy:
 test:
 	cargo nextest run --workspace --no-tests=pass
 
-codex-test:
-	python3 -m unittest discover -s tests/codex -v
-
 deny:
 	cargo deny check licenses bans sources
 
@@ -26,4 +23,4 @@ serve:
 watch:
 	AR_GATEWAY_BIND=0.0.0.0:8090 bacon --job gateway-dev
 
-ci: fmt clippy test codex-test deny build
+ci: fmt clippy test deny build

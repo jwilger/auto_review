@@ -17,7 +17,6 @@ Focused gates:
 just fmt
 just clippy
 just test
-just codex-test
 just deny
 just build
 ```
@@ -42,9 +41,9 @@ tea issue view <N> --repo Slipstream/auto_review
 tea pr create --repo Slipstream/auto_review --head <branch> --base main --title "..." --description "..."
 ```
 
-Codex configures a local `forgejo` MCP server in `.codex/config.toml`. It runs `forgejo-mcp` from the Nix dev shell against `https://git.johnwilger.com` and expects `FORGEJO_TOKEN` in the environment; never hardcode or commit the token.
+Forgejo MCP may be available from the surrounding Codex environment. If it is not available, use `tea` as the fallback. `FORGEJO_TOKEN` is the expected credential for Forgejo tooling; never hardcode or commit the token.
 
-Branch protection requires a PR for every merge to `main`. CI in `.forgejo/workflows/ci.yml` path-classifies changes: application changes run the Rust verification gates, while `.codex/**`, `.agents/**`, and `scripts/codex/**` changes run `just codex-test`.
+Branch protection requires a PR for every merge to `main`. CI in `.forgejo/workflows/ci.yml` runs the Rust verification gates for application changes.
 
 ## Architecture
 
@@ -72,13 +71,16 @@ Deterministic linters/tests/builds run in CI before semantic review. Runtime wor
 
 | Crate | Purpose |
 |---|---|
-| `ar-gateway` | HTTP server, HMAC verification, webhook intake, chat poller |
-| `ar-orchestrator` | `JobDispatcher`, `SpawningDispatcher`, per-PR state machine, review history |
-| `ar-forgejo` | REST client and HTTP-Basic bootstrap client |
+| `ar-agentcore` | AWS Bedrock AgentCore-compatible HTTP runtime surface |
+| `ar-gateway` | HTTP server, HMAC verification, webhook intake, CI-triggered dispatch, chat poller |
+| `ar-orchestrator` | `JobDispatcher`, `SpawningDispatcher`, review history, changed-file triage, status calls |
+| `ar-forge` | Provider-neutral repository-host DTOs, error type, and `ReviewHost` trait |
+| `ar-forgejo` | Forgejo REST client, webhook DTOs, review/comment/status APIs, Basic-auth bootstrap client |
+| `ar-github` | GitHub App REST client foundation and `ReviewHost` wrapper |
 | `ar-llm` | provider trait and tier-based router |
 | `ar-prompts` | prompt templates and JSON schemas |
 | `ar-review` | review, verify, self-heal, RAG context, repo config |
-| `ar-cli` | `auto-review` operator command and gateway entrypoint |
+| `ar-cli` | `auto-review` operator command, gateway entrypoint, and AgentCore entrypoint |
 | `ar-chat` | chat command handling |
 | `ar-index` | tree-sitter symbols, embeddings, vector stores, co-change graph, learnings store |
 
@@ -87,9 +89,9 @@ changing public behavior. The CLI command reference lives in `docs/CLI.md`.
 
 ## Development Discipline
 
-- TDD is mandatory. For behavior changes, start with `python3 scripts/codex/rgr.py --session <id> start --behavior <behavior> --test <test>`, then use the specialist RGR agents: `rgr-test-author` for one focused RED, `rgr-test-reviewer` and `python3 scripts/codex/rgr.py --session <id> approve-red` before production edits, `rgr-diagnostic-implementer` for one minimum GREEN edit per current diagnostic, and `rgr-implementation-reviewer` before REFACTOR or broader verification. Multi-failure RED output is invalid; split or narrow tests until one failure drives one edit.
-- After one behavioral production edit, rerun the focused command and record a changed diagnostic with `python3 scripts/codex/rgr.py --session <id> record-changed-diagnostic`/`approve-changed-diagnostic` or passing proof with `record-proof` and `mark-green` before editing again. Commit each approved GREEN/refactor checkpoint before starting the next RED.
-- Plans and todo lists for behavior work must be RGR-shaped, not component waterfalls.
+- TDD is mandatory for behavior changes: create one focused RED, confirm it fails for the intended reason, make the smallest production edit, and rerun the focused command until it passes.
+- Multi-failure RED output is invalid; split or narrow tests until one failure drives one edit.
+- Plans and todo lists for behavior work should be shaped around focused red/green/refactor checkpoints, not component waterfalls.
 - Pure parsing and formatting helpers get adjacent `#[cfg(test)] mod tests`; HTTP integration tests use `wiremock`; LLM tests use `CannedProvider` or `ScriptedProvider` fakes.
 - Do not add deterministic tests that assert documentation wording for docs-only content. Keep tests for executable behavior, generated docs, public CLI/contracts, schemas, deployment artifacts, and security red-team boundaries; justify any docs-reading contract test near the test.
 - Commits must stay green and use `feat(scope):`, `fix(scope):`, `docs:`, `chore:`, `refactor:`, or `test:`.
@@ -115,14 +117,12 @@ changing public behavior. The CLI command reference lives in `docs/CLI.md`.
 - Metrics changes may require updates to `deploy/prometheus/auto_review.rules.yaml`, `deploy/grafana/auto_review.dashboard.json`, and contract tests.
 - User-facing and operator-facing release notes are generated by the release PR from merged conventional commits.
 
-## Codex Project Layout
+## Project Layout
 
-- `.codex/config.toml` registers project Codex settings, Forgejo MCP, and agent limits.
-- `.codex/hooks.json` registers project-local Codex lifecycle hooks; changed hooks must be reviewed and trusted in Codex with `/hooks`.
-- `.codex/agents/` contains specialist Codex subagents.
-- `.agents/skills/` contains longer on-demand procedures.
-- `scripts/codex/` contains deterministic helper CLIs and hook policy code.
-- `tests/codex/` contains the Codex policy/config/helper test suite. Run `just codex-test` for any `.codex/**`, `.agents/**`, `scripts/codex/**`, `tests/codex/**`, or `AGENTS.md` change; `just test` remains the Rust application test suite.
+- `scripts/release` contains release helper logic.
+- `tests/features/` contains end-to-end feature specifications.
+- `.forgejo/workflows/` contains Forgejo Actions workflows.
+- `.forgejo/pull_request_template.md` contains the pull request template.
 
 ## Reference Docs
 
