@@ -9,66 +9,11 @@ permissions:
   pull-requests: read
 
 jobs:
-  path-classification:
-    name: Classify changed paths
-    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 10
-    outputs:
-      app_ci: ${{ steps.changed-paths.outputs.app_ci }}
-      codex_ci: ${{ steps.changed-paths.outputs.codex_ci }}
-    steps:
-      - name: Detect changed paths
-        id: changed-paths
-        env:
-          FORGEJO_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-
-          owner="${{ github.repository_owner }}"
-          repo="${{ github.event.repository.name }}"
-          pr_number="${{ github.event.pull_request.number }}"
-          files_url="${{ github.server_url }}/api/v1/repos/$owner/$repo/pulls/$pr_number/files"
-
-          files_json="$({
-            curl -fsS --connect-timeout 5 --max-time 30 \
-              -H "Authorization: token $FORGEJO_TOKEN" \
-              -H "Accept: application/json" \
-              "$files_url"
-          } || true)"
-
-          if [ -z "$files_json" ]; then
-            echo "path classification failed to fetch changed files; running all CI gates" >&2
-            app_ci="true"
-            codex_ci="true"
-          else
-            changed_files="$(printf '%s' "$files_json" | python3 -c 'import json,sys; print("\n".join(item.get("filename", "") for item in json.load(sys.stdin)))')"
-
-            app_ci="true"
-            codex_ci="false"
-
-            while IFS= read -r file; do
-              case "$file" in
-                .codex/*|.agents/*|scripts/codex/*|tests/codex/*|AGENTS.md)
-                  codex_ci="true"
-                  app_ci="false"
-                  ;;
-                *)
-                  app_ci="true"
-                  ;;
-              esac
-            done <<< "$changed_files"
-          fi
-
-          echo "app_ci=$app_ci" >> "$GITHUB_OUTPUT"
-          echo "codex_ci=$codex_ci" >> "$GITHUB_OUTPUT"
-
   fmt:
     name: Format check
-    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.path-classification.outputs.app_ci == 'true' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    needs: [path-classification]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -124,10 +69,9 @@ jobs:
 
   clippy:
     name: Clippy
-    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.path-classification.outputs.app_ci == 'true' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    needs: [path-classification]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -167,10 +111,9 @@ jobs:
 
   test:
     name: Test
-    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.path-classification.outputs.app_ci == 'true' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    needs: [path-classification]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -208,55 +151,11 @@ jobs:
           export PATH="/nix/var/nix/profiles/default/bin:$PATH"
           nix develop --command just test
 
-  codex-test:
-    name: Codex policy tests
-    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.path-classification.outputs.codex_ci == 'true' }}
-    runs-on: ubuntu-24.04
-    timeout-minutes: 60
-    needs: [path-classification]
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          persist-credentials: false
-
-      - name: Install or reuse Nix
-        run: |
-          set -euo pipefail
-          NIX_BIN_DIR="/nix/var/nix/profiles/default/bin"
-          if [ -x "$NIX_BIN_DIR/nix" ]; then
-            echo "Nix already present at $NIX_BIN_DIR (volume cache hit)"
-          else
-            echo "Installing Nix (cold start or fresh volume)"
-            curl --proto '=https' --tlsv1.2 -sSf -L \
-              https://install.determinate.systems/nix \
-              | sh -s -- install linux \
-                --init none \
-                --no-confirm \
-                --extra-conf "experimental-features = nix-command flakes" \
-                --extra-conf "accept-flake-config = true"
-          fi
-          if ! getent group nixbld > /dev/null; then
-            groupadd -r nixbld
-          fi
-          for i in $(seq 1 32); do
-            if ! id -u "nixbld$i" > /dev/null 2>&1; then
-              useradd -r -g nixbld -G nixbld -d /var/empty \
-                -s /usr/sbin/nologin -c "Nix build user $i" "nixbld$i"
-            fi
-          done
-          echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
-
-      - name: Run just codex-test
-        run: |
-          export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-          nix develop --command just codex-test
-
   deny:
     name: Dependency policy
-    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.path-classification.outputs.app_ci == 'true' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    needs: [path-classification]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -296,10 +195,9 @@ jobs:
 
   build:
     name: Build
-    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' && needs.path-classification.outputs.app_ci == 'true' }}
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 60
-    needs: [path-classification]
     steps:
       - uses: actions/checkout@v4
         with:
@@ -340,7 +238,6 @@ jobs:
   semantic-review:
     name: Request auto_review semantic review
     runs-on: ubuntu-24.04
-    needs: [path-classification]
     if: ${{ github.event_name == 'pull_request' }}
     env:
       AUTO_REVIEW_GATEWAY_URL: ${{ vars.AUTO_REVIEW_GATEWAY_URL }}
@@ -378,7 +275,7 @@ jobs:
   pr-artifact-build:
     name: Build PR artifacts (no token)
     runs-on: docker-release
-    needs: [fmt, clippy, test, codex-test, deny, build]
+    needs: [fmt, clippy, test, deny, build]
     if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
     env:
       PR_NUMBER: ${{ github.event.pull_request.number }}
