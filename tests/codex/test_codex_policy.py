@@ -36,8 +36,10 @@ class CodexPolicyStructureTests(unittest.TestCase):
 
         self.assertIn("[mcp_servers.forgejo]", config)
         self.assertIn('command = "sh"', config)
-        self.assertIn("nix develop", config)
+        self.assertNotIn("nix develop", config)
         self.assertIn("forgejo-mcp", config)
+        self.assertIn("--transport", config)
+        self.assertIn("stdio", config)
         self.assertIn("--token", config)
         self.assertIn("FORGEJO_TOKEN", config)
         self.assertIn('env_vars = ["FORGEJO_TOKEN"]', config)
