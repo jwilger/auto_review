@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [1.4.0] - 2026-06-26
+
+### Added
+
+- *(agentcore)* add GitHub App and AgentCore runtime support (#291)
+
+### Other
+
+- convert agent workflow to codex (#293)
+
 ## [1.3.0] - 2026-06-13
 
 ### Fixed
