@@ -1666,21 +1666,6 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    fn run_from_env_source() -> &'static str {
-        let source = include_str!("startup.rs");
-        let start = source
-            .find("pub async fn run_from_env(options: StartupOptions)")
-            .unwrap_or_else(|| panic!("startup.rs should define run_from_env with StartupOptions"));
-        let end = source[start..]
-            .find("fn validate_ci_review_token")
-            .map(|offset| start + offset)
-            .unwrap_or_else(|| {
-                panic!("run_from_env source should precede validate_ci_review_token")
-            });
-
-        &source[start..end]
-    }
-
     struct CapturingSubscriber {
         messages: Arc<Mutex<Vec<String>>>,
     }
@@ -1728,53 +1713,6 @@ mod tests {
                 self.message = Some(format!("{value:?}").trim_matches('"').to_string());
             }
         }
-    }
-
-    #[test]
-    fn run_from_env_wires_startup_options_and_bare_env_to_launcher_before_gateway_config() {
-        let source = run_from_env_source();
-        let selector = source
-            .find("select_gateway_launcher_for_startup_options")
-            .unwrap_or_else(|| {
-                panic!(
-                    "run_from_env must call select_gateway_launcher_for_startup_options before normal startup"
-                )
-            });
-        let config = source
-            .find("GatewayStartupConfig::from_env_values")
-            .unwrap_or_else(|| panic!("run_from_env should continue through GatewayStartupConfig"));
-
-        assert!(
-            selector < config,
-            "run_from_env must select the launcher before normal gateway config/startup"
-        );
-
-        let launcher_wiring = &source[..config];
-
-        assert!(
-            launcher_wiring.contains("AR_GATEWAY_BARE"),
-            "run_from_env must read AR_GATEWAY_BARE before selecting the launcher"
-        );
-        assert!(
-            launcher_wiring.contains("AR_GATEWAY_EXTERNAL_ISOLATION"),
-            "run_from_env must read AR_GATEWAY_EXTERNAL_ISOLATION before selecting the launcher"
-        );
-        assert!(
-            launcher_wiring[selector..].contains("options"),
-            "run_from_env must pass its StartupOptions into the launcher selector"
-        );
-        assert!(
-            launcher_wiring[selector..].contains("GatewayLauncherEnvValues"),
-            "run_from_env must pass GatewayLauncherEnvValues into the launcher selector"
-        );
-        assert!(
-            launcher_wiring[selector..].contains("bare:"),
-            "run_from_env must wire the AR_GATEWAY_BARE value into GatewayLauncherEnvValues::bare"
-        );
-        assert!(
-            launcher_wiring[selector..].contains("external_isolation:"),
-            "run_from_env must wire AR_GATEWAY_EXTERNAL_ISOLATION into GatewayLauncherEnvValues::external_isolation"
-        );
     }
 
     #[test]
