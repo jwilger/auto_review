@@ -36,7 +36,11 @@ class CodexPolicyStructureTests(unittest.TestCase):
 
         self.assertIn("[mcp_servers.forgejo]", config)
         self.assertIn('command = "sh"', config)
+        self.assertIn("git rev-parse --show-toplevel", config)
+        self.assertIn("nix run --quiet", config)
+        self.assertIn("#forgejo-mcp", config)
         self.assertNotIn("nix develop", config)
+        self.assertNotIn("exec forgejo-mcp", config)
         self.assertIn("forgejo-mcp", config)
         self.assertIn("--transport", config)
         self.assertIn("stdio", config)

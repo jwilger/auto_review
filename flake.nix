@@ -293,6 +293,7 @@
         # the default package so `nix build` produces a deployable
         # artefact.
         packages = rec {
+          forgejo-mcp = pkgs.forgejo-mcp;
           ar-cli-unwrapped = craneLib.buildPackage (
             commonArgs
             // {
