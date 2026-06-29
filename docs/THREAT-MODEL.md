@@ -1,7 +1,7 @@
 # auto_review Threat Model
 
 Status: **Living document**
-Last reviewed: 2026-05-14
+Last reviewed: 2026-06-25
 
 ## Scope
 

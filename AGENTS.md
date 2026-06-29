@@ -33,8 +33,8 @@ Prefer Forgejo MCP (`forgejo_*` tools) for issue, PR, and repository operations 
 
 ```sh
 # MCP-first path
-forgejo_list_repo_issues --owner jwilger --repo auto_review
-forgejo_create_pull_request --owner jwilger --repo auto_review --base main --head <branch> --title "..." --body "..."
+forgejo_list_repo_issues --owner Slipstream --repo auto_review
+forgejo_create_pull_request --owner Slipstream --repo auto_review --base main --head <branch> --title "..." --body "..."
 
 # CLI fallback
 tea issue view <N> --repo Slipstream/auto_review
@@ -110,7 +110,7 @@ changing public behavior. The CLI command reference lives in `docs/CLI.md`.
   Validation:
   - <focused checks run>
   ```
-- Use `read_non_empty_env(name)` and `parse_env::<T>(name)` in `ar-gateway/src/main.rs` instead of raw env parsing.
+- Use `read_non_empty_env(name)` and `parse_env::<T>(name)` in `ar-gateway/src/startup.rs` instead of raw env parsing.
 - Cap provider error bodies with `ar_llm::cap_for_error` or equivalent helpers.
 - No `unwrap()` or `expect()` outside `#[cfg(test)]`.
 - If a change touches a documented threat in `docs/THREAT-MODEL.md`, update the matching red-team test when needed.

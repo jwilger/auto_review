@@ -69,10 +69,13 @@ Full setup: [Quickstart](./docs/QUICKSTART.md). Deployment options:
 
 ## Current status
 
-`auto_review` is being prepared for the 1.0.0 release. The documented runtime
-contract is the supported single-binary Forgejo reviewer path: CI triggers
-semantic review, the gateway isolates workspace handling, and the bot posts
-verified review output back to Forgejo.
+`auto_review` is released and versioned under semver — see
+[CHANGELOG](./CHANGELOG.md) for the current release. The supported runtime
+contract is the single-binary Forgejo reviewer path: CI triggers semantic
+review, the gateway isolates workspace handling, and the bot posts verified
+review output back to Forgejo. Provider-neutral review hosts now add
+foundational GitHub App support, and the reviewer can also run as an AWS
+Bedrock AgentCore runtime instead of the long-lived gateway service.
 
 ```text
 Forgejo webhook / CI trigger
@@ -134,7 +137,10 @@ providers, Ollama, vLLM, OpenRouter, Together, Groq, and similar endpoints.
 |---|---|
 | `ar-gateway` | HTTP webhook intake, HMAC verification, CI/chat dispatch, ops endpoints |
 | `ar-orchestrator` | Per-PR state machine, job dispatch, review history, lifecycle observations |
+| `ar-forge` | Provider-neutral repository-host DTOs and the `ReviewHost` trait shared by the Forgejo and GitHub adapters |
 | `ar-forgejo` | Forgejo REST client |
+| `ar-github` | GitHub App REST client for review-host operations |
+| `ar-agentcore` | AWS Bedrock AgentCore-compatible runtime HTTP surface |
 | `ar-llm` | LLM provider trait and tier router |
 | `ar-index` | Tree-sitter symbols, embeddings, vector stores, co-change graph, learnings store |
 | `ar-prompts` | Prompt templates and JSON schemas |

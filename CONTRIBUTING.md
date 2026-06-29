@@ -34,14 +34,13 @@ just ci
 just fmt
 just clippy
 just test
-just opencode-test
 just deny
 just build
 ```
 
 `just ci` runs rustfmt, clippy (with `-D warnings`), the full
-nextest application test suite, the `.opencode/` plugin/harness test
-suite, cargo-deny (licenses + bans + sources), and a workspace build.
+nextest application test suite, cargo-deny (licenses + bans + sources),
+and a workspace build.
 Advisory checks require network access, so run
 `cargo deny check advisories` separately when bumping a dep. Land no
 commit that fails any required check.
@@ -89,10 +88,6 @@ everyone (and CI) picks up the same versions.
 - **End-to-end behaviour** that depends on real `git`, real Forgejo,
   or real LLMs is exercised via `auto-review review once` and is
   not currently covered by automated tests.
-- **opencode plugin and harness tests** live next to the plugins under
-  `.opencode/plugins/*.test.ts` and run with `just opencode-test`.
-  Keep these separate from Rust application tests so project coding
-  guardrails remain visible without being mistaken for product behavior.
 
 ## Architecture overview
 
@@ -115,7 +110,10 @@ Crate-level navigation is centralized in `docs/CRATES.md`. The summary table:
 |---|---|
 | `ar-gateway` | HTTP server, HMAC verification, webhook intake, chat poller |
 | `ar-orchestrator` | JobDispatcher trait + production SpawningDispatcher |
+| `ar-forge` | Provider-neutral repository-host DTOs + `ReviewHost` trait shared by the Forgejo and GitHub adapters |
 | `ar-forgejo` | REST client + InitClient for HTTP-Basic bootstrap |
+| `ar-github` | GitHub App REST client (JWT minting, installation tokens, `ReviewHost` wrapper) |
+| `ar-agentcore` | AWS Bedrock AgentCore-compatible runtime HTTP surface |
 | `ar-llm` | Provider trait + tier-based Router |
 | `ar-prompts` | Prompt templates + JSON schemas + validation |
 | `ar-review` | Pipeline activities (review, verify, self-heal, RAG context, repo config) |
@@ -186,7 +184,7 @@ contract at the test site.
 ## Adding a new chat command
 
 Chat commands live in `crates/ar-chat/`. The pattern matches the
-existing 8 commands.
+existing 7 commands.
 
 1. **Add the variant** to `ChatCommand` in
    `crates/ar-chat/src/command.rs`:

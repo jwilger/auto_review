@@ -40,9 +40,9 @@ auto-review bench run bench/fixtures \
   --baseline baseline.json
 ```
 
-`--fail-on-regression` requires `--baseline` and exits non-zero when precision or
-recall drops by more than 5 percentage points, or p99 latency rises by more than
-5 seconds.
+`--fail-on-regression` requires `--baseline` and exits non-zero when success
+rate, precision, or recall drops by more than 5 percentage points, or p99
+latency rises by more than 5 seconds.
 
 ## Fixture format
 

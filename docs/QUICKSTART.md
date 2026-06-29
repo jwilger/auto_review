@@ -20,7 +20,12 @@ Use a release asset when possible:
 1. Download the latest Linux `x86_64` `auto-review` archive from the Forgejo
    release page.
 2. Verify `SHA256SUMS` and its signature using the commands in the release notes.
-3. Install the binary somewhere on `PATH`, for example `/usr/local/bin`.
+3. Extract the whole archive to a stable directory (for example
+   `/opt/auto-review`), keeping the `auto-review` launcher next to its sibling
+   `bin/` and `nix/` directories. Add that directory to `PATH`, or invoke the
+   `auto-review` launcher by absolute path. The launcher resolves its embedded
+   OCI runtime relative to its own location, so do not copy the `auto-review`
+   file out on its own.
 
 Or build from source with the pinned Nix toolchain:
 
@@ -31,8 +36,8 @@ nix build .
 export AUTO_REVIEW="$PWD/result/bin/auto-review"
 ```
 
-The older `.#ar-cli` package name is still available, but `nix build .` is the
-preferred installable package.
+The default flake package is `ar-cli`, so `nix build .` and `nix build .#ar-cli`
+build the same derivation.
 
 ## 2. Create the bot PAT
 
