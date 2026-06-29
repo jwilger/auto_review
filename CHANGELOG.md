@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [1.4.1] - 2026-06-29
+
+### Fixed
+
+- *(codex)* remove Forgejo MCP nix wrapper
+- *(codex)* run Forgejo MCP via quiet flake package (#296)
+
+### Other
+
+- consolidate agentic development config (#297)
+- correct, complete, and de-stale all documentation (#298)
+
 ## [1.4.0] - 2026-06-26
 
 ### Added
