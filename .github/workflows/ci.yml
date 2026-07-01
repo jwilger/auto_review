@@ -1,0 +1,153 @@
+name: CI
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened]
+  merge_group:
+    types: [checks_requested]
+
+permissions:
+  contents: read
+  pull-requests: read
+
+jobs:
+  fmt:
+    name: Format check
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: .dependencies/cargo
+
+      - name: Run just fmt
+        run: nix develop .#ci --command just fmt
+
+  clippy:
+    name: Clippy
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: .dependencies/cargo
+
+      - name: Run just clippy
+        run: nix develop .#ci --command just clippy
+
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: .dependencies/cargo
+
+      - name: Run just test
+        run: nix develop .#ci --command just test
+
+  deny:
+    name: Dependency policy
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: .dependencies/cargo
+
+      - name: Run just deny
+        run: nix develop .#ci --command just deny
+
+  build:
+    name: Build
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: .dependencies/cargo
+
+      - name: Run just build
+        run: nix develop .#ci --command just build
+
+  # NOTE: the Forgejo-era `semantic-review` job (which called this repo's own
+  # ar-gateway for an async "semantic review" of the PR) is deliberately
+  # dropped here. auto_review is the product being retired fleet-wide in
+  # favor of CodeRabbit -- porting a CI call into its own retiring gateway
+  # would be actively wrong. See .coderabbit.yaml for the replacement.
+
+  pr-artifact-build:
+    name: Build PR artifacts (no token)
+    runs-on: ubuntu-latest
+    needs: [fmt, clippy, test, deny, build]
+    if: ${{ github.event_name == 'pull_request' && github.event.action != 'closed' }}
+    env:
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+    steps:
+      - name: Skip non-release PR artifact build
+        if: "${{ !(startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v')) }}"
+        run: |
+          printf 'Skipping release PR artifact build for ordinary non-release PR.\n'
+
+      - uses: actions/checkout@v4
+        if: "${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v') }}"
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@v22
+        if: "${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v') }}"
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        if: "${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v') }}"
+
+      - name: Build release PR binary artifact
+        if: "${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v') }}"
+        run: |
+          set -euo pipefail
+          mkdir -p pr-artifacts
+          x86_release_root="$(nix build .#packages.x86_64-linux.ar-cli-portable-release-root --print-out-paths --no-link)"
+          tar -C "$x86_release_root" -czf "pr-artifacts/auto-review-pr-$PR_NUMBER-$PR_HEAD_SHA-linux-x86_64.tar.gz" auto-review bin nix
+          (cd pr-artifacts && sha256sum "auto-review-pr-$PR_NUMBER-$PR_HEAD_SHA-linux-x86_64.tar.gz" > SHA256SUMS)
+
+      - uses: actions/upload-artifact@v4
+        if: "${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v') }}"
+        with:
+          name: pr-release-artifacts
+          path: pr-artifacts

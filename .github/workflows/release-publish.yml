@@ -9,9 +9,12 @@ on:
         required: true
         type: string
 
+permissions:
+  contents: write
+
 jobs:
   release-publish:
-    runs-on: docker-release
+    runs-on: [self-hosted, self-hosted-gregor]
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' && inputs.release_merge_sha != '' }}
     environment: release-publish
     steps:
@@ -29,48 +32,19 @@ jobs:
           ref: ${{ inputs.release_merge_sha }}
           persist-credentials: false
           fetch-depth: 0
-      - name: Install or reuse Nix
-        run: |
-          set -euo pipefail
-          NIX_BIN_DIR="/nix/var/nix/profiles/default/bin"
-          if [ -x "$NIX_BIN_DIR/nix" ]; then
-            echo "Nix already present at $NIX_BIN_DIR (volume cache hit)"
-          else
-            echo "Installing Nix (cold start or fresh volume)"
-            curl --proto '=https' --tlsv1.2 -sSf -L \
-              https://install.determinate.systems/nix \
-              | sh -s -- install linux \
-                --init none \
-                --no-confirm \
-                --extra-conf "experimental-features = nix-command flakes" \
-                --extra-conf "accept-flake-config = true"
-          fi
-          if ! getent group nixbld > /dev/null; then
-            groupadd -r nixbld
-          fi
-          for i in $(seq 1 32); do
-            if ! id -u "nixbld$i" > /dev/null 2>&1; then
-              useradd -r -g nixbld -G nixbld -d /var/empty \
-                -s /usr/sbin/nologin -c "Nix build user $i" "nixbld$i"
-            fi
-          done
-          PATH="$NIX_BIN_DIR:$PATH" nix profile install --inputs-from . \
-            nixpkgs#tea \
-            nixpkgs#coreutils \
-            nixpkgs#gawk \
-            nixpkgs#gnused
-          echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
-          # Nix refuses to run a local build when any build-dir ancestor is
-          # world-writable. The gitea runner image ships / as 0777, which blocks
-          # building store paths that are not on a binary cache (e.g. the rust
-          # nightly toolchain). Tighten it so local builds work.
-          chmod 0755 /
+
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.GH_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.GH_AUTOMATION_APP_PRIVATE_KEY }}
+
       - name: Export pushed release context
         if: ${{ github.event_name == 'push' }}
         env:
           RELEASE_BASE_SHA: ${{ github.event.before }}
           RELEASE_MERGE_SHA: ${{ github.sha }}
-          RELEASE_COMMIT_MESSAGE: ${{ github.event.head_commit.message }}
         run: |
           set -euo pipefail
           printf 'RELEASE_BASE_SHA=%s\n' "$RELEASE_BASE_SHA" >> "$GITHUB_ENV"
@@ -111,11 +85,10 @@ jobs:
               if [ "$saw_release_metadata" != true ]; then
                 should_publish_release=false
               fi
-              if [[ "$RELEASE_COMMIT_MESSAGE" == "chore: release v"* ]]; then
-                :
-              else
-                should_publish_release=false
-              fi
+              case "$RELEASE_COMMIT_MESSAGE" in
+                "chore: release v"*) ;;
+                *) should_publish_release=false ;;
+              esac
             fi
           fi
           if [ "$should_publish_release" != true ]; then
@@ -164,33 +137,16 @@ jobs:
           PY
           )"
           printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
-      - name: Resolve trusted release publication tools
+
+      - uses: DeterminateSystems/nix-installer-action@v22
         if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
-        run: |
-          set -euo pipefail
-          TEA=/nix/var/nix/profiles/default/bin/tea
-          AWK=/nix/var/nix/profiles/default/bin/awk
-          SED=/nix/var/nix/profiles/default/bin/sed
-          MKTEMP=/nix/var/nix/profiles/default/bin/mktemp
-          CAT=/nix/var/nix/profiles/default/bin/cat
-          MKDIR=/nix/var/nix/profiles/default/bin/mkdir
-          [ -x "$TEA" ]
-          [ -x "$AWK" ]
-          [ -x "$SED" ]
-          [ -x "$MKTEMP" ]
-          [ -x "$CAT" ]
-          [ -x "$MKDIR" ]
-          printf 'TEA=%s\n' "$TEA" >> "$GITHUB_ENV"
-          printf 'AWK=%s\n' "$AWK" >> "$GITHUB_ENV"
-          printf 'SED=%s\n' "$SED" >> "$GITHUB_ENV"
-          printf 'MKTEMP=%s\n' "$MKTEMP" >> "$GITHUB_ENV"
-          printf 'CAT=%s\n' "$CAT" >> "$GITHUB_ENV"
-          printf 'MKDIR=%s\n' "$MKDIR" >> "$GITHUB_ENV"
+
       - name: Build Linux binary release artifacts from merged commit
         if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
         env:
           RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          REPO_FULL_NAME: ${{ github.repository }}
         run: |
           set -euo pipefail
           if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
@@ -207,20 +163,20 @@ jobs:
           signing_key="$signing_dir/release-signing-key"
           printf '%s\n' "$RELEASE_SIGNING_KEY" > "$signing_key"
           chmod 600 "$signing_key"
-          "$MKDIR" -p release-artifacts
+          mkdir -p release-artifacts
           x86_release_root="$(nix build .#packages.x86_64-linux.ar-cli-portable-release-root --print-out-paths --no-link)"
           tar -C "$x86_release_root" -czf "release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz" auto-review bin nix
           (
             cd release-artifacts
             sha256sum auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz > SHA256SUMS
-            python3 - "$RELEASE_VERSION" "$RELEASE_MERGE_SHA" "$x86_release_root" <<'PY'
+            python3 - "$RELEASE_VERSION" "$RELEASE_MERGE_SHA" "$x86_release_root" "$REPO_FULL_NAME" <<'PY'
           import datetime
           import hashlib
           import json
           import pathlib
           import sys
 
-          version, source, x86_out = sys.argv[1:]
+          version, source, x86_out, repo_full_name = sys.argv[1:]
           generated_at = datetime.datetime.now(datetime.UTC).replace(microsecond=0).isoformat()
           archives = [
               ("linux-x86_64", f"auto-review-{version}-linux-x86_64.tar.gz", x86_out),
@@ -264,17 +220,17 @@ jobs:
               "dataLicense": "CC0-1.0",
               "SPDXID": "SPDXRef-DOCUMENT",
               "name": f"auto-review-{version}-binary-release",
-              "documentNamespace": f"https://git.johnwilger.com/Slipstream/auto_review/releases/v{version}/sbom",
+              "documentNamespace": f"https://github.com/{repo_full_name}/releases/v{version}/sbom",
               "creationInfo": {
                   "created": generated_at,
-                  "creators": ["Tool: auto_review-release-workflow", "Organization: Slipstream/auto_review"],
+                  "creators": ["Tool: auto_review-release-workflow", "Organization: slipstream-code-new"],
               },
               "packages": [
                   {
                       "SPDXID": "SPDXRef-Package-auto-review",
                       "name": "auto-review",
                       "versionInfo": version,
-                      "downloadLocation": f"https://git.johnwilger.com/Slipstream/auto_review/releases/tag/v{version}",
+                      "downloadLocation": f"https://github.com/{repo_full_name}/releases/tag/v{version}",
                       "filesAnalyzed": True,
                       "packageVerificationCode": {"packageVerificationCodeValue": package_verification_code(file_sha1s)},
                       "licenseConcluded": "NOASSERTION",
@@ -302,16 +258,16 @@ jobs:
               "predicateType": "https://slsa.dev/provenance/v1",
               "predicate": {
                   "buildDefinition": {
-                      "buildType": "https://git.johnwilger.com/Slipstream/auto_review/.forgejo/workflows/release-publish.yml@v1",
+                      "buildType": f"https://github.com/{repo_full_name}/.github/workflows/release-publish.yml@refs/heads/main",
                       "externalParameters": {"releaseVersion": version, "releaseMergeSha": source},
                       "internalParameters": {},
                       "resolvedDependencies": [
-                          {"uri": "git+https://git.johnwilger.com/Slipstream/auto_review", "digest": {"gitCommit": source}},
+                          {"uri": f"git+https://github.com/{repo_full_name}", "digest": {"gitCommit": source}},
                           {"uri": "nix-store:" + x86_out, "name": "packages.x86_64-linux.ar-cli-portable-release-root"},
                       ],
                   },
                   "runDetails": {
-                      "builder": {"id": "https://git.johnwilger.com/Slipstream/auto_review/actions/release-publish"},
+                      "builder": {"id": f"https://github.com/{repo_full_name}/actions/workflows/release-publish.yml"},
                       "metadata": {"invocationId": source, "startedOn": generated_at, "finishedOn": generated_at},
                   },
               },
@@ -324,32 +280,27 @@ jobs:
             sha256sum -c SHA256SUMS
             nix develop --command ssh-keygen -Y verify -f allowed-signers -I "$RELEASE_BOT_EMAIL" -n file -s SHA256SUMS.sig < SHA256SUMS
           )
-      - name: Create Forgejo Release
+      - name: Create GitHub Release
         if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
         env:
-          GITEA_SERVER_TOKEN: ${{ secrets.RELEASE_PUBLISH_TOKEN }}
-          GITEA_SERVER_URL: https://git.johnwilger.com
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
         run: |
           set -euo pipefail
-          RELEASE_NOTES_FILE="$($MKTEMP)"
+          RELEASE_NOTES_FILE="$(mktemp)"
           # Generate notes from the finalized CHANGELOG.md ## [$RELEASE_VERSION] section.
-          "$AWK" "/^## \\[$RELEASE_VERSION\\]/{emit=1; next} /^## \\[/{if (emit) exit} emit {print}" CHANGELOG.md > "$RELEASE_NOTES_FILE"
+          awk "/^## \\[$RELEASE_VERSION\\]/{emit=1; next} /^## \\[/{if (emit) exit} emit {print}" CHANGELOG.md > "$RELEASE_NOTES_FILE"
           printf '\nLinux binary archive:\n- auto-review-%s-linux-x86_64.tar.gz\n' "$RELEASE_VERSION" >> "$RELEASE_NOTES_FILE"
           printf '\nVerify downloads before use:\n```bash\nsha256sum -c SHA256SUMS\nssh-keygen -Y verify -f allowed-signers -I %s -n file -s SHA256SUMS.sig < SHA256SUMS\n```\n' "$RELEASE_BOT_EMAIL" >> "$RELEASE_NOTES_FILE"
-          tea_login="auto_review-release-publish-${GITHUB_RUN_ID:-$$}"
-          "$TEA" login add --name "$tea_login" --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
-          "$TEA" release create \
-            --login "$tea_login" \
-            --repo Slipstream/auto_review \
-            --tag v$RELEASE_VERSION \
+          gh release create "v$RELEASE_VERSION" \
+            --repo "$GITHUB_REPOSITORY" \
             --target "$RELEASE_MERGE_SHA" \
             --title "v$RELEASE_VERSION" \
-            --note-file "$RELEASE_NOTES_FILE" \
-            --asset release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz \
-            --asset release-artifacts/SHA256SUMS \
-            --asset release-artifacts/SHA256SUMS.sig \
-            --asset release-artifacts/release-signing-key.pub \
-            --asset release-artifacts/allowed-signers \
-            --asset release-artifacts/auto-review-$RELEASE_VERSION-sbom.spdx.json \
-            --asset release-artifacts/auto-review-$RELEASE_VERSION-provenance.json
+            --notes-file "$RELEASE_NOTES_FILE" \
+            release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz \
+            release-artifacts/SHA256SUMS \
+            release-artifacts/SHA256SUMS.sig \
+            release-artifacts/release-signing-key.pub \
+            release-artifacts/allowed-signers \
+            release-artifacts/auto-review-$RELEASE_VERSION-sbom.spdx.json \
+            release-artifacts/auto-review-$RELEASE_VERSION-provenance.json

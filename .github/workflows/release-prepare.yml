@@ -6,52 +6,36 @@ on:
       - main
   workflow_dispatch:
 
+permissions:
+  contents: write
+  pull-requests: write
+
 jobs:
   release-prepare:
-    runs-on: docker-release
+    runs-on: [self-hosted, self-hosted-gregor]
     if: "${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore: release') }}"
     steps:
-      - name: Install or reuse Nix
-        run: |
-          set -euo pipefail
-          NIX_BIN_DIR="/nix/var/nix/profiles/default/bin"
-          if [ ! -x "$NIX_BIN_DIR/nix" ]; then
-            curl --proto '=https' --tlsv1.2 -sSf -L \
-              https://install.determinate.systems/nix \
-              | sh -s -- install linux \
-                --init none \
-                --no-confirm \
-                --extra-conf "experimental-features = nix-command flakes" \
-                --extra-conf "accept-flake-config = true"
-          fi
-          if ! getent group nixbld > /dev/null; then
-            groupadd -r nixbld
-          fi
-          for i in $(seq 1 32); do
-            if ! id -u "nixbld$i" > /dev/null 2>&1; then
-              useradd -r -g nixbld -G nixbld -d /var/empty \
-                -s /usr/sbin/nologin -c "Nix build user $i" "nixbld$i"
-            fi
-          done
-          echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
-          # Nix refuses to run a local build when any build-dir ancestor is
-          # world-writable. The gitea runner image ships / as 0777, which blocks
-          # building store paths that are not on a binary cache (e.g. the rust
-          # nightly toolchain). Tighten it so local builds work.
-          chmod 0755 /
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
           fetch-depth: 0
+
+      - name: Mint GitHub App installation token
+        id: app-token
+        uses: actions/create-github-app-token@v2
+        with:
+          app-id: ${{ vars.GH_AUTOMATION_APP_ID }}
+          private-key: ${{ secrets.GH_AUTOMATION_APP_PRIVATE_KEY }}
+
       - env:
-          RELEASE_PREPARE_TOKEN: ${{ secrets.RELEASE_PREPARE_TOKEN }}
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
           RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
           RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
           RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
         run: |
           set -euo pipefail
-          if [ -z "${RELEASE_PREPARE_TOKEN:-}" ]; then
-            printf 'missing RELEASE_PREPARE_TOKEN\n' >&2
+          if [ -z "${GH_TOKEN:-}" ]; then
+            printf 'missing GitHub App installation token\n' >&2
             exit 1
           fi
           if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
@@ -76,8 +60,8 @@ jobs:
           export GIT_CONFIG_VALUE_1="$signing_key"
           export GIT_CONFIG_KEY_2=commit.gpgsign
           export GIT_CONFIG_VALUE_2=true
-          export GIT_CONFIG_KEY_3=url.https://release:${RELEASE_PREPARE_TOKEN}@git.johnwilger.com/.insteadOf
-          export GIT_CONFIG_VALUE_3=https://git.johnwilger.com/
+          export GIT_CONFIG_KEY_3="url.https://x-access-token:${GH_TOKEN}@github.com/.insteadOf"
+          export GIT_CONFIG_VALUE_3=https://github.com/
           git fetch --tags
           release_plan="$(nix develop --command scripts/release plan --workspace .)"
           CONVENTIONAL_RELEASE_TYPE="$(printf '%s\n' "$release_plan" | awk -F= '$1 == "release_type" { print $2 }')"
@@ -125,31 +109,17 @@ jobs:
           fi
           git commit -m "chore: release v$RELEASE_VERSION"
           nix develop --command git push --no-verify --force-with-lease origin "$branch"
-          export GITEA_SERVER_URL="https://git.johnwilger.com"
-          export GITEA_SERVER_TOKEN="$RELEASE_PREPARE_TOKEN"
-          tea_login="auto_review-release-${GITHUB_RUN_ID:-$$}"
-          nix develop --command tea login add --name "$tea_login" --url "$GITEA_SERVER_URL" --token "$GITEA_SERVER_TOKEN"
-          open_prs_json="${RUNNER_TEMP:-/tmp}/release-open-prs.json"
-          export OPEN_PRS_JSON="$open_prs_json"
-          export RELEASE_BRANCH="$branch"
-          export RELEASE_VERSION
-          export TEA_LOGIN="$tea_login"
-          nix develop --command bash -c 'set -euo pipefail
-            curl -fsS \
-            -H "Authorization: token $GITEA_SERVER_TOKEN" \
-            -H "Accept: application/json" \
-            "$GITEA_SERVER_URL/api/v1/repos/Slipstream/auto_review/pulls?state=open" \
-            | jq -c '\''[.[] | {index: .number, head: .head.ref}]'\'' > "$OPEN_PRS_JSON"'
-          nix develop --command bash -c 'set -euo pipefail
-            open_prs="$(<"$OPEN_PRS_JSON")"
-            superseded_prs="$(printf "%s\n" "$open_prs" | jq -r --arg branch "$RELEASE_BRANCH" --arg prefix "release/v" ".[] | select(.head | startswith(\$prefix)) | select(.head != \$branch) | .index")"
-            for superseded_pr in $superseded_prs; do
-              tea pr close --login "$TEA_LOGIN" --repo Slipstream/auto_review "$superseded_pr"
-            done
-            existing_pr="$(printf "%s\n" "$open_prs" | jq -r --arg branch "$RELEASE_BRANCH" ".[] | select(.head == \$branch) | .index" | head -n 1)"
-            if [ -z "$existing_pr" ]; then
-              tea pr create --login "$TEA_LOGIN" --repo Slipstream/auto_review --head "$RELEASE_BRANCH" --base main --title "chore: release v$RELEASE_VERSION" --description "Prepare release v$RELEASE_VERSION from branch $RELEASE_BRANCH using scripts/release prepare. This version bump updates Cargo.toml, Cargo.lock, and CHANGELOG.md with semver-selected release metadata before merge to main."
-            else
-              printf "release PR already open: #%s\n" "$existing_pr"
-              tea pr edit --login "$TEA_LOGIN" --repo Slipstream/auto_review "$existing_pr" --description "Prepare release v$RELEASE_VERSION from branch $RELEASE_BRANCH using scripts/release prepare. This version bump updates Cargo.toml, Cargo.lock, and CHANGELOG.md with semver-selected release metadata before merge to main."
-            fi'
+
+          open_prs_json="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName --limit 100)"
+          superseded_prs="$(printf '%s\n' "$open_prs_json" | jq -r --arg branch "$branch" '.[] | select(.headRefName | startswith("release/v")) | select(.headRefName != $branch) | .number')"
+          for superseded_pr in $superseded_prs; do
+            gh pr close "$superseded_pr" --repo "$GITHUB_REPOSITORY"
+          done
+          existing_pr="$(printf '%s\n' "$open_prs_json" | jq -r --arg branch "$branch" '.[] | select(.headRefName == $branch) | .number' | head -n 1)"
+          body="Prepare release v$RELEASE_VERSION from branch $branch using scripts/release prepare. This version bump updates Cargo.toml, Cargo.lock, and CHANGELOG.md with semver-selected release metadata before merge to main."
+          if [ -z "$existing_pr" ]; then
+            gh pr create --repo "$GITHUB_REPOSITORY" --head "$branch" --base main --title "chore: release v$RELEASE_VERSION" --body "$body"
+          else
+            printf 'release PR already open: #%s\n' "$existing_pr"
+            gh pr edit "$existing_pr" --repo "$GITHUB_REPOSITORY" --body "$body"
+          fi

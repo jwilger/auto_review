@@ -1,0 +1,39 @@
+reviews:
+  request_changes_workflow: true
+  path_filters:
+    - "!Cargo.lock"
+    - "!flake.lock"
+    - "!release-artifacts/**"
+    - "!pr-artifacts/**"
+    - "!**/*-sbom.spdx.json"
+    - "!**/*-provenance.json"
+  path_instructions:
+    - path: "crates/**"
+      instructions: >-
+        This is a Rust workspace (12 crates). Apply Rust idioms and review for
+        correctness, error handling, and API surface changes.
+    - path: "scripts/release/**"
+      instructions: >-
+        This is a supply-chain-sensitive release pipeline that computes
+        semver-gated version bumps, creates SSH-signed release commits, and
+        (via .github/workflows/release-publish.yml) emits SLSA provenance and
+        an SPDX SBOM. Flag any change here as high-consequence and scrutinize
+        it closely.
+    - path: ".github/workflows/**"
+      instructions: >-
+        These workflows sign release commits/artifacts and publish releases
+        with SLSA provenance. Flag any change to secret handling, signing, or
+        publish gating conditions as high-consequence and scrutinize it
+        closely.
+    - path: "flake.nix"
+      instructions: >-
+        Contains the NixOS module's systemd hardening/sandboxing block for
+        deploying auto_review. Security-relevant sandboxing options
+        (e.g. systemd `ProtectSystem`, `NoNewPrivileges`, capability drops)
+        are easy to silently weaken in a review nobody scrutinizes closely --
+        flag any change that loosens these.
+    - path: "deploy/**"
+      instructions: >-
+        Deployment/operational configuration (Prometheus rules, Grafana
+        dashboards, NixOS/systemd units). Flag changes that weaken security
+        posture or silently change alerting/monitoring behavior.
