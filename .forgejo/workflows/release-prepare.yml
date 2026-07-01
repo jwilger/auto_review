@@ -34,6 +34,11 @@ jobs:
             fi
           done
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
+          # Nix refuses to run a local build when any build-dir ancestor is
+          # world-writable. The gitea runner image ships / as 0777, which blocks
+          # building store paths that are not on a binary cache (e.g. the rust
+          # nightly toolchain). Tighten it so local builds work.
+          chmod 0755 /
       - uses: actions/checkout@v4
         with:
           persist-credentials: false

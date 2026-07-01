@@ -61,11 +61,16 @@ jobs:
           # GITHUB_PATH (honored by Forgejo Actions) makes the PATH
           # change durable across steps.
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
+          # Nix refuses to run a local build when any build-dir ancestor is
+          # world-writable. The gitea runner image ships / as 0777, which blocks
+          # building store paths that are not on a binary cache (e.g. the rust
+          # nightly toolchain). Tighten it so local builds work.
+          chmod 0755 /
 
       - name: Run just fmt
         run: |
           export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-          nix develop --command just fmt
+          nix develop .#ci --command just fmt
 
   clippy:
     name: Clippy
@@ -103,11 +108,16 @@ jobs:
             fi
           done
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
+          # Nix refuses to run a local build when any build-dir ancestor is
+          # world-writable. The gitea runner image ships / as 0777, which blocks
+          # building store paths that are not on a binary cache (e.g. the rust
+          # nightly toolchain). Tighten it so local builds work.
+          chmod 0755 /
 
       - name: Run just clippy
         run: |
           export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-          nix develop --command just clippy
+          nix develop .#ci --command just clippy
 
   test:
     name: Test
@@ -145,11 +155,16 @@ jobs:
             fi
           done
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
+          # Nix refuses to run a local build when any build-dir ancestor is
+          # world-writable. The gitea runner image ships / as 0777, which blocks
+          # building store paths that are not on a binary cache (e.g. the rust
+          # nightly toolchain). Tighten it so local builds work.
+          chmod 0755 /
 
       - name: Run just test
         run: |
           export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-          nix develop --command just test
+          nix develop .#ci --command just test
 
   deny:
     name: Dependency policy
@@ -187,11 +202,16 @@ jobs:
             fi
           done
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
+          # Nix refuses to run a local build when any build-dir ancestor is
+          # world-writable. The gitea runner image ships / as 0777, which blocks
+          # building store paths that are not on a binary cache (e.g. the rust
+          # nightly toolchain). Tighten it so local builds work.
+          chmod 0755 /
 
       - name: Run just deny
         run: |
           export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-          nix develop --command just deny
+          nix develop .#ci --command just deny
 
   build:
     name: Build
@@ -229,11 +249,16 @@ jobs:
             fi
           done
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
+          # Nix refuses to run a local build when any build-dir ancestor is
+          # world-writable. The gitea runner image ships / as 0777, which blocks
+          # building store paths that are not on a binary cache (e.g. the rust
+          # nightly toolchain). Tighten it so local builds work.
+          chmod 0755 /
 
       - name: Run just build
         run: |
           export PATH="/nix/var/nix/profiles/default/bin:$PATH"
-          nix develop --command just build
+          nix develop .#ci --command just build
 
   semantic-review:
     name: Request auto_review semantic review
@@ -319,6 +344,11 @@ jobs:
             fi
           done
           echo "$NIX_BIN_DIR" >> "$GITHUB_PATH"
+          # Nix refuses to run a local build when any build-dir ancestor is
+          # world-writable. The gitea runner image ships / as 0777, which blocks
+          # building store paths that are not on a binary cache (e.g. the rust
+          # nightly toolchain). Tighten it so local builds work.
+          chmod 0755 /
 
       - name: Build release PR binary artifact
         if: "${{ startsWith(github.event.pull_request.head.ref, 'release/v') && github.event.pull_request.head.repo.full_name == github.repository && startsWith(github.event.pull_request.title, 'chore: release v') }}"

@@ -244,49 +244,104 @@
             pname = "auto_review";
           }
         );
+
+        # sidequest control plane (CLI + `sidequest-mcp` MCP stdio
+        # server) from the Slipstream/ai-plugins marketplace repo,
+        # consumed by the side-quest Claude Code plugin.
+        #
+        # Deliberately NOT a flake input: flake inputs are fetched
+        # eagerly at evaluation time, so an input would force CI's
+        # egress-restricted runner to reach git.johnwilger.com just to
+        # evaluate the flake. As a build-time `fetchgit` referenced only
+        # by the interactive `default` dev shell, the source is fetched
+        # and compiled solely when that shell is realized — CI's `.#ci`
+        # shell never touches it.
+        #
+        # Tracks main by pinned rev; bump by re-running
+        # `nix-prefetch-git --url <repo> --rev <main HEAD>` and updating
+        # both fields below.
+        sidequestSrc = pkgs.fetchgit {
+          url = "https://git.johnwilger.com/Slipstream/ai-plugins.git";
+          rev = "bd4efae37fd046ef86de5dac97cf389172bbfdd4";
+          hash = "sha256-QEzHuyqNOSGskxiJ4HFDVvPHSK6mnQV324/aPSTe20Q=";
+        };
+        sidequest = craneLib.buildPackage {
+          src = sidequestSrc;
+          pname = "sidequest";
+          version = "0.1.0";
+          strictDeps = true;
+          # Build/install just the control-plane crate and its path dep.
+          cargoExtraArgs = "-p sidequest";
+          # The crate's cucumber/process/worktree tests need a writable
+          # git+process environment the Nix sandbox lacks; the dev-shell
+          # binary only needs to compile and install.
+          doCheck = false;
+        };
       in
       {
-        # ----- Dev shell ---------------------------------------------
+        # ----- Dev shells --------------------------------------------
         # `nix develop` (or `direnv allow` with .envrc) drops into
         # an environment with the pinned rust toolchain plus the
         # supply-chain and ergonomics tools the workflow expects.
-        devShells.default = pkgs.mkShell {
-          buildInputs = with pkgs; [
-            rustToolchain
-            cargo-deny
-            cargo-nextest
-            just
-            cargo-semver-checks
-            git
-            just
-            lefthook
-            forgejo-mcp
-            tea
-            python3
-            nodejs_24
-            jq
-            openssh
-            kubernetes-helm
-            pkg-config
-            openssl
-            # Quick foreground Rust check loops.
-            bacon
-          ];
+        #
+        # Two shells share one tool list:
+        #   - `ci`      — toolchain + quality gates only. CI uses this
+        #                 (see .forgejo/workflows/ci.yml) so its
+        #                 sandboxed, egress-restricted runner never has
+        #                 to compile the cross-repo `sidequest` crate.
+        #   - `default` — the `ci` tools plus the sidequest control
+        #                 plane, for interactive use.
+        devShells =
+          let
+            baseTools = with pkgs; [
+              rustToolchain
+              cargo-deny
+              cargo-nextest
+              just
+              cargo-semver-checks
+              git
+              lefthook
+              forgejo-mcp
+              tea
+              python3
+              nodejs_24
+              jq
+              openssh
+              kubernetes-helm
+              pkg-config
+              openssl
+              # Quick foreground Rust check loops.
+              bacon
+            ];
 
-          RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+            mkDevShell =
+              extraInputs:
+              pkgs.mkShell {
+                buildInputs = baseTools ++ extraInputs;
 
-          shellHook = ''
-            # Project-local cargo + rustup directories so the
-            # nix-pinned toolchain doesn't fight a system rustup.
-            export CARGO_HOME="$PWD/.dependencies/cargo"
-            export RUSTUP_HOME="$PWD/.dependencies/rustup"
-            mkdir -p "$CARGO_HOME" "$RUSTUP_HOME"
-            export PATH="$CARGO_HOME/bin:$PATH"
-            if [ -f lefthook.yml ]; then
-              lefthook install
-            fi
-          '';
-        };
+                RUST_SRC_PATH = "${rustToolchain}/lib/rustlib/src/rust/library";
+
+                shellHook = ''
+                  # Project-local cargo + rustup directories so the
+                  # nix-pinned toolchain doesn't fight a system rustup.
+                  export CARGO_HOME="$PWD/.dependencies/cargo"
+                  export RUSTUP_HOME="$PWD/.dependencies/rustup"
+                  mkdir -p "$CARGO_HOME" "$RUSTUP_HOME"
+                  export PATH="$CARGO_HOME/bin:$PATH"
+                  if [ -f lefthook.yml ]; then
+                    lefthook install
+                  fi
+                '';
+              };
+          in
+          {
+            ci = mkDevShell [ ];
+
+            # Interactive default also provides the sidequest CLI and
+            # `sidequest-mcp` (the MCP stdio server the side-quest
+            # plugin's .mcp.json launches) on PATH.
+            default = mkDevShell [ sidequest ];
+          };
 
         # ----- Packages ----------------------------------------------
         # auto-review is the single binary operators run; expose it as
