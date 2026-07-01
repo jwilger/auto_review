@@ -75,7 +75,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "ar-agentcore"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ar-forge",
@@ -93,7 +93,7 @@ dependencies = [
 
 [[package]]
 name = "ar-chat"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ar-forge",
@@ -113,7 +113,7 @@ dependencies = [
 
 [[package]]
 name = "ar-cli"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ar-agentcore",
@@ -148,7 +148,7 @@ dependencies = [
 
 [[package]]
 name = "ar-forge"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "async-trait",
  "serde",
@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "ar-forgejo"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ar-forge",
@@ -177,7 +177,7 @@ dependencies = [
 
 [[package]]
 name = "ar-gateway"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ar-chat",
@@ -207,7 +207,7 @@ dependencies = [
 
 [[package]]
 name = "ar-github"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "ar-forge",
  "async-trait",
@@ -228,7 +228,7 @@ dependencies = [
 
 [[package]]
 name = "ar-index"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ar-llm",
@@ -250,7 +250,7 @@ dependencies = [
 
 [[package]]
 name = "ar-llm"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -266,7 +266,7 @@ dependencies = [
 
 [[package]]
 name = "ar-orchestrator"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ar-forge",
@@ -294,7 +294,7 @@ dependencies = [
 
 [[package]]
 name = "ar-prompts"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -304,7 +304,7 @@ dependencies = [
 
 [[package]]
 name = "ar-review"
-version = "1.4.0"
+version = "1.5.0"
 dependencies = [
  "anyhow",
  "ar-forge",
