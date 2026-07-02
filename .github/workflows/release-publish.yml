@@ -140,6 +140,8 @@ jobs:
 
       - uses: DeterminateSystems/nix-installer-action@v22
         if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+        if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
 
       - name: Build Linux binary release artifacts from merged commit
         if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}

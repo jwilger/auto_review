@@ -21,6 +21,11 @@ jobs:
           fetch-depth: 0
 
       - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: .dependencies/cargo
 
       - name: Mint GitHub App installation token
         id: app-token
