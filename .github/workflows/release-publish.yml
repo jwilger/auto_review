@@ -223,7 +223,7 @@ jobs:
               "documentNamespace": f"https://github.com/{repo_full_name}/releases/v{version}/sbom",
               "creationInfo": {
                   "created": generated_at,
-                  "creators": ["Tool: auto_review-release-workflow", "Organization: slipstream-code-new"],
+                  "creators": ["Tool: auto_review-release-workflow", "Organization: slipstream-eng"],
               },
               "packages": [
                   {
