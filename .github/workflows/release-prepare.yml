@@ -12,13 +12,15 @@ permissions:
 
 jobs:
   release-prepare:
-    runs-on: [self-hosted, self-hosted-gregor]
+    runs-on: ubuntu-latest
     if: "${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore: release') }}"
     steps:
       - uses: actions/checkout@v4
         with:
           persist-credentials: false
           fetch-depth: 0
+
+      - uses: DeterminateSystems/nix-installer-action@v22
 
       - name: Mint GitHub App installation token
         id: app-token
