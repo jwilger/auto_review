@@ -25,25 +25,18 @@ jobs:
         uses: 1password/load-secrets-action@v4
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
-          GH_AUTOMATION_APP_PRIVATE_KEY: op://Github Secrets/GH_AUTOMATION_APP_PRIVATE_KEY/credential
+          GH_RELEASE_AUTOMATION_TOKEN: op://Github Secrets/GH_RELEASE_AUTOMATION_TOKEN/credential
           RELEASE_SIGNING_KEY: op://Github Secrets/RELEASE_SIGNING_KEY/private key?ssh-format=openssh
 
-      - name: Mint GitHub App installation token
-        id: app-token
-        uses: actions/create-github-app-token@v2
-        with:
-          app-id: ${{ vars.GH_AUTOMATION_APP_ID }}
-          private-key: ${{ steps.load_secrets.outputs.GH_AUTOMATION_APP_PRIVATE_KEY }}
-
       - env:
-          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          GH_TOKEN: ${{ steps.load_secrets.outputs.GH_RELEASE_AUTOMATION_TOKEN }}
           RELEASE_SIGNING_KEY: ${{ steps.load_secrets.outputs.RELEASE_SIGNING_KEY }}
           RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
           RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
-            printf 'missing GitHub App installation token\n' >&2
+            printf 'missing GH_RELEASE_AUTOMATION_TOKEN\n' >&2
             exit 1
           fi
           if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
