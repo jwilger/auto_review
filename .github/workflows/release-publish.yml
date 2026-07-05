@@ -14,7 +14,7 @@ permissions:
 
 jobs:
   release-publish:
-    runs-on: [self-hosted, self-hosted-gregor]
+    runs-on: ubuntu-latest
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' && inputs.release_merge_sha != '' }}
     environment: release-publish
     steps:
@@ -139,6 +139,8 @@ jobs:
           printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
 
       - uses: DeterminateSystems/nix-installer-action@v22
+        if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
+      - uses: DeterminateSystems/magic-nix-cache-action@v14
         if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
 
       - name: Build Linux binary release artifacts from merged commit
