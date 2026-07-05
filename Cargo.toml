@@ -19,7 +19,7 @@ members = [
 version = "1.4.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
-repository = "https://git.johnwilger.com/jwilger/auto_review"
+repository = "https://github.com/jwilger/auto_review"
 # Workspace crates are application code, not crates.io packages.
 # `publish = false` also tells cargo-deny these are private path
 # crates so wildcard internal deps (`ar-* = { path = "..." }`)
