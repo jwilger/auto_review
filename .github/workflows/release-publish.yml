@@ -33,12 +33,20 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      - name: Load release secrets
+        id: load_secrets
+        uses: 1password/load-secrets-action@v4
+        env:
+          OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
+          GH_AUTOMATION_APP_PRIVATE_KEY: op://Github Secrets/GH_AUTOMATION_APP_PRIVATE_KEY/credential
+          RELEASE_SIGNING_KEY: op://Github Secrets/RELEASE_SIGNING_KEY/private key?ssh-format=openssh
+
       - name: Mint GitHub App installation token
         id: app-token
         uses: actions/create-github-app-token@v2
         with:
           app-id: ${{ vars.GH_AUTOMATION_APP_ID }}
-          private-key: ${{ secrets.GH_AUTOMATION_APP_PRIVATE_KEY }}
+          private-key: ${{ steps.load_secrets.outputs.GH_AUTOMATION_APP_PRIVATE_KEY }}
 
       - name: Export pushed release context
         if: ${{ github.event_name == 'push' }}
@@ -145,7 +153,7 @@ jobs:
         if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
         env:
           RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
-          RELEASE_SIGNING_KEY: ${{ secrets.RELEASE_SIGNING_KEY }}
+          RELEASE_SIGNING_KEY: ${{ steps.load_secrets.outputs.RELEASE_SIGNING_KEY }}
           REPO_FULL_NAME: ${{ github.repository }}
         run: |
           set -euo pipefail
