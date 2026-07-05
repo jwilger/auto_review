@@ -37,12 +37,12 @@ MCP is unavailable:
 
 ```sh
 # MCP-first path
-forgejo_list_repo_issues --owner Slipstream --repo auto_review
-forgejo_create_pull_request --owner Slipstream --repo auto_review --base main --head <branch> --title "..." --body "..."
+forgejo_list_repo_issues --owner example-owner --repo example-repo
+forgejo_create_pull_request --owner example-owner --repo example-repo --base main --head <branch> --title "..." --body "..."
 
 # CLI fallback
-tea issue view <N> --repo Slipstream/auto_review
-tea pr create --repo Slipstream/auto_review --head <branch> --base main --title "..." --description "..."
+tea issue view <N> --repo example-owner/example-repo
+tea pr create --repo example-owner/example-repo --head <branch> --base main --title "..." --description "..."
 ```
 
 Forgejo MCP may be available from the surrounding Codex environment. If it is
@@ -50,7 +50,9 @@ not available, use `tea` as the fallback for Forgejo instance work.
 `FORGEJO_TOKEN` is the expected credential for Forgejo tooling; never hardcode
 or commit the token.
 
-Branch protection requires a PR for every merge to `main`. CI in `.forgejo/workflows/ci.yml` runs the Rust verification gates for application changes.
+Branch protection requires a PR for every merge to `main`. GitHub Actions in
+`.github/workflows/ci.yml` runs the Rust verification gates for application
+changes.
 
 ## Architecture
 

@@ -246,7 +246,7 @@
         );
 
         # sidequest control plane (CLI + `sidequest-mcp` MCP stdio
-        # server) from the Slipstream/ai-plugins marketplace repo,
+        # server) from the jwilger/ai-plugins marketplace repo,
         # consumed by the side-quest Claude Code plugin.
         #
         # Deliberately NOT a flake input: flake inputs are fetched

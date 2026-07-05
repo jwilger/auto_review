@@ -271,7 +271,7 @@ review locally, call LLM providers, or execute linters; it only authenticates to
 Configure the gateway with `AR_CI_REVIEW_TOKEN`, store the gateway base URL as
 an Actions variable such as `AUTO_REVIEW_GATEWAY_URL`, and store the same token
 value as the Actions secret `AR_CI_REVIEW_TOKEN`. For this project,
-configure those values on `Slipstream/auto_review` after repository ownership
+configure those values on `jwilger/auto_review` after repository ownership
 changes; a stale or missing token secret reaches the gateway but receives HTTP
 401 from `POST /reviews/ci`. Then add a gated job:
 
