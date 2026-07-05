@@ -9,9 +9,9 @@ keywords:
   - code-review
   - ai
   - llm
-home: https://git.johnwilger.com/jwilger/auto_review
+home: https://github.com/jwilger/auto_review
 sources:
-  - https://git.johnwilger.com/jwilger/auto_review
+  - https://github.com/jwilger/auto_review
 maintainers:
   - name: John Wilger
-    url: https://git.johnwilger.com/jwilger
+    url: https://github.com/jwilger

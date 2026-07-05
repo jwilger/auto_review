@@ -14,7 +14,7 @@ compatibility alias).
 1. Install or build the single public command:
 
    ```sh
-   git clone https://git.johnwilger.com/Slipstream/auto_review
+   git clone https://github.com/jwilger/auto_review
    cd auto_review
    nix build .
    export AUTO_REVIEW="$PWD/result/bin/auto-review"
