@@ -30,7 +30,7 @@ Use a release asset when possible:
 Or build from source with the pinned Nix toolchain:
 
 ```sh
-git clone https://git.johnwilger.com/Slipstream/auto_review
+git clone https://github.com/jwilger/auto_review
 cd auto_review
 nix build .
 export AUTO_REVIEW="$PWD/result/bin/auto-review"
@@ -166,7 +166,7 @@ jobs:
     needs: [fmt, clippy, test, deny, build]
     if: ${{ github.event_name == 'pull_request' }}
     steps:
-      - uses: https://git.johnwilger.com/Slipstream/auto_review/deploy/forgejo-action@main
+      - uses: https://github.com/jwilger/auto_review/deploy/forgejo-action@main
         with:
           gateway-url: https://reviewer.example.com
           action-token: ${{ secrets.AR_CI_REVIEW_TOKEN }}

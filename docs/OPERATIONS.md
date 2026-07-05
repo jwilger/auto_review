@@ -124,7 +124,7 @@ jobs:
     needs: [fmt, clippy, test]
     if: ${{ github.event_name == 'pull_request' }}
     steps:
-      - uses: https://git.johnwilger.com/Slipstream/auto_review/deploy/forgejo-action@main
+      - uses: https://github.com/jwilger/auto_review/deploy/forgejo-action@main
         with:
           gateway-url: https://reviewer.example.com
           action-token: ${{ secrets.AR_CI_REVIEW_TOKEN }}

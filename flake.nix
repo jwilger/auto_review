@@ -251,7 +251,7 @@
         #
         # Deliberately NOT a flake input: flake inputs are fetched
         # eagerly at evaluation time, so an input would force CI's
-        # egress-restricted runner to reach git.johnwilger.com just to
+        # egress-restricted runner to reach github.com just to
         # evaluate the flake. As a build-time `fetchgit` referenced only
         # by the interactive `default` dev shell, the source is fetched
         # and compiled solely when that shell is realized — CI's `.#ci`
@@ -261,7 +261,7 @@
         # `nix-prefetch-git --url <repo> --rev <main HEAD>` and updating
         # both fields below.
         sidequestSrc = pkgs.fetchgit {
-          url = "https://git.johnwilger.com/Slipstream/ai-plugins.git";
+          url = "https://github.com/jwilger/ai-plugins.git";
           rev = "bd4efae37fd046ef86de5dac97cf389172bbfdd4";
           hash = "sha256-QEzHuyqNOSGskxiJ4HFDVvPHSK6mnQV324/aPSTe20Q=";
         };

@@ -114,9 +114,9 @@ review.
 Build or install the current program:
 
 ```sh
-nix build git+https://git.johnwilger.com/Slipstream/auto_review
-nix profile install git+https://git.johnwilger.com/Slipstream/auto_review
-nix shell git+https://git.johnwilger.com/Slipstream/auto_review -c auto-review --help
+nix build git+https://github.com/jwilger/auto_review
+nix profile install git+https://github.com/jwilger/auto_review
+nix shell git+https://github.com/jwilger/auto_review -c auto-review --help
 ```
 
 The flake also ships a NixOS module for direct-host deployments and for installing
@@ -124,7 +124,7 @@ only the CLI:
 
 ```nix
 {
-  inputs.auto-review.url = "git+https://git.johnwilger.com/Slipstream/auto_review";
+  inputs.auto-review.url = "git+https://github.com/jwilger/auto_review";
 
   outputs = { nixpkgs, auto-review, ... }: {
     nixosConfigurations.reviewer = nixpkgs.lib.nixosSystem {
@@ -281,7 +281,7 @@ semantic-review:
   needs: [fmt, clippy, test]
   if: ${{ github.event_name == 'pull_request' }}
   steps:
-    - uses: https://git.johnwilger.com/Slipstream/auto_review/deploy/forgejo-action@main
+    - uses: https://github.com/jwilger/auto_review/deploy/forgejo-action@main
       with:
         gateway-url: https://reviewer.example.com
         action-token: ${{ secrets.AR_CI_REVIEW_TOKEN }}

@@ -25,11 +25,15 @@ just build
 
 Use `bacon`, `bacon clippy`, or `bacon test` for focused Rust check loops.
 
-## Forgejo, Not GitHub
+## GitHub Repository, Forgejo Product
 
-The remote is `git.johnwilger.com` (Forgejo). `gh` does not work for this repo.
+This repository is hosted on GitHub at `jwilger/auto_review`; use `gh` for
+repository issues, pull requests, and branch operations.
 
-Prefer Forgejo MCP (`forgejo_*` tools) for issue, PR, and repository operations when available. Use `tea` only as a fallback when MCP is unavailable:
+The product under development reviews Forgejo pull requests. Prefer Forgejo MCP
+(`forgejo_*` tools) for operations against test or deployment Forgejo instances
+when available. Use `tea` only as a fallback for those Forgejo instances when
+MCP is unavailable:
 
 ```sh
 # MCP-first path
@@ -41,7 +45,10 @@ tea issue view <N> --repo Slipstream/auto_review
 tea pr create --repo Slipstream/auto_review --head <branch> --base main --title "..." --description "..."
 ```
 
-Forgejo MCP may be available from the surrounding Codex environment. If it is not available, use `tea` as the fallback. `FORGEJO_TOKEN` is the expected credential for Forgejo tooling; never hardcode or commit the token.
+Forgejo MCP may be available from the surrounding Codex environment. If it is
+not available, use `tea` as the fallback for Forgejo instance work.
+`FORGEJO_TOKEN` is the expected credential for Forgejo tooling; never hardcode
+or commit the token.
 
 Branch protection requires a PR for every merge to `main`. CI in `.forgejo/workflows/ci.yml` runs the Rust verification gates for application changes.
 
