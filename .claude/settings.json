@@ -1,5 +1,8 @@
 {
   "permissions": {
+    "allow": [
+      "Workflow"
+    ],
     "deny": [
       "Read(factory/holdout/**)",
       "Bash(git push --force:*)",
