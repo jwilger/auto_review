@@ -31,8 +31,24 @@ spec:
               value: "container"
             - name: RUST_LOG
               value: {{ .Values.logging.rustLog | quote }}
+            {{- if or .Values.config.forgejoBaseUrl (not .Values.config.githubAppId) }}
             - name: FORGEJO_BASE_URL
-              value: {{ required "config.forgejoBaseUrl is required" .Values.config.forgejoBaseUrl | quote }}
+              value: {{ required "config.forgejoBaseUrl or config.githubAppId is required" .Values.config.forgejoBaseUrl | quote }}
+            {{- end }}
+            {{- if .Values.config.githubAppId }}
+            - name: GITHUB_APP_ID
+              value: {{ .Values.config.githubAppId | quote }}
+            - name: GITHUB_API_URL
+              value: {{ .Values.config.githubApiUrl | default "https://api.github.com" | quote }}
+            {{- end }}
+            {{- if .Values.config.githubBotLogin }}
+            - name: GITHUB_BOT_LOGIN
+              value: {{ .Values.config.githubBotLogin | quote }}
+            {{- end }}
+            {{- if .Values.config.githubBotName }}
+            - name: GITHUB_BOT_NAME
+              value: {{ .Values.config.githubBotName | quote }}
+            {{- end }}
             - name: LLM_BASE_URL
               value: {{ required "config.llmBaseUrl is required" .Values.config.llmBaseUrl | quote }}
             - name: LLM_REASONING_MODEL

@@ -294,6 +294,17 @@ semantic-review:
 Forked PRs do not receive repository secrets. Do not use a privileged target-style
 workflow that checks out or executes untrusted fork code with secrets.
 
+## GitHub App provider
+
+The gateway serves GitHub repositories when `GITHUB_APP_ID`,
+`GITHUB_APP_PRIVATE_KEY`, and `GITHUB_WEBHOOK_SECRET` are set; Forgejo settings
+then become optional. Point the GitHub App webhook at
+`https://reviewer.example.com/webhooks/github` and trigger review from GitHub
+Actions with `deploy/github-action`. For Helm, set `config.githubAppId` and the
+`secrets.githubAppPrivateKey` / `secrets.githubWebhookSecret` values (or
+`secrets.secretRef`). App permissions, events, and the workflow snippet are in
+[GitHub repositories](./GITHUB.md).
+
 ## Prometheus and Grafana
 
 Prometheus rules ship at `deploy/prometheus/auto_review.rules.yaml`. Install them

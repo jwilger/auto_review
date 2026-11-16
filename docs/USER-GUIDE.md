@@ -161,7 +161,7 @@ pr_metadata_check:
     - "Security-sensitive changes must describe the threat model impact."
     - "Schema migrations must mention rollback risk."
 
-# Forgejo logins allowed to force an approval over the bot's outstanding
+# Forgejo or GitHub logins allowed to force an approval over the bot's outstanding
 # findings (see "Disagreeing with a finding"). Opt-in: when empty or omitted,
 # nobody may override. Matching is case-insensitive.
 override_approvers:

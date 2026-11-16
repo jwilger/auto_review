@@ -2864,6 +2864,7 @@ auto_review_reviews_completed_count 10
             reasoning_model: "test-model".into(),
             poller_enabled: true,
             readiness_enabled: true,
+            providers: vec!["forgejo"],
             runtime_isolation: RuntimeIsolationPostureInfo::oci_default(),
         });
         let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)).with_info(info));

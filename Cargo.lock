@@ -181,7 +181,9 @@ version = "1.4.0"
 dependencies = [
  "anyhow",
  "ar-chat",
+ "ar-forge",
  "ar-forgejo",
+ "ar-github",
  "ar-index",
  "ar-llm",
  "ar-orchestrator",

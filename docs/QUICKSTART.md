@@ -2,6 +2,10 @@
 
 Get `auto_review` reviewing PRs on a Forgejo instance you control.
 
+Reviewing GitHub repositories? Install and run the gateway as below (steps 1
+and 4), but create a GitHub App instead of a Forgejo bot and follow
+[GitHub repositories](./GITHUB.md) for configuration and the CI trigger.
+
 ## Prerequisites
 
 - A Forgejo instance you administer.

@@ -56,7 +56,7 @@ changes.
 
 ## Architecture
 
-A Forgejo webhook lands at `ar-gateway`, which HMAC-verifies the payload and handles low-cost PR intake plus chat commands. Normal semantic review dispatch comes from the CI action path after repository-selected prerequisites pass; explicit chat commands such as `@auto-review re-review` can force a review. The review pipeline is:
+A Forgejo or GitHub App webhook lands at `ar-gateway` (`/webhooks/forgejo` or `/webhooks/github`), which signature-verifies the payload and handles low-cost PR intake plus chat commands. Normal semantic review dispatch comes from the CI action path after repository-selected prerequisites pass; explicit chat commands such as `@auto-review re-review` can force a review. The review pipeline is:
 
 ```text
 clone (workspace.rs)
@@ -85,7 +85,7 @@ Deterministic linters/tests/builds run in CI before semantic review. Runtime wor
 | `ar-orchestrator` | `JobDispatcher`, `SpawningDispatcher`, review history, changed-file triage, status calls |
 | `ar-forge` | Provider-neutral repository-host DTOs, error type, and `ReviewHost` trait |
 | `ar-forgejo` | Forgejo REST client, webhook DTOs, review/comment/status APIs, Basic-auth bootstrap client |
-| `ar-github` | GitHub App REST client foundation and `ReviewHost` wrapper |
+| `ar-github` | GitHub App REST client, webhook payloads, and `ReviewHost` implementations (per-invocation and long-lived gateway `AppReviewHost`) |
 | `ar-llm` | provider trait and tier-based router |
 | `ar-prompts` | prompt templates and JSON schemas |
 | `ar-review` | review, verify, self-heal, RAG context, repo config |

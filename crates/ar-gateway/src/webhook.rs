@@ -1,14 +1,17 @@
 use crate::hmac::{verify, HmacError};
 use crate::AppState;
 use ar_chat::{parse_chat_command, ChatCommand, ChatContext, ChatHandler};
+use ar_forge::ReviewHost;
 use ar_forgejo::{IssueCommentEvent, PullRequestAction, PullRequestEvent};
 use ar_orchestrator::review_history::PrKey;
+use ar_orchestrator::JobDispatcher;
 use ar_orchestrator::ReviewJob;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
+use std::sync::Arc;
 use subtle::ConstantTimeEq;
 
 const SIG_HEADER: &str = "x-forgejo-signature";
@@ -25,6 +28,13 @@ const FALLBACK_DELIVERY_HEADER: &str = "x-gitea-delivery";
 /// 3. For `pull_request`, decodes the payload and records acceptance without
 ///    dispatching review work; CI-triggered reviews use `/reviews/ci`.
 pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
+    // GitHub-only gateways run without a Forgejo webhook secret. HMAC
+    // accepts an empty key, so refuse the route outright rather than
+    // verifying signatures anyone could compute.
+    if state.webhook_secret.is_empty() {
+        return reject(StatusCode::NOT_FOUND, "forgejo webhooks not configured");
+    }
+
     // Global throttle (T7 mitigation). Checked before HMAC verify so
     // a flood of unsigned junk can't burn CPU on signature math.
     // Operators leave this unconfigured by default; main.rs wires it
@@ -241,8 +251,28 @@ pub async fn handle_ci_review(
         return reject(StatusCode::BAD_REQUEST, "unsafe owner/repo path segment");
     }
 
-    let pr = match deps
-        .forgejo
+    let (host, dispatcher): (&dyn ReviewHost, &Arc<dyn JobDispatcher>) = match req.provider {
+        CiProvider::Forgejo => {
+            let Some(forgejo) = deps.forgejo.as_ref() else {
+                return reject(StatusCode::NOT_FOUND, "forgejo provider not configured");
+            };
+            (forgejo.as_ref(), &state.dispatcher)
+        }
+        CiProvider::Github => {
+            let Some(github) = state.github.as_ref() else {
+                return reject(StatusCode::NOT_FOUND, "github provider not configured");
+            };
+            if let Some(installation_id) = req.installation_id {
+                github
+                    .host
+                    .remember_installation(&req.owner, &req.repo, installation_id)
+                    .await;
+            }
+            (github.host.as_ref(), &github.dispatcher)
+        }
+    };
+
+    let pr = match host
         .get_pull_request(&req.owner, &req.repo, req.pr_number)
         .await
     {
@@ -257,8 +287,7 @@ pub async fn handle_ci_review(
         return reject(StatusCode::CONFLICT, "pull request is not reviewable");
     }
 
-    state
-        .dispatcher
+    dispatcher
         .dispatch(ReviewJob {
             owner: req.owner,
             repo: req.repo,
@@ -273,8 +302,23 @@ pub async fn handle_ci_review(
     (StatusCode::ACCEPTED, "").into_response()
 }
 
+#[derive(Debug, Clone, Copy, Default, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+enum CiProvider {
+    /// Omitted provider keeps the original Forgejo-only request contract.
+    #[default]
+    Forgejo,
+    Github,
+}
+
 #[derive(Deserialize)]
 struct CiReviewRequest {
+    #[serde(default)]
+    provider: CiProvider,
+    /// GitHub App installation covering the repository. Optional: the
+    /// gateway looks it up when omitted.
+    #[serde(default)]
+    installation_id: Option<u64>,
     owner: String,
     repo: String,
     pr_number: u64,
@@ -650,6 +694,7 @@ mod tests {
             reasoning_model: "qwen2.5-coder:32b".into(),
             poller_enabled: true,
             readiness_enabled: true,
+            providers: vec!["forgejo"],
             runtime_isolation: RuntimeIsolationPostureInfo::oci_default(),
         });
         let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)).with_info(info));
@@ -695,6 +740,7 @@ mod tests {
             reasoning_model: "qwen2.5-coder:32b".into(),
             poller_enabled: true,
             readiness_enabled: true,
+            providers: vec!["forgejo"],
             runtime_isolation: RuntimeIsolationPostureInfo::oci_setup_failed(
                 secret_bearing_diagnostic,
             ),
@@ -742,6 +788,7 @@ mod tests {
             reasoning_model: "qwen2.5-coder:32b".into(),
             poller_enabled: true,
             readiness_enabled: true,
+            providers: vec!["forgejo"],
             runtime_isolation: RuntimeIsolationPostureInfo::oci_default(),
         });
         let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)).with_info(info));
