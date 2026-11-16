@@ -11,8 +11,12 @@ set -euo pipefail
 
 cmd=$(jq -r '.tool_input.command // ""')
 
-# Only merge-shaped commands are checked.
-if ! grep -Eq 'gh +pr +merge|enablePullRequestAutoMerge|mergePullRequest|pulls/[0-9]+/merge' <<<"$cmd"; then
+# Only merge-shaped commands are checked: `gh pr merge` in command position
+# (line start or after ; & | ( , optionally behind VAR=value assignments), so
+# prose that mentions it, such as a pull request body, does not trip the
+# guard; and the GraphQL or REST merge calls anywhere.
+cmd_pos='(^|[;&|(])[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*'
+if ! grep -Eq "${cmd_pos}gh +pr +merge|enablePullRequestAutoMerge|mergePullRequest|pulls/[0-9]+/merge" <<<"$cmd"; then
   exit 0
 fi
 
