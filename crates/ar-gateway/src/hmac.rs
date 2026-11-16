@@ -33,7 +33,7 @@ pub fn verify(secret: &str, body: &[u8], signature_hex: &str) -> Result<(), Hmac
     if expected.len() != provided.len() {
         return Err(HmacError::Mismatch);
     }
-    if expected.as_slice().ct_eq(&provided).into() {
+    if expected[..].ct_eq(&provided).into() {
         Ok(())
     } else {
         Err(HmacError::Mismatch)
