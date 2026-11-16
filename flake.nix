@@ -234,6 +234,12 @@
           buildInputs = with pkgs; [
             openssl
           ];
+          # reqwest verifies TLS through the OS trust store and refuses to
+          # build a client when none is found, even for plain-HTTP wiremock
+          # tests. The Nix build sandbox has no /etc/ssl, so point the test
+          # run at the pinned CA bundle. Build-time only; runtime images set
+          # their own SSL_CERT_FILE.
+          SSL_CERT_FILE = "${pkgs.cacert}/etc/ssl/certs/ca-bundle.crt";
         };
 
         # Pre-built dependency layer reused by every check below.
