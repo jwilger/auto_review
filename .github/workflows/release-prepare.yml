@@ -20,6 +20,13 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      - uses: DeterminateSystems/nix-installer-action@v23
+      - uses: DeterminateSystems/magic-nix-cache-action@v15
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          cache-directories: .dependencies/cargo
+
       - name: Load release secrets
         id: load_secrets
         uses: 1password/load-secrets-action@v5
