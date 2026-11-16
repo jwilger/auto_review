@@ -58,6 +58,17 @@ pub fn build_clone_url(
     Ok(url.to_string())
 }
 
+/// Add installation-token userinfo to a repository's HTTPS clone URL.
+pub fn with_clone_credentials(clone_url: &str, installation_token: &str) -> Result<String, Error> {
+    let mut url =
+        Url::parse(clone_url).map_err(|_| Error::InvalidBaseUrl(clone_url.to_string()))?;
+    url.set_username("x-access-token")
+        .map_err(|_| Error::CloneCredentialEncoding)?;
+    url.set_password(Some(installation_token))
+        .map_err(|_| Error::CloneCredentialEncoding)?;
+    Ok(url.to_string())
+}
+
 #[derive(Debug)]
 pub struct InstallationReviewHost {
     client: Client,
@@ -76,13 +87,12 @@ impl InstallationReviewHost {
 #[async_trait]
 impl ar_forge::ReviewHost for InstallationReviewHost {
     async fn clone_url(&self, owner: &str, repo: &str) -> Result<String, ar_forge::HostError> {
-        build_clone_url(
-            self.client.base.as_str(),
-            owner,
-            repo,
-            &self.installation_token,
-        )
-        .map_err(host_error)
+        let clone_url = self
+            .client
+            .get_repository_clone_url(owner, repo, &self.installation_token)
+            .await
+            .map_err(host_error)?;
+        with_clone_credentials(&clone_url, &self.installation_token).map_err(host_error)
     }
 
     async fn get_pull_request(
@@ -377,6 +387,25 @@ impl Client {
             .await
     }
 
+    /// Fetch the repository's HTTPS `clone_url`. The REST API host is not
+    /// the git host on github.com or GitHub Enterprise Server.
+    pub async fn get_repository_clone_url(
+        &self,
+        owner: &str,
+        repo: &str,
+        installation_token: &str,
+    ) -> Result<String, Error> {
+        #[derive(Deserialize)]
+        struct Repository {
+            clone_url: String,
+        }
+        let url = self.url(&format!("repos/{owner}/{repo}"))?;
+        let repository: Repository = self
+            .get_with_installation_token(url, installation_token)
+            .await?;
+        Ok(repository.clone_url)
+    }
+
     pub async fn list_changed_files(
         &self,
         owner: &str,
@@ -443,9 +472,27 @@ impl Client {
         installation_token: &str,
     ) -> Result<ar_forge::CreatedReview, Error> {
         let url = self.url(&format!("repos/{owner}/{repo}/pulls/{pull_number}/reviews"))?;
-        let request = GitHubCreateReviewRequest::from(request);
-        self.post_with_installation_token(url, &request, installation_token)
+        let github_request = GitHubCreateReviewRequest::from(request);
+        match self
+            .post_with_installation_token(url.clone(), &github_request, installation_token)
             .await
+        {
+            // GitHub rejects the whole review when any inline comment targets a
+            // line outside the diff. Keep the findings visible by retrying with
+            // the inline comments folded into the review body.
+            Err(Error::Api { status: 422, .. }) if !github_request.comments.is_empty() => {
+                let folded_body = fold_inline_comments_into_body(request);
+                let fallback = GitHubCreateReviewRequest {
+                    body: folded_body.as_str(),
+                    commit_id: github_request.commit_id,
+                    event: github_request.event,
+                    comments: Vec::new(),
+                };
+                self.post_with_installation_token(url, &fallback, installation_token)
+                    .await
+            }
+            other => other,
+        }
     }
 
     pub async fn post_commit_status(
@@ -457,8 +504,9 @@ impl Client {
         installation_token: &str,
     ) -> Result<(), Error> {
         let url = self.url(&format!("repos/{owner}/{repo}/statuses/{sha}"))?;
+        let status = GitHubCommitStatus::from(status);
         let _: serde_json::Value = self
-            .post_with_installation_token(url, status, installation_token)
+            .post_with_installation_token(url, &status, installation_token)
             .await?;
         Ok(())
     }
@@ -503,7 +551,10 @@ impl Client {
                 .get_with_installation_token(url, installation_token)
                 .await?;
             let chunk_len = chunk.len();
-            all.extend(chunk);
+            all.extend(chunk.into_iter().map(|mut review| {
+                review.state = normalize_review_state(&review.state).to_string();
+                review
+            }));
             if chunk_len < 100 {
                 break;
             }
@@ -762,7 +813,10 @@ impl Client {
 struct GitHubCreateReviewRequest<'a> {
     body: &'a str,
     commit_id: &'a str,
-    event: ar_forge::ReviewEvent,
+    /// `None` leaves the review pending, which is how GitHub models a
+    /// draft review (there is no `PENDING` event value).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    event: Option<GitHubReviewEvent>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     comments: Vec<GitHubReviewComment<'a>>,
 }
@@ -773,9 +827,18 @@ impl<'a> From<&'a ar_forge::CreateReviewRequest> for GitHubCreateReviewRequest<'
             .comments
             .iter()
             .filter_map(|comment| {
-                comment.new_position.map(|position| GitHubReviewComment {
+                // The provider-neutral DTO carries file line numbers, not
+                // diff-relative offsets, so GitHub needs `line` + `side`
+                // rather than the legacy `position` field.
+                let (line, side) = match (comment.new_position, comment.old_position) {
+                    (Some(line), _) => (line, DiffSide::Right),
+                    (None, Some(line)) => (line, DiffSide::Left),
+                    (None, None) => return None,
+                };
+                Some(GitHubReviewComment {
                     path: comment.path.as_str(),
-                    position,
+                    line,
+                    side,
                     body: comment.body.as_str(),
                 })
             })
@@ -783,7 +846,7 @@ impl<'a> From<&'a ar_forge::CreateReviewRequest> for GitHubCreateReviewRequest<'
         Self {
             body: request.body.as_str(),
             commit_id: request.commit_id.as_str(),
-            event: request.event,
+            event: GitHubReviewEvent::from_review_event(request.event),
             comments,
         }
     }
@@ -792,8 +855,96 @@ impl<'a> From<&'a ar_forge::CreateReviewRequest> for GitHubCreateReviewRequest<'
 #[derive(Debug, Serialize)]
 struct GitHubReviewComment<'a> {
     path: &'a str,
-    position: u32,
+    line: u32,
+    side: DiffSide,
     body: &'a str,
+}
+
+/// GitHub's review `event` vocabulary differs from Forgejo's: approving is
+/// `APPROVE` (not `APPROVED`) and pending reviews omit the field entirely.
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "SCREAMING_SNAKE_CASE")]
+enum GitHubReviewEvent {
+    Approve,
+    RequestChanges,
+    Comment,
+}
+
+impl GitHubReviewEvent {
+    fn from_review_event(event: ar_forge::ReviewEvent) -> Option<Self> {
+        match event {
+            ar_forge::ReviewEvent::Approved => Some(Self::Approve),
+            ar_forge::ReviewEvent::RequestChanges => Some(Self::RequestChanges),
+            ar_forge::ReviewEvent::Comment => Some(Self::Comment),
+            ar_forge::ReviewEvent::Pending => None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize)]
+#[serde(rename_all = "UPPERCASE")]
+enum DiffSide {
+    Left,
+    Right,
+}
+
+fn fold_inline_comments_into_body(request: &ar_forge::CreateReviewRequest) -> String {
+    let mut body = request.body.clone();
+    body.push_str("\n\n---\n\n**Inline comments that GitHub could not anchor to the diff:**");
+    for comment in &request.comments {
+        let location = match (comment.new_position, comment.old_position) {
+            (Some(line), _) => format!(" line {line}"),
+            (None, Some(line)) => format!(" old line {line}"),
+            (None, None) => String::new(),
+        };
+        body.push_str(&format!(
+            "\n\n#### `{}`{location}\n\n{}",
+            comment.path, comment.body
+        ));
+    }
+    body
+}
+
+/// GitHub's commit-status limit for `description`, in characters.
+const MAX_GITHUB_STATUS_DESCRIPTION_CHARS: usize = 140;
+
+#[derive(Debug, Serialize)]
+struct GitHubCommitStatus<'a> {
+    state: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    target_url: Option<&'a str>,
+    description: String,
+    context: &'a str,
+}
+
+impl<'a> From<&'a ar_forge::CommitStatus> for GitHubCommitStatus<'a> {
+    fn from(status: &'a ar_forge::CommitStatus) -> Self {
+        let state = match status.state {
+            ar_forge::CommitStatusState::Pending => "pending",
+            ar_forge::CommitStatusState::Success => "success",
+            ar_forge::CommitStatusState::Error => "error",
+            // GitHub has no `warning` state; keep it non-green.
+            ar_forge::CommitStatusState::Failure | ar_forge::CommitStatusState::Warning => {
+                "failure"
+            }
+        };
+        let target_url = Some(status.target_url.as_str()).filter(|url| !url.trim().is_empty());
+        Self {
+            state,
+            target_url,
+            description: truncate_chars(&status.description, MAX_GITHUB_STATUS_DESCRIPTION_CHARS),
+            context: status.context.as_str(),
+        }
+    }
+}
+
+fn truncate_chars(text: &str, max_chars: usize) -> String {
+    if text.chars().count() <= max_chars {
+        return text.to_string();
+    }
+    let mut truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
+    truncated.push('…');
+    truncated
 }
 
 #[derive(Debug, Serialize)]
@@ -859,6 +1010,16 @@ struct CachedInstallationToken {
 struct InstallationTokenCacheKey {
     installation_id: u64,
     request: InstallationTokenRequest,
+}
+
+/// Map GitHub review states onto the provider-neutral vocabulary
+/// (`REQUEST_CHANGES`, `COMMENT`, `APPROVED`, ...) shared with Forgejo.
+fn normalize_review_state(state: &str) -> &str {
+    match state {
+        "CHANGES_REQUESTED" => "REQUEST_CHANGES",
+        "COMMENTED" => "COMMENT",
+        other => other,
+    }
 }
 
 fn cap_for_error(body: &str) -> String {
