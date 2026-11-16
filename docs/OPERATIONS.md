@@ -104,19 +104,19 @@ jobs:
   fmt:
     runs-on: docker
     steps:
-      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://code.forgejo.org/actions/checkout@v7
       - run: nix develop -c cargo fmt --all -- --check
 
   clippy:
     runs-on: docker
     steps:
-      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://code.forgejo.org/actions/checkout@v7
       - run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     runs-on: docker
     steps:
-      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://code.forgejo.org/actions/checkout@v7
       - run: nix develop -c cargo nextest run --workspace --no-tests=pass
 
   semantic-review:
@@ -133,6 +133,10 @@ jobs:
           pr-number: ${{ github.event.pull_request.number }}
           head-sha: ${{ github.event.pull_request.head.sha }}
 ```
+
+`actions/checkout@v7` runs on Node 24, so the runner's job image for these
+steps must provide Node 24 or newer; on older images, pin the checkout
+version that matches the image's Node runtime.
 
 Forgejo Actions intentionally exposes GitHub-compatible context and
 environment names (`github.*`, `GITHUB_*`) for workflow compatibility; the

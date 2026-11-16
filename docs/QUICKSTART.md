@@ -128,7 +128,7 @@ jobs:
   fmt:
     runs-on: docker
     steps:
-      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://code.forgejo.org/actions/checkout@v7
         with:
           persist-credentials: false
       - run: just fmt
@@ -136,7 +136,7 @@ jobs:
   clippy:
     runs-on: docker
     steps:
-      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://code.forgejo.org/actions/checkout@v7
         with:
           persist-credentials: false
       - run: just clippy
@@ -144,7 +144,7 @@ jobs:
   test:
     runs-on: docker
     steps:
-      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://code.forgejo.org/actions/checkout@v7
         with:
           persist-credentials: false
       - run: just test
@@ -152,7 +152,7 @@ jobs:
   deny:
     runs-on: docker
     steps:
-      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://code.forgejo.org/actions/checkout@v7
         with:
           persist-credentials: false
       - run: just deny
@@ -160,7 +160,7 @@ jobs:
   build:
     runs-on: docker
     steps:
-      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://code.forgejo.org/actions/checkout@v7
         with:
           persist-credentials: false
       - run: just build
@@ -179,6 +179,10 @@ jobs:
           pr-number: ${{ github.event.pull_request.number }}
           head-sha: ${{ github.event.pull_request.head.sha }}
 ```
+
+`actions/checkout@v7` runs on Node 24, so the runner's job image for these
+steps must provide Node 24 or newer; on older images, pin the checkout
+version that matches the image's Node runtime.
 
 Do not switch to a privileged target-style workflow that checks out or executes
 untrusted fork code with secrets.
