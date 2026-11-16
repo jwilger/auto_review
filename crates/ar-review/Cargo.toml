@@ -8,7 +8,6 @@ publish.workspace = true
 description = "Review pipeline activities: triage, summarize, review, verify, walkthrough"
 
 [dependencies]
-anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 serde_yaml = "0.9"

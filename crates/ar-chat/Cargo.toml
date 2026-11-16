@@ -8,7 +8,6 @@ publish.workspace = true
 description = "Agentic @-mention chat handler for Forgejo PR discussions"
 
 [dependencies]
-anyhow.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 thiserror.workspace = true

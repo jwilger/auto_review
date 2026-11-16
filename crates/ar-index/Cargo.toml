@@ -9,7 +9,6 @@ description = "Repo indexer: tree-sitter parsing, embeddings, SQLite vector stor
 
 [dependencies]
 serde.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
