@@ -21,3 +21,6 @@ __pycache__/
 **/.dependencies/
 result
 result-*
+# Claude Code worktrees and factory scratch output
+/.claude/worktrees/
+/factory/evidence/

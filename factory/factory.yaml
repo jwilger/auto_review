@@ -1,0 +1,24 @@
+# Rendered by factory-builder:10kr-build-factory. Edit through review, like code.
+# Loop mode and review rounds live in factory/policy.md only.
+version: 1
+tracker: tracker-github-issues
+ready: { labels: [factory:ready, status:queued], author: jwilger }
+forge: forge-github
+scm: scm-git
+runners: [local]                 # add `routine` once a cloud sandbox can run `nix develop`
+loops:
+  deliver: { max_concurrent: 1 }
+  upkeep:  { schedule: "mondays 06:00", scans: [dependencies] }
+stations:
+  - { id: spec,    agent: factory-spec-writer, model: inherit, effort: medium, verdict: [READY, ESCALATE] }
+  - { id: slice,   agent: factory-slicer, model: inherit, verdict: [SLICED, ESCALATE] }
+  - { id: build,   agent: factory-implementer, model: inherit, isolation: worktree, gates: [check], verdict: [DONE, BLOCKED] }
+  - { id: review,  lenses: [correctness, security, architecture, operability], effort: high, verdict: [PASS, CHANGES] }
+  - { id: approve, agent: factory-approver, effort: high, verdict: [APPROVE, ESCALATE] }
+gates:
+  check: "nix develop .#ci --command just ci"
+  slow: []
+holdout:
+  enabled: false
+  threshold: 0.9
+metrics: factory/metrics.jsonl
