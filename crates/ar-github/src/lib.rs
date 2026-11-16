@@ -1,6 +1,9 @@
 //! GitHub App REST client.
 
+mod app_host;
 pub mod webhook;
+
+pub use app_host::{review_installation_token_request, AppReviewHost};
 
 use async_trait::async_trait;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
@@ -12,7 +15,11 @@ use time::{Duration, OffsetDateTime};
 use tokio::sync::Mutex;
 use url::Url;
 
-pub use webhook::{verify_webhook_signature, WebhookSignatureError};
+pub use webhook::{
+    verify_webhook_signature, InstallationRef, IssueCommentEvent, PullRequestReviewCommentEvent,
+    WebhookComment, WebhookIssue, WebhookPullRequestRef, WebhookRepository, WebhookSignatureError,
+    WebhookUser,
+};
 
 const GITHUB_API_VERSION: &str = "2022-11-28";
 const TOKEN_REFRESH_MARGIN: Duration = Duration::minutes(5);
@@ -293,15 +300,68 @@ impl GitHubAppJwt {
     }
 }
 
+/// How app-level (JWT-authenticated) calls authenticate.
+#[derive(Debug, Clone)]
+enum AppAuth {
+    /// A pre-minted JWT. Valid for at most ten minutes, so only suitable
+    /// for short-lived clients such as a single CI invocation.
+    Static(String),
+    /// Mint a fresh JWT per app-level call. Required by long-running
+    /// processes such as the gateway.
+    Signer(GitHubAppJwt),
+}
+
+impl AppAuth {
+    fn bearer(&self) -> Result<HeaderValue, Error> {
+        let jwt = match self {
+            Self::Static(jwt) => jwt.clone(),
+            Self::Signer(signer) => signer.jwt_now()?,
+        };
+        let mut value = HeaderValue::from_str(&format!("Bearer {jwt}"))
+            .map_err(|_| Error::InvalidHeader("app JWT must be valid header text".to_string()))?;
+        value.set_sensitive(true);
+        Ok(value)
+    }
+}
+
 #[derive(Debug)]
 pub struct Client {
     http: reqwest::Client,
     base: Url,
+    app_auth: AppAuth,
     installation_tokens: Mutex<HashMap<InstallationTokenCacheKey, CachedInstallationToken>>,
+}
+
+/// The authenticated GitHub App, as returned by `GET /app`.
+#[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
+pub struct AppInfo {
+    pub id: u64,
+    pub slug: String,
+    #[serde(default)]
+    pub name: String,
+}
+
+impl AppInfo {
+    /// Login GitHub shows for comments and reviews authored by this app.
+    pub fn bot_login(&self) -> String {
+        format!("{}[bot]", self.slug)
+    }
 }
 
 impl Client {
     pub fn new(base_url: &str, app_jwt: &str) -> Result<Self, Error> {
+        let app_auth = AppAuth::Static(app_jwt.to_string());
+        app_auth.bearer()?;
+        Self::build(base_url, app_auth)
+    }
+
+    /// Build a client that signs a fresh app JWT for every app-level call,
+    /// so it stays usable for the lifetime of a long-running service.
+    pub fn with_app_signer(base_url: &str, signer: GitHubAppJwt) -> Result<Self, Error> {
+        Self::build(base_url, AppAuth::Signer(signer))
+    }
+
+    fn build(base_url: &str, app_auth: AppAuth) -> Result<Self, Error> {
         let normalized = if base_url.ends_with('/') {
             base_url.to_string()
         } else {
@@ -311,10 +371,6 @@ impl Client {
             Url::parse(&normalized).map_err(|_| Error::InvalidBaseUrl(normalized.clone()))?;
 
         let mut headers = HeaderMap::new();
-        let mut auth_value = HeaderValue::from_str(&format!("Bearer {app_jwt}"))
-            .map_err(|_| Error::InvalidHeader("app JWT must be valid header text".to_string()))?;
-        auth_value.set_sensitive(true);
-        headers.insert(AUTHORIZATION, auth_value);
         headers.insert(
             ACCEPT,
             HeaderValue::from_static("application/vnd.github+json"),
@@ -335,8 +391,52 @@ impl Client {
         Ok(Self {
             http,
             base,
+            app_auth,
             installation_tokens: Mutex::new(HashMap::new()),
         })
+    }
+
+    /// `GET /app`: identify the authenticated GitHub App.
+    pub async fn get_authenticated_app(&self) -> Result<AppInfo, Error> {
+        let url = self.url("app")?;
+        self.get_with_app_auth(url).await
+    }
+
+    /// `GET /repos/{owner}/{repo}/installation`: find the app installation
+    /// that covers a repository.
+    pub async fn get_repository_installation_id(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<u64, Error> {
+        #[derive(Deserialize)]
+        struct Installation {
+            id: u64,
+        }
+        let url = self.url(&format!("repos/{owner}/{repo}/installation"))?;
+        let installation: Installation = self.get_with_app_auth(url).await?;
+        Ok(installation.id)
+    }
+
+    async fn get_with_app_auth<T>(&self, url: Url) -> Result<T, Error>
+    where
+        T: for<'de> Deserialize<'de>,
+    {
+        let response = self
+            .http
+            .get(url)
+            .header(AUTHORIZATION, self.app_auth.bearer()?)
+            .send()
+            .await?;
+        let status = response.status();
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body: cap_for_error(&body),
+            });
+        }
+        Ok(serde_json::from_str(&body)?)
     }
 
     pub async fn installation_token(
@@ -355,7 +455,13 @@ impl Client {
         let url = self.url(&format!(
             "app/installations/{installation_id}/access_tokens"
         ))?;
-        let response = self.http.post(url).json(&request).send().await?;
+        let response = self
+            .http
+            .post(url)
+            .header(AUTHORIZATION, self.app_auth.bearer()?)
+            .json(&request)
+            .send()
+            .await?;
         let status = response.status();
         let body = response.text().await?;
         if !status.is_success() {
