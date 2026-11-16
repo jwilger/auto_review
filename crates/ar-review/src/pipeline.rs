@@ -780,6 +780,10 @@ mod tests {
         seen: Mutex<Vec<CompleteRequest>>,
     }
 
+    /// Serializes tests that read or write `AR_REVIEW_COST_FOOTER`; the
+    /// process environment is shared across parallel test threads.
+    static COST_FOOTER_ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
     struct EnvVarRestoreGuard {
         key: &'static str,
         original: Option<String>,
@@ -3933,6 +3937,7 @@ mod tests {
 
     #[tokio::test]
     async fn review_pull_request_posts_review_with_llm_usage_cost_footer() {
+        let _env_lock = COST_FOOTER_ENV_LOCK.lock().await;
         let server = MockServer::start().await;
         Mock::given(method("GET"))
             .and(path("/api/v1/repos/o/r/pulls/7.diff"))
@@ -4108,6 +4113,7 @@ mod tests {
 
     #[tokio::test]
     async fn review_pull_request_omits_llm_usage_cost_footer_when_disabled_by_env() {
+        let _env_lock = COST_FOOTER_ENV_LOCK.lock().await;
         let _footer_env = EnvVarRestoreGuard::set("AR_REVIEW_COST_FOOTER", "false");
 
         let server = MockServer::start().await;
