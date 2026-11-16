@@ -3,7 +3,7 @@
 //! Forgejo sends `X-Forgejo-Signature` as a hex-encoded HMAC-SHA256 digest
 //! of the raw request body, keyed by the configured webhook secret.
 
-use ::hmac::{Hmac, Mac};
+use ::hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
 

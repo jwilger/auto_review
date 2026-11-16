@@ -1,5 +1,5 @@
 use ar_github::{verify_webhook_signature, WebhookSignatureError};
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 
 type HmacSha256 = Hmac<Sha256>;
