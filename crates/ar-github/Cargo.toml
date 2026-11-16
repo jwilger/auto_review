@@ -20,7 +20,7 @@ reqwest.workspace = true
 url.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 time = { version = "0.3", features = ["parsing"] }
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+jsonwebtoken = { version = "12", features = ["rust_crypto"] }
 
 [dev-dependencies]
 base64 = "0.23"
