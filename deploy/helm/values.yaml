@@ -12,7 +12,13 @@ replicaCount: 1
 # Required configuration. Provide as Helm --set values, in a values
 # override file, or via secretRef (recommended for tokens).
 config:
+  # Configure Forgejo, a GitHub App, or both. Forgejo is required unless
+  # githubAppId is set.
   forgejoBaseUrl: ""        # e.g. https://forgejo.example.com
+  githubAppId: ""           # numeric GitHub App id; enables /webhooks/github
+  githubApiUrl: ""          # default https://api.github.com; GHES: https://ghe.example.com/api/v3
+  githubBotLogin: ""        # default <app-slug>[bot] from GET /app
+  githubBotName: ""         # default <app-slug>; the @<handle> users mention
   llmBaseUrl: ""            # e.g. http://ollama:11434 or https://api.openai.com
   llmReasoningModel: "qwen2.5-coder:32b"
   llmEmbeddingModel: ""     # optional; enables RAG
@@ -63,6 +69,8 @@ config:
 secrets:
   forgejoToken: ""
   webhookSecret: ""
+  githubAppPrivateKey: ""   # GitHub App PEM private key
+  githubWebhookSecret: ""   # GitHub App webhook secret
   ciReviewToken: ""
   llmApiKey: ""
   secretRef: ""

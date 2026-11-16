@@ -8,6 +8,7 @@
 
 pub mod config;
 pub mod dedup;
+pub mod github_webhook;
 pub mod hmac;
 pub mod metrics;
 pub mod poller;
@@ -71,12 +72,73 @@ pub struct AppState {
     pub webhook_dedup: Option<Arc<dyn crate::dedup::DeliveryDedup>>,
     pub chat_comment_cursors: Option<SharedCommentCursors>,
     pub ci_review_endpoint: Option<CiReviewEndpointDeps>,
+    /// GitHub App support. When set, `/webhooks/github` accepts
+    /// `X-Hub-Signature-256`-signed deliveries and `/reviews/ci` accepts
+    /// `"provider": "github"` requests.
+    pub github: Option<GitHubDeps>,
 }
 
 #[derive(Clone)]
 pub struct CiReviewEndpointDeps {
     pub action_token: Arc<String>,
-    pub forgejo: Arc<ForgejoClient>,
+    /// Forgejo client for `provider: "forgejo"` CI requests. `None` in
+    /// GitHub-only deployments.
+    pub forgejo: Option<Arc<ForgejoClient>>,
+}
+
+/// Everything the gateway needs to serve GitHub App repositories.
+#[derive(Clone)]
+pub struct GitHubDeps {
+    /// Secret configured on the GitHub App webhook; verifies
+    /// `X-Hub-Signature-256`.
+    pub webhook_secret: Arc<String>,
+    pub host: Arc<ar_github::AppReviewHost>,
+    /// Dispatcher whose reviews run against [`Self::host`].
+    pub dispatcher: Arc<dyn JobDispatcher>,
+    /// Login GitHub shows for the app's own comments (`<slug>[bot]`).
+    pub bot_login: Arc<String>,
+    /// Mention handle users type (`@<bot_name>`).
+    pub bot_name: Arc<String>,
+    /// Chat dependencies; `None` parses commands without handling them.
+    pub chat: Option<GitHubChatDeps>,
+}
+
+#[derive(Clone)]
+pub struct GitHubChatDeps {
+    pub llm: Arc<LlmRouter>,
+    pub learnings: Arc<dyn LearningsStore>,
+}
+
+impl GitHubDeps {
+    pub fn new(
+        webhook_secret: impl Into<String>,
+        host: Arc<ar_github::AppReviewHost>,
+        dispatcher: Arc<dyn JobDispatcher>,
+    ) -> Self {
+        Self {
+            webhook_secret: Arc::new(webhook_secret.into()),
+            host,
+            dispatcher,
+            bot_login: Arc::new("auto-review[bot]".into()),
+            bot_name: Arc::new("auto-review".into()),
+            chat: None,
+        }
+    }
+
+    pub fn with_bot_identity(
+        mut self,
+        bot_login: impl Into<String>,
+        bot_name: impl Into<String>,
+    ) -> Self {
+        self.bot_login = Arc::new(bot_login.into());
+        self.bot_name = Arc::new(bot_name.into());
+        self
+    }
+
+    pub fn with_chat(mut self, chat: GitHubChatDeps) -> Self {
+        self.chat = Some(chat);
+        self
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -150,19 +212,42 @@ pub struct GatewayInfo {
     /// Whether the background `ChatPoller` is running. Disabled
     /// when `AR_POLL_INTERVAL_SECS=0`.
     pub poller_enabled: bool,
+    /// Repository providers this gateway serves: `"forgejo"`, `"github"`.
+    pub providers: Vec<&'static str>,
     /// Whether `/readyz` does an actual probe vs degrading to
     /// `/healthz` semantics.
     pub readiness_enabled: bool,
     pub runtime_isolation: RuntimeIsolationPostureInfo,
 }
 
-/// Async-Mutex-guarded TTL cache wrapping a Forgejo reachability
-/// check. The cache stays small intentionally — readiness should be
-/// independent of fancy metrics infrastructure.
+/// Async-Mutex-guarded TTL cache wrapping repository-host reachability
+/// checks (Forgejo server version, GitHub App authentication). The cache
+/// stays small intentionally — readiness should be independent of fancy
+/// metrics infrastructure.
 pub struct ReadinessProbe {
-    forgejo: Arc<ForgejoClient>,
+    targets: Vec<ReadinessTarget>,
     ttl: Duration,
     cache: Mutex<Option<CachedReadiness>>,
+}
+
+enum ReadinessTarget {
+    Forgejo(Arc<ForgejoClient>),
+    GitHub(Arc<ar_github::AppReviewHost>),
+}
+
+impl ReadinessTarget {
+    async fn check(&self) -> (bool, String) {
+        match self {
+            Self::Forgejo(forgejo) => match forgejo.get_server_version().await {
+                Ok(v) => (true, format!("forgejo reachable ({v})")),
+                Err(e) => (false, format!("forgejo unreachable: {e}")),
+            },
+            Self::GitHub(host) => match host.client().get_authenticated_app().await {
+                Ok(app) => (true, format!("github reachable (app {})", app.slug)),
+                Err(e) => (false, format!("github unreachable: {e}")),
+            },
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -178,15 +263,31 @@ impl ReadinessProbe {
     }
 
     pub fn with_ttl(forgejo: Arc<ForgejoClient>, ttl: Duration) -> Self {
+        Self::from_targets(vec![ReadinessTarget::Forgejo(forgejo)], ttl)
+    }
+
+    /// Probe only GitHub App authentication (GitHub-only gateways).
+    pub fn github_with_ttl(host: Arc<ar_github::AppReviewHost>, ttl: Duration) -> Self {
+        Self::from_targets(vec![ReadinessTarget::GitHub(host)], ttl)
+    }
+
+    /// Also require GitHub App authentication to succeed.
+    pub fn and_github(mut self, host: Arc<ar_github::AppReviewHost>) -> Self {
+        self.targets.push(ReadinessTarget::GitHub(host));
+        self
+    }
+
+    fn from_targets(targets: Vec<ReadinessTarget>, ttl: Duration) -> Self {
         Self {
-            forgejo,
+            targets,
             ttl,
             cache: Mutex::new(None),
         }
     }
 
-    /// Returns `(healthy, detail)`. Probes Forgejo when the cache is
-    /// empty or stale; serves from cache otherwise.
+    /// Returns `(healthy, detail)`. Probes every configured host when the
+    /// cache is empty or stale; serves from cache otherwise. Healthy only
+    /// when every host is reachable.
     pub async fn check(&self) -> (bool, String) {
         let mut guard = self.cache.lock().await;
         let now = Instant::now();
@@ -195,10 +296,14 @@ impl ReadinessProbe {
                 return (c.healthy, c.detail.clone());
             }
         }
-        let (healthy, detail) = match self.forgejo.get_server_version().await {
-            Ok(v) => (true, format!("forgejo reachable ({v})")),
-            Err(e) => (false, format!("forgejo unreachable: {e}")),
-        };
+        let mut healthy = true;
+        let mut details = Vec::with_capacity(self.targets.len());
+        for target in &self.targets {
+            let (target_healthy, detail) = target.check().await;
+            healthy &= target_healthy;
+            details.push(detail);
+        }
+        let detail = details.join("; ");
         *guard = Some(CachedReadiness {
             checked_at: now,
             healthy,
@@ -232,6 +337,7 @@ impl AppState {
             webhook_dedup: None,
             chat_comment_cursors: None,
             ci_review_endpoint: None,
+            github: None,
         }
     }
 
@@ -263,8 +369,23 @@ impl AppState {
     ) -> Self {
         self.ci_review_endpoint = Some(CiReviewEndpointDeps {
             action_token: Arc::new(action_token.into()),
-            forgejo,
+            forgejo: Some(forgejo),
         });
+        self
+    }
+
+    /// Enable `/reviews/ci` without a Forgejo client, for GitHub-only
+    /// deployments. Forgejo-provider requests are then rejected.
+    pub fn with_ci_review_token(mut self, action_token: impl Into<String>) -> Self {
+        self.ci_review_endpoint = Some(CiReviewEndpointDeps {
+            action_token: Arc::new(action_token.into()),
+            forgejo: None,
+        });
+        self
+    }
+
+    pub fn with_github(mut self, github: GitHubDeps) -> Self {
+        self.github = Some(github);
         self
     }
 
@@ -318,6 +439,7 @@ pub fn build_router(state: AppState) -> Router {
         .route("/metrics", get(metrics_handler))
         .route("/reviews/ci", post(webhook::handle_ci_review))
         .route("/webhooks/forgejo", post(webhook::handle))
+        .route("/webhooks/github", post(github_webhook::handle))
         .with_state(state)
 }
 

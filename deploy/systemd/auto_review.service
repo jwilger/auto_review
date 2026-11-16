@@ -1,6 +1,6 @@
 [Unit]
 Description=auto_review (Forgejo PR-review bot)
-Documentation=https://git.johnwilger.com/jwilger/auto_review
+Documentation=https://github.com/jwilger/auto_review
 # Forgejo needs to be reachable; in particular /readyz probes it.
 # We don't gate on a specific Forgejo unit name — operators using
 # Forgejo on the same host can add `Wants=forgejo.service` and

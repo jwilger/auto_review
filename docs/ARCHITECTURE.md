@@ -7,15 +7,17 @@ not a rationale log; historical context and supersession details live in the ADR
 ## System shape
 
 `auto_review` is a single-tenant pull-request review bot implemented as a Rust
-Cargo workspace of single-purpose crates. Forgejo is the implemented repository
-host today, and the review pipeline is being separated from Forgejo-specific API
-types through provider-neutral host DTOs and a `ReviewHost` boundary. It is not
+Cargo workspace of single-purpose crates. Forgejo and GitHub (through a GitHub
+App) are the implemented repository hosts. The review pipeline depends on
+provider-neutral host DTOs and a `ReviewHost` boundary rather than on either
+forge's API types. It is not
 a multi-tenant SaaS and does not currently target GitLab, Bitbucket, a web
 dashboard, a web-based OAuth installer, or fine-tuned models.
 
-The primary always-on runtime is a gateway service that receives Forgejo
-traffic, handles chat commands, exposes operator endpoints, and dispatches
-semantic review work. The no-dedicated-server runtime path is
+The primary always-on runtime is a gateway service that receives Forgejo and
+GitHub App traffic, handles chat commands, exposes operator endpoints, and
+dispatches semantic review work. One gateway may serve Forgejo, GitHub, or both
+(ADR-0022). The no-dedicated-server runtime path is
 `auto-review agentcore serve`, an AWS Bedrock AgentCore-compatible HTTP surface
 with `/ping` health checks and `/invocations` for CI-invoked semantic reviews.
 The public operator executable is `auto-review`; the gateway service entrypoint
@@ -27,11 +29,20 @@ The gateway owns external request boundaries:
 
 - Forgejo webhook requests pass through optional rate limiting, HMAC
   verification, bounded event classification, and bounded JSON failure handling.
+- GitHub App webhook requests at `POST /webhooks/github` pass through the same
+  rate limit, `X-Hub-Signature-256` verification with the App's webhook secret
+  before parsing, and namespaced `X-GitHub-Delivery` dedup. `issue_comment` and
+  `pull_request_review_comment` deliveries route `@<bot>` mentions to the chat
+  handler; bot senders are ignored. A gateway without a Forgejo webhook secret
+  answers `404` on `/webhooks/forgejo` rather than verifying with an empty key.
 - `POST /reviews/ci` is the authenticated CI intake path. It is enabled only when
   `AR_CI_REVIEW_TOKEN` is configured and receives the owner, repo, PR number,
-  head SHA, and trigger metadata for the CI-validated revision.
-- Chat commands are handled through webhook and polling paths because Forgejo
-  does not reliably deliver every inline-thread reply event.
+  head SHA, and trigger metadata for the CI-validated revision. An optional
+  `provider` field (`forgejo` by default, or `github` with an optional
+  `installation_id`) selects the repository host and its dispatcher.
+- Forgejo chat commands are handled through webhook and polling paths because
+  Forgejo does not reliably deliver every inline-thread reply event. GitHub
+  delivers review-comment webhooks reliably, so the GitHub path has no poller.
 - AgentCore `/invocations` accepts provider-neutral semantic-review and
   chat-command payloads. Semantic-review invocations fetch the current PR
   metadata through `ReviewHost`, reject stale head SHAs, claim an invocation
@@ -95,7 +106,17 @@ top-level pull request comment reads use the Issues comments API because GitHub
 models pull request conversations as issue comments; top-level PR comment
 posting uses the same endpoint. Repository config reads use the Contents API
 with the raw media type so `.auto_review.yaml` can be loaded without cloning.
-GitHub HTTPS clone auth material is built with installation-token credentials.
+GitHub HTTPS clone auth material is built from the repository's `clone_url`
+with installation-token credentials, because the REST API host is not the git
+host. The gateway uses `AppReviewHost`, a long-lived GitHub App `ReviewHost`
+that signs a fresh app JWT per app-level call, resolves (or accepts from webhook
+deliveries) the installation covering each repository, and mints
+repository-scoped installation tokens through the client's token cache. The
+GitHub adapter translates provider-neutral reviews to GitHub's wire format:
+`APPROVE`/`REQUEST_CHANGES`/`COMMENT` events, inline comments as `line` +
+`side`, review states normalized to the shared vocabulary, 140-character status
+descriptions, and a retry that folds inline comments into the review body when
+GitHub rejects comments outside the diff.
 GitHub can be wrapped as a `ReviewHost` with an installation token for the
 implemented read and write operations, including PR summary fetches,
 compare-diff reads for incremental review, pull-review and review-comment

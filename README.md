@@ -1,8 +1,9 @@
 # auto_review
 
-A self-hosted, AI-driven pull-request reviewer for [Forgejo](https://forgejo.org/).
+A self-hosted, AI-driven pull-request reviewer for [Forgejo](https://forgejo.org/)
+and GitHub.
 
-`auto_review` gives Forgejo operators a sovereignty-friendly alternative to
+`auto_review` gives Forgejo and GitHub operators a sovereignty-friendly alternative to
 closed-source AI reviewers: it runs on infrastructure you control, supports local
 or cloud OpenAI-compatible LLM endpoints, waits for your CI checks, reviews PRs
 semantically, verifies findings before posting, and talks to authors through
@@ -14,7 +15,7 @@ compatibility alias).
 1. Install or build the single public command:
 
    ```sh
-   git clone https://git.johnwilger.com/Slipstream/auto_review
+   git clone https://github.com/jwilger/auto_review
    cd auto_review
    nix build .
    export AUTO_REVIEW="$PWD/result/bin/auto-review"
@@ -73,8 +74,9 @@ Full setup: [Quickstart](./docs/QUICKSTART.md). Deployment options:
 [CHANGELOG](./CHANGELOG.md) for the current release. The supported runtime
 contract is the single-binary Forgejo reviewer path: CI triggers semantic
 review, the gateway isolates workspace handling, and the bot posts verified
-review output back to Forgejo. Provider-neutral review hosts now add
-foundational GitHub App support, and the reviewer can also run as an AWS
+review output back to Forgejo. The same gateway also serves GitHub repositories
+through a GitHub App — webhooks, chat commands, and CI-triggered review (see
+[GitHub repositories](./docs/GITHUB.md)). The reviewer can also run as an AWS
 Bedrock AgentCore runtime instead of the long-lived gateway service.
 
 ```text

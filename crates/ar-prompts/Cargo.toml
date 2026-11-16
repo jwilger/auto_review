@@ -10,5 +10,4 @@ description = "Prompt templates and JSON schemas for review/triage/verify/chat"
 [dependencies]
 serde.workspace = true
 serde_json.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true

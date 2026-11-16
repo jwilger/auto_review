@@ -19,7 +19,7 @@ members = [
 version = "1.4.0"
 edition = "2021"
 license = "AGPL-3.0-or-later"
-repository = "https://git.johnwilger.com/jwilger/auto_review"
+repository = "https://github.com/jwilger/auto_review"
 # Workspace crates are application code, not crates.io packages.
 # `publish = false` also tells cargo-deny these are private path
 # crates so wildcard internal deps (`ar-* = { path = "..." }`)
@@ -36,16 +36,15 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
-reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+reqwest = { version = "0.13", default-features = false, features = ["json", "rustls"] }
 async-trait = "0.1"
-aws-config = { version = "1.8.18", features = ["behavior-version-latest"] }
-aws-sdk-dynamodb = "1.116.0"
+aws-config = { version = "1.13.2", features = ["behavior-version-latest"] }
+aws-sdk-dynamodb = { version = "1.139.0", default-features = false, features = ["default-https-client", "rt-tokio"] }
 url = "2.5"
-axum = "0.7"
+axum = "0.8"
 tower = "0.5"
-tower-http = { version = "0.6", features = ["trace"] }
-hmac = "0.12"
-sha2 = "0.10"
+hmac = "0.13"
+sha2 = "0.11"
 hex = "0.4"
 subtle = "2.6"
 

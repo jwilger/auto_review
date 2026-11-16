@@ -1,0 +1,95 @@
+name: auto_review
+description: Request an auto_review semantic review of a GitHub pull request from an auto_review gateway.
+author: auto_review contributors
+
+inputs:
+  gateway-url:
+    description: auto_review gateway base URL (for example https://reviewer.example.com).
+    required: true
+  action-token:
+    description: Bearer token matching the gateway's AR_CI_REVIEW_TOKEN.
+    required: true
+  installation-id:
+    description: Optional GitHub App installation id. The gateway looks it up when omitted.
+    required: false
+    default: ""
+  force:
+    description: Re-review even when this head SHA was already reviewed.
+    required: false
+    default: "false"
+  owner:
+    description: Optional override for the repository owner. Defaults to the pull request context.
+    required: false
+    default: ""
+  repo:
+    description: Optional override for the repository name. Defaults to the pull request context.
+    required: false
+    default: ""
+  pr-number:
+    description: Optional override for the pull request number. Defaults to the pull request context.
+    required: false
+    default: ""
+  head-sha:
+    description: Optional override for the head commit SHA to review. Defaults to the pull request context.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - name: Request auto_review semantic review
+      shell: bash
+      # Every value reaches the script through env, never by expression
+      # interpolation into the script body, so PR-controlled text cannot
+      # inject shell.
+      env:
+        GATEWAY_URL: ${{ inputs.gateway-url }}
+        ACTION_TOKEN: ${{ inputs.action-token }}
+        INPUT_INSTALLATION_ID: ${{ inputs.installation-id }}
+        INPUT_FORCE: ${{ inputs.force }}
+        INPUT_OWNER: ${{ inputs.owner }}
+        INPUT_REPO: ${{ inputs.repo }}
+        INPUT_PR_NUMBER: ${{ inputs.pr-number }}
+        INPUT_HEAD_SHA: ${{ inputs.head-sha }}
+        CONTEXT_OWNER: ${{ github.repository_owner }}
+        CONTEXT_REPO: ${{ github.event.repository.name }}
+        CONTEXT_PR_NUMBER: ${{ github.event.pull_request.number }}
+        CONTEXT_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        RUN_ID: ${{ github.run_id }}
+      run: |
+        set -euo pipefail
+        OWNER="${INPUT_OWNER:-$CONTEXT_OWNER}"
+        REPO="${INPUT_REPO:-$CONTEXT_REPO}"
+        PR_NUMBER="${INPUT_PR_NUMBER:-$CONTEXT_PR_NUMBER}"
+        HEAD_SHA="${INPUT_HEAD_SHA:-$CONTEXT_HEAD_SHA}"
+
+        if [ -z "$PR_NUMBER" ] || [ -z "$OWNER" ] || [ -z "$REPO" ] || [ -z "$HEAD_SHA" ]; then
+          echo "auto_review requires pull request context (owner, repo, pr-number, head-sha)" >&2
+          exit 1
+        fi
+        case "$PR_NUMBER" in (*[!0-9]*) echo "pr-number must be numeric" >&2; exit 1;; esac
+        case "$INPUT_INSTALLATION_ID" in (*[!0-9]*) echo "installation-id must be numeric" >&2; exit 1;; esac
+        case "$INPUT_FORCE" in (true|false) ;; (*) echo "force must be true or false" >&2; exit 1;; esac
+
+        PAYLOAD=$(jq -n \
+          --arg owner "$OWNER" \
+          --arg repo "$REPO" \
+          --argjson pr_number "$PR_NUMBER" \
+          --arg head_sha "$HEAD_SHA" \
+          --argjson force "$INPUT_FORCE" \
+          --arg installation_id "$INPUT_INSTALLATION_ID" \
+          --arg run_id "$RUN_ID" \
+          '{provider: "github", owner: $owner, repo: $repo, pr_number: $pr_number,
+            head_sha: $head_sha, force: $force,
+            trigger: {source: "github-actions", run_id: $run_id}}
+           + (if $installation_id == "" then {} else {installation_id: ($installation_id | tonumber)} end)')
+
+        curl -fsS --connect-timeout 5 --max-time 30 -X POST \
+          -H "Authorization: Bearer $ACTION_TOKEN" \
+          -H "Content-Type: application/json" \
+          --data "$PAYLOAD" \
+          "${GATEWAY_URL%/}/reviews/ci"
+
+branding:
+  icon: book-open
+  color: gray-dark

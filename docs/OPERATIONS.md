@@ -104,19 +104,19 @@ jobs:
   fmt:
     runs-on: docker
     steps:
-      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://code.forgejo.org/actions/checkout@v7
       - run: nix develop -c cargo fmt --all -- --check
 
   clippy:
     runs-on: docker
     steps:
-      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://code.forgejo.org/actions/checkout@v7
       - run: nix develop -c cargo clippy --workspace --all-targets -- -D warnings
 
   test:
     runs-on: docker
     steps:
-      - uses: https://code.forgejo.org/actions/checkout@v4
+      - uses: https://code.forgejo.org/actions/checkout@v7
       - run: nix develop -c cargo nextest run --workspace --no-tests=pass
 
   semantic-review:
@@ -124,7 +124,7 @@ jobs:
     needs: [fmt, clippy, test]
     if: ${{ github.event_name == 'pull_request' }}
     steps:
-      - uses: https://git.johnwilger.com/Slipstream/auto_review/deploy/forgejo-action@main
+      - uses: https://github.com/jwilger/auto_review/deploy/forgejo-action@main
         with:
           gateway-url: https://reviewer.example.com
           action-token: ${{ secrets.AR_CI_REVIEW_TOKEN }}
@@ -133,6 +133,10 @@ jobs:
           pr-number: ${{ github.event.pull_request.number }}
           head-sha: ${{ github.event.pull_request.head.sha }}
 ```
+
+`actions/checkout@v7` runs on Node 24, so the runner's job image for these
+steps must provide Node 24 or newer; on older images, pin the checkout
+version that matches the image's Node runtime.
 
 Forgejo Actions intentionally exposes GitHub-compatible context and
 environment names (`github.*`, `GITHUB_*`) for workflow compatibility; the
@@ -163,21 +167,32 @@ waiting-for-CI/action-triggered lifecycle.
 
 ## 0.4 Project release automation credentials
 
-This section is for maintainers of `Slipstream/auto_review`, not for normal gateway
+This section is for maintainers of `jwilger/auto_review`, not for normal gateway
 operators. Keep release credentials out of the gateway systemd environment and
 out of deployment env files.
 
-Configure the release preparation credential as Forgejo Actions secret `RELEASE_PREPARE_TOKEN`. Its release preparation PAT blast radius is to prepare release PR branches and release PRs only in `Slipstream/auto_review` for trusted `main` push runs.
+Configure the release automation credential as `GH_RELEASE_AUTOMATION_TOKEN` in
+the dedicated 1Password `Github Secrets` vault. GitHub Actions loads it through
+`1password/load-secrets-action` and the repository-level
+`OP_SERVICE_ACCOUNT_TOKEN` bootstrap secret. Its blast radius should be limited
+to preparing release PR branches, opening release PRs, creating release tags,
+and creating GitHub Releases in `jwilger/auto_review`.
 
-Create a dedicated release bot Forgejo user for release PR commits. Add its
-public SSH signing key to that account, store the private key as Forgejo Actions secret `RELEASE_SIGNING_KEY`, and set repository variables `RELEASE_BOT_NAME` and `RELEASE_BOT_EMAIL` to the bot identity attached to the signing key. Release publish also uses that SSH signing key to sign `SHA256SUMS`.
+Use the dedicated SSH signing key stored as `RELEASE_SIGNING_KEY` in the
+`Github Secrets` 1Password vault. Its public key is registered on the GitHub
+account used by the release automation, and repository variables
+`RELEASE_BOT_NAME` and `RELEASE_BOT_EMAIL` identify the signing identity.
+Release publish also uses that SSH signing key to sign `SHA256SUMS`.
 
-Configure the release publishing credential as Forgejo Actions secret `RELEASE_PUBLISH_TOKEN`, owned by the same release bot named in `RELEASE_BOT_NAME`. Its release publishing PAT blast radius is to publish Linux binary artifacts, checksums, signatures, SBOM/provenance metadata, and Forgejo Releases only in `Slipstream/auto_review`; it also covers managed PR body/description edit for binary artifact links.
+Release publishing uses the same `GH_RELEASE_AUTOMATION_TOKEN` only after
+artifacts exist. It creates GitHub Releases with Linux binary artifacts,
+checksums, signatures, SBOM/provenance metadata, and release notes for
+`jwilger/auto_review`.
 
-The PR publishing credential model keeps `RELEASE_PUBLISH_TOKEN` out of
+The PR publishing credential model keeps `GH_RELEASE_AUTOMATION_TOKEN` out of
 checkout/build steps and exposes it only after artifacts exist. CI verifies PR
 release artifacts, uploads release-binary links to release PR descriptions, and
-keeps token-bearing publish steps scoped to token-bearing forge operations.
+keeps token-bearing publish steps scoped to GitHub release operations.
 
 Final release publication verifies the reviewed Linux x86_64 binary archive,
 attaches the final binary assets, and includes verification commands in the

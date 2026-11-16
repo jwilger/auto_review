@@ -4,7 +4,7 @@ Codex uses this file as the always-loaded project guidance for `auto_review`.
 
 ## Toolchain
 
-`just` is the canonical command interface for routine development and CI checks. Nix is optional for developers who already have the required tools on `PATH`, and remains the supported way to provision the pinned Rust toolchain in `rust-toolchain.toml` plus `cargo-nextest`, `cargo-deny`, `forgejo-mcp`, `git`, `pkg-config`, `openssl`, and other project tools. Do not call system `rustup` from inside `nix develop` or bypass project-local `CARGO_HOME` / `RUSTUP_HOME` under `.dependencies/`.
+`just` is the canonical command interface for routine development and CI checks. Nix is optional for developers who already have the required tools on `PATH`, and remains the supported way to provision the pinned Rust toolchain in `rust-toolchain.toml` plus `cargo-nextest`, `cargo-deny`, `forgejo-mcp`, `git`, `pkg-config`, `openssl`, `sqlite` (sqlx links the system SQLite), and other project tools. Do not call system `rustup` from inside `nix develop` or bypass project-local `CARGO_HOME` / `RUSTUP_HOME` under `.dependencies/`.
 
 ```sh
 nix develop
@@ -25,29 +25,38 @@ just build
 
 Use `bacon`, `bacon clippy`, or `bacon test` for focused Rust check loops.
 
-## Forgejo, Not GitHub
+## GitHub Repository, Forgejo Product
 
-The remote is `git.johnwilger.com` (Forgejo). `gh` does not work for this repo.
+This repository is hosted on GitHub at `jwilger/auto_review`; use `gh` for
+repository issues, pull requests, and branch operations.
 
-Prefer Forgejo MCP (`forgejo_*` tools) for issue, PR, and repository operations when available. Use `tea` only as a fallback when MCP is unavailable:
+The product under development reviews Forgejo pull requests. Prefer Forgejo MCP
+(`forgejo_*` tools) for operations against test or deployment Forgejo instances
+when available. Use `tea` only as a fallback for those Forgejo instances when
+MCP is unavailable:
 
 ```sh
 # MCP-first path
-forgejo_list_repo_issues --owner Slipstream --repo auto_review
-forgejo_create_pull_request --owner Slipstream --repo auto_review --base main --head <branch> --title "..." --body "..."
+forgejo_list_repo_issues --owner example-owner --repo example-repo
+forgejo_create_pull_request --owner example-owner --repo example-repo --base main --head <branch> --title "..." --body "..."
 
 # CLI fallback
-tea issue view <N> --repo Slipstream/auto_review
-tea pr create --repo Slipstream/auto_review --head <branch> --base main --title "..." --description "..."
+tea issue view <N> --repo example-owner/example-repo
+tea pr create --repo example-owner/example-repo --head <branch> --base main --title "..." --description "..."
 ```
 
-Forgejo MCP may be available from the surrounding Codex environment. If it is not available, use `tea` as the fallback. `FORGEJO_TOKEN` is the expected credential for Forgejo tooling; never hardcode or commit the token.
+Forgejo MCP may be available from the surrounding Codex environment. If it is
+not available, use `tea` as the fallback for Forgejo instance work.
+`FORGEJO_TOKEN` is the expected credential for Forgejo tooling; never hardcode
+or commit the token.
 
-Branch protection requires a PR for every merge to `main`. CI in `.forgejo/workflows/ci.yml` runs the Rust verification gates for application changes.
+Branch protection requires a PR for every merge to `main`. GitHub Actions in
+`.github/workflows/ci.yml` runs the Rust verification gates for application
+changes.
 
 ## Architecture
 
-A Forgejo webhook lands at `ar-gateway`, which HMAC-verifies the payload and handles low-cost PR intake plus chat commands. Normal semantic review dispatch comes from the CI action path after repository-selected prerequisites pass; explicit chat commands such as `@auto-review re-review` can force a review. The review pipeline is:
+A Forgejo or GitHub App webhook lands at `ar-gateway` (`/webhooks/forgejo` or `/webhooks/github`), which signature-verifies the payload and handles low-cost PR intake plus chat commands. Normal semantic review dispatch comes from the CI action path after repository-selected prerequisites pass; explicit chat commands such as `@auto-review re-review` can force a review. The review pipeline is:
 
 ```text
 clone (workspace.rs)
@@ -76,7 +85,7 @@ Deterministic linters/tests/builds run in CI before semantic review. Runtime wor
 | `ar-orchestrator` | `JobDispatcher`, `SpawningDispatcher`, review history, changed-file triage, status calls |
 | `ar-forge` | Provider-neutral repository-host DTOs, error type, and `ReviewHost` trait |
 | `ar-forgejo` | Forgejo REST client, webhook DTOs, review/comment/status APIs, Basic-auth bootstrap client |
-| `ar-github` | GitHub App REST client foundation and `ReviewHost` wrapper |
+| `ar-github` | GitHub App REST client, webhook payloads, and `ReviewHost` implementations (per-invocation and long-lived gateway `AppReviewHost`) |
 | `ar-llm` | provider trait and tier-based router |
 | `ar-prompts` | prompt templates and JSON schemas |
 | `ar-review` | review, verify, self-heal, RAG context, repo config |

@@ -10,7 +10,7 @@
 
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
-use tree_sitter::{Node, Parser, Query, QueryCursor};
+use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -209,12 +209,11 @@ fn extract_with(
     let capture_names = query.capture_names();
 
     let mut out = Vec::new();
-    #[allow(clippy::while_let_on_iterator)]
     while let Some(m) = matches.next() {
         let mut kind: Option<SymbolKind> = None;
         let mut name: Option<String> = None;
         let mut node_for_range: Option<Node> = None;
-        for cap in m.captures {
+        for cap in m.captures() {
             let cap_name = capture_names[cap.index as usize];
             if cap_name == "name" {
                 name = Some(

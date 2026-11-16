@@ -24,7 +24,7 @@ use ar_orchestrator::{
 use ar_prompts::{render_review_prompt, ReviewPromptInputs};
 use ar_review::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 use async_trait::async_trait;
-use hmac::{Hmac, Mac};
+use hmac::{Hmac, KeyInit, Mac};
 use sha2::Sha256;
 use std::sync::Arc;
 
@@ -2864,6 +2864,7 @@ auto_review_reviews_completed_count 10
             reasoning_model: "test-model".into(),
             poller_enabled: true,
             readiness_enabled: true,
+            providers: vec!["forgejo"],
             runtime_isolation: RuntimeIsolationPostureInfo::oci_default(),
         });
         let app = build_router(AppState::new("s", Arc::new(NoOpDispatcher)).with_info(info));

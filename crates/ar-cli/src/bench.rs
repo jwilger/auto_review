@@ -202,28 +202,14 @@ impl Comparison {
         // would tank this even when precision/recall stayed flat
         // for the surviving runs. Catch it explicitly rather than
         // hoping precision/recall would surface it.
-        if let Some(d) = self.success_rate_delta {
-            if d < -0.05 {
-                return true;
-            }
-        }
-        if let Some(d) = self.precision_delta {
-            if d < -0.05 {
-                return true;
-            }
-        }
-        if let Some(d) = self.recall_delta {
-            if d < -0.05 {
-                return true;
-            }
-        }
-        // The "50% jump in p99" check needs the baseline's p99 to
-        // compute the percent; signal it via the absolute jump
-        // instead. A 5-second p99 increase is alert-worthy regardless.
-        if self.p99_latency_ms_delta > 5000 {
-            return true;
-        }
-        false
+        let dropped = |delta: Option<f64>| delta.is_some_and(|d| d < -0.05);
+        dropped(self.success_rate_delta)
+            || dropped(self.precision_delta)
+            || dropped(self.recall_delta)
+            // The "50% jump in p99" check needs the baseline's p99 to
+            // compute the percent; signal it via the absolute jump
+            // instead. A 5-second p99 increase is alert-worthy regardless.
+            || self.p99_latency_ms_delta > 5000
     }
 }
 
@@ -1099,9 +1085,9 @@ mod tests {
                     .replace('\\', "/")
             })
             .collect();
-        assert!(names.contains(&"sqli/case1.json".to_string()));
-        assert!(names.contains(&"xss/case1.json".to_string()));
-        assert!(names.contains(&"sqli/more/case2.json".to_string()));
+        assert!(names.iter().any(|n| n == "sqli/case1.json"));
+        assert!(names.iter().any(|n| n == "xss/case1.json"));
+        assert!(names.iter().any(|n| n == "sqli/more/case2.json"));
         assert!(!names.iter().any(|n| n.ends_with(".md")));
         assert_eq!(resolved.len(), 3);
     }

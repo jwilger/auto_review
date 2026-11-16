@@ -103,8 +103,21 @@ async fn review_host_get_pull_request_uses_installation_token() {
 }
 
 #[tokio::test]
-async fn review_host_clone_url_uses_installation_token_credentials() {
-    let client = Client::new("https://github.example.com", "app-jwt").expect("client");
+async fn review_host_clone_url_uses_repository_clone_url_with_installation_token_credentials() {
+    // The REST API host (api.github.com, or <host>/api/v3 on GHES) is not the
+    // git host, so the clone URL must come from the repository resource.
+    let github = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo"))
+        .and(header("authorization", "Bearer ghs_token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "full_name": "owner/repo",
+            "clone_url": "https://github.example.com/owner/repo.git"
+        })))
+        .expect(1)
+        .mount(&github)
+        .await;
+    let client = Client::new(&github.uri(), "app-jwt").expect("client");
     let host = ar_github::InstallationReviewHost::new(client, "ghs_token");
     let host: &dyn ar_forge::ReviewHost = &host;
 
@@ -245,7 +258,7 @@ async fn review_host_get_pr_diff_dispatches_through_installation_token() {
 }
 
 #[tokio::test]
-async fn review_host_list_pull_reviews_uses_installation_token_and_paginates() {
+async fn review_host_list_pull_reviews_uses_installation_token_paginates_and_normalizes_state() {
     let github = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/repos/owner/repo/pulls/7/reviews"))
@@ -299,10 +312,12 @@ async fn review_host_list_pull_reviews_uses_installation_token_and_paginates() {
 
     assert_eq!(reviews.len(), 101);
     assert_eq!(reviews[0].id, 2001);
-    assert_eq!(reviews[0].state, "COMMENTED");
+    // GitHub review states are normalized to the provider-neutral
+    // (Forgejo-shaped) vocabulary that chat and pipeline code compare against.
+    assert_eq!(reviews[0].state, "COMMENT");
     assert_eq!(reviews[0].user.login, "alice");
     assert_eq!(reviews[100].id, 2101);
-    assert_eq!(reviews[100].state, "CHANGES_REQUESTED");
+    assert_eq!(reviews[100].state, "REQUEST_CHANGES");
     assert_eq!(reviews[100].user.login, "bob");
 }
 
@@ -405,7 +420,7 @@ async fn review_host_update_pull_request_uses_installation_token_and_omits_unset
 }
 
 #[tokio::test]
-async fn create_review_uses_installation_token_and_maps_inline_comment_position() {
+async fn create_review_uses_installation_token_and_maps_inline_comment_to_new_file_line() {
     let github = MockServer::start().await;
     let request = ar_forge::CreateReviewRequest {
         body: "LGTM with notes".to_string(),
@@ -430,7 +445,8 @@ async fn create_review_uses_installation_token_and_maps_inline_comment_position(
             "comments": [
                 {
                     "path": "src/lib.rs",
-                    "position": 42,
+                    "line": 42,
+                    "side": "RIGHT",
                     "body": "This misses the edge case."
                 }
             ]
@@ -505,7 +521,6 @@ async fn review_host_post_commit_status_uses_installation_token() {
         .and(header("accept", "application/vnd.github+json"))
         .and(body_json(serde_json::json!({
             "state": "pending",
-            "target_url": "",
             "description": "auto_review running",
             "context": "auto_review"
         })))
@@ -715,4 +730,129 @@ async fn get_file_content_returns_none_when_github_returns_404() {
         .expect("missing file should not be an error");
 
     assert_eq!(contents, None);
+}
+
+#[tokio::test]
+async fn create_review_maps_approved_event_to_github_approve() {
+    let github = MockServer::start().await;
+    let request = ar_forge::CreateReviewRequest {
+        body: "Looks good".to_string(),
+        commit_id: "head-sha".to_string(),
+        event: ar_forge::ReviewEvent::Approved,
+        comments: Vec::new(),
+    };
+    Mock::given(method("POST"))
+        .and(path("/repos/owner/repo/pulls/7/reviews"))
+        .and(body_json(serde_json::json!({
+            "body": "Looks good",
+            "commit_id": "head-sha",
+            "event": "APPROVE"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 100,
+            "state": "APPROVED"
+        })))
+        .expect(1)
+        .mount(&github)
+        .await;
+
+    let client = Client::new(&github.uri(), "app-jwt").expect("client");
+
+    let created = client
+        .create_review("owner", "repo", 7, &request, "installation-token")
+        .await
+        .expect("created review");
+
+    assert_eq!(created.id, 100);
+}
+
+#[tokio::test]
+async fn post_commit_status_shapes_body_to_github_status_limits() {
+    let github = MockServer::start().await;
+    let status = ar_forge::CommitStatus {
+        state: ar_forge::CommitStatusState::Warning,
+        target_url: String::new(),
+        description: "x".repeat(240),
+        context: "auto_review".to_string(),
+    };
+    // GitHub rejects descriptions over 140 characters, has no `warning`
+    // state, and only accepts absolute URLs for `target_url`.
+    let expected_description = format!("{}…", "x".repeat(139));
+    Mock::given(method("POST"))
+        .and(path("/repos/owner/repo/statuses/head-sha"))
+        .and(body_json(serde_json::json!({
+            "state": "failure",
+            "description": expected_description,
+            "context": "auto_review"
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({
+            "id": 124,
+            "state": "failure"
+        })))
+        .expect(1)
+        .mount(&github)
+        .await;
+
+    let client = Client::new(&github.uri(), "app-jwt").expect("client");
+
+    client
+        .post_commit_status("owner", "repo", "head-sha", &status, "installation-token")
+        .await
+        .expect("status posted");
+}
+
+#[tokio::test]
+async fn create_review_folds_unanchorable_inline_comments_into_body_on_422() {
+    let github = MockServer::start().await;
+    let request = ar_forge::CreateReviewRequest {
+        body: "Summary".to_string(),
+        commit_id: "head-sha".to_string(),
+        event: ar_forge::ReviewEvent::RequestChanges,
+        comments: vec![ar_forge::ReviewComment {
+            path: "src/lib.rs".to_string(),
+            body: "Outside the diff.".to_string(),
+            old_position: None,
+            new_position: Some(900),
+        }],
+    };
+    Mock::given(method("POST"))
+        .and(path("/repos/owner/repo/pulls/7/reviews"))
+        .and(body_json(serde_json::json!({
+            "body": "Summary",
+            "commit_id": "head-sha",
+            "event": "REQUEST_CHANGES",
+            "comments": [
+                {"path": "src/lib.rs", "line": 900, "side": "RIGHT", "body": "Outside the diff."}
+            ]
+        })))
+        .respond_with(ResponseTemplate::new(422).set_body_json(serde_json::json!({
+            "message": "Unprocessable Entity",
+            "errors": ["Line could not be resolved"]
+        })))
+        .expect(1)
+        .mount(&github)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/repos/owner/repo/pulls/7/reviews"))
+        .and(body_json(serde_json::json!({
+            "body": "Summary\n\n---\n\n**Inline comments that GitHub could not anchor to the diff:**\n\n#### `src/lib.rs` line 900\n\nOutside the diff.",
+            "commit_id": "head-sha",
+            "event": "REQUEST_CHANGES"
+        })))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "id": 101,
+            "state": "CHANGES_REQUESTED"
+        })))
+        .expect(1)
+        .mount(&github)
+        .await;
+
+    let client = Client::new(&github.uri(), "app-jwt").expect("client");
+
+    let created = client
+        .create_review("owner", "repo", 7, &request, "installation-token")
+        .await
+        .expect("created review after fallback");
+
+    assert_eq!(created.id, 101);
 }

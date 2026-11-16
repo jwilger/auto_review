@@ -7,8 +7,9 @@ Thanks for considering a contribution to `auto_review`.
 ### Prerequisites
 
 - A Rust toolchain plus the project tools on `PATH`: `just`,
-  `cargo-deny`, `cargo-nextest`, `git`, `pkg-config`, `openssl`,
-  and the rest of the normal build prerequisites.
+  `cargo-deny`, `cargo-nextest`, `git`, `pkg-config`, `openssl`, SQLite
+  development headers (`libsqlite3-dev`), and the rest of the normal
+  build prerequisites.
 - Optional: **[Nix](https://nixos.org/download.html) with flakes
   enabled.** This is the supported provisioning path: it pins the
   Rust toolchain (nightly, resolved by `flake.lock`'s rust-overlay
