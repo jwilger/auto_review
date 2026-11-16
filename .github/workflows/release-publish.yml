@@ -18,14 +18,14 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' && inputs.release_merge_sha != '' }}
     environment: release-publish
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         name: Checkout pushed main commit
         if: ${{ github.event_name == 'push' }}
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 0
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         name: Checkout dispatched release merge commit
         if: ${{ github.event_name == 'workflow_dispatch' }}
         with:
@@ -35,7 +35,7 @@ jobs:
 
       - name: Load release secrets
         id: load_secrets
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@v5
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           GH_RELEASE_AUTOMATION_TOKEN: op://Github Secrets/GH_RELEASE_AUTOMATION_TOKEN/credential
@@ -139,7 +139,7 @@ jobs:
           )"
           printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
 
-      - uses: DeterminateSystems/nix-installer-action@v22
+      - uses: DeterminateSystems/nix-installer-action@v23
         if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
 
       - name: Build Linux binary release artifacts from merged commit

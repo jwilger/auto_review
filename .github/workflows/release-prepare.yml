@@ -15,14 +15,14 @@ jobs:
     runs-on: ubuntu-latest
     if: "${{ github.event_name != 'push' || !startsWith(github.event.head_commit.message, 'chore: release') }}"
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
         with:
           persist-credentials: false
           fetch-depth: 0
 
       - name: Load release secrets
         id: load_secrets
-        uses: 1password/load-secrets-action@v4
+        uses: 1password/load-secrets-action@v5
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           GH_RELEASE_AUTOMATION_TOKEN: op://Github Secrets/GH_RELEASE_AUTOMATION_TOKEN/credential
