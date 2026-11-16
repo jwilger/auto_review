@@ -178,7 +178,9 @@ impl VectorStore for SqliteVectorStore {
             let clauses: Vec<&str> =
                 vec!["(path = ? AND name = ? AND line_start = ?)"; chunk.len()];
             sql.push_str(&clauses.join(" OR "));
-            let mut q = sqlx::query(&sql);
+            // The statement is assembled solely from static fragments and
+            // `?` placeholders; every caller-supplied value is bound below.
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
             for (path, name, line_start) in chunk {
                 q = q.bind(path).bind(name).bind(*line_start as i64);
             }
