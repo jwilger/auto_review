@@ -178,7 +178,9 @@ impl VectorStore for SqliteVectorStore {
             let clauses: Vec<&str> =
                 vec!["(path = ? AND name = ? AND line_start = ?)"; chunk.len()];
             sql.push_str(&clauses.join(" OR "));
-            let mut q = sqlx::query(&sql);
+            // The statement is assembled solely from static fragments and
+            // `?` placeholders; every caller-supplied value is bound below.
+            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
             for (path, name, line_start) in chunk {
                 q = q.bind(path).bind(name).bind(*line_start as i64);
             }
@@ -267,8 +269,10 @@ fn vec_f32_to_bytes(v: &[f32]) -> Vec<u8> {
 
 fn bytes_to_vec_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
-        .chunks_exact(4)
-        .map(|c| f32::from_le_bytes([c[0], c[1], c[2], c[3]]))
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|c| f32::from_le_bytes(*c))
         .collect()
 }
 

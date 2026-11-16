@@ -384,7 +384,7 @@ fn reject(status: StatusCode, msg: &str) -> Response {
 mod tests {
     use super::*;
     use crate::build_router;
-    use ::hmac::{Hmac, Mac};
+    use ::hmac::{Hmac, KeyInit, Mac};
     use ar_orchestrator::{JobDispatcher, NoOpDispatcher};
     use async_trait::async_trait;
     use axum::body::Body;

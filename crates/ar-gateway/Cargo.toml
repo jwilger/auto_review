@@ -14,7 +14,6 @@ tracing-subscriber.workspace = true
 anyhow.workspace = true
 axum.workspace = true
 tower.workspace = true
-tower-http.workspace = true
 thiserror.workspace = true
 hmac.workspace = true
 sha2.workspace = true
@@ -30,7 +29,7 @@ ar-index = { path = "../ar-index" }
 ar-forge = { path = "../ar-forge" }
 ar-github = { path = "../ar-github" }
 async-trait.workspace = true
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-unbundled", "macros"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

@@ -350,7 +350,7 @@ impl From<ChatError> for PollerError {
 mod tests {
     use super::*;
     use crate::{build_router, AppState, ChatDeps};
-    use ::hmac::{Hmac, Mac};
+    use ::hmac::{Hmac, KeyInit, Mac};
     use ar_index::InMemoryLearningsStore;
     use ar_llm::Router;
     use ar_orchestrator::review_history::InMemoryReviewHistory;

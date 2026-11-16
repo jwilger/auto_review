@@ -11,7 +11,6 @@ description = "Per-PR durable workflow state machine; fan-out/fan-in across pipe
 tokio.workspace = true
 serde.workspace = true
 serde_json.workspace = true
-anyhow.workspace = true
 thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
@@ -21,7 +20,7 @@ ar-forgejo = { path = "../ar-forgejo" }
 ar-index = { path = "../ar-index" }
 ar-llm = { path = "../ar-llm" }
 ar-review = { path = "../ar-review" }
-sqlx = { version = "0.8", default-features = false, features = ["runtime-tokio", "sqlite", "macros"] }
+sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio", "sqlite-unbundled", "macros"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
