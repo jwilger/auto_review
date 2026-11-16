@@ -30,7 +30,15 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "deny"
 # Surface but don't block on:
 unmaintained = "workspace"
-ignore = []
+ignore = [
+    # Bundled SQLite < 3.54 page-cache disclosure. The workspace builds
+    # sqlx with `sqlite-unbundled`, so the vulnerable bundled C source in
+    # libsqlite3-sys is never compiled; the binary links nixpkgs' SQLite
+    # (3.54.0, patched). cargo-deny matches only on the libsqlite3-sys
+    # version, which sqlx-sqlite 0.9.0 caps below 0.38. Remove this entry
+    # once the sqlx in Cargo.lock allows libsqlite3-sys >= 0.39.
+    { id = "RUSTSEC-2026-0459", reason = "bundled SQLite not compiled (sqlite-unbundled); links patched system SQLite 3.54.0" },
+]
 
 # ---------------------------------------------------------------
 # License compatibility. The project ships under AGPL-3.0-or-later
