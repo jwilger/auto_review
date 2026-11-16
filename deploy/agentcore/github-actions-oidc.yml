@@ -16,7 +16,7 @@ jobs:
     if: ${{ github.event.pull_request.draft == false }}
     steps:
       - name: Configure AWS credentials
-        uses: aws-actions/configure-aws-credentials@v4
+        uses: aws-actions/configure-aws-credentials@v6
         with:
           role-to-assume: ${{ vars.AUTO_REVIEW_AGENTCORE_INVOKE_ROLE_ARN }}
           aws-region: ${{ vars.AWS_REGION }}
