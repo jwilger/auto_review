@@ -4,7 +4,8 @@ use crate::metrics::{Metrics, MetricsObserver};
 use crate::poller::{ChatPoller, SharedCommentCursors, DEFAULT_POLL_INTERVAL};
 use crate::ratelimit::TokenBucket;
 use crate::{
-    build_router, AppState, ChatDeps, GatewayInfo, ReadinessProbe, RuntimeIsolationPostureInfo,
+    build_router, AppState, ChatDeps, GatewayInfo, GitHubChatDeps, GitHubDeps, ReadinessProbe,
+    RuntimeIsolationPostureInfo,
 };
 use anyhow::{Context, Result};
 use ar_forgejo::Client as ForgejoClient;
@@ -15,7 +16,7 @@ use ar_index::{
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::review_history::{InMemoryReviewHistory, ReviewHistory};
 use ar_orchestrator::sqlite_history::SqliteReviewHistory;
-use ar_orchestrator::SpawningDispatcher;
+use ar_orchestrator::{NoOpDispatcher, SpawningDispatcher};
 use std::collections::HashMap;
 use std::env;
 use std::fmt;
@@ -35,17 +36,49 @@ struct GatewayStartupEnvValues<'a> {
     ar_forgejo_token: Option<&'a str>,
     llm_base_url: Option<&'a str>,
     llm_reasoning_model: Option<&'a str>,
+    github: GitHubStartupEnvValues<'a>,
+}
+
+#[derive(Clone, Copy, Default)]
+struct GitHubStartupEnvValues<'a> {
+    app_id: Option<&'a str>,
+    private_key: Option<&'a str>,
+    webhook_secret: Option<&'a str>,
+    api_url: Option<&'a str>,
+}
+
+impl GitHubStartupEnvValues<'_> {
+    fn any_set(&self) -> bool {
+        self.app_id.is_some() || self.private_key.is_some() || self.webhook_secret.is_some()
+    }
 }
 
 #[derive(Debug)]
 struct GatewayStartupConfig {
     bind: String,
-    webhook_secret: String,
-    forgejo_base_url: String,
-    ar_forgejo_token: String,
+    /// Forgejo provider. Required unless a GitHub App is configured.
+    forgejo: Option<ForgejoStartupConfig>,
+    github: Option<GitHubStartupConfig>,
     llm_base_url: String,
     llm_reasoning_model: String,
 }
+
+#[derive(Debug)]
+struct ForgejoStartupConfig {
+    webhook_secret: String,
+    base_url: String,
+    token: String,
+}
+
+#[derive(Debug)]
+struct GitHubStartupConfig {
+    app_id: u64,
+    private_key: String,
+    webhook_secret: String,
+    api_url: String,
+}
+
+const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
 
 #[derive(Clone, Copy)]
 struct BotIdentityEnvValues<'a> {
@@ -153,11 +186,18 @@ const STATIC_INNER_GATEWAY_ENV: &[(&str, &str)] = &[
     ("RUST_LOG", "info,ar_gateway=debug"),
 ];
 
-const REQUIRED_INNER_GATEWAY_ENV: &[&str] = &[
-    "WEBHOOK_SECRET",
-    "FORGEJO_BASE_URL",
-    "AR_FORGEJO_TOKEN",
-    "LLM_BASE_URL",
+const REQUIRED_INNER_GATEWAY_ENV: &[&str] = &["LLM_BASE_URL"];
+
+/// Required when the Forgejo provider is in use (any Forgejo variable set,
+/// or no GitHub App configured).
+const REQUIRED_FORGEJO_INNER_GATEWAY_ENV: &[&str] =
+    &["WEBHOOK_SECRET", "FORGEJO_BASE_URL", "AR_FORGEJO_TOKEN"];
+
+/// Required when any GitHub App variable is set.
+const REQUIRED_GITHUB_INNER_GATEWAY_ENV: &[&str] = &[
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_WEBHOOK_SECRET",
 ];
 
 const INNER_GATEWAY_ENV_ALLOWLIST: &[&str] = &[
@@ -165,6 +205,12 @@ const INNER_GATEWAY_ENV_ALLOWLIST: &[&str] = &[
     "WEBHOOK_SECRET",
     "FORGEJO_BASE_URL",
     "AR_FORGEJO_TOKEN",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY",
+    "GITHUB_WEBHOOK_SECRET",
+    "GITHUB_API_URL",
+    "GITHUB_BOT_LOGIN",
+    "GITHUB_BOT_NAME",
     "LLM_BASE_URL",
     "LLM_API_KEY",
     "LLM_REASONING_MODEL",
@@ -474,16 +520,35 @@ fn inner_gateway_process_env_from_lookup(
         .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
         .collect::<Vec<_>>();
 
+    let mut staged = Vec::new();
     for name in INNER_GATEWAY_ENV_ALLOWLIST {
         let value = lookup(name)?.filter(|value| !value.trim().is_empty());
-        if REQUIRED_INNER_GATEWAY_ENV.contains(name) && value.is_none() {
-            return Err(OciSetupDiagnostic::new(format!(
-                "{name} is required for staged OCI inner gateway config"
-            )));
-        }
         if let Some(value) = value {
+            staged.push(*name);
             set_process_env_entry(&mut process_env, name, value);
         }
+    }
+
+    let is_staged = |name: &str| staged.contains(&name);
+    let github_requested = REQUIRED_GITHUB_INNER_GATEWAY_ENV
+        .iter()
+        .any(|name| is_staged(name));
+    let forgejo_requested =
+        is_staged("FORGEJO_BASE_URL") || is_staged("AR_FORGEJO_TOKEN") || !github_requested;
+    let mut required: Vec<&str> = REQUIRED_INNER_GATEWAY_ENV.to_vec();
+    if forgejo_requested {
+        required.extend_from_slice(REQUIRED_FORGEJO_INNER_GATEWAY_ENV);
+    }
+    if github_requested {
+        required.extend_from_slice(REQUIRED_GITHUB_INNER_GATEWAY_ENV);
+    }
+    if let Some(name) = INNER_GATEWAY_ENV_ALLOWLIST
+        .iter()
+        .find(|name| required.contains(name) && !is_staged(name))
+    {
+        return Err(OciSetupDiagnostic::new(format!(
+            "{name} is required for staged OCI inner gateway config"
+        )));
     }
 
     set_process_env_entry(
@@ -981,20 +1046,66 @@ impl GatewayStartupConfig {
             );
         }
 
+        let github = if values.github.any_set() {
+            let app_id = values
+                .github
+                .app_id
+                .context("GITHUB_APP_ID is required when a GitHub App is configured")?
+                .trim()
+                .parse::<u64>()
+                .ok()
+                .context("GITHUB_APP_ID must be the numeric GitHub App id")?;
+            let private_key = values
+                .github
+                .private_key
+                .context("GITHUB_APP_PRIVATE_KEY is required when a GitHub App is configured")?;
+            let webhook_secret = values
+                .github
+                .webhook_secret
+                .context("GITHUB_WEBHOOK_SECRET is required when a GitHub App is configured")?;
+            Some(GitHubStartupConfig {
+                app_id,
+                // Env files commonly carry PEMs on one line with `\n` escapes.
+                private_key: private_key.replace("\\n", "\n"),
+                webhook_secret: webhook_secret.to_string(),
+                api_url: values
+                    .github
+                    .api_url
+                    .unwrap_or(DEFAULT_GITHUB_API_URL)
+                    .to_string(),
+            })
+        } else {
+            None
+        };
+
+        // Forgejo stays mandatory unless the operator configured GitHub
+        // instead, preserving the original single-provider contract.
+        let forgejo_requested = values.forgejo_base_url.is_some()
+            || values.ar_forgejo_token.is_some()
+            || github.is_none();
+        let forgejo = if forgejo_requested {
+            Some(ForgejoStartupConfig {
+                webhook_secret: values
+                    .webhook_secret
+                    .context("WEBHOOK_SECRET is required")?
+                    .to_string(),
+                base_url: values
+                    .forgejo_base_url
+                    .context("FORGEJO_BASE_URL is required")?
+                    .to_string(),
+                token: values
+                    .ar_forgejo_token
+                    .context("AR_FORGEJO_TOKEN is required")?
+                    .to_string(),
+            })
+        } else {
+            None
+        };
+
         Ok(Self {
             bind: values.bind.unwrap_or("0.0.0.0:8080").to_string(),
-            webhook_secret: values
-                .webhook_secret
-                .context("WEBHOOK_SECRET is required")?
-                .to_string(),
-            forgejo_base_url: values
-                .forgejo_base_url
-                .context("FORGEJO_BASE_URL is required")?
-                .to_string(),
-            ar_forgejo_token: values
-                .ar_forgejo_token
-                .context("AR_FORGEJO_TOKEN is required")?
-                .to_string(),
+            forgejo,
+            github,
             llm_base_url: values
                 .llm_base_url
                 .context("LLM_BASE_URL is required")?
@@ -1034,6 +1145,30 @@ fn resolve_bot_identity(values: BotIdentityEnvValues<'_>) -> Result<EffectiveBot
     })
 }
 
+/// Resolve the GitHub App's comment login (`<slug>[bot]`) and the mention
+/// handle users type. Explicit `GITHUB_BOT_LOGIN` / `GITHUB_BOT_NAME`
+/// override what `GET /app` reports.
+fn resolve_github_bot_identity(
+    login_override: Option<&str>,
+    name_override: Option<&str>,
+    app: Option<&ar_github::AppInfo>,
+) -> Result<EffectiveBotIdentity> {
+    let login = match (login_override, app) {
+        (Some(login), _) => login.trim().to_string(),
+        (None, Some(app)) => app.bot_login(),
+        (None, None) => anyhow::bail!("GITHUB_BOT_LOGIN is required when GET /app is skipped"),
+    };
+    let name = match (name_override, app) {
+        (Some(name), _) => name.trim().trim_start_matches('@').to_string(),
+        (None, Some(app)) => app.slug.clone(),
+        (None, None) => login.trim_end_matches("[bot]").to_string(),
+    };
+    if login.is_empty() || name.is_empty() {
+        anyhow::bail!("GITHUB_BOT_LOGIN and GITHUB_BOT_NAME must not be empty");
+    }
+    Ok(EffectiveBotIdentity { login, name })
+}
+
 pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     tracing_subscriber::fmt()
         .with_env_filter(
@@ -1064,6 +1199,10 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     let forgejo_token_env = read_non_empty_env("AR_FORGEJO_TOKEN");
     let llm_base_env = env::var("LLM_BASE_URL").ok();
     let reasoning_model_env = env::var("LLM_REASONING_MODEL").ok();
+    let github_app_id_env = read_non_empty_env("GITHUB_APP_ID");
+    let github_private_key_env = read_non_empty_env("GITHUB_APP_PRIVATE_KEY");
+    let github_webhook_secret_env = read_non_empty_env("GITHUB_WEBHOOK_SECRET");
+    let github_api_url_env = read_non_empty_env("GITHUB_API_URL");
     let startup_config = GatewayStartupConfig::from_env_values(GatewayStartupEnvValues {
         bind: bind_env.as_deref(),
         webhook_secret: webhook_secret_env.as_deref(),
@@ -1071,6 +1210,12 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         ar_forgejo_token: forgejo_token_env.as_deref(),
         llm_base_url: llm_base_env.as_deref(),
         llm_reasoning_model: reasoning_model_env.as_deref(),
+        github: GitHubStartupEnvValues {
+            app_id: github_app_id_env.as_deref(),
+            private_key: github_private_key_env.as_deref(),
+            webhook_secret: github_webhook_secret_env.as_deref(),
+            api_url: github_api_url_env.as_deref(),
+        },
     })?;
 
     // git is required for the workspace clone phase. Probe up
@@ -1105,21 +1250,32 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         }
     }
 
-    let secret = startup_config.webhook_secret;
-    // Forgejo's webhook docs recommend a strong random secret; HMAC-
-    // SHA256 with a short shared key is brute-forceable. Warn at
+    // Webhook docs for both forges recommend a strong random secret;
+    // HMAC-SHA256 with a short shared key is brute-forceable. Warn at
     // startup rather than at first verify so operators see this in
     // their first log scrape, not a production failure window.
-    if secret.len() < 16 {
-        tracing::warn!(
-            length = secret.len(),
-            "WEBHOOK_SECRET is shorter than 16 bytes; HMAC verification \
-             will work but the secret is weakly resistant to brute-force \
-             attack. Recommend 32+ random bytes (e.g. `openssl rand -hex 32`)"
-        );
+    for (name, secret) in [
+        (
+            "WEBHOOK_SECRET",
+            startup_config.forgejo.as_ref().map(|f| &f.webhook_secret),
+        ),
+        (
+            "GITHUB_WEBHOOK_SECRET",
+            startup_config.github.as_ref().map(|g| &g.webhook_secret),
+        ),
+    ] {
+        if let Some(secret) = secret.filter(|secret| secret.len() < 16) {
+            tracing::warn!(
+                env = name,
+                length = secret.len(),
+                "webhook secret is shorter than 16 bytes; HMAC verification \
+                 will work but the secret is weakly resistant to brute-force \
+                 attack. Recommend 32+ random bytes (e.g. `openssl rand -hex 32`)"
+            );
+        }
     }
-    let forgejo_base = startup_config.forgejo_base_url;
-    let forgejo_token = startup_config.ar_forgejo_token;
+    let forgejo_config = startup_config.forgejo;
+    let github_config = startup_config.github;
     let llm_base = startup_config.llm_base_url;
     let llm_api_key = env::var("LLM_API_KEY").ok();
     let reasoning_model = startup_config.llm_reasoning_model;
@@ -1140,8 +1296,14 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     let bot_login = bot_identity.login;
     let bot_name = bot_identity.name;
 
-    let forgejo =
-        Arc::new(ForgejoClient::new(&forgejo_base, &forgejo_token).context("forgejo client")?);
+    let forgejo = forgejo_config
+        .as_ref()
+        .map(|config| {
+            ForgejoClient::new(&config.base_url, &config.token)
+                .map(Arc::new)
+                .context("forgejo client")
+        })
+        .transpose()?;
 
     let reasoning_provider = Arc::new(
         OpenAiProvider::new(&llm_base, llm_api_key.as_deref(), &reasoning_model)
@@ -1341,74 +1503,142 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     let observer: Arc<dyn ar_orchestrator::ReviewObserver> =
         Arc::new(MetricsObserver::new(metrics.clone()));
 
-    let mut dispatcher_builder = SpawningDispatcher::new(
-        forgejo.clone(),
-        llm_router.clone(),
-        forgejo_base.clone(),
-        forgejo_token.clone(),
-    )
-    .with_history(history.clone())
-    .with_learnings(learnings.clone())
-    .with_vector_store(vector_store.clone())
-    .with_observer(observer);
-
-    // Optional concurrency cap on in-flight reviews. Without this,
-    // a burst of N PRs spawns N tmpdirs + N in-flight LLM calls.
-    // For high-traffic instances or expensive cloud LLMs the
-    // operator wants a cap; small deployments leave it unset.
-    if let Some(max) = parse_env::<usize>("AR_REVIEW_CONCURRENCY") {
-        dispatcher_builder = dispatcher_builder.with_concurrency_limit(max);
-        tracing::info!(max, "review concurrency cap enabled");
+    // Optional concurrency cap on in-flight reviews, applied to each
+    // provider's dispatcher. Without this, a burst of N PRs spawns N
+    // tmpdirs + N in-flight LLM calls. For high-traffic instances or
+    // expensive cloud LLMs the operator wants a cap; small deployments
+    // leave it unset.
+    let review_concurrency = parse_env::<usize>("AR_REVIEW_CONCURRENCY");
+    if let Some(max) = review_concurrency {
+        tracing::info!(max, "review concurrency cap enabled (per provider)");
     }
+    let with_shared_review_state = |builder: SpawningDispatcher| {
+        let builder = builder
+            .with_history(history.clone())
+            .with_learnings(learnings.clone())
+            .with_vector_store(vector_store.clone())
+            .with_observer(observer.clone());
+        match review_concurrency {
+            Some(max) => builder.with_concurrency_limit(max),
+            None => builder,
+        }
+    };
 
-    let dispatcher = Arc::new(dispatcher_builder);
+    let forgejo_dispatcher = match (forgejo.as_ref(), forgejo_config.as_ref()) {
+        (Some(forgejo), Some(config)) => {
+            Some(Arc::new(with_shared_review_state(SpawningDispatcher::new(
+                forgejo.clone(),
+                llm_router.clone(),
+                config.base_url.clone(),
+                config.token.clone(),
+            ))))
+        }
+        _ => None,
+    };
 
     // Background poller for inline review-thread `@auto-review`
     // mentions. Forgejo doesn't fire pull_request_review_comment
     // webhooks reliably for thread replies (gitea#26023), so we
-    // poll. Disabled when AR_POLL_INTERVAL_SECS=0.
+    // poll. Disabled when AR_POLL_INTERVAL_SECS=0. GitHub delivers
+    // review-comment webhooks reliably, so it needs no poller.
     let poll_interval_secs =
         parse_env::<u64>("AR_POLL_INTERVAL_SECS").unwrap_or(DEFAULT_POLL_INTERVAL.as_secs());
     let chat_comment_cursors: SharedCommentCursors = Arc::new(Mutex::new(HashMap::new()));
-    if poll_interval_secs > 0 {
-        let dispatcher_dyn: Arc<dyn ar_orchestrator::JobDispatcher> = dispatcher.clone();
-        ChatPoller::new(
-            forgejo.clone(),
-            llm_router.clone(),
-            learnings.clone(),
-            history.clone(),
-            dispatcher_dyn,
-            bot_login.clone(),
-            bot_name.clone(),
-        )
-        .with_cursors(chat_comment_cursors.clone())
-        .with_metrics(metrics.clone())
-        .spawn(Duration::from_secs(poll_interval_secs));
-        tracing::info!(
-            interval_secs = poll_interval_secs,
-            bot_login = %bot_login,
-            bot_name = %bot_name,
-            "chat poller running"
-        );
-    } else {
-        tracing::info!("AR_POLL_INTERVAL_SECS=0; chat poller disabled");
+    let mut poller_enabled = false;
+    match (forgejo.as_ref(), forgejo_dispatcher.as_ref()) {
+        (Some(forgejo), Some(dispatcher)) if poll_interval_secs > 0 => {
+            let dispatcher_dyn: Arc<dyn ar_orchestrator::JobDispatcher> = dispatcher.clone();
+            ChatPoller::new(
+                forgejo.clone(),
+                llm_router.clone(),
+                learnings.clone(),
+                history.clone(),
+                dispatcher_dyn,
+                bot_login.clone(),
+                bot_name.clone(),
+            )
+            .with_cursors(chat_comment_cursors.clone())
+            .with_metrics(metrics.clone())
+            .spawn(Duration::from_secs(poll_interval_secs));
+            poller_enabled = true;
+            tracing::info!(
+                interval_secs = poll_interval_secs,
+                bot_login = %bot_login,
+                bot_name = %bot_name,
+                "chat poller running"
+            );
+        }
+        (Some(_), _) => tracing::info!("AR_POLL_INTERVAL_SECS=0; chat poller disabled"),
+        (None, _) => tracing::info!("Forgejo not configured; chat poller disabled"),
     }
 
-    let chat_deps = ChatDeps {
-        forgejo: forgejo.clone(),
-        llm: llm_router.clone(),
-        learnings,
+    let github_deps = match github_config.as_ref() {
+        Some(config) => {
+            let signer =
+                ar_github::GitHubAppJwt::from_rsa_pem(config.app_id, config.private_key.as_bytes())
+                    .context("GITHUB_APP_PRIVATE_KEY must be the GitHub App's PEM private key")?;
+            let client = ar_github::Client::with_app_signer(&config.api_url, signer)
+                .context("github client")?;
+            let host = Arc::new(ar_github::AppReviewHost::new(client));
+            let login_override = read_non_empty_env("GITHUB_BOT_LOGIN");
+            let name_override = read_non_empty_env("GITHUB_BOT_NAME");
+            let app = if login_override.is_some() && name_override.is_some() {
+                None
+            } else {
+                Some(host.client().get_authenticated_app().await.context(
+                    "authenticate as the GitHub App (GET /app); check GITHUB_APP_ID, \
+                     GITHUB_APP_PRIVATE_KEY, and GITHUB_API_URL",
+                )?)
+            };
+            let identity = resolve_github_bot_identity(
+                login_override.as_deref(),
+                name_override.as_deref(),
+                app.as_ref(),
+            )?;
+            let host_dyn: Arc<dyn ar_forge::ReviewHost> = host.clone();
+            let dispatcher: Arc<dyn ar_orchestrator::JobDispatcher> =
+                Arc::new(with_shared_review_state(SpawningDispatcher::new_with_host(
+                    host_dyn,
+                    llm_router.clone(),
+                    "",
+                    "",
+                )));
+            tracing::info!(
+                api_url = %config.api_url,
+                bot_login = %identity.login,
+                bot_name = %identity.name,
+                "GitHub App provider enabled at POST /webhooks/github"
+            );
+            Some(
+                GitHubDeps::new(config.webhook_secret.clone(), host, dispatcher)
+                    .with_bot_identity(identity.login, identity.name)
+                    .with_chat(GitHubChatDeps {
+                        llm: llm_router.clone(),
+                        learnings: learnings.clone(),
+                    }),
+            )
+        }
+        None => None,
     };
 
-    // Wire the readiness probe to the same Forgejo client the chat
-    // handler uses. The TTL (default 10s) is tuneable via env so
-    // operators with aggressive k8s probe schedules can lengthen it
-    // to avoid hammering Forgejo.
-    let readiness_ttl_secs = parse_env::<u64>("AR_READINESS_TTL_SECS").unwrap_or(10);
-    let readiness = Arc::new(ReadinessProbe::with_ttl(
-        forgejo.clone(),
-        Duration::from_secs(readiness_ttl_secs),
-    ));
+    // Wire the readiness probe to the configured repository hosts. The
+    // TTL (default 10s) is tuneable via env so operators with aggressive
+    // k8s probe schedules can lengthen it to avoid hammering the forge.
+    let readiness_ttl =
+        Duration::from_secs(parse_env::<u64>("AR_READINESS_TTL_SECS").unwrap_or(10));
+    let readiness = match (forgejo.as_ref(), github_deps.as_ref()) {
+        (Some(forgejo), Some(github)) => Some(
+            ReadinessProbe::with_ttl(forgejo.clone(), readiness_ttl)
+                .and_github(github.host.clone()),
+        ),
+        (Some(forgejo), None) => Some(ReadinessProbe::with_ttl(forgejo.clone(), readiness_ttl)),
+        (None, Some(github)) => Some(ReadinessProbe::github_with_ttl(
+            github.host.clone(),
+            readiness_ttl,
+        )),
+        (None, None) => None,
+    }
+    .map(Arc::new);
     let runtime_isolation = RuntimeIsolationPostureInfo::from(classify_runtime_isolation_posture(
         RuntimeIsolationPostureInput {
             bare: bare_env.as_deref(),
@@ -1423,6 +1653,14 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         detail = %runtime_isolation.detail,
         "runtime isolation posture classified"
     );
+
+    let mut providers = Vec::new();
+    if forgejo.is_some() {
+        providers.push("forgejo");
+    }
+    if github_deps.is_some() {
+        providers.push("github");
+    }
 
     // Snapshot the runtime config for /info. Read env-var-driven
     // booleans here once rather than threading them through every
@@ -1447,22 +1685,47 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
             tiers
         },
         reasoning_model: reasoning_model.clone(),
-        poller_enabled: poll_interval_secs > 0,
-        readiness_enabled: true,
+        poller_enabled,
+        readiness_enabled: readiness.is_some(),
+        providers,
         runtime_isolation,
     });
 
-    let mut state = AppState::new(secret, dispatcher)
-        .with_chat(chat_deps)
+    // GitHub-only gateways leave the Forgejo webhook secret empty, which
+    // makes `/webhooks/forgejo` answer 404 instead of verifying anything.
+    let forgejo_dispatcher_dyn: Arc<dyn ar_orchestrator::JobDispatcher> = match forgejo_dispatcher {
+        Some(dispatcher) => dispatcher,
+        None => Arc::new(NoOpDispatcher),
+    };
+    let forgejo_secret = forgejo_config
+        .as_ref()
+        .map(|config| config.webhook_secret.clone())
+        .unwrap_or_default();
+    let mut state = AppState::new(forgejo_secret, forgejo_dispatcher_dyn)
         .with_bot_identity(bot_login, bot_name)
         .with_metrics(metrics)
-        .with_readiness(readiness)
         .with_chat_comment_cursors(chat_comment_cursors)
         .with_info(info);
+    if let Some(forgejo) = forgejo.as_ref() {
+        state = state.with_chat(ChatDeps {
+            forgejo: forgejo.clone(),
+            llm: llm_router.clone(),
+            learnings: learnings.clone(),
+        });
+    }
+    if let Some(readiness) = readiness {
+        state = state.with_readiness(readiness);
+    }
+    if let Some(github) = github_deps {
+        state = state.with_github(github);
+    }
 
     if let Some(action_token) = validate_ci_review_token(read_non_empty_env("AR_CI_REVIEW_TOKEN"))?
     {
-        state = state.with_ci_review_endpoint(action_token, forgejo.clone());
+        state = match forgejo.as_ref() {
+            Some(forgejo) => state.with_ci_review_endpoint(action_token, forgejo.clone()),
+            None => state.with_ci_review_token(action_token),
+        };
         tracing::info!("CI review endpoint enabled at POST /reviews/ci");
     } else {
         tracing::info!("CI review endpoint disabled (AR_CI_REVIEW_TOKEN unset)");
@@ -1795,6 +2058,167 @@ mod tests {
         );
     }
 
+    const TEST_GITHUB_KEY: &str = "-----BEGIN PRIVATE KEY-----\\nkey\\n-----END PRIVATE KEY-----";
+
+    fn github_only_values() -> GatewayStartupEnvValues<'static> {
+        GatewayStartupEnvValues {
+            bind: None,
+            webhook_secret: None,
+            forgejo_base_url: None,
+            ar_forgejo_token: None,
+            llm_base_url: Some("https://llm.example.test/v1"),
+            llm_reasoning_model: None,
+            github: GitHubStartupEnvValues {
+                app_id: Some("12345"),
+                private_key: Some(TEST_GITHUB_KEY),
+                webhook_secret: Some("github-webhook-secret-value"),
+                api_url: None,
+            },
+        }
+    }
+
+    #[test]
+    fn github_bot_identity_defaults_to_app_slug_and_honors_overrides() {
+        let app = ar_github::AppInfo {
+            id: 1,
+            slug: "acme-review".to_string(),
+            name: "Acme Review".to_string(),
+        };
+
+        let defaults = resolve_github_bot_identity(None, None, Some(&app)).unwrap();
+        let overridden =
+            resolve_github_bot_identity(Some("reviewer[bot]"), Some("@reviewer"), None).unwrap();
+        let login_only = resolve_github_bot_identity(Some("reviewer[bot]"), None, None).unwrap();
+
+        assert_eq!(defaults.login, "acme-review[bot]");
+        assert_eq!(defaults.name, "acme-review");
+        assert_eq!(overridden.login, "reviewer[bot]");
+        assert_eq!(overridden.name, "reviewer");
+        assert_eq!(login_only.name, "reviewer");
+    }
+
+    #[test]
+    fn startup_config_accepts_github_app_without_forgejo() {
+        let config = GatewayStartupConfig::from_env_values(github_only_values()).unwrap();
+
+        assert!(config.forgejo.is_none());
+        let github = config.github.expect("github config");
+        assert_eq!(github.app_id, 12345);
+        assert_eq!(github.api_url, "https://api.github.com");
+        assert_eq!(github.webhook_secret, "github-webhook-secret-value");
+        // Escaped newlines from single-line env files become real newlines.
+        assert_eq!(
+            github.private_key,
+            "-----BEGIN PRIVATE KEY-----\nkey\n-----END PRIVATE KEY-----"
+        );
+    }
+
+    #[test]
+    fn startup_config_rejects_partial_github_app_config_without_leaking_values() {
+        for (missing_name, values) in [
+            (
+                "GITHUB_APP_ID",
+                GatewayStartupEnvValues {
+                    github: GitHubStartupEnvValues {
+                        app_id: None,
+                        ..github_only_values().github
+                    },
+                    ..github_only_values()
+                },
+            ),
+            (
+                "GITHUB_APP_PRIVATE_KEY",
+                GatewayStartupEnvValues {
+                    github: GitHubStartupEnvValues {
+                        private_key: None,
+                        ..github_only_values().github
+                    },
+                    ..github_only_values()
+                },
+            ),
+            (
+                "GITHUB_WEBHOOK_SECRET",
+                GatewayStartupEnvValues {
+                    github: GitHubStartupEnvValues {
+                        webhook_secret: None,
+                        ..github_only_values().github
+                    },
+                    ..github_only_values()
+                },
+            ),
+            (
+                "GITHUB_APP_ID",
+                GatewayStartupEnvValues {
+                    github: GitHubStartupEnvValues {
+                        app_id: Some("not-a-number"),
+                        ..github_only_values().github
+                    },
+                    ..github_only_values()
+                },
+            ),
+        ] {
+            let message = GatewayStartupConfig::from_env_values(values)
+                .unwrap_err()
+                .to_string();
+            assert!(
+                message.contains(missing_name),
+                "error should name {missing_name}, got: {message}"
+            );
+            assert!(
+                !message.contains("github-webhook-secret-value")
+                    && !message.contains("BEGIN PRIVATE KEY"),
+                "error must not leak configured values, got: {message}"
+            );
+        }
+    }
+
+    #[test]
+    fn startup_config_without_any_provider_still_requires_forgejo() {
+        let message = GatewayStartupConfig::from_env_values(GatewayStartupEnvValues {
+            github: GitHubStartupEnvValues::default(),
+            ..github_only_values()
+        })
+        .unwrap_err()
+        .to_string();
+
+        assert!(
+            message.contains("WEBHOOK_SECRET") || message.contains("FORGEJO_BASE_URL"),
+            "with no provider configured the Forgejo requirements apply, got: {message}"
+        );
+    }
+
+    #[test]
+    fn inner_gateway_oci_env_accepts_github_only_provider_config() {
+        let source = HashMap::from([
+            ("LLM_BASE_URL", "https://llm.example.test/v1"),
+            ("GITHUB_APP_ID", "12345"),
+            ("GITHUB_APP_PRIVATE_KEY", "github-private-key-value"),
+            ("GITHUB_WEBHOOK_SECRET", "github-webhook-secret-value"),
+            ("GITHUB_API_URL", "https://ghe.example.test/api/v3"),
+        ]);
+
+        let process_env = inner_gateway_process_env_from_lookup(|name| {
+            Ok(source.get(name).map(|value| (*value).to_string()))
+        })
+        .unwrap_or_else(|diagnostic| {
+            panic!("GitHub-only env should stage inner gateway env: {diagnostic:?}")
+        });
+        let env = process_env_map(&process_env);
+
+        for name in [
+            "GITHUB_APP_ID",
+            "GITHUB_APP_PRIVATE_KEY",
+            "GITHUB_WEBHOOK_SECRET",
+            "GITHUB_API_URL",
+        ] {
+            assert!(
+                env.contains_key(name),
+                "inner gateway env must include {name}"
+            );
+        }
+        assert!(!env.contains_key("FORGEJO_BASE_URL"));
+    }
+
     #[test]
     fn startup_config_from_explicit_env_values_applies_defaults_and_safe_validation() {
         let webhook_value = "webhook-value-for-test";
@@ -1806,14 +2230,17 @@ mod tests {
             ar_forgejo_token: Some(forgejo_value),
             llm_base_url: Some("https://llm.example.test/v1"),
             llm_reasoning_model: None,
+            github: GitHubStartupEnvValues::default(),
         };
 
         let config = GatewayStartupConfig::from_env_values(values).unwrap();
 
         assert_eq!(config.bind, "0.0.0.0:8080");
-        assert_eq!(config.webhook_secret, webhook_value);
-        assert_eq!(config.forgejo_base_url, "https://forgejo.example.test");
-        assert_eq!(config.ar_forgejo_token, forgejo_value);
+        let forgejo = config.forgejo.as_ref().expect("forgejo config");
+        assert_eq!(forgejo.webhook_secret, webhook_value);
+        assert_eq!(forgejo.base_url, "https://forgejo.example.test");
+        assert_eq!(forgejo.token, forgejo_value);
+        assert!(config.github.is_none());
         assert_eq!(config.llm_base_url, "https://llm.example.test/v1");
         assert_eq!(config.llm_reasoning_model, "qwen2.5-coder:32b");
 
