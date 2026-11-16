@@ -230,9 +230,16 @@
             # provide them from Nix rather than the host.
             coreutils
             bash
+            # libsqlite3-sys generates bindings against the system SQLite
+            # at build time (sqlx `sqlite-unbundled`); bindgen needs libclang.
+            rustPlatform.bindgenHook
           ];
           buildInputs = with pkgs; [
             openssl
+            # sqlx links the system SQLite (`sqlite-unbundled`) so the
+            # binary picks up nixpkgs' patched SQLite instead of the copy
+            # bundled in libsqlite3-sys, which lags behind upstream fixes.
+            sqlite
           ];
           # reqwest verifies TLS through the OS trust store and refuses to
           # build a client when none is found, even for plain-HTTP wiremock
@@ -316,6 +323,8 @@
               kubernetes-helm
               pkg-config
               openssl
+              sqlite
+              rustPlatform.bindgenHook
               # Quick foreground Rust check loops.
               bacon
             ];
