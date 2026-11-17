@@ -221,6 +221,36 @@ model into spurious-but-passing-verification findings (false
 positives, not RCE). Bounded by review-comment surface; cannot
 acquire host shell.
 
+### T3a. PR-supplied config disables or narrows its own review
+
+_Attacker:_ A1, A2.
+_Path:_ The PR adds or edits `.auto_review.yaml` in its own head
+branch. With `enabled: false` the bot would post a success status
+reading "disabled by repo config" and skip the review; with
+`ignored_paths: ["**"]` every changed file would be filtered out;
+rewritten `guidelines`, `pr_metadata_check`, or `override_approvers`
+would steer the model, switch off the metadata gate, or grant the
+author an override over outstanding findings.
+_Mitigation:_ Repository config is never read from the head
+checkout. `ar_review::trusted_files::load_repo_config_from_base`
+fetches `.auto_review.yaml`, then `.auto_review.yml`, through
+`ReviewHost::get_file_content` at the PR's base branch, and both the
+review dispatcher and the chat handler use it (ADR-0024). The base
+ref is percent-encoded in the Forgejo `raw` and GitHub `contents`
+requests, so a branch name cannot inject query parameters. A missing
+file, a body over 64 KiB, malformed YAML, or a non-404 fetch error
+falls back to defaults with a warning and the review proceeds, so no
+fetch failure turns into a skipped review. The same loader is the
+required path for every later repository-controlled instruction file
+(`AGENTS.md`, `CLAUDE.md`, `REVIEW.md`, path instructions).
+_Residual risk:_ a maintainer who merges a hostile config change to
+the base branch disables or narrows review for every open PR on its
+next review. That is a base-branch write, outside this threat. The
+64 KiB cap applies after the host client has read the response body,
+so it bounds YAML parsing but not the download: an oversized
+base-branch file is fetched in full, then not parsed. Only someone
+with base-branch write access controls that body.
+
 ### T4. LLM-issued tool calls escape the workspace
 
 _Attacker:_ A3 (or A1 via T3).
@@ -421,6 +451,15 @@ threat-model claims fail CI when a regression slips in:
   explicit PR metadata gate exception: prompt-injection framing,
   issue-criteria anchoring, verbatim offending-text quotes, and the
   opt-out path that suppresses the cheap-tier metadata decision.
+- `crates/ar-orchestrator/src/dispatcher.rs` test
+  `tests::hostile_head_config_does_not_disable_or_narrow_review` — covers T3a
+  (PR-supplied config): the head workspace holds `.auto_review.yaml`
+  with `enabled: false` and `ignored_paths: ["**"]`, the fake host
+  returns 404 for the base-branch file. The test asserts the review
+  still runs and posts a normal review with a Success/Failure status
+  (not the "disabled by repo config" status), and that the changed
+  file `src/lib.rs` still reaches the review prompt, so the head
+  `ignored_paths: ["**"]` does not narrow the review.
 - `crates/ar-review/tests/red_team_workspace_tools.rs` — covers
   T4 (LLM tool calls escape workspace): symlink escape, chained
   symlinks, empty paths, pathological regex; and T5 (clone credential

@@ -142,6 +142,22 @@ Components receive only the workspace capability they need:
 - Context building and agentic verification use read-only, path-confined access
   under the clone root with symlink escape rejection and output/result caps.
 - Agentic verifier tools are file read and search capabilities, not shell access.
+- Repository-controlled instruction files are read from the PR's base branch,
+  never from the head checkout (ADR-0024). `ar_review::trusted_files` is the
+  single runtime loader: `read_trusted_repo_file` fetches a file through
+  `ReviewHost::get_file_content` at the base branch tip by name, and
+  `load_repo_config_from_base` tries `.auto_review.yaml`, then
+  `.auto_review.yml`, returning the config with its provenance (path and ref)
+  and an optional warning. A missing file, an oversized body, malformed YAML, or
+  a non-404 fetch error falls back to default config and the review proceeds.
+  `run_review_job` fetches the pull request once and passes a `BaseRef` (name
+  and SHA) into workspace preparation and the review; the chat handler uses the
+  same loader. Later ingestion of `AGENTS.md`, `CLAUDE.md`, `REVIEW.md`, or
+  path instructions must use this loader or the base tree.
+- Base-branch repository config overrides operator defaults such as
+  `AR_SEVERITY_FLOOR` once a repository key exists for the same behaviour.
+  Operator environment variables are defaults only and never cap a repository
+  key.
 
 Any future feature that executes repo-controlled code must introduce a
 feature-specific sandbox design, fail-closed configuration, threat-model update,
