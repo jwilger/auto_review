@@ -32,6 +32,8 @@ fn duplicate_severity_and_message_across_locations_posts_one_inline_comment() {
                 line_end: None,
                 severity: ReviewSeverity::Warning,
                 message: duplicate_message.into(),
+                title: String::new(),
+                category: ar_prompts::FindingCategory::Correctness,
             },
             ReviewFinding {
                 path: "src/second.rs".into(),
@@ -39,6 +41,8 @@ fn duplicate_severity_and_message_across_locations_posts_one_inline_comment() {
                 line_end: None,
                 severity: ReviewSeverity::Warning,
                 message: duplicate_message.into(),
+                title: String::new(),
+                category: ar_prompts::FindingCategory::Correctness,
             },
         ],
     };

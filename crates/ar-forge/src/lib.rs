@@ -21,8 +21,53 @@ impl HostError {
     }
 }
 
+/// Review features the connected repository host supports.
+///
+/// Hosts differ: GitHub supports all of these, while Forgejo gained
+/// multi-line review comments in v16 and suggestion blocks, thread replies
+/// and thread resolution in v18. Callers must check these flags and degrade
+/// instead of assuming a feature exists.
+///
+/// [`HostCapabilities::default`] supports nothing: the safe fallback.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostCapabilities {
+    /// Inline review comments can span a line range.
+    pub multi_line_comments: bool,
+    /// Review comments can carry a ```` ```suggestion ```` block the author
+    /// can apply.
+    pub suggestion_blocks: bool,
+    /// The bot can reply inside an existing review-comment thread.
+    pub thread_replies: bool,
+    /// The bot can mark a review-comment thread as resolved.
+    pub resolve_threads: bool,
+}
+
+impl HostCapabilities {
+    /// Every capability supported.
+    pub const fn all() -> Self {
+        Self {
+            multi_line_comments: true,
+            suggestion_blocks: true,
+            thread_replies: true,
+            resolve_threads: true,
+        }
+    }
+}
+
 #[async_trait]
 pub trait ReviewHost: Send + Sync {
+    /// Review features this host supports. The default reports none, so a
+    /// host that cannot tell gets the plain-comment fallback.
+    async fn capabilities(&self) -> HostCapabilities {
+        HostCapabilities::default()
+    }
+
+    /// Login of the account this host acts as, used to find the bot's own
+    /// reviews and comments. Implementations cache it per host.
+    async fn bot_login(&self) -> Result<String, HostError> {
+        Err(HostError::new("bot login not available for this host"))
+    }
+
     async fn clone_url(&self, owner: &str, repo: &str) -> Result<String, HostError> {
         Err(HostError::new(format!(
             "clone URL not available for {owner}/{repo}"
@@ -143,6 +188,42 @@ pub trait ReviewHost: Send + Sync {
             "issue comments not available for {owner}/{repo}#{issue_number}"
         )))
     }
+
+    /// Replace the body of an existing top-level issue/PR comment.
+    ///
+    /// Callers must pass only ids of comments the bot itself authored
+    /// (ids returned by `post_issue_comment`, or comments filtered by
+    /// the bot's login); see THREAT-MODEL.md T9.
+    async fn edit_issue_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<(), HostError> {
+        let _ = body;
+        Err(HostError::new(format!(
+            "issue comment editing not available for {owner}/{repo} comment {comment_id}"
+        )))
+    }
+
+    /// Replace the body of an existing inline review comment.
+    ///
+    /// Callers must pass only ids of comments the bot itself authored
+    /// (ids from its own `create_review`, or comments filtered by the
+    /// bot's login); see THREAT-MODEL.md T9.
+    async fn edit_review_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<(), HostError> {
+        let _ = body;
+        Err(HostError::new(format!(
+            "review comment editing not available for {owner}/{repo} comment {comment_id}"
+        )))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -251,6 +332,10 @@ pub struct PullReviewSummary {
     pub state: String,
     #[serde(default)]
     pub user: PrReviewCommentUser,
+    /// Number of inline (code) comments the review holds, when the host
+    /// reports it. `None` means unknown, not zero.
+    #[serde(default)]
+    pub comments_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -260,6 +345,28 @@ pub struct PrReviewComment {
     pub body: String,
     #[serde(default)]
     pub user: PrReviewCommentUser,
+    /// File path an inline review comment is anchored to. Empty for
+    /// top-level conversation comments.
+    #[serde(default, deserialize_with = "empty_string_when_null")]
+    pub path: String,
+    /// New-side (head) line the inline comment is anchored to. Forgejo
+    /// sets exactly one of `position` and `original_position`, depending
+    /// on which side of the diff the comment is on, and leaves the other
+    /// at zero. Replies in the same thread share `path`, `position` and
+    /// `original_position`. Zero for top-level conversation comments.
+    #[serde(default, deserialize_with = "zero_when_null")]
+    pub position: u64,
+    /// Old-side (base) line the inline comment is anchored to; zero for
+    /// comments on the new side of the diff. See `position`.
+    #[serde(default, deserialize_with = "zero_when_null")]
+    pub original_position: u64,
+}
+
+fn zero_when_null<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -285,6 +392,126 @@ pub struct IssueSummary {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal host that implements only the required methods. Every
+    /// required method bumps `calls`, so a default edit method that
+    /// tried to reach the host would show up as a non-zero count.
+    #[derive(Default)]
+    struct MinimalHost {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MinimalHost {
+        fn record<T>(&self) -> Result<T, HostError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(HostError::new("minimal host"))
+        }
+    }
+
+    #[async_trait]
+    impl ReviewHost for MinimalHost {
+        async fn get_pull_request(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+        ) -> Result<PullRequestSummary, HostError> {
+            self.record()
+        }
+        async fn get_pr_diff(&self, _: &str, _: &str, _: u64) -> Result<String, HostError> {
+            self.record()
+        }
+        async fn get_compare_diff(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<String, HostError> {
+            self.record()
+        }
+        async fn list_changed_files(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+        ) -> Result<Vec<ChangedFile>, HostError> {
+            self.record()
+        }
+        async fn list_pr_review_comments(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+        ) -> Result<Vec<PrReviewComment>, HostError> {
+            self.record()
+        }
+        async fn list_pull_reviews(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+        ) -> Result<Vec<PullReviewSummary>, HostError> {
+            self.record()
+        }
+        async fn list_pull_review_comments(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+            _: u64,
+        ) -> Result<Vec<PrReviewComment>, HostError> {
+            self.record()
+        }
+        async fn update_pull_request(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<(), HostError> {
+            self.record()
+        }
+        async fn post_commit_status(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &CommitStatus,
+        ) -> Result<(), HostError> {
+            self.record()
+        }
+        async fn create_review(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+            _: &CreateReviewRequest,
+        ) -> Result<CreatedReview, HostError> {
+            self.record()
+        }
+    }
+
+    #[tokio::test]
+    async fn default_edit_methods_return_err_without_touching_the_host() {
+        let host = MinimalHost::default();
+
+        let issue = host
+            .edit_issue_comment("o", "r", 11, "new body")
+            .await
+            .expect_err("default edit_issue_comment must fail");
+        let review = host
+            .edit_review_comment("o", "r", 12, "new body")
+            .await
+            .expect_err("default edit_review_comment must fail");
+
+        assert!(issue.message().contains("o/r"), "{issue}");
+        assert!(issue.message().contains("11"), "{issue}");
+        assert!(review.message().contains("o/r"), "{review}");
+        assert!(review.message().contains("12"), "{review}");
+        assert_eq!(host.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn pull_request_summary_treats_null_body_as_empty() {
@@ -434,5 +661,49 @@ mod tests {
             .expect_err("default get_issue must fail");
 
         assert!(err.message().contains("o/r#12"), "{}", err.message());
+    }
+
+    #[test]
+    fn pr_review_comment_reads_inline_thread_location_when_present() {
+        let comment: PrReviewComment = serde_json::from_value(serde_json::json!({
+            "id": 12,
+            "body": "@auto-review help",
+            "user": {"login": "bob"},
+            "path": "src/lib.rs",
+            "position": 4,
+            "original_position": 0
+        }))
+        .expect("comment");
+
+        assert_eq!(comment.path, "src/lib.rs");
+        assert_eq!(comment.position, 4);
+        assert_eq!(comment.original_position, 0);
+    }
+
+    #[test]
+    fn pr_review_comment_without_inline_location_still_deserializes() {
+        let comment: PrReviewComment = serde_json::from_value(serde_json::json!({
+            "id": 3,
+            "body": "top-level",
+            "user": {"login": "carol"}
+        }))
+        .expect("comment");
+
+        assert_eq!(comment.path, "");
+        assert_eq!(comment.position, 0);
+        assert_eq!(comment.original_position, 0);
+    }
+
+    #[test]
+    fn default_host_capabilities_support_nothing() {
+        assert_eq!(
+            HostCapabilities::default(),
+            HostCapabilities {
+                multi_line_comments: false,
+                suggestion_blocks: false,
+                thread_replies: false,
+                resolve_threads: false,
+            }
+        );
     }
 }

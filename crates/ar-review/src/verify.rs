@@ -145,6 +145,8 @@ mod tests {
             line_end: None,
             severity: ReviewSeverity::Warning,
             message: format!("issue {i}"),
+            title: String::new(),
+            category: ar_prompts::FindingCategory::Correctness,
         }
     }
 
@@ -208,6 +210,19 @@ mod tests {
         assert_eq!(result.findings.len(), 2);
         let names: Vec<&str> = result.findings.iter().map(|f| f.path.as_str()).collect();
         assert_eq!(names, vec!["f1.rs", "f2.rs"]);
+    }
+
+    #[tokio::test]
+    async fn kept_findings_keep_their_title_and_category() {
+        let json = r#"{"verdicts":[{"finding_index": 0, "keep": false},{"finding_index": 1, "keep": true}]}"#;
+        let provider = Arc::new(CannedProvider(Mutex::new(Some(json.into()))));
+        let router = Router::new().with(ModelTier::Cheap, provider);
+        let mut input = out(2);
+        input.findings[1].title = "Slow loop".into();
+        input.findings[1].category = ar_prompts::FindingCategory::Performance;
+        let expected = input.findings[1].clone();
+        let result = verify_findings(&router, input, "diff").await.expect("ok");
+        assert_eq!(result.findings, vec![expected]);
     }
 
     #[tokio::test]

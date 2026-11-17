@@ -233,7 +233,7 @@ Common optional env vars:
 |---|---|---|
 | `LLM_API_KEY` | — | Omit for local Ollama/vLLM when not required |
 | `LLM_REASONING_MODEL` | `qwen2.5-coder:32b` | Review-generation model |
-| `LLM_CHEAP_MODEL` | — | Verifier and chat-assist tier (`autofix`, `docstring`, `tests`, free-form Q&A) |
+| `LLM_CHEAP_MODEL` | — | Verifier and chat-assist tier (`autofix`, `tests`, free-form Q&A) |
 | `LLM_CHEAP_BASE_URL` / `LLM_CHEAP_API_KEY` | `=LLM_BASE_URL` / `=LLM_API_KEY` | Optional cheap-tier endpoint override |
 | `LLM_EMBEDDING_MODEL` | — | Enables RAG context retrieval |
 | `LLM_EMBEDDING_BASE_URL` / `LLM_EMBEDDING_API_KEY` | `=LLM_BASE_URL` / `=LLM_API_KEY` | Optional embedding endpoint override |
