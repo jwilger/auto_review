@@ -164,11 +164,9 @@ jobs:
       - name: Run nix flake check
         run: nix develop .#ci --command just flake-check
 
-  # NOTE: the Forgejo-era `semantic-review` job (which called this repo's own
-  # ar-gateway for an async "semantic review" of the PR) is deliberately
-  # dropped here. auto_review is the product being retired fleet-wide in
-  # favor of CodeRabbit -- porting a CI call into its own retiring gateway
-  # would be actively wrong. See .coderabbit.yaml for the replacement.
+  # NOTE: there is no `semantic-review` job yet because no auto_review
+  # deployment is wired up to review this repository. A deployment would add
+  # the job shown in deploy/agentcore/github-actions-oidc.yml.
 
   pr-artifact-build:
     name: Build PR artifacts (no token)
