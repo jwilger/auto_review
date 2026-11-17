@@ -167,6 +167,27 @@ New **T6b**, suppression poisoning: never-suppress classes, K across at least 2 
 
 The landscape report lists four drifts. The severity-floor doc comment is fixed together with host-neutral chat wording. The USER-GUIDE "cannot approve" claim is rewritten by the approval-policy slice, and the "secrets" claim by the credential slices. The co-change and triage claims go with the code deletion. The review system prompt's "Forgejo PR" is fixed by the fencing slice. The docstring command becomes a fixed retirement notice: CodeRabbit retired docstring generation on 2026-11-11 ([CodeRabbit changelog](https://docs.coderabbit.ai/changelog)). `AGENTS.md` and `.claude/rules/*.md` are factory-class paths, so feature slices do not edit them. Two factory-class sync items collect those edits. Existing issue #13 also edits `AGENTS.md` and adds an ADR, so ADR numbers are allocated at implementation time.
 
+## Theme DEC: decision models
+
+### What leaders do
+
+- TypeSafe's Jev (Sept 2026) is a "decision model": a request carries input plus named questions (`choice`, `noul` yes/no, `score`), each with options defined in the request, and returns a probability per option and a confidence. It cannot generate text. Input costs about $0.042 per million tokens, with 64K tokens of context ([TypeSafe docs](https://docs.typesafe.ai/api), [models](https://docs.typesafe.ai/models.md)).
+- Ollama 0.35+ serves the same `POST /v1/systemone` API for open models: `nimble` (9B, Apache-2.0, about 8K tokens per question, 75.7% vs Jev's 76.0% on the vendors' 13-dataset suite) and `tev1` / `tev1:0.8b` (about 2K tokens) ([Ollama blog](https://ollama.com/blog/decision-models), [nimble](https://ollama.com/library/nimble)).
+- Cursor's Jev guide routes PRs to security review from PR metadata ([Cursor](https://cursor.com/docs/bdk/guides/jev)). No vendor publishes code-review accuracy for decision models.
+- Datadog showed planted policy text steers Jev: injection-detection recall fell from 82.9% to 3.9% ([Datadog Security Labs](https://securitylabs.datadoghq.com/articles/jev-as-a-judge-how-counterfeit-policy-steers-jev/)). Local models also show positional and "yes" bias ([Towards AI](https://pub.towardsai.net/i-tried-emulating-jev-locally-with-ollama-here-are-the-3-structural-traps-i-hit-bde20823caf7)).
+
+### Chosen design
+
+- A Decision tier ([#164](https://github.com/jwilger/auto_review/issues/164)) speaks `/v1/systemone` to hosted Jev or Ollama. It is on by default with `nimble` at the shared LLM base URL; `LLM_DECISION_MODEL=off` disables it.
+- Every site calls a shared `decide()` helper. Off, unavailable, error, too-large input or confidence below the site's threshold falls back to today's Cheap-tier path, counted by reason.
+- A labelled eval harness ([#165](https://github.com/jwilger/auto_review/issues/165)) applies one adoption rule per site. In at least 2 of 3 runs: Decision accuracy at least Cheap accuracy minus 2 points; at least 95% precision on the cases it decides at the chosen threshold; no worse than Cheap on an adversarial subset with planted instructions; lower p95 latency. A site that fails stays on the Cheap tier, with results recorded.
+- Sites are limited to decisions where a steered answer is low-stakes or bounded by a deterministic rule: chat intent, override-reason yes/no, PR metadata pass/fail with fixed reason codes, finding ordering for the comment cap, addressed judging, reply feedback and target, category promotion into never-suppress classes only, automatic effort with a floor, file ranking for fan-out, paraphrased-duplicate detection, suppression-match confirmation, learning applicability, pre-merge checks and linked-issue criteria when the input fits, and benchmark matching.
+- Not adopted: injection flags ([#124](https://github.com/jwilger/auto_review/issues/124)), because that is exactly where decision models fail; the agentic verifier's tool loop and review generation, which need generated text; and dropping findings on the decision model alone.
+
+### Security impact
+
+The threat model gains a note that decision models are easily steered by planted text. Every site fences untrusted input, fixes option order, keeps existing authorization and deterministic checks in front of the answer, and is adopted only after an adversarial eval.
+
 ## Cross-cutting design
 
 ### Repository configuration (read from the base branch)
@@ -261,6 +282,9 @@ Decisions made on 2026-11-16 to make the human-gated items agent-runnable:
 27. **Feedback suppression default** ([#147](https://github.com/jwilger/auto_review/issues/147)) is decided by rule: `enforce` becomes the default when at least 50 evaluated would-suppress findings exist and their addressed rate is at most 10%, read from `auto_review_feedback_shadow_outcomes_total` ([#158](https://github.com/jwilger/auto_review/issues/158)) at `AR_STATS_METRICS_URL`. With fewer findings the item blocks as "insufficient shadow data".
 28. **MCP server** ([#148](https://github.com/jwilger/auto_review/issues/148)) is built now, after local review.
 29. **Forgejo verification is split.** [#143](https://github.com/jwilger/auto_review/issues/143) verifies v17 behavior on a throwaway container from the E2E runbook, with a gateway built from the branch. [#157](https://github.com/jwilger/auto_review/issues/157) holds the v18 suggestion, reply and resolve checks and stays not ready until Forgejo v18 is released.
+30. **Decision tier on by default.** `LLM_DECISION_MODEL` defaults to `nimble` at the shared LLM base URL (consistent with [#160](https://github.com/jwilger/auto_review/issues/160)), and `off` disables it. Every site falls back to its Cheap-tier path when the tier is unavailable, the input does not fit, or confidence is below the site's threshold.
+31. **Mechanical adoption per site.** A site switches to the Decision tier only when its labelled eval passes the rule in [#165](https://github.com/jwilger/auto_review/issues/165); otherwise it stays on the Cheap tier, behind `AR_DECISION_SITES`, with the results recorded in docs/BENCHMARKS.md.
+32. **Decision models never make a call that steering could turn against the user.** They only rank, promote, confirm, or decide behind an existing authorization or deterministic check. Injection flags, review generation, the agentic verifier's tool loop and finding drops stay with LLMs and deterministic code.
 
 ## Unverified and unresolved
 
@@ -389,6 +413,23 @@ Decisions made on 2026-11-16 to make the human-gated items agent-runnable:
 | CLEAN-08 | [#157](https://github.com/jwilger/auto_review/issues/157) | chore(ops): verify Forgejo v18 suggestion, reply and resolve paths live | no | OUT-09, OUT-17, CLEAN-07 |
 | CLEAN-09 | [#160](https://github.com/jwilger/auto_review/issues/160) | feat(config): default every LLM setting to a local Ollama setup (qwen3) | yes | — |
 | CLEAN-10 | [#161](https://github.com/jwilger/auto_review/issues/161) | chore(ops): deploy a GitHub App and gateway for the sandbox repository | no | — |
+| DEC-F1 | [#164](https://github.com/jwilger/auto_review/issues/164) | feat(llm): add a Decision tier that speaks the /v1/systemone API | yes | #160 |
+| DEC-F2 | [#165](https://github.com/jwilger/auto_review/issues/165) | test(bench): add a labelled eval harness for decision sites | yes | #164 |
+| DEC-S1 | [#166](https://github.com/jwilger/auto_review/issues/166) | feat(chat): classify directed comments with the Decision tier | yes | #164, #165, #38 |
+| DEC-S2 | [#167](https://github.com/jwilger/auto_review/issues/167) | feat(chat): judge override reasons with the Decision tier | yes | #164, #165, #38 |
+| DEC-S3 | [#168](https://github.com/jwilger/auto_review/issues/168) | feat(review): decide PR metadata quality with the Decision tier | yes | #164, #165, #118 |
+| DEC-S4 | [#169](https://github.com/jwilger/auto_review/issues/169) | feat(review): rank findings by decision-model validity for the comment cap | yes | #164, #165, #77 |
+| DEC-S5 | [#170](https://github.com/jwilger/auto_review/issues/170) | feat(review): judge addressed findings with the Decision tier first | yes | #164, #165, #57 |
+| DEC-S6 | [#171](https://github.com/jwilger/auto_review/issues/171) | feat(chat): classify finding replies and their target with the Decision tier | yes | #164, #165, #59, #66 |
+| DEC-S7 | [#172](https://github.com/jwilger/auto_review/issues/172) | feat(review): double-check finding categories with the Decision tier | yes | #164, #165, #50, #76 |
+| DEC-S8 | [#173](https://github.com/jwilger/auto_review/issues/173) | feat(review): add review.effort: auto chosen by the Decision tier | yes | #164, #165, #126, #45 |
+| DEC-S9 | [#174](https://github.com/jwilger/auto_review/issues/174) | feat(review): prioritise files for hypothesis fan-out with the Decision tier | yes | #164, #165, #133 |
+| DEC-S10 | [#175](https://github.com/jwilger/auto_review/issues/175) | feat(review): detect paraphrased duplicate findings with the Decision tier | yes | #164, #165, #84, #134 |
+| DEC-S11 | [#176](https://github.com/jwilger/auto_review/issues/176) | feat(review): confirm feedback-suppression matches with the Decision tier | yes | #164, #165, #114 |
+| DEC-S12 | [#177](https://github.com/jwilger/auto_review/issues/177) | feat(review): filter retrieved learnings by applicability with the Decision tier | yes | #164, #165, #39 |
+| DEC-S13 | [#178](https://github.com/jwilger/auto_review/issues/178) | feat(review): evaluate pre-merge checks with the Decision tier when they fit | yes | #164, #165, #116 |
+| DEC-S14 | [#179](https://github.com/jwilger/auto_review/issues/179) | feat(review): assess linked-issue criteria with the Decision tier | yes | #164, #165, #119 |
+| DEC-S15 | [#180](https://github.com/jwilger/auto_review/issues/180) | feat(cli): match benchmark findings to golden comments with the Decision tier | yes | #164, #165, #65 |
 | AGENT-13 | [#144](https://github.com/jwilger/auto_review/issues/144) | chore(review): make the agentic verifier the default for standard effort if bench rule G1 passes | yes | MEAS-14, AGENT-07, AGENT-10 |
 | AGENT-14 | [#145](https://github.com/jwilger/auto_review/issues/145) | chore(review): enable agentic generation for standard effort if bench rule G2 passes | yes | MEAS-14, AGENT-06, AGENT-07, SEC-02 |
 | AGENT-15 | [#146](https://github.com/jwilger/auto_review/issues/146) | chore(review): post fan-out findings for deep effort if bench rule G3 passes | yes | MEAS-14, AGENT-12 |
@@ -402,3 +443,4 @@ Decisions made on 2026-11-16 to make the human-gated items agent-runnable:
 | AGENT-EPIC | [#153](https://github.com/jwilger/auto_review/issues/153) | chore: track agentic review, effort and cost work | no | — |
 | LEARN-EPIC | [#154](https://github.com/jwilger/auto_review/issues/154) | chore: track learning loop and local review work | no | — |
 | CLEAN-EPIC | [#155](https://github.com/jwilger/auto_review/issues/155) | chore: track cleanup, drift fixes and live verification | no | — |
+| DEC-EPIC | [#181](https://github.com/jwilger/auto_review/issues/181) | chore: track decision-model adoption | no | — |
