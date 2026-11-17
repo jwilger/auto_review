@@ -83,17 +83,24 @@ async fn seed_chat_cursor_monotonic(cursors: &SharedCommentCursors, key: PrKey, 
 /// Root comment id of the inline review thread `comment` belongs to.
 ///
 /// Forgejo has no explicit "in reply to" field on review comments, so a
-/// thread is identified by its anchor: every comment with the same `path`
-/// and `original_position`, across all of the PR's reviews, belongs to one
-/// thread, and the lowest id is the comment that opened it. Returns the
-/// comment's own id when it is the earliest in its thread.
+/// thread is identified by its anchor: the file `path` plus the diff line.
+/// Forgejo reports a new-side line as `position` and an old-side line as
+/// `original_position`, leaving the other at zero, so the pair
+/// (`position`, `original_position`) names both the side and the line.
+/// Every comment with the same anchor, across all of the PR's reviews,
+/// belongs to one thread, and the lowest id is the comment that opened
+/// it. Returns the comment's own id when it is the earliest in its thread.
 fn thread_root_id(
     all_inline: &[ar_forge::PrReviewComment],
     comment: &ar_forge::PrReviewComment,
 ) -> u64 {
     all_inline
         .iter()
-        .filter(|c| c.path == comment.path && c.original_position == comment.original_position)
+        .filter(|c| {
+            c.path == comment.path
+                && c.position == comment.position
+                && c.original_position == comment.original_position
+        })
         .map(|c| c.id)
         .fold(comment.id, u64::min)
 }
@@ -1175,12 +1182,29 @@ mod tests {
             .await;
     }
 
-    fn inline(id: u64, path: &str, original_position: u64) -> ar_forge::PrReviewComment {
+    /// An inline comment on the new side of the diff: Forgejo reports its
+    /// line as `position` and leaves `original_position` at 0.
+    fn inline(id: u64, path: &str, position: u64) -> ar_forge::PrReviewComment {
         serde_json::from_value(serde_json::json!({
             "id": id,
             "body": "",
             "user": {"login": "bob"},
             "path": path,
+            "position": position,
+            "original_position": 0
+        }))
+        .unwrap()
+    }
+
+    /// An inline comment on the old side of the diff: Forgejo reports its
+    /// line as `original_position` and leaves `position` at 0.
+    fn inline_old_side(id: u64, path: &str, original_position: u64) -> ar_forge::PrReviewComment {
+        serde_json::from_value(serde_json::json!({
+            "id": id,
+            "body": "",
+            "user": {"login": "bob"},
+            "path": path,
+            "position": 0,
             "original_position": original_position
         }))
         .unwrap()
@@ -1202,14 +1226,36 @@ mod tests {
     #[test]
     fn thread_root_separates_threads_at_different_positions_on_one_path() {
         let all = vec![
-            inline(10, "src/lib.rs", 4),
-            inline(11, "src/lib.rs", 9),
-            inline(12, "src/lib.rs", 4),
-            inline(13, "src/lib.rs", 9),
-            inline(5, "src/main.rs", 9),
+            inline_old_side(10, "src/lib.rs", 4),
+            inline_old_side(11, "src/lib.rs", 9),
+            inline_old_side(12, "src/lib.rs", 4),
+            inline_old_side(13, "src/lib.rs", 9),
+            inline_old_side(5, "src/main.rs", 9),
         ];
         assert_eq!(thread_root_id(&all, &all[3]), 11);
         assert_eq!(thread_root_id(&all, &all[2]), 10);
+    }
+
+    #[test]
+    fn thread_root_separates_new_side_threads_at_different_lines_on_one_path() {
+        // Both threads are on the new side, so `original_position` is 0 for
+        // every comment; only `position` tells the threads apart.
+        let all = vec![
+            inline(10, "src/lib.rs", 4),
+            inline(11, "src/lib.rs", 20),
+            inline(12, "src/lib.rs", 20),
+        ];
+        assert_eq!(thread_root_id(&all, &all[2]), 11);
+    }
+
+    #[test]
+    fn thread_root_separates_old_side_and_new_side_threads_at_the_same_line() {
+        let all = vec![
+            inline(10, "src/lib.rs", 4),
+            inline_old_side(11, "src/lib.rs", 4),
+            inline_old_side(12, "src/lib.rs", 4),
+        ];
+        assert_eq!(thread_root_id(&all, &all[2]), 11);
     }
 
     /// Mount the PR reviews list for `alice/widgets` PR `pr`.
@@ -1245,7 +1291,8 @@ mod tests {
             "body": "**warning**: this unwraps a fallible parse",
             "user": {"login": "auto-review"},
             "path": "src/lib.rs",
-            "original_position": 4
+            "position": 4,
+            "original_position": 0
         })
     }
 
@@ -1255,7 +1302,8 @@ mod tests {
             "body": "@auto-review help",
             "user": {"login": "bob"},
             "path": "src/lib.rs",
-            "original_position": 4
+            "position": 4,
+            "original_position": 0
         })
     }
 
@@ -1376,7 +1424,8 @@ mod tests {
                 "body": "@auto_review re-review",
                 "user": {"login": "bob"},
                 "path": "src/lib.rs",
-                "original_position": 4
+                "position": 4,
+                "original_position": 0
             }]),
         )
         .await;
@@ -1455,7 +1504,8 @@ mod tests {
                 "body": "Reply `@auto_review re-review` after fixing this.",
                 "user": {"login": "auto_review"},
                 "path": "src/lib.rs",
-                "original_position": 4
+                "position": 4,
+                "original_position": 0
             }]),
         )
         .await;

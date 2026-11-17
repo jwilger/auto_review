@@ -250,9 +250,15 @@ pub struct PrReviewComment {
     /// top-level conversation comments.
     #[serde(default, deserialize_with = "empty_string_when_null")]
     pub path: String,
-    /// Diff position the inline comment was originally anchored at.
-    /// Replies in the same thread share `path` and `original_position`.
-    /// Zero for top-level conversation comments.
+    /// New-side (head) line the inline comment is anchored to. Forgejo
+    /// sets exactly one of `position` and `original_position`, depending
+    /// on which side of the diff the comment is on, and leaves the other
+    /// at zero. Replies in the same thread share `path`, `position` and
+    /// `original_position`. Zero for top-level conversation comments.
+    #[serde(default, deserialize_with = "zero_when_null")]
+    pub position: u64,
+    /// Old-side (base) line the inline comment is anchored to; zero for
+    /// comments on the new side of the diff. See `position`.
     #[serde(default, deserialize_with = "zero_when_null")]
     pub original_position: u64,
 }
@@ -296,12 +302,14 @@ mod tests {
             "body": "@auto-review help",
             "user": {"login": "bob"},
             "path": "src/lib.rs",
-            "original_position": 4
+            "position": 4,
+            "original_position": 0
         }))
         .expect("comment");
 
         assert_eq!(comment.path, "src/lib.rs");
-        assert_eq!(comment.original_position, 4);
+        assert_eq!(comment.position, 4);
+        assert_eq!(comment.original_position, 0);
     }
 
     #[test]
@@ -314,6 +322,7 @@ mod tests {
         .expect("comment");
 
         assert_eq!(comment.path, "");
+        assert_eq!(comment.position, 0);
         assert_eq!(comment.original_position, 0);
     }
 }
