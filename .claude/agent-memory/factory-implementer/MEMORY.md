@@ -1,2 +1,1 @@
 - [Worktree git guard](feedback_worktree_git_guard.md) — use absolute git path + -C for commit/checkout; diff paths against origin/main
-- [Integrate branch ref collision](project_integrate_branch_ref_collision.md) — factory/<id> can't coexist with factory/<id>/S* refs; recheck slices vs criteria
