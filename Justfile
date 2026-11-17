@@ -8,8 +8,14 @@ fmt:
 clippy:
 	cargo clippy --workspace --all-targets -- -D warnings
 
+# git exports GIT_DIR and friends to its hooks, so under the pre-push hook a
+# test that spawns git would act on this repository (one fixture's `git init`
+# set `core.bare = true` here). Clearing them keeps every test hermetic,
+# however it spawns git.
 test:
-	cargo nextest run --workspace --no-tests=pass
+	env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR \
+		-u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_PREFIX \
+		cargo nextest run --workspace --no-tests=pass
 
 deny:
 	cargo deny check licenses bans sources
@@ -27,6 +33,12 @@ shellcheck:
 actionlint:
 	actionlint
 
+# Fails on unresolved merge conflict markers in tracked files.
+conflict-markers:
+	status=0; git grep -nE '^(<{7}|>{7}) ' || status=$?; \
+	if [ "$status" -eq 0 ]; then echo "conflict markers found in tracked files" >&2; exit 1; fi; \
+	[ "$status" -eq 1 ]
+
 # Builds the packages and evaluates the Nix contract checks; slow on a cold store.
 flake-check:
 	nix flake check --print-build-logs
@@ -37,4 +49,4 @@ serve:
 watch:
 	AR_GATEWAY_BIND=0.0.0.0:8090 bacon --job gateway-dev
 
-ci: fmt clippy test deny build shellcheck actionlint
+ci: fmt clippy test deny build shellcheck actionlint conflict-markers

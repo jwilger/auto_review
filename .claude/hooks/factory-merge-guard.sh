@@ -2,8 +2,11 @@
 # PreToolUse guard: agents never merge, or schedule the merge of, a pull
 # request that touches a `factory` path from factory/policy.md. The maintainer
 # merges those. Agents run as the maintainer's own GitHub account, so GitHub
-# cannot enforce this; this hook is a guard against mistakes, not a security
-# boundary.
+# cannot enforce this. This hook is a tripwire against the factory's own
+# scripted mistakes, not a security boundary: it does not try to read every
+# way a shell command could merge, and anything running as the maintainer's
+# account can still merge. The enforceable boundary is a separate factory
+# identity that cannot merge factory paths, tracked in issue #223.
 #
 # Override, only on the maintainer's explicit instruction in the session:
 # prefix the command with FACTORY_MERGE_APPROVED=<pr number>.

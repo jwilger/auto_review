@@ -526,6 +526,17 @@ Forgejo API access.
 - **Endpoint security on the operator's workstation.** If the
   operator's `.env` leaks, the bot is compromised. Use a secret
   manager.
+- **The delivery factory's merge guard.** The development factory's
+  agents (`factory/`, `.claude/`) act as the maintainer's own GitHub
+  account, so GitHub cannot tell their merges, labels or reviews from the
+  maintainer's. `.claude/hooks/factory-merge-guard.sh`, which denies agent
+  merges of pull requests touching `factory` paths unless the command
+  carries `FACTORY_MERGE_APPROVED=<pr>`, is a tripwire against the
+  factory's own scripted mistakes, not a security boundary: it does not
+  try to read every way a shell command could merge. The enforceable
+  boundary is a separate factory identity that cannot merge `factory`
+  paths, tracked in issue #223; until then the maintainer merges every
+  `factory` class change.
 
 ## Test coverage of these threats
 
