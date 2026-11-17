@@ -9,6 +9,10 @@ use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[expect(
+    clippy::expect_used,
+    reason = "a mock-server client that fails to build should abort the calling test at setup"
+)]
 async fn host() -> (MockServer, Client) {
     let server = MockServer::start().await;
     let client = Client::new(&server.uri(), "test-token").expect("client");
@@ -20,6 +24,14 @@ fn comment_json(id: u64, body: &str) -> serde_json::Value {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn edit_issue_comment_patches_issue_comment_endpoint() {
     let (server, client) = host().await;
     Mock::given(method("PATCH"))
@@ -38,6 +50,14 @@ async fn edit_issue_comment_patches_issue_comment_endpoint() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn edit_review_comment_patches_issue_comment_endpoint() {
     let (server, client) = host().await;
     Mock::given(method("PATCH"))
@@ -56,6 +76,14 @@ async fn edit_review_comment_patches_issue_comment_endpoint() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn edit_succeeds_when_response_body_is_not_a_comment() {
     let (server, client) = host().await;
     Mock::given(method("PATCH"))
@@ -72,6 +100,14 @@ async fn edit_succeeds_when_response_body_is_not_a_comment() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn edit_treats_204_no_content_as_not_edited() {
     let (server, client) = host().await;
     Mock::given(method("PATCH"))
@@ -91,6 +127,14 @@ async fn edit_treats_204_no_content_as_not_edited() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn edit_issue_comment_reports_403_status() {
     let (server, client) = host().await;
     Mock::given(method("PATCH"))
@@ -109,6 +153,14 @@ async fn edit_issue_comment_reports_403_status() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn edit_review_comment_reports_404_status() {
     let (server, client) = host().await;
     Mock::given(method("PATCH"))
@@ -126,6 +178,26 @@ async fn edit_review_comment_reports_404_status() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::non_ascii_literal,
+    reason = "the expected suffix is cap_for_error's literal `…` marker; escaping it would edit the assertion"
+)]
+#[expect(
+    clippy::panic,
+    reason = "an unexpected Error variant must fail this test, printing the variant it got"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
+#[expect(
+    clippy::wildcard_enum_match_arm,
+    reason = "every Error variant other than the asserted one is a test failure, reported by the catch-all panic arm"
+)]
 async fn edit_error_body_is_capped() {
     let (server, client) = host().await;
     let long = "x".repeat(5000);
