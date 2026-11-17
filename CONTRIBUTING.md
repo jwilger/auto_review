@@ -97,13 +97,13 @@ See `docs/ARCHITECTURE.md` for the current architecture projection,
 `docs/ADR-0016-adr-event-stream-architecture-projection.md` for the ADR process,
 and `docs/CRATES.md` for the crate map.
 
-ADR files are managed as an append-only event stream. Create architecture changes
-as proposed ADRs through the project ADR workflow tools, update proposed ADRs
-through the same typed workflow, and transition them with the accept/reject
-tools. Once accepted or rejected, an ADR body is immutable; later changes require
-a new ADR and may only add brief supersession metadata to the older record. Keep
-`docs/ARCHITECTURE.md` in sync as the current projection rather than rewriting
-historical ADR rationale.
+ADR files are managed as an append-only event stream. Record an architecture
+change as a new `docs/ADR-NNNN-<slug>.md` file. Once accepted or rejected, an ADR
+body is immutable; a changed decision needs a new ADR that supersedes the old
+one, and the older record may only gain brief supersession metadata. Update
+`docs/ARCHITECTURE.md` in the same change as the current projection rather than
+rewriting historical ADR rationale. No tool enforces this; the
+`.claude/rules/adr-event-stream.md` rule and code review do (ADR-0023).
 
 Crate-level navigation is centralized in `docs/CRATES.md`. The summary table:
 
@@ -172,9 +172,8 @@ templates.
      DB stores for storage paths.
 
 Document the new subcommand in `docs/CLI.md`, and in `docs/OPERATIONS.md` if it
-changes operator workflows. The CLI contract test fails when a top-level command
-is missing from `docs/CLI.md`; that test is intentionally limited to the public
-CLI surface and must not expand into checking prose wording.
+changes operator workflows. Nothing checks this automatically; code review
+enforces it.
 
 For docs-only changes, do not add deterministic tests that assert exact wording
 or required phrases. Use human/operator review for prose. Keep tests for
