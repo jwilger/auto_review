@@ -39,8 +39,10 @@
 # writes naming it, GraphQL label mutations, issue and label writes whose
 # values come from `--input` or a `-F field=@file`, and label names held in
 # shell variables, which it cannot check). Labels are read after removing
-# shell quoting, and commands are read from command position behind wrappers
-# such as `nix develop .#ci --command`, `sh -c`, `xargs` and shell keywords.
+# shell quoting and compared case-insensitively, as GitHub names labels;
+# words may be split by spaces or tabs; and commands are read from command
+# position behind wrappers such as `nix develop .#ci --command`, `sh -c`,
+# `xargs` and shell keywords.
 #
 # Override, only on the maintainer's explicit instruction in the session:
 # prefix the command with FACTORY_MERGE_APPROVED=<pr number>.
@@ -89,7 +91,8 @@ normalize() {
       s=$rest
     fi
   done
-  sed -E 's#^[^[:space:]]*/gh([[:space:]]|$)#gh\1#; s/[[:space:]](-R|--repo)([[:space:]]+|=)[^[:space:]]+//g' <<<"$s"
+  # Bash splits words on tabs too, so every run of blanks reads as one space.
+  sed -E 's/[[:space:]]+/ /g; s#^[^ ]*/gh( |$)#gh\1#; s/ (-R|--repo)( +|=)[^ ]+//g' <<<"$s"
 }
 
 # dequote: remove shell quoting (backslash escapes and quote characters), so
@@ -105,6 +108,30 @@ word="(\"[^\"]*\"|'[^']*'|\\\\.|[^[:space:]\"'\\\\])+"
 flag_values() {
   grep -Eo -- "(^|[[:space:]])($2)([[:space:]]+|=)$word" <<<"$1" \
     | sed -E "s/^[[:space:]]*($2)([[:space:]]+|=)//" | dequote || true
+}
+
+# merge_target <segment>: the pull request a `gh pr merge` segment names,
+# read from its shell words after the first three, skipping the values of the
+# flags that take one; empty when none is named.
+merge_target() {
+  local w skip=0 n
+  while IFS= read -r w; do
+    if ((skip)); then
+      skip=0
+      continue
+    fi
+    case $w in
+      -t | --subject | -b | --body | -F | --body-file | -A | --author-email | --match-head-commit)
+        skip=1
+        continue
+        ;;
+    esac
+    n=$(sed -E 's#^https://github\.com/[^/]+/[^/]+/pull/##; s/^#//' <<<"$w")
+    if [[ $n =~ ^[0-9]+$ ]]; then
+      echo "$n"
+      return
+    fi
+  done < <(grep -Eo "$word" <<<"$1" | tail -n +4)
 }
 
 # A label name the guard cannot read (a variable or a command substitution)
@@ -127,7 +154,7 @@ while IFS= read -r segment; do
     else
       values=$(flag_values "$segment" '-l|--label')
     fi
-    if grep -qF "$approved_label" <<<"$values"; then
+    if grep -qiF "$approved_label" <<<"$values"; then
       deny "only the maintainer adds the $approved_label label."
     fi
     if grep -Eq "$unreadable" <<<"$values"; then
@@ -145,7 +172,7 @@ while IFS= read -r segment; do
       fi
     fi
     if [[ "$method" != GET && "$method" != DELETE ]]; then
-      if dequote <<<"$segment" | grep -qF "$approved_label"; then
+      if dequote <<<"$segment" | grep -qiF "$approved_label"; then
         deny "only the maintainer adds the $approved_label label."
       fi
       # An issue write (which can set `labels`) or a label write whose values
@@ -172,9 +199,10 @@ merges=()
 while IFS= read -r raw; do
   segment=$(normalize "$raw")
   if grep -Eq '^gh +pr +merge( |$)' <<<"$segment"; then
-    # The first bare number (or pull URL) among `gh pr merge`'s arguments.
-    pr=$(tr ' ' '\n' <<<"$segment" \
-      | sed -E 's#^https://github\.com/[^/]+/[^/]+/pull/##; s/^#//' | grep -Ex '[0-9]+' | head -n1 || true)
+    # The first bare number (or pull URL) among `gh pr merge`'s arguments,
+    # skipping the values of its value-taking flags, so the number in
+    # `--subject 7 218` is 218, the pull request gh merges.
+    pr=$(merge_target "$segment")
     [[ -n "$pr" ]] || deny "name the pull request number explicitly so its files can be checked."
     pin=$(flag_values "$segment" '--match-head-commit' | head -n1 | tr -d "\"'")
     override=0
@@ -315,13 +343,13 @@ $hits"
   # it; the factory removes the label before every push other than a clean
   # merge of main (references/follow-through.md, step 4) to close that gap.
   local events label_ok
-  if jq -e --arg l "$approved_label" 'any(.labels[]?; .name == $l)' <<<"$view" >/dev/null; then
+  if jq -e --arg l "$approved_label" 'any(.labels[]?; (.name | ascii_downcase) == $l)' <<<"$view" >/dev/null; then
     events=$(bounded gh api --paginate "repos/{owner}/{repo}/issues/$pr/events") \
       || deny "$held
 (could not read the events of #$pr)"
     label_ok=$(jq -s --argjson roles "$roles_json" --arg l "$approved_label" --arg own "$own_date" '
       add // []
-      | map(select(.event == "labeled" and .label.name == $l))
+      | map(select(.event == "labeled" and (.label.name | ascii_downcase) == $l))
       | sort_by(.created_at) | last
       | if . == null then false
         else ((.actor.login as $u | $roles | index($u)) != null)

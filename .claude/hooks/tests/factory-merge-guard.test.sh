@@ -21,7 +21,10 @@ set -euo pipefail
 fix=${FAKE_GH_FIXTURES:?}
 if [[ -n "${FAKE_GH_SLEEP:-}" ]]; then sleep "$FAKE_GH_SLEEP"; fi
 case "$1 ${2:-}" in
-  "pr view") cat "$fix/pr.json" ;;
+  "pr view")
+    # pr-<number>.json, when a case records one, else pr.json.
+    if [[ -f "$fix/pr-${3:-}.json" ]]; then cat "$fix/pr-$3.json"; else cat "$fix/pr.json"; fi
+    ;;
   "api "*)
     shift
     [[ "$1" == --paginate ]] && shift
@@ -235,6 +238,12 @@ label_event labeled jwilger factory:approved 2026-11-17T11:00:00Z
 expect 0 "allows a Roles label newer than the last branch-own commit" "$merge"
 
 fixture
+LABELS='["Factory:Approved"]' pr h1 factory/policy.md
+commit h1 2026-11-17T10:00:00Z p0
+label_event labeled jwilger Factory:Approved 2026-11-17T11:00:00Z
+expect 0 "reads the label case-insensitively, as GitHub names it" "$merge"
+
+fixture
 LABELS='["factory:approved"]' pr h1 factory/policy.md
 commit h1 2026-11-17T12:00:00Z p0
 label_event labeled jwilger factory:approved 2026-11-17T11:00:00Z
@@ -299,6 +308,20 @@ commit h1 2026-11-17T10:00:00Z p0
 expect 2 "checks a merge run under nix develop" 'nix develop .#ci --command gh pr merge 7 --squash'
 expect 2 "checks a merge run under bash -c" "bash -c 'gh pr merge 7 --squash'"
 expect 2 "checks a merge after a shell keyword" 'if true; then gh pr merge 7 --squash; fi'
+# Bash splits words on tabs as well as spaces.
+expect 2 "checks a tab-separated merge" $'gh\tpr\tmerge 7 --squash'
+expect 2 "blocks a tab-separated label add" $'gh\tpr\tedit 5 --add-label factory:approved'
+
+# The pull request is the merge's argument, not a flag's value: here #7
+# touches no factory paths, and #218 is the one gh would merge.
+fixture
+pr h1 factory/policy.md
+commit h1 2026-11-17T10:00:00Z p0
+jq -n '{headRefOid: "h7", files: [{path: "crates/ar-llm/src/lib.rs"}], labels: []}' >"$fix/pr-7.json"
+expect 2 "skips a flag's numeric value when reading the pull request" 'gh pr merge --subject 7 218 --squash'
+expect 2 "skips a quoted flag value holding a number" "gh pr merge -b 'fixes 7' 218 --squash"
+expect 2 "skips a --flag=value holding a number" 'gh pr merge --subject=7 218 --squash'
+expect 0 "still reads a pull request named after its flags" 'gh pr merge --squash --subject x 7'
 
 fixture
 pr h1 factory/policy.md
@@ -331,6 +354,10 @@ expect 2 "blocks a label add under bash -lc after another command" "bash -lc 'cd
 expect 2 "blocks a label add under xargs" 'echo 5 | xargs -n1 gh pr edit --add-label factory:approved'
 expect 2 "blocks an issue PATCH from an --input file" 'gh api -X PATCH repos/o/r/issues/5 --input body.json'
 expect 2 "blocks a label write read from a file" "gh api repos/o/r/issues/5/labels -F 'labels[]=@lbl.txt'"
+# GitHub label names are case-insensitive: gh and the REST API apply the
+# existing factory:approved label for any spelling of it.
+expect 2 "blocks an upper-case factory:approved" 'gh pr edit 5 --add-label FACTORY:APPROVED'
+expect 2 "blocks a mixed-case api label POST" 'gh api -X POST repos/o/r/issues/5/labels -f labels[]=Factory:Approved'
 expect 2 "blocks a backslash-escaped label" 'gh pr edit 5 --add-label factory\:approved'
 expect 2 "blocks a label split across adjacent quotes" "gh pr edit 5 --add-label 'factory'':approved'"
 expect 2 "blocks an api label write split across adjacent quotes" "gh api repos/o/r/issues/5/labels -f labels[]='factory'\":approved\""

@@ -44,13 +44,14 @@ branch's last own commit. A merge of `main` is clean only when its tree is
 exactly the automatic merge of its parents, so a hand-resolved conflict voids
 the approval. The hook reads the Roles from this file on `main`, never from
 the pull request's own branch, reads the rest through `gh api`, bounds every
-read with a timeout, and denies whenever it cannot read something in time. It is not a blanket bypass: a new own commit voids the approval, and
-agents may not add the `factory:approved` label, which the same hook blocks.
-Because agents open factory pull requests as the maintainer's account, and
-GitHub does not let an author approve their own pull request, the label is
-the maintainer's practical approval; a review counts only from another Roles
-account. `FACTORY_MERGE_APPROVED=<pr>` stays reserved for an instruction the maintainer
-gives in the session.
+read with a timeout, and denies whenever it cannot read something in time.
+It is not a blanket bypass: a new own commit voids the approval, and agents
+may not add the `factory:approved` label (in any letter case), which the
+same hook blocks. Because agents open factory pull requests as the
+maintainer's account, and GitHub does not let an author approve their own
+pull request, the label is the maintainer's practical approval; a review
+counts only from another Roles account. `FACTORY_MERGE_APPROVED=<pr>` stays
+reserved for an instruction the maintainer gives in the session.
 
 ## Intake
 - Only open issues authored by @jwilger, with `factory:ready` and `status:queued`, are eligible.

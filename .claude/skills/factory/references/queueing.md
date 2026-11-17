@@ -16,7 +16,8 @@ The orchestrator follows these procedures whenever it launches, defers, requeues
 1. Run this in `next` after reconcile and before claiming anything.
 2. Count the open pull requests labelled `factory` that have no auto-merge scheduled: `gh pr list --label factory --state open --json number,autoMergeRequest,isDraft`, counting every entry whose `autoMergeRequest` is null, drafts included. That set covers every `needs-review` pull request and any `approved` one whose auto-merge was not scheduled.
 3. When the count is at or above `max_awaiting_human`, emit one notice line in the run output naming the cap and the waiting pull request numbers (for example `awaiting-human cap 2 reached: #210, #214`), then stop. Claim nothing, transition nothing and post no tracker comments, so a looping `/factory next` stays quiet until a person merges or approves one.
-4. The cap applies to `next` only. An explicit `ITEM_ID`, `approve` or `rework` is not capped, because a person asked for it.
+4. When that `gh pr list` call fails (authentication, network, rate limit), fail closed: emit one notice line that the awaiting-human cap could not be read, with the error, and stop without claiming or transitioning anything, so an unattended loop neither runs past the cap nor stops silently.
+5. The cap applies to `next` only. An explicit `ITEM_ID`, `approve` or `rework` is not capped, because a person asked for it.
 
 ## Slot check
 

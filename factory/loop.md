@@ -78,10 +78,10 @@ agents from adding it.
 - Item branches never carry `.claude/agent-memory/**`; a build or merge whose
   diff contains such a path is sent back for rework.
 - Every push runs as `nix develop .#ci --command git push ...`, so the
-  lefthook pre-push gate has its toolchain. Nothing skips that hook. To
-  audit this, `rg -n 'git push' .claude factory | rg -v 'nix develop .#ci --command'`
-  lists only the deny rules and the push guard in `.claude/settings.json`,
-  which forbid force pushes and pushes to `main` rather than make a push.
+  lefthook pre-push gate has its toolchain. Nothing skips that hook. The
+  only push commands under `.claude` and `factory` without that prefix are
+  the deny rules and the push guard in `.claude/settings.json`, which forbid
+  force pushes and pushes to `main` rather than make a push.
 
 ## Checks that guard the factory
 
