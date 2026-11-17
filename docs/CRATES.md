@@ -15,7 +15,7 @@ instructions live in [Quickstart](./QUICKSTART.md) and [Deployment](./DEPLOYMENT
 | `ar-llm` | Provider trait, OpenAI-compatible provider, and tier router for `Reasoning`, `Cheap`, and `Embedding`. |
 | `ar-index` | Tree-sitter symbols, embeddings, SQLite/in-memory vector stores, and in-memory/SQLite/DynamoDB learnings store. `RepoScope` (lowercased `owner/repo`) scopes learnings: `LearningsStore::add` takes the scope and origin PR, `list` takes a filter (all, one repository, or unscoped), `remove` takes an optional scope (`None` for operator CLI removal), and `query_nearest` only returns learnings in the given scope. A stored repository value that does not parse as `owner/repo` is read as unscoped. |
 | `ar-prompts` | Prompt templates, JSON schemas, DTOs, and validators for review and verification LLM calls; `fence_untrusted` and `fence_nonce` are the reusable helpers that wrap untrusted text in nonce-tagged `UNTRUSTED_DATA` markers (with marker neutralization, invisible-character stripping, CRLF normalization and a byte cap) for the review and metadata-check prompts today and for verifiers, chat and later features. |
-| `ar-review` | Review activities: provider-supplied clone URL workspace prep, repo config, the trusted base-branch loader for repository-controlled instruction files (`trusted_files`), RAG context, prompt rendering, self-heal, verification, severity filtering, review mapping. |
+| `ar-review` | Review activities: provider-supplied clone URL workspace prep, repo config, the trusted base-branch loader for repository-controlled instruction files (`trusted_files`), RAG context, prompt rendering, self-heal, verification, severity filtering, review mapping, and the bounded JSON-action agent loop (`agent_loop::run_agent_loop`) behind the agentic verifier. |
 | `ar-chat` | `@<bot>` parser and provider-neutral `ReviewHost` handlers for `help`, `remember`, `forget`, `re-review`, `autofix`, `tests`, and free-form Q&A. |
 | `ar-cli` | The `auto-review` binary: gateway and AgentCore entrypoints plus auth, webhook, config, review, bench, ops, history, and learnings commands. |
 
@@ -101,7 +101,10 @@ seeded with the startup bot identity.
 
 - Pure helpers get adjacent `#[cfg(test)] mod tests`.
 - Forgejo HTTP paths use `wiremock`.
-- LLM paths use canned/scripted providers.
+- LLM paths use canned/scripted providers. The shared FIFO
+  `ar_llm::testing::ScriptedProvider` (records requests, scripts usage tokens)
+  sits behind ar-llm's `test-support` feature; enable it only from
+  `[dev-dependencies]`.
 - Security boundary claims are pinned by red-team tests referenced from
   [Threat Model](./THREAT-MODEL.md).
 - Do not turn prose-only documentation changes into deterministic wording

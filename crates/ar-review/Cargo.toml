@@ -26,5 +26,6 @@ ar-llm = { path = "../ar-llm" }
 ar-prompts = { path = "../ar-prompts" }
 
 [dev-dependencies]
+ar-llm = { path = "../ar-llm", features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock.workspace = true

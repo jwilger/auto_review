@@ -5,6 +5,7 @@
 //! filtering, verification, PR metadata checks, and Forgejo review mapping. The
 //! orchestrator crate coordinates when these activities run for each PR.
 
+pub mod agent_loop;
 pub mod agentic_verify;
 pub mod config;
 pub mod context_builder;

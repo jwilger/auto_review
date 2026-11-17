@@ -1,6 +1,6 @@
 use crate::error::ReviewError;
 use ar_llm::{CompleteRequest, Message, ModelTier, ResponseFormat, Role, Router};
-use ar_prompts::{review_schema, validate_review_output, ReviewOutput, ValidationError};
+use ar_prompts::{review_schema, validate_review_output, ReviewOutput};
 
 #[derive(Debug, Clone, Copy)]
 pub struct HealConfig {
@@ -24,13 +24,13 @@ pub async fn generate_with_self_heal(
     config: HealConfig,
 ) -> Result<ReviewOutput, ReviewError> {
     let mut messages: Vec<Message> = vec![Message::user(user_prompt)];
-    let mut last_error: Option<ValidationError> = None;
 
-    // Clamp at-least-one so the loop body always runs once. A
-    // misconfigured `max_attempts: 0` would otherwise leave
-    // `last_error == None` and trip the `.expect` below.
+    // Clamp at-least-one so a misconfigured `max_attempts: 0` still
+    // makes one attempt and reports `Unhealable { attempts: 1 }`.
     let max_attempts = config.max_attempts.max(1);
-    for attempt in 1..=max_attempts {
+    let mut attempt: u32 = 0;
+    loop {
+        attempt += 1;
         let req = CompleteRequest {
             system: Some(system.to_string()),
             messages: messages.clone(),
@@ -55,6 +55,12 @@ pub async fn generate_with_self_heal(
             }
             Err(e) => {
                 tracing::warn!(attempt, error = %e, "review JSON failed validation");
+                if attempt >= max_attempts {
+                    return Err(ReviewError::Unhealable {
+                        attempts: max_attempts,
+                        last_error: e,
+                    });
+                }
                 messages.push(Message {
                     role: Role::Assistant,
                     content: resp.content,
@@ -63,63 +69,18 @@ pub async fn generate_with_self_heal(
                     "That output failed validation: {e}\n\nReturn ONLY a JSON object that \
                      conforms to the schema. No prose, no markdown fences."
                 )));
-                last_error = Some(e);
             }
         }
     }
-
-    Err(ReviewError::Unhealable {
-        attempts: max_attempts,
-        last_error: last_error.expect("loop ran at least once"),
-    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ar_llm::{CompleteResponse, Error, LlmProvider};
-    use async_trait::async_trait;
+    use ar_llm::testing::ScriptedProvider;
     use std::sync::Arc;
-    use std::sync::Mutex;
-
-    struct ScriptedProvider {
-        responses: Mutex<Vec<String>>,
-        calls: Mutex<u32>,
-    }
-
-    impl ScriptedProvider {
-        fn new(responses: Vec<&str>) -> Self {
-            Self {
-                responses: Mutex::new(responses.into_iter().map(String::from).collect()),
-                calls: Mutex::new(0),
-            }
-        }
-        fn call_count(&self) -> u32 {
-            *self.calls.lock().unwrap()
-        }
-    }
-
-    #[async_trait]
-    impl LlmProvider for ScriptedProvider {
-        async fn complete(&self, _req: CompleteRequest) -> Result<CompleteResponse, Error> {
-            *self.calls.lock().unwrap() += 1;
-            let next = self
-                .responses
-                .lock()
-                .unwrap()
-                .pop()
-                .unwrap_or_else(|| "{}".to_string());
-            Ok(CompleteResponse {
-                content: next,
-                input_tokens: 0,
-                output_tokens: 0,
-            })
-        }
-    }
 
     fn router_with(responses: Vec<&str>) -> (Router, Arc<ScriptedProvider>) {
-        // ScriptedProvider returns responses in REVERSE order (Vec::pop), so
-        // pass them last-to-first.
         let provider = Arc::new(ScriptedProvider::new(responses));
         let router = Router::new().with(ModelTier::Reasoning, provider.clone());
         (router, provider)
@@ -139,7 +100,7 @@ mod tests {
 
     #[tokio::test]
     async fn retries_when_first_response_is_invalid_json() {
-        let (router, provider) = router_with(vec![VALID, "not json"]);
+        let (router, provider) = router_with(vec!["not json", VALID]);
         let out = generate_with_self_heal(&router, "sys", "user", HealConfig::default())
             .await
             .expect("ok");
@@ -150,7 +111,7 @@ mod tests {
     #[tokio::test]
     async fn retries_when_first_response_violates_schema() {
         let bad = r#"{"summary":"x","findings":[{"path":"a","line_start":1,"severity":"oops","message":"m"}]}"#;
-        let (router, provider) = router_with(vec![VALID, bad]);
+        let (router, provider) = router_with(vec![bad, VALID]);
         let out = generate_with_self_heal(&router, "sys", "user", HealConfig::default())
             .await
             .expect("ok");
