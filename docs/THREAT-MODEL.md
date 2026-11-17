@@ -82,7 +82,7 @@ What an attacker would target, and what protects each:
 | `AR_CI_REVIEW_TOKEN`                                      | Authenticates CI-triggered review requests                                                                                                                                                                                                                                                                  | Bearer token, constant-time compare; gateway re-fetches PR head before dispatch                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
 | Reviewer host (root filesystem, host PATs of other tools) | Lateral movement                                                                                                                                                                                                                                                                                            | Runtime does not execute repo-supplied linter/tool configs; gateway runs as non-root                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                         |
 | Other repos the bot can write to                          | Cross-repo blast radius                                                                                                                                                                                                                                                                                     | Bot PAT scoping; per-repo `enabled: false`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
-| Learnings store (SQLite)                                  | LLM-prompt injection vector if poisoned                                                                                                                                                                                                                                                                     | Append-only; chat command surface gated to repo collaborators                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                |
+| Learnings store (SQLite)                                  | LLM-prompt injection vector if poisoned                                                                                                                                                                                                                                                                     | Each learning is scoped to a lowercased `owner/repo`; `remember`, `forget`, review corrections, and retrieval only touch the scope of the PR repository the command or review runs for. Chat commands arrive only through signature-verified webhooks or the bot's poller, and the bot only acts on PRs in repositories where it is installed; there is no collaborator gate, so any account that can comment on such a PR can invoke them. Legacy unscoped rows are excluded from retrieval |
 | Vector/RAG store (SQLite)                                 | May retain source snippets and embeddings from reviewed repositories                                                                                                                                                                                                                                         | Stored in the gateway state directory; operators can choose `:memory:` for volatile operation; snippets are framed as untrusted data before LLM use                                                                                                                                                                                                                                                                                                                                                                                            |
 | Release automation PAT                                    | Can prepare release PR metadata, create tags, create GitHub Releases, and update release PR descriptions                                                                                                                                                                                                     | `GH_RELEASE_AUTOMATION_TOKEN` loaded from the `Github Secrets` 1Password vault; blast radius is limited to release automation in `jwilger/auto_review`                                                                                                                                                                                                                                                                                                                                                                                           |
 | Binary release assets and provenance                      | Direct-download operators rely on archive integrity and origin                                                                                                                                                                                                                                              | Linux x86_64 archives ship with SHA-256 checksums, SSH signatures, SBOM/provenance metadata, and release notes verification commands such as `sha256sum -c SHA256SUMS` and `ssh-keygen -Y verify -f allowed-signers -I <release-bot-email> -n file -s SHA256SUMS.sig < SHA256SUMS` |
@@ -309,17 +309,43 @@ release operators own runner provisioning, isolation, and audit logs.
 _Attacker:_ A2.
 _Path:_ Repeatedly invoke `@auto-review remember <malicious text>`
 to inject prompt-fragments that future reviews retrieve, or rely on reviewed
-source snippets being persisted in the vector/RAG store.
-_Mitigation:_ Chat commands are gated to authenticated PR
-participants by Forgejo's permission model. Stored learnings are
-plain text and pass through the same untrusted-data framing in the
-review prompt as any other repo content. The `forget` command
-allows operators to purge entries.
+source snippets being persisted in the vector/RAG store. A commenter on a PR in
+one repository could also try to plant a learning that is retrieved into another
+repository's reviews, or `forget` another repository's learning by id.
+_Mitigation:_ Chat commands only reach the handler through signature-verified
+webhooks or the bot's own poller, for PRs in repositories where the bot is
+installed. There is no collaborator gate: anyone who can comment on such a PR
+can invoke `remember` and `forget`. Every new learning stores its repository
+scope (lowercased `owner/repo`, ADR-0025) and the PR it came from. Review
+retrieval, `remember`, review corrections and chat `forget` all use the scope
+of the PR's repository, so one repository's learnings never reach another
+repository's prompts, and `forget <id>` on a PR in another repository replies
+"No learning with id N in this repository" and leaves the learning in place.
+Legacy rows without a scope are backfilled from the "Repository
+`<owner>/<repo>` only." prefix when present; the rest stay unscoped and are
+excluded from retrieval. The operator CLI (`auto-review learnings`) can list
+and remove across scopes. Stored learnings are plain text and pass through the
+same untrusted-data framing in the review prompt as any other repo content.
+_Tests:_ the per-store scoped-query tests for the in-memory store
+(`crates/ar-index/src/learnings.rs`), the SQLite store
+(`crates/ar-index/src/sqlite_learnings.rs`) and the DynamoDB store
+(`crates/ar-index/tests/dynamodb_learnings.rs`), each showing that
+`query_nearest` for repository B excludes repository A's learnings and
+unscoped rows; the context-builder test with two scopes
+(`crates/ar-review/src/context_builder.rs`), showing a learning remembered in
+repository A is never returned when reviewing repository B; and the ar-chat
+red-team test in `crates/ar-chat/tests/`, showing `forget <id>` on a
+repository-B PR for a repository-A learning is refused and the learning
+remains.
 _Residual risk:_ a collaborator with write access can already merge
 malicious code; learnings poisoning is a strictly weaker capability
-for them. Operators using cloud embedding providers should treat embedded
-snippets like other LLM-bound repository content and choose `AR_VECTOR_DB=:memory:`
-or rotate/delete the SQLite store if long-term snippet retention is undesirable.
+for them. Any commenter can still poison the learnings of the repository
+they comment in; approver gating of `remember` and `forget` is planned
+separately. Repositories with the same lowercased `owner/repo` on different
+forges (mirrors) share learnings by design. Operators using cloud embedding
+providers should treat embedded snippets like other LLM-bound repository
+content and choose `AR_VECTOR_DB=:memory:` or rotate/delete the SQLite store if
+long-term snippet retention is undesirable.
 
 ### T6a. Unauthenticated operator endpoints
 
