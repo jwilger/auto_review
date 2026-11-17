@@ -53,8 +53,8 @@ in your Forgejo instance for the exact handle.
 |---------|--------------|
 | `@<bot> help` | List every available command. |
 | `@<bot> re-review` | Re-run the full review against the current head SHA, even if it was already reviewed. |
-| `@<bot> remember <text>` | Save a guideline to the repo's learnings store. Future semantic retrieval requires an embedding tier (`LLM_EMBEDDING_MODEL`); otherwise the entry is stored but not retrieved by similarity search. |
-| `@<bot> forget <id>` | Delete a learnings entry. The id is printed when `remember` stores the entry; operators can also audit ids with `auto-review learnings list`. |
+| `@<bot> remember <text>` | Save a guideline for this repository. It only affects reviews of this repository (see [Learnings are per repository](#learnings-are-per-repository)). Future semantic retrieval requires an embedding tier (`LLM_EMBEDDING_MODEL`); otherwise the entry is stored but not retrieved by similarity search. |
+| `@<bot> forget <id>` | Delete one of this repository's learnings. An id that belongs to another repository, or that does not exist, gets the same reply: "No learning with id N in this repository". The id is printed when `remember` stores the entry; operators can also audit ids with `auto-review learnings list`. |
 | `@<bot> autofix` | Ask the cheap-tier model for diff-based inline patch suggestions. The bot does not push commits — you decide what to apply. |
 | `@<bot> docstring` | Suggest docstrings for newly-added public APIs. Requires the cheap-tier model (`LLM_CHEAP_MODEL`). Same: comment-only, you apply. |
 | `@<bot> tests` | Suggest scaffolded test cases for added code. Requires the cheap-tier model. Same. |
@@ -67,6 +67,23 @@ without special syntax.
 
 Mentions inside an inline review thread (replies to a finding) are
 picked up by the bot's polling loop, typically within a minute.
+
+### Learnings are per repository
+
+Every learning belongs to one repository, identified by its lowercased
+`owner/repo`. A `remember` on a PR, and any correction the bot records from a
+review thread, only affects later reviews of that repository. `forget` only
+works on that repository's learnings. Learnings are not shared between
+repositories, even on the same bot installation.
+
+The repository key has no forge in it, so mirrored repositories with the same
+lowercased `owner/repo` on different forges (for example a Forgejo mirror of a
+GitHub repository) share learnings.
+
+Learnings stored before repository scoping were assigned to a repository when
+their text starts with "Repository `<owner>/<repo>` only.". Any other older
+learning is unscoped and is no longer used in reviews; an operator can list or
+remove it with `auto-review learnings`.
 
 ## Disagreeing with a finding
 

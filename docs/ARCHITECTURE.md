@@ -183,8 +183,23 @@ configured, and uses DynamoDB review history when
 AgentCore uses DynamoDB learnings when `AGENTCORE_LEARNINGS_DYNAMODB_TABLE` or
 `--learnings-dynamodb-table` is configured.
 
+Learnings are scoped by repository (ADR-0025). Each learning stores a
+`repo` scope, the lowercased `owner/repo` with no provider component, and the
+`origin_pr` it came from. Context building retrieves only learnings in the
+reviewed repository's scope; chat `remember`, review corrections and `forget`
+use the scope of the PR's repository. Mirrored repositories with the same
+lowercased `owner/repo` on different forges share learnings. Opening an older
+SQLite store adds the columns and backfills the scope from the legacy
+"Repository `<owner>/<repo>` only." text prefix; DynamoDB items without a `repo`
+attribute get the same treatment at read time. Rows with no recoverable scope
+are excluded from retrieval, and the gateway logs their count at startup.
+Vector-store rows are not scoped yet: `SqliteVectorStore` is still shared
+across repositories, and keying its rows by the same `RepoScope` is planned
+under ADR-0025 in issue #40.
+
 Repository context uses the diff, changed paths, tree-sitter symbols, embeddings
-when an embedding tier is configured, and persistent learnings. Co-change graph
+when an embedding tier is configured, and repository-scoped persistent
+learnings. Co-change graph
 support exists in `ar-index`, but the 1.0 review pipeline does not inject
 co-change data into prompts. The review pipeline depends on the `VectorStore`
 abstraction; `SqliteVectorStore` is the current persistent default. LanceDB or

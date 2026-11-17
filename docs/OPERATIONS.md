@@ -699,21 +699,76 @@ sqlite3 /var/lib/auto_review/learnings.db ".backup '/backup/learnings-$(date -I)
 
 **Inspect:**
 ```bash
-auto-review learnings list   # uses AR_LEARNINGS_DB by default
+auto-review learnings list   # every learning; uses AR_LEARNINGS_DB by default
+auto-review learnings list --repo OWNER/REPO   # one repository's learnings
+auto-review learnings list --unscoped          # legacy rows with no repository
 auto-review learnings list --json | jq    # machine-readable
 ```
+
+Each learning is scoped to one repository (lowercased `owner/repo`) and records
+the PR it was taught on; `list` prints both, with `-` (or `null` in `--json`)
+when unknown. See the [CLI reference](./CLI.md#learnings) for the flags.
 
 (For a custom inspection query, `sqlite3` against the file
 works too — the schema is documented in
 `crates/ar-index/src/sqlite_learnings.rs`.)
 
+**Upgrading an older SQLite store (gateway):** opening a store created before
+repository scoping adds the `repo` and `origin_pr` columns and assigns a
+repository to rows whose text starts with "Repository `<owner>/<repo>` only."
+(old review corrections). Other older rows stay unscoped and are excluded from
+review retrieval; the gateway logs one startup `warn` with an
+`unscoped_learnings` count while any remain. A row whose stored `repo` value is
+not a valid `owner/repo` counts as unscoped too and is logged with a `warn`
+when read. Review unscoped rows with `learnings list --unscoped`, then re-teach
+them with `@<bot> remember` on a PR in the right repository or remove them with
+`learnings forget`. Because that prefix could also have been typed by a
+commenter through chat `remember`, audit the backfilled rows with
+`learnings list` after upgrading and remove any that do not belong to their
+repository.
+
+**Upgrading a DynamoDB store (AgentCore):** the AgentCore runtime logs no
+`unscoped_learnings` count at startup, and `auto-review learnings list` and
+`learnings forget` only open the SQLite store, so neither works against a
+DynamoDB table. Nothing in the table is rewritten. When an item with no `repo`
+attribute is read, it is scoped from the same "Repository `<owner>/<repo>`
+only." text prefix; every other such item is unscoped and excluded from review
+retrieval. An item whose `repo` attribute is not a valid `owner/repo` counts as
+unscoped and is logged with a `warn` when read. Audit the legacy items with the
+AWS CLI. The result holds both the unscoped items and the prefix-scoped ones
+that need checking:
+
+```bash
+aws dynamodb scan \
+  --table-name "$AGENTCORE_LEARNINGS_DYNAMODB_TABLE" \
+  --filter-expression 'begins_with(pk, :p) AND attribute_not_exists(repo)' \
+  --expression-attribute-values '{":p":{"S":"learning#"}}' \
+  --projection-expression 'pk, #t' \
+  --expression-attribute-names '{"#t":"text"}'
+```
+
+Re-teach the ones to keep with `@<bot> remember` on a PR in the right
+repository, which writes a new item with a `repo` attribute, then delete the
+old item by its `pk`:
+
+```bash
+aws dynamodb delete-item \
+  --table-name "$AGENTCORE_LEARNINGS_DYNAMODB_TABLE" \
+  --key '{"pk":{"S":"learning#<ID>"}}'
+```
+
+`@<bot> forget <ID>` on a PR also removes a prefix-scoped legacy item of that
+PR's repository, but it cannot remove an unscoped item; use `delete-item` for
+those.
+
 **Forget a single learning:**
 ```bash
 auto-review learnings forget --id <ID>
 ```
-Same effect as `@<bot> forget` from a PR thread but operates
-directly on the SQLite store, so operators can script bulk
-wipes without going through Forgejo.
+This removes any learning, including unscoped ones and those of other
+repositories, directly in the store, so operators can script bulk wipes without
+going through a forge. `@<bot> forget` from a PR thread only removes learnings
+of that PR's repository.
 
 **Restore:** stop the gateway, replace the file, restart.
 

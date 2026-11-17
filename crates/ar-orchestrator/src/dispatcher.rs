@@ -83,6 +83,14 @@ pub struct ReviewJob {
     pub force: bool,
 }
 
+impl ReviewJob {
+    /// Learnings scope of the reviewed repository: the lowercased
+    /// `owner/repo`, so a mixed-case job still finds its learnings.
+    pub fn repo_scope(&self) -> ar_index::RepoScope {
+        ar_index::RepoScope::new(&self.owner, &self.repo)
+    }
+}
+
 impl From<&PullRequestEvent> for ReviewJob {
     fn from(evt: &PullRequestEvent) -> Self {
         Self {
@@ -814,13 +822,13 @@ async fn prepare_workspace_context(
     let repo_context = if raw_diff.is_empty() {
         String::new()
     } else {
-        build_review_context_with_store(
+        job_review_context(
             workspace.path(),
             llm,
             &raw_diff,
             learnings,
-            5,
             vector_store,
+            job,
         )
         .await
         .unwrap_or_else(|e| {
@@ -835,6 +843,28 @@ async fn prepare_workspace_context(
         raw_diff,
         workspace: Some(workspace),
     })
+}
+
+/// Build the RAG context for `job`, retrieving only learnings scoped
+/// to the job's repository.
+async fn job_review_context(
+    workspace_path: &std::path::Path,
+    llm: &LlmRouter,
+    raw_diff: &str,
+    learnings: Option<&dyn LearningsStore>,
+    vector_store: Option<&dyn VectorStore>,
+    job: &ReviewJob,
+) -> Result<String, ar_review::ContextBuildError> {
+    build_review_context_with_store(
+        workspace_path,
+        llm,
+        raw_diff,
+        learnings,
+        &job.repo_scope(),
+        5,
+        vector_store,
+    )
+    .await
 }
 
 async fn clone_head_workspace(
@@ -1126,6 +1156,79 @@ mod tests {
 
     fn router_with(provider: Arc<CannedProvider>) -> Router {
         Router::new().with(ModelTier::Reasoning, provider)
+    }
+
+    /// Embeds every text to the same direction, so any stored learning
+    /// with that embedding is a nearest match for the diff.
+    struct ConstantEmbedder;
+
+    #[async_trait]
+    impl LlmProvider for ConstantEmbedder {
+        async fn complete(&self, _req: CompleteRequest) -> Result<CompleteResponse, LlmError> {
+            Err(LlmError::Provider {
+                status: 500,
+                body: "embedder only".into(),
+            })
+        }
+
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LlmError> {
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn job_review_context_retrieves_only_the_jobs_repository_learnings() {
+        // The job is mixed case and the learning is stored lowercase, so
+        // this also covers the case-insensitive scope match.
+        use ar_index::{InMemoryLearningsStore, LearningSource, RepoScope};
+
+        let store = InMemoryLearningsStore::new();
+        store
+            .add(
+                "Widget forbids unwrap.".into(),
+                LearningSource::Chat,
+                vec![1.0, 0.0],
+                0,
+                &RepoScope::new("acme", "widget"),
+                None,
+            )
+            .await
+            .unwrap();
+        let llm = Router::new().with(ModelTier::Embedding, Arc::new(ConstantEmbedder));
+        let dir = tempfile::tempdir().unwrap();
+        let job_for = |repo: &str| ReviewJob {
+            owner: "Acme".to_string(),
+            repo: repo.to_string(),
+            pr_number: 1,
+            head_sha: "abc".to_string(),
+            pr_title: String::new(),
+            pr_body: String::new(),
+            force: false,
+        };
+
+        let same = job_review_context(
+            dir.path(),
+            &llm,
+            "diff",
+            Some(&store),
+            None,
+            &job_for("Widget"),
+        )
+        .await
+        .unwrap();
+        assert!(same.contains("Widget forbids unwrap."), "{same}");
+
+        let other = job_review_context(
+            dir.path(),
+            &llm,
+            "diff",
+            Some(&store),
+            None,
+            &job_for("Gadget"),
+        )
+        .await
+        .unwrap();
+        assert!(!other.contains("Widget forbids unwrap."), "{other}");
     }
 
     #[tokio::test]
