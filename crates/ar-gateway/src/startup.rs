@@ -1385,6 +1385,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
             )
         }
     };
+    warn_on_unscoped_learnings(learnings.as_ref()).await;
 
     // Shared review history. Both the orchestrator's incremental-
     // review dedup AND the chat poller need to enumerate the PRs
@@ -1794,6 +1795,26 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     Ok(())
 }
 
+/// Log once at startup how many legacy learnings have no repository.
+/// Those rows predate per-repository scoping and are never retrieved
+/// into reviews, so operators need to know they exist to re-teach or
+/// remove them (`auto-review learnings list --unscoped`). A failure to
+/// count is logged and never stops the gateway.
+async fn warn_on_unscoped_learnings(store: &dyn ar_index::LearningsStore) {
+    match store.list(ar_index::LearningsFilter::Unscoped).await {
+        Ok(unscoped) if unscoped.is_empty() => {}
+        Ok(unscoped) => tracing::warn!(
+            unscoped_learnings = unscoped.len(),
+            "learnings without a repository are excluded from retrieval; \
+             list them with `auto-review learnings list --unscoped`"
+        ),
+        Err(error) => tracing::warn!(
+            error = %error,
+            "could not count learnings without a repository; continuing startup"
+        ),
+    }
+}
+
 /// Shutdown signal handler. Returns when SIGTERM (Unix) or
 /// SIGINT (Ctrl-C, cross-platform) arrives. Used as the
 /// `with_graceful_shutdown` argument on `axum::serve` so:
@@ -1976,6 +1997,181 @@ mod tests {
                 self.message = Some(format!("{value:?}").trim_matches('"').to_string());
             }
         }
+    }
+
+    /// One captured tracing event: its level and every field rendered
+    /// as a string (the message under `message`).
+    #[derive(Debug, Clone)]
+    struct CapturedEvent {
+        level: tracing::Level,
+        fields: Vec<(String, String)>,
+    }
+
+    impl CapturedEvent {
+        fn field(&self, name: &str) -> Option<&str> {
+            self.fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.as_str())
+        }
+    }
+
+    struct EventCapturingSubscriber {
+        events: Arc<Mutex<Vec<CapturedEvent>>>,
+    }
+
+    impl tracing::Subscriber for EventCapturingSubscriber {
+        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
+            true
+        }
+
+        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
+            tracing::span::Id::from_u64(1)
+        }
+
+        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+
+        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+
+        fn event(&self, event: &tracing::Event<'_>) {
+            let mut visitor = FieldVisitor::default();
+            event.record(&mut visitor);
+            self.events.lock().unwrap().push(CapturedEvent {
+                level: *event.metadata().level(),
+                fields: visitor.fields,
+            });
+        }
+
+        fn enter(&self, _span: &tracing::span::Id) {}
+
+        fn exit(&self, _span: &tracing::span::Id) {}
+    }
+
+    #[derive(Default)]
+    struct FieldVisitor {
+        fields: Vec<(String, String)>,
+    }
+
+    impl tracing::field::Visit for FieldVisitor {
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+
+        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+
+        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+            self.fields.push((
+                field.name().to_string(),
+                format!("{value:?}").trim_matches('"').to_string(),
+            ));
+        }
+    }
+
+    /// A learnings store whose only job is to answer
+    /// `list(Unscoped)` with a fixed count, or fail.
+    struct UnscopedCountStore {
+        unscoped: Option<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ar_index::LearningsStore for UnscopedCountStore {
+        async fn add(
+            &self,
+            _text: String,
+            _source: ar_index::LearningSource,
+            _embedding: Vec<f32>,
+            _now: i64,
+            _scope: &ar_index::RepoScope,
+            _origin_pr: Option<u64>,
+        ) -> Result<ar_index::LearningRecord, ar_index::LearningsError> {
+            unreachable!("startup must not add learnings")
+        }
+
+        async fn list(
+            &self,
+            filter: ar_index::LearningsFilter,
+        ) -> Result<Vec<ar_index::LearningRecord>, ar_index::LearningsError> {
+            assert_eq!(filter, ar_index::LearningsFilter::Unscoped);
+            let count = self
+                .unscoped
+                .ok_or_else(|| ar_index::LearningsError::Storage("disk on fire".into()))?;
+            Ok((0..count as u64)
+                .map(|id| ar_index::LearningRecord {
+                    id,
+                    text: format!("legacy {id}"),
+                    source: ar_index::LearningSource::Chat,
+                    embedding: vec![0.0; 3],
+                    created_at: 0,
+                    repo: None,
+                    origin_pr: None,
+                })
+                .collect())
+        }
+
+        async fn remove(
+            &self,
+            _id: u64,
+            _scope: Option<&ar_index::RepoScope>,
+        ) -> Result<(), ar_index::LearningsError> {
+            unreachable!("startup must not remove learnings")
+        }
+
+        async fn query_nearest(
+            &self,
+            _query: &[f32],
+            _top_k: usize,
+            _scope: &ar_index::RepoScope,
+        ) -> Result<Vec<ar_index::ScoredLearning>, ar_index::LearningsError> {
+            unreachable!("startup must not query learnings")
+        }
+    }
+
+    async fn capture_unscoped_learnings_log(unscoped: Option<usize>) -> Vec<CapturedEvent> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = EventCapturingSubscriber {
+            events: Arc::clone(&events),
+        };
+        let _guard = tracing::subscriber::set_default(subscriber);
+        warn_on_unscoped_learnings(&UnscopedCountStore { unscoped }).await;
+        let captured = events.lock().unwrap().clone();
+        captured
+    }
+
+    #[tokio::test]
+    async fn startup_warns_once_with_the_count_of_unscoped_learnings() {
+        let events = capture_unscoped_learnings_log(Some(3)).await;
+        assert_eq!(events.len(), 1, "expected one event, got {events:?}");
+        let event = &events[0];
+        assert_eq!(event.level, tracing::Level::WARN);
+        assert_eq!(event.field("unscoped_learnings"), Some("3"));
+        let message = event.field("message").unwrap_or_default();
+        assert!(
+            message.contains("excluded from retrieval"),
+            "message should say the learnings are excluded, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_logs_nothing_when_no_learnings_are_unscoped() {
+        let events = capture_unscoped_learnings_log(Some(0)).await;
+        assert!(events.is_empty(), "expected no events, got {events:?}");
+    }
+
+    #[tokio::test]
+    async fn startup_logs_and_continues_when_counting_unscoped_learnings_fails() {
+        let events = capture_unscoped_learnings_log(None).await;
+        assert_eq!(events.len(), 1, "expected one event, got {events:?}");
+        assert!(
+            events[0]
+                .field("error")
+                .is_some_and(|error| error.contains("disk on fire")),
+            "the failure should carry the store error, got {events:?}"
+        );
+        assert!(events[0].field("unscoped_learnings").is_none());
     }
 
     #[test]

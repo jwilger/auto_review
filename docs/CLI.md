@@ -50,10 +50,27 @@ auto-review ops status --gateway-url https://reviewer.example.com
 | Command | Purpose |
 |---|---|
 | `config validate` | Parses `.auto_review.yaml`; add `--strict` to reject unknown top-level keys. |
-| `learnings list` | Lists persistent learnings, optionally as JSON. |
-| `learnings forget` | Deletes one learning by id. |
+| `learnings list` | Lists every persistent learning with its repository and origin PR, optionally as JSON. |
+| `learnings forget` | Deletes one learning by id, in any repository. |
 | `history reset-pr` | Clears the last-reviewed SHA for one PR so the next review is fresh. |
 | `history purge` | Deletes review-history rows older than N days. |
+
+### Learnings
+
+Learnings are scoped to one repository, written as lowercased `owner/repo`.
+`learnings list` prints each learning's repository and the PR it was taught
+on; the text table shows `-` for either when it is unknown, and `--json` emits
+`repo` and `origin_pr` as `null`. Two flags narrow the list, and they cannot be
+combined:
+
+| Flag | Lists |
+|---|---|
+| `--repo OWNER/REPO` | Only learnings of that repository. The value is matched case-insensitively. |
+| `--unscoped` | Only legacy learnings with no repository. Reviews never retrieve these, and the gateway logs their count once at startup. |
+
+`learnings forget --id N` is the operator path and removes any learning,
+including unscoped ones. The chat `forget` command only removes learnings of
+the repository it is posted in.
 
 ## Debugging and benchmarks
 

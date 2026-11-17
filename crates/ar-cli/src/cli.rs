@@ -326,6 +326,33 @@ pub struct ListLearningsArgs {
     /// into `jq`. Otherwise renders a human-readable table.
     #[arg(long)]
     pub json: bool,
+
+    /// Only list learnings scoped to this repository, given as
+    /// `owner/repo`. Matching is case-insensitive.
+    #[arg(long, value_name = "OWNER/REPO", value_parser = parse_repo_scope)]
+    pub repo: Option<ar_index::RepoScope>,
+
+    /// Only list legacy learnings that have no repository. These are
+    /// excluded from review retrieval.
+    #[arg(long, conflicts_with = "repo")]
+    pub unscoped: bool,
+}
+
+impl ListLearningsArgs {
+    /// The store filter the flags select. With neither flag every
+    /// learning is listed.
+    pub fn filter(&self) -> ar_index::LearningsFilter {
+        match (&self.repo, self.unscoped) {
+            (Some(scope), _) => ar_index::LearningsFilter::Repo(scope.clone()),
+            (None, true) => ar_index::LearningsFilter::Unscoped,
+            (None, false) => ar_index::LearningsFilter::All,
+        }
+    }
+}
+
+fn parse_repo_scope(value: &str) -> Result<ar_index::RepoScope, String> {
+    ar_index::RepoScope::parse(value.trim())
+        .ok_or_else(|| format!("expected owner/repo, got {value:?}"))
 }
 
 #[derive(clap::Args, Debug)]
@@ -859,6 +886,55 @@ mod tests {
             }
             _ => panic!("expected ListLearnings"),
         }
+    }
+
+    fn parse_list_learnings(extra: &[&str]) -> Result<ListLearningsArgs, clap::Error> {
+        let mut argv = vec![
+            "auto-review",
+            "learnings",
+            "list",
+            "--learnings-db",
+            "/tmp/l.db",
+        ];
+        argv.extend_from_slice(extra);
+        match Cli::try_parse_from(argv)?.command {
+            Command::Learnings(LearningsCommand::List(a)) => Ok(a),
+            other => panic!("expected ListLearnings, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn list_learnings_repo_flag_filters_to_the_lowercased_repository() {
+        let args = parse_list_learnings(&["--repo", "Acme/Widget"]).expect("parse");
+        assert_eq!(
+            args.filter(),
+            ar_index::LearningsFilter::Repo(ar_index::RepoScope::new("acme", "widget"))
+        );
+    }
+
+    #[test]
+    fn list_learnings_unscoped_flag_filters_to_unscoped_learnings() {
+        let args = parse_list_learnings(&["--unscoped"]).expect("parse");
+        assert_eq!(args.filter(), ar_index::LearningsFilter::Unscoped);
+    }
+
+    #[test]
+    fn list_learnings_lists_every_learning_by_default() {
+        let args = parse_list_learnings(&[]).expect("parse");
+        assert_eq!(args.filter(), ar_index::LearningsFilter::All);
+    }
+
+    #[test]
+    fn list_learnings_rejects_repo_and_unscoped_together() {
+        let err = parse_list_learnings(&["--repo", "acme/widget", "--unscoped"])
+            .expect_err("--repo and --unscoped must conflict");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+    }
+
+    #[test]
+    fn list_learnings_rejects_repo_without_owner() {
+        let err = parse_list_learnings(&["--repo", "widget"]).expect_err("needs owner/repo");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]

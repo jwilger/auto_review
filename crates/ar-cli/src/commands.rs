@@ -735,61 +735,88 @@ pub fn build_webhook_url(gateway_url: &str) -> String {
     format!("{trimmed}{WEBHOOK_PATH}")
 }
 
-/// Print every learning in the SQLite store. Operators use
-/// this to audit what `@<bot> remember` has been writing and
-/// to find the `id` `forget-learning` needs.
+/// Print the learnings in the SQLite store. Operators use this to
+/// audit what `@<bot> remember` and review corrections have been
+/// writing, to see which repository each learning belongs to, and to
+/// find the `id` `learnings forget` needs. `--repo` and `--unscoped`
+/// narrow the list; with neither flag every learning is shown.
 pub async fn list_learnings(args: ListLearningsArgs) -> Result<()> {
     use ar_index::LearningsStore;
     let store = ar_index::SqliteLearningsStore::open(&args.learnings_db)
         .await
         .with_context(|| format!("open learnings db at {}", args.learnings_db.display()))?;
-    let learnings = store
-        .list(ar_index::LearningsFilter::All)
-        .await
-        .context("list learnings")?;
-    if args.json {
-        for l in &learnings {
-            // The embedding is many floats and rarely useful in a
-            // human-facing dump. Emit a serialisation that omits
-            // it.
-            let row = serde_json::json!({
-                "id": l.id,
-                "text": l.text,
-                "source": l.source,
-                "created_at": l.created_at,
-                "embedding_dim": l.embedding.len(),
-            });
-            println!("{}", serde_json::to_string(&row)?);
-        }
-        return Ok(());
+    let learnings = store.list(args.filter()).await.context("list learnings")?;
+    for line in render_learnings(&learnings, args.json, &args.learnings_db)? {
+        println!("{line}");
+    }
+    Ok(())
+}
+
+/// Render `learnings` as NDJSON rows (`json`) or as a human-readable
+/// table. Unscoped learnings show `-` for their repository in the table
+/// and `null` in JSON; the same goes for an unknown origin PR.
+fn render_learnings(
+    learnings: &[ar_index::LearningRecord],
+    json: bool,
+    learnings_db: &std::path::Path,
+) -> Result<Vec<String>> {
+    if json {
+        return learnings
+            .iter()
+            .map(|l| {
+                // The embedding is many floats and rarely useful in a
+                // human-facing dump. Emit a serialisation that omits
+                // it.
+                let row = serde_json::json!({
+                    "id": l.id,
+                    "repo": l.repo.as_ref().map(ToString::to_string),
+                    "origin_pr": l.origin_pr,
+                    "text": l.text,
+                    "source": l.source,
+                    "created_at": l.created_at,
+                    "embedding_dim": l.embedding.len(),
+                });
+                Ok(serde_json::to_string(&row)?)
+            })
+            .collect();
     }
     if learnings.is_empty() {
-        println!("No learnings stored.");
-        return Ok(());
+        return Ok(vec!["No learnings stored.".to_string()]);
     }
-    println!(
-        "{} learning{} in {}:",
-        learnings.len(),
-        if learnings.len() == 1 { "" } else { "s" },
-        args.learnings_db.display(),
-    );
-    println!();
-    for l in &learnings {
+    let mut lines = vec![
+        format!(
+            "{} learning{} in {}:",
+            learnings.len(),
+            if learnings.len() == 1 { "" } else { "s" },
+            learnings_db.display(),
+        ),
+        String::new(),
+    ];
+    for l in learnings {
         let truncated: String = l.text.chars().take(80).collect();
         let suffix = if l.text.chars().count() > 80 {
             "…"
         } else {
             ""
         };
-        println!(
-            "  id={:<6} source={:<10} {}{}",
+        let repo = l
+            .repo
+            .as_ref()
+            .map_or_else(|| "-".to_string(), ToString::to_string);
+        let pr = l
+            .origin_pr
+            .map_or_else(|| "-".to_string(), |pr| pr.to_string());
+        lines.push(format!(
+            "  id={:<6} repo={:<24} pr={:<6} source={:<10} {}{}",
             l.id,
+            repo,
+            pr,
             format!("{:?}", l.source).to_lowercase(),
             truncated,
             suffix,
-        );
+        ));
     }
-    Ok(())
+    Ok(lines)
 }
 
 /// Delete one learning by id. Same effect as `@<bot> forget` but
@@ -2485,6 +2512,8 @@ mod tests {
         let args = ListLearningsArgs {
             learnings_db: path,
             json: false,
+            repo: None,
+            unscoped: false,
         };
         list_learnings(args).await.expect("ok");
     }
@@ -2511,8 +2540,72 @@ mod tests {
         let args = ListLearningsArgs {
             learnings_db: path,
             json: true,
+            repo: None,
+            unscoped: false,
         };
         list_learnings(args).await.expect("ok");
+    }
+
+    fn learning_record(
+        id: u64,
+        repo: Option<ar_index::RepoScope>,
+        origin_pr: Option<u64>,
+    ) -> ar_index::LearningRecord {
+        ar_index::LearningRecord {
+            id,
+            text: format!("learning {id}"),
+            source: ar_index::LearningSource::Chat,
+            embedding: vec![0.0; 3],
+            created_at: 100,
+            repo,
+            origin_pr,
+        }
+    }
+
+    #[test]
+    fn learnings_json_rows_carry_repo_and_origin_pr() {
+        let rows = render_learnings(
+            &[
+                learning_record(1, Some(ar_index::RepoScope::new("Acme", "Widget")), Some(7)),
+                learning_record(2, None, None),
+            ],
+            true,
+            std::path::Path::new("/tmp/l.db"),
+        )
+        .expect("render");
+        let parsed: Vec<serde_json::Value> = rows
+            .iter()
+            .map(|row| serde_json::from_str(row).expect("json row"))
+            .collect();
+        assert_eq!(parsed[0]["repo"], "acme/widget");
+        assert_eq!(parsed[0]["origin_pr"], 7);
+        assert!(parsed[1]["repo"].is_null());
+        assert!(parsed[1]["origin_pr"].is_null());
+    }
+
+    #[test]
+    fn learnings_text_rows_show_repo_or_dash_and_origin_pr() {
+        let rows = render_learnings(
+            &[
+                learning_record(1, Some(ar_index::RepoScope::new("acme", "widget")), Some(7)),
+                learning_record(2, None, None),
+            ],
+            false,
+            std::path::Path::new("/tmp/l.db"),
+        )
+        .expect("render");
+        let first = rows
+            .iter()
+            .find(|row| row.contains("id=1 "))
+            .expect("row for id 1");
+        assert!(first.contains("repo=acme/widget"), "row: {first}");
+        assert!(first.contains("pr=7"), "row: {first}");
+        let second = rows
+            .iter()
+            .find(|row| row.contains("id=2 "))
+            .expect("row for id 2");
+        assert!(second.contains("repo=-"), "row: {second}");
+        assert!(second.contains("pr=-"), "row: {second}");
     }
 
     #[tokio::test]
@@ -2524,6 +2617,8 @@ mod tests {
         let args = ListLearningsArgs {
             learnings_db: path,
             json: false,
+            repo: None,
+            unscoped: false,
         };
         list_learnings(args).await.expect("ok");
     }
