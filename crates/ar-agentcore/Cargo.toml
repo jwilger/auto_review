@@ -22,3 +22,6 @@ ar-orchestrator = { path = "../ar-orchestrator" }
 [dev-dependencies]
 serde_json.workspace = true
 tower = { workspace = true, features = ["util"] }
+
+[lints]
+workspace = true
