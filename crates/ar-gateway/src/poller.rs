@@ -51,9 +51,13 @@
 //!   review is submitted. If a poll cycle raises the watermark in
 //!   between, a mention in that draft arrives below it.
 //! - Issue comments are listed before inline comments, so a top-level
-//!   comment created while a cycle is listing reviews can end up below
-//!   the watermark unlisted. The `issue_comment` webhook delivers such
-//!   comments; only a lost webhook delivery drops one.
+//!   mention created while a cycle is listing reviews is not listed by
+//!   that cycle, yet the cycle raises the watermark past it whenever a
+//!   newer inline comment exists. Its `issue_comment` webhook then only
+//!   rescues it if delivered before the cycle ends: a delivery that
+//!   arrives after the watermark is raised is rejected by
+//!   `claim_chat_comment` as already handled (the webhook path logs this
+//!   at debug level), and a lost delivery drops it too.
 //!
 //! Bot's own comments are filtered out by login, so reading a comment
 //! the bot itself posted doesn't trigger an infinite reply loop.
@@ -399,9 +403,11 @@ impl ChatPoller {
         }
         // Everything listed this cycle is now handled, so move the
         // watermark past it and drop the per-id claims it covers. Issue
-        // comments are listed before inline comments, so a comment this
-        // can skip is a top-level one created mid-cycle, which the
-        // issue_comment webhook also delivers.
+        // comments are listed before inline comments, so this can skip a
+        // top-level mention created mid-cycle. Its issue_comment webhook
+        // only rescues it if delivered before this point; a later
+        // delivery falls below the watermark and is rejected (see the
+        // module doc's known gaps).
         if let Some(max_seen) = max_seen {
             advance_chat_cursor(&self.cursors, key.clone(), max_seen).await;
         }
