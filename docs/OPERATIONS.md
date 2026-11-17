@@ -505,6 +505,30 @@ The bot still accepts PR webhooks, but repository config is enforced when a
 CI-triggered or explicit forced review runs; disabled repositories get a
 "disabled by repo config" success status instead of review findings.
 
+The file must be on the PR's base branch. The bot reads repository config from
+the base branch only (see "Configuration precedence" below), so the change takes
+effect after it merges and a PR cannot disable its own review.
+
+### 7.1.1 Configuration precedence
+
+Review behaviour comes from two sources:
+
+- **Repository config**: `.auto_review.yaml` (or `.auto_review.yml`) read from
+  the PR's base branch through `ar_review::trusted_files`. The PR's head
+  checkout is never consulted, so config edits apply only after they merge to
+  the base branch, and then to every open PR on its next review. A missing,
+  oversized (over 64 KiB), or malformed file, or a non-404 error fetching it,
+  falls back to defaults with a warning log and the review proceeds.
+- **Operator environment variables** such as `AR_SEVERITY_FLOOR`.
+
+Base-branch repository config overrides operator defaults. Operator variables
+are defaults only: they apply when the repository config has no key for the
+same behaviour. Once a repository key exists for a behaviour (for example a
+future repository severity-floor key alongside `AR_SEVERITY_FLOOR`), the
+repository value wins. No operator variable caps or overrides a repository key.
+This is a maintainer decision recorded in
+[ADR-0024](./ADR-0024-base-branch-trusted-repository-instruction-files.md).
+
 ### 7.2 Add custom guidelines
 
 ```yaml
