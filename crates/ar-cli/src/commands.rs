@@ -21,7 +21,7 @@ use ar_orchestrator::{
     run_review_job, InMemoryReviewHistory, InlineDispatcher, JobDispatcher, ReviewHistory,
     ReviewJob,
 };
-use ar_prompts::{render_review_prompt, ReviewPromptInputs};
+use ar_prompts::{fence_nonce, process_nonce_salt, render_review_prompt, ReviewPromptInputs};
 use ar_review::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 use async_trait::async_trait;
 use hmac::{Hmac, KeyInit, Mac};
@@ -512,7 +512,7 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
     }
 
     if args.dry_run {
-        return print_dry_run_prompt(&forgejo, &args, &pr.title, &pr.body).await;
+        return print_dry_run_prompt(&forgejo, &args, &pr.head.sha, &pr.title, &pr.body).await;
     }
 
     let provider = Arc::new(
@@ -571,6 +571,7 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
 async fn print_dry_run_prompt(
     forgejo: &Client,
     args: &ReviewOnceArgs,
+    head_sha: &str,
     pr_title: &str,
     pr_body: &str,
 ) -> Result<()> {
@@ -585,6 +586,8 @@ async fn print_dry_run_prompt(
         .context("fetch changed files")?;
     let changed_files: Vec<String> = files.iter().map(|f| f.filename.clone()).collect();
     let repo_full = format!("{}/{}", args.owner, args.repo);
+    // Same derivation as the review pipeline: head SHA plus a process-random salt.
+    let nonce = fence_nonce(head_sha, process_nonce_salt());
     let prompt = render_review_prompt(&ReviewPromptInputs {
         repo_full_name: &repo_full,
         pr_number: args.pr,
@@ -596,6 +599,7 @@ async fn print_dry_run_prompt(
         guidelines: "",
         repo_context: "",
         prior_discussion: "",
+        fence_nonce: &nonce,
     });
     println!("{prompt}");
     Ok(())

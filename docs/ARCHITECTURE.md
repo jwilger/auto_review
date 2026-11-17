@@ -142,6 +142,22 @@ Components receive only the workspace capability they need:
 - Context building and agentic verification use read-only, path-confined access
   under the clone root with symlink escape rejection and output/result caps.
 - Agentic verifier tools are file read and search capabilities, not shell access.
+- Repository-controlled instruction files are read from the PR's base branch,
+  never from the head checkout (ADR-0024). `ar_review::trusted_files` is the
+  single runtime loader: `read_trusted_repo_file` fetches a file through
+  `ReviewHost::get_file_content` at the base branch tip by name, and
+  `load_repo_config_from_base` tries `.auto_review.yaml`, then
+  `.auto_review.yml`, returning the config with its provenance (path and ref)
+  and an optional warning. A missing file, an oversized body, malformed YAML, or
+  a non-404 fetch error falls back to default config and the review proceeds.
+  `run_review_job` fetches the pull request once and passes a `BaseRef` (name
+  and SHA) into workspace preparation and the review; the chat handler uses the
+  same loader. Later ingestion of `AGENTS.md`, `CLAUDE.md`, `REVIEW.md`, or
+  path instructions must use this loader or the base tree.
+- Base-branch repository config overrides operator defaults such as
+  `AR_SEVERITY_FLOOR` once a repository key exists for the same behaviour.
+  Operator environment variables are defaults only and never cap a repository
+  key.
 
 Any future feature that executes repo-controlled code must introduce a
 feature-specific sandbox design, fail-closed configuration, threat-model update,
@@ -256,7 +272,10 @@ obligations.
 ## ADR event stream
 
 Architecture decisions are recorded as ADR events under `docs/ADR-*.md`.
-Accepted or rejected ADRs are immutable except for brief supersession metadata.
-When the architecture changes, use the ADR workflow tools to create or update a
-proposed ADR carrying the intended projection patch. The patch is applied to
-this document only when that ADR is accepted.
+ADRs are append-only: accepted or rejected ADRs are immutable except for brief
+supersession metadata. A changed decision is recorded as a new ADR that
+supersedes the old one, the older record gets only a `Superseded` status and a
+short `Superseded By` section, and this document is updated in the same change.
+Per ADR-0023, enforcement comes from the `.claude/rules/adr-event-stream.md`
+rule, the architecture reviewer agent and human review, not from mechanical
+tooling.

@@ -76,7 +76,7 @@ the repository it is posted in.
 
 | Command | Purpose |
 |---|---|
-| `review once` | Runs a one-shot reasoning-path review against one PR without the gateway. It does not wire every gateway runtime store or optional LLM tier. `--dry-run` prints the base rendered LLM prompt and exits without clone/RAG/repo-config loading/posting. |
+| `review once` | Runs a one-shot reasoning-path review against one PR without the gateway. It does not wire every gateway runtime store or optional LLM tier. `--dry-run` prints the base rendered LLM prompt and exits without clone/RAG/repo-config loading/posting. The PR title and body appear inside `<<<UNTRUSTED_DATA ...>>>` fences whose `nonce` is drawn at random on every invocation, so two dry runs of the same PR differ in the nonce. |
 | `bench run` | Replays PR fixtures through the LLM review path. `--baseline FILE` compares against an earlier JSON run; `--fail-on-regression` exits non-zero on configured precision/recall/latency regressions. |
 
 Benchmark fixture details live in [Benchmarks](./BENCHMARKS.md).
