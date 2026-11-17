@@ -79,7 +79,7 @@ pub fn fence_untrusted(
     out.push_str(">>>\n");
 
     let truncation = format!("\n[{label} truncated]");
-    crate::prompt::push_capped(&mut out, &body, cap, &truncation);
+    push_capped(&mut out, &body, cap, &truncation);
     if !out.ends_with('\n') {
         out.push('\n');
     }
@@ -160,6 +160,23 @@ fn sanitize_marker_field(field: &str) -> String {
         .chars()
         .filter(|c| !c.is_control() && !is_hidden_char(*c) && !matches!(c, '"' | '<' | '>' | '\\'))
         .collect()
+}
+
+/// Append `s` to `out`, capping at `max_bytes`. When the cap fires,
+/// the truncated prefix is appended followed by `marker` (no
+/// trailing newline — the caller decides how to frame). Walks back
+/// to a UTF-8 char boundary so multi-byte codepoints aren't split.
+fn push_capped(out: &mut String, s: &str, max_bytes: usize, marker: &str) {
+    if s.len() <= max_bytes {
+        out.push_str(s);
+        return;
+    }
+    let mut cut = max_bytes;
+    while cut > 0 && !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    out.push_str(&s[..cut]);
+    out.push_str(marker);
 }
 
 #[cfg(test)]

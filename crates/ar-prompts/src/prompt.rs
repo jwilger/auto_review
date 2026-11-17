@@ -202,23 +202,6 @@ pub fn render_review_prompt(inputs: &ReviewPromptInputs<'_>) -> String {
     out
 }
 
-/// Append `s` to `out`, capping at `max_bytes`. When the cap fires,
-/// the truncated prefix is appended followed by `marker` (no
-/// trailing newline — the caller decides how to frame). Walks back
-/// to a UTF-8 char boundary so multi-byte codepoints aren't split.
-pub(crate) fn push_capped(out: &mut String, s: &str, max_bytes: usize, marker: &str) {
-    if s.len() <= max_bytes {
-        out.push_str(s);
-        return;
-    }
-    let mut cut = max_bytes;
-    while cut > 0 && !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    out.push_str(&s[..cut]);
-    out.push_str(marker);
-}
-
 fn short_sha(sha: &str) -> &str {
     sha.get(..7).unwrap_or(sha)
 }
