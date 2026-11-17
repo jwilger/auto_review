@@ -7,8 +7,10 @@
 //! - `Remember(text)`: embeds the text via the LLM router and adds
 //!   it as a `Chat`-source learning. Replies confirming with the
 //!   new id.
-//! - `Forget(id)`: removes the learning. Replies confirming, or
-//!   surfaces "not found" when the id is unknown.
+//! - `Forget(id)`: removes the learning when it belongs to this PR's
+//!   repository. Replies confirming, or with the same "not found"
+//!   reply whether the id is unknown, unscoped, or another
+//!   repository's.
 //! - `ReReview`: when a JobDispatcher is configured, fetches the
 //!   PR's current head SHA + metadata and dispatches a force=true
 //!   ReviewJob (bypasses the per-PR history dedup). Drafts are
@@ -24,11 +26,12 @@
 
 use crate::command::ChatCommand;
 use ar_forge::{CreateReviewRequest, PullRequestSummary, ReviewComment, ReviewEvent, ReviewHost};
-use ar_index::{LearningSource, LearningsStore};
+use ar_index::{LearningSource, LearningsStore, RepoScope};
 use ar_llm::{CompleteRequest, Message, ModelTier, ResponseFormat, Router as LlmRouter};
 use ar_orchestrator::{JobDispatcher, ReviewJob};
-use ar_review::config::{parse_repo_config, RepoConfig};
+use ar_review::config::RepoConfig;
 use ar_review::override_marker::{apply_body_section, apply_title_marker};
+use ar_review::trusted_files::load_repo_config_from_base;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -226,9 +229,9 @@ pub enum ChatError {
 const HELP_TEXT: &str = "\
 **auto_review chat commands** (mention me with `@auto-review`; `@auto_review` also works):
 
-- `remember <text>` — store project-specific guidance. I'll inject \
-matching learnings into future review prompts.
-- `forget <id>` — drop a previously-remembered learning by its id \
+- `remember <text>` — store guidance for this repository. I'll inject \
+matching learnings into future reviews of this repository only.
+- `forget <id>` — drop a learning of this repository by its id \
 (printed on `remember`).
 - `re-review` — re-run a full review on the current head SHA, \
 ignoring my recorded review history.
@@ -272,6 +275,13 @@ pub struct ChatContext<'a> {
     /// comment replied in, when the command came from an inline reply.
     /// `None` for top-level PR conversation comments.
     pub reply_to_comment_id: Option<u64>,
+}
+
+impl ChatContext<'_> {
+    /// Learnings scope of the PR's repository.
+    pub fn repo_scope(&self) -> RepoScope {
+        RepoScope::new(self.owner, self.repo)
+    }
 }
 
 impl ChatHandler<'_> {
@@ -558,35 +568,17 @@ impl ChatHandler<'_> {
         }
     }
 
-    /// Load the repo config for the chat path by reading `.auto_review.yaml`
-    /// from the PR's base branch over the API (no clone). Falls back to
-    /// defaults when absent or unparsable.
+    /// Load the repo config for the chat path from the PR's base branch over
+    /// the API (no clone), through the trusted loader. Falls back to defaults
+    /// when absent, unreadable, oversized or unparsable.
     async fn load_repo_config_for_chat(
         &self,
         ctx: &ChatContext<'_>,
         pr: &PullRequestSummary,
     ) -> RepoConfig {
-        for name in [".auto_review.yaml", ".auto_review.yml"] {
-            match self
-                .host
-                .get_file_content(ctx.owner, ctx.repo, name, &pr.base.ref_name)
-                .await
-            {
-                Ok(Some(contents)) => match parse_repo_config(&contents) {
-                    Ok(cfg) => return cfg,
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to parse repo config for chat; using defaults");
-                        return RepoConfig::default();
-                    }
-                },
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::warn!(%error, "failed to fetch repo config for chat; using defaults");
-                    return RepoConfig::default();
-                }
-            }
-        }
-        RepoConfig::default()
+        load_repo_config_from_base(self.host, ctx.owner, ctx.repo, &pr.base.ref_name)
+            .await
+            .config
     }
 
     /// Judge whether `correction` contains a substantive explanation of WHY an
@@ -642,15 +634,23 @@ impl ChatHandler<'_> {
         ctx: &ChatContext<'_>,
         correction: &str,
     ) -> Result<(), ChatError> {
+        // The repository lives in the learning's scope, so the text no
+        // longer carries a "Repository <owner>/<repo> only." prefix.
         let embedding_text = format!(
-            "Repository {}/{} only. Review correction from PR feedback: treat the user's \
-             explanation as repository-specific guidance for future reviews. User feedback: {correction}",
-            ctx.owner, ctx.repo
+            "Review correction from PR feedback: treat the user's explanation as \
+             repository-specific guidance for future reviews. User feedback: {correction}"
         );
         let embedding = self.embed(&embedding_text).await?;
         let now = current_unix_seconds()?;
         self.learnings
-            .add(embedding_text, LearningSource::Chat, embedding, now)
+            .add(
+                embedding_text,
+                LearningSource::Chat,
+                embedding,
+                now,
+                &ctx.repo_scope(),
+                Some(ctx.issue_number),
+            )
             .await?;
         Ok(())
     }
@@ -1007,7 +1007,14 @@ impl ChatHandler<'_> {
         let now = current_unix_seconds()?;
         let record = self
             .learnings
-            .add(text.to_string(), LearningSource::Chat, embedding, now)
+            .add(
+                text.to_string(),
+                LearningSource::Chat,
+                embedding,
+                now,
+                &ctx.repo_scope(),
+                Some(ctx.issue_number),
+            )
             .await?;
         let reply = format!(
             "Remembered as learning #{}. To revoke later: `@auto-review forget {}`.",
@@ -1017,10 +1024,13 @@ impl ChatHandler<'_> {
     }
 
     async fn handle_forget(&self, ctx: ChatContext<'_>, id: u64) -> Result<(), ChatError> {
-        let reply = match self.learnings.remove(id).await {
+        // Scoped remove: another repository's learning, an unscoped
+        // legacy learning and a missing id all get the same reply, so
+        // the reply cannot be used to probe other repositories' ids.
+        let reply = match self.learnings.remove(id, Some(&ctx.repo_scope())).await {
             Ok(()) => format!("Forgotten learning #{id}."),
             Err(ar_index::LearningsError::NotFound(_)) => {
-                format!("No learning with id {id}; nothing to forget.")
+                format!("No learning with id {id} in this repository")
             }
             Err(e) => return Err(ChatError::Learnings(e)),
         };
@@ -1473,7 +1483,7 @@ fn current_unix_seconds() -> Result<i64, ChatError> {
 mod tests {
     use super::*;
     use ar_forgejo::Client as ForgejoClient;
-    use ar_index::InMemoryLearningsStore;
+    use ar_index::{InMemoryLearningsStore, LearningsFilter};
     use ar_llm::{
         CompleteRequest, CompleteResponse, Error as LlmError, LlmProvider, ModelTier, Router,
     };
@@ -1721,11 +1731,13 @@ mod tests {
             .handle(ctx(), ChatCommand::Remember("prefer Result".into()))
             .await
             .expect("ok");
-        let stored = learnings.list().await.expect("list");
+        let stored = learnings.list(LearningsFilter::All).await.expect("list");
         assert_eq!(stored.len(), 1);
         assert_eq!(stored[0].text, "prefer Result");
         assert_eq!(stored[0].source, LearningSource::Chat);
         assert_eq!(stored[0].embedding, vec![0.5, 0.5]);
+        assert_eq!(stored[0].repo, Some(RepoScope::new("alice", "widgets")));
+        assert_eq!(stored[0].origin_pr, Some(42));
     }
 
     #[tokio::test]
@@ -1754,7 +1766,7 @@ mod tests {
             .await
             .expect("ok");
         // Nothing should have been stored.
-        let stored = learnings.list().await.expect("list");
+        let stored = learnings.list(LearningsFilter::All).await.expect("list");
         assert!(
             stored.is_empty(),
             "oversized remember text must not have been stored; got {stored:?}"
@@ -1771,6 +1783,8 @@ mod tests {
                 LearningSource::Chat,
                 vec![1.0],
                 1700000000,
+                &RepoScope::new("Alice", "Widgets"),
+                None,
             )
             .await
             .unwrap();
@@ -1790,7 +1804,11 @@ mod tests {
             .handle(ctx(), ChatCommand::Forget(added.id))
             .await
             .expect("ok");
-        assert!(learnings.list().await.unwrap().is_empty());
+        assert!(learnings
+            .list(LearningsFilter::All)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]
@@ -1798,7 +1816,11 @@ mod tests {
         let (server, forgejo, learnings, llm) = setup().await;
         Mock::given(method("POST"))
             .and(path("/api/v1/repos/alice/widgets/issues/42/comments"))
+            .and(body_partial_json(serde_json::json!({
+                "body": "No learning with id 999 in this repository"
+            })))
             .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .expect(1)
             .mount(&server)
             .await;
         let handler = ChatHandler {
@@ -1850,7 +1872,7 @@ mod tests {
             .handle(ctx(), ChatCommand::Remember("guidance".into()))
             .await
             .expect("ok");
-        let stored = learnings.list().await.expect("list");
+        let stored = learnings.list(LearningsFilter::All).await.expect("list");
         assert_eq!(stored[0].embedding, Vec::<f32>::new());
     }
 

@@ -18,14 +18,14 @@ jobs:
     if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' || github.event_name == 'workflow_dispatch' && inputs.release_merge_sha != '' }}
     environment: release-publish
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         name: Checkout pushed main commit
         if: ${{ github.event_name == 'push' }}
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
           fetch-depth: 0
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         name: Checkout dispatched release merge commit
         if: ${{ github.event_name == 'workflow_dispatch' }}
         with:
@@ -35,7 +35,7 @@ jobs:
 
       - name: Load release secrets
         id: load_secrets
-        uses: 1password/load-secrets-action@v5
+        uses: 1password/load-secrets-action@70062d7a876d3eb6334754fa26efd2fbd90c32f2 # v5.0.1
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           GH_RELEASE_AUTOMATION_TOKEN: op://Github Secrets/GH_RELEASE_AUTOMATION_TOKEN/credential
@@ -139,9 +139,9 @@ jobs:
           )"
           printf 'RELEASE_VERSION=%s\n' "$RELEASE_VERSION" >> "$GITHUB_ENV"
 
-      - uses: DeterminateSystems/nix-installer-action@v23
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
         if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
-      - uses: DeterminateSystems/magic-nix-cache-action@v15
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
         if: ${{ github.event_name == 'workflow_dispatch' || env.SHOULD_PUBLISH_RELEASE == 'true' }}
 
       - name: Build Linux binary release artifacts from merged commit
@@ -171,7 +171,7 @@ jobs:
           tar -C "$x86_release_root" -czf "release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz" auto-review bin nix
           (
             cd release-artifacts
-            sha256sum auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz > SHA256SUMS
+            sha256sum "auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz" > SHA256SUMS
             python3 - "$RELEASE_VERSION" "$RELEASE_MERGE_SHA" "$x86_release_root" "$REPO_FULL_NAME" <<'PY'
           import datetime
           import hashlib
@@ -294,16 +294,23 @@ jobs:
           # Generate notes from the finalized CHANGELOG.md ## [$RELEASE_VERSION] section.
           awk "/^## \\[$RELEASE_VERSION\\]/{emit=1; next} /^## \\[/{if (emit) exit} emit {print}" CHANGELOG.md > "$RELEASE_NOTES_FILE"
           printf '\nLinux binary archive:\n- auto-review-%s-linux-x86_64.tar.gz\n' "$RELEASE_VERSION" >> "$RELEASE_NOTES_FILE"
-          printf '\nVerify downloads before use:\n```bash\nsha256sum -c SHA256SUMS\nssh-keygen -Y verify -f allowed-signers -I %s -n file -s SHA256SUMS.sig < SHA256SUMS\n```\n' "$RELEASE_BOT_EMAIL" >> "$RELEASE_NOTES_FILE"
+          cat >> "$RELEASE_NOTES_FILE" <<NOTES
+
+          Verify downloads before use:
+          \`\`\`bash
+          sha256sum -c SHA256SUMS
+          ssh-keygen -Y verify -f allowed-signers -I ${RELEASE_BOT_EMAIL} -n file -s SHA256SUMS.sig < SHA256SUMS
+          \`\`\`
+          NOTES
           gh release create "v$RELEASE_VERSION" \
             --repo "$GITHUB_REPOSITORY" \
             --target "$RELEASE_MERGE_SHA" \
             --title "v$RELEASE_VERSION" \
             --notes-file "$RELEASE_NOTES_FILE" \
-            release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz \
+            "release-artifacts/auto-review-$RELEASE_VERSION-linux-x86_64.tar.gz" \
             release-artifacts/SHA256SUMS \
             release-artifacts/SHA256SUMS.sig \
             release-artifacts/release-signing-key.pub \
             release-artifacts/allowed-signers \
-            release-artifacts/auto-review-$RELEASE_VERSION-sbom.spdx.json \
-            release-artifacts/auto-review-$RELEASE_VERSION-provenance.json
+            "release-artifacts/auto-review-$RELEASE_VERSION-sbom.spdx.json" \
+            "release-artifacts/auto-review-$RELEASE_VERSION-provenance.json"

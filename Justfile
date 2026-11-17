@@ -14,8 +14,22 @@ test:
 deny:
 	cargo deny check licenses bans sources
 
+# Needs network: fetches the RustSec advisory database.
+advisories:
+	cargo deny check advisories
+
 build:
 	cargo build --workspace
+
+shellcheck:
+	shellcheck scripts/release
+
+actionlint:
+	actionlint
+
+# Builds the packages and evaluates the Nix contract checks; slow on a cold store.
+flake-check:
+	nix flake check --print-build-logs
 
 serve:
 	pkg="$(nix build --no-link --print-out-paths .#ar-cli)"; AR_GATEWAY_BIND=0.0.0.0:8090 "$pkg/bin/auto-review" gateway
@@ -23,4 +37,4 @@ serve:
 watch:
 	AR_GATEWAY_BIND=0.0.0.0:8090 bacon --job gateway-dev
 
-ci: fmt clippy test deny build
+ci: fmt clippy test deny build shellcheck actionlint
