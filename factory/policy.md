@@ -2,9 +2,9 @@
 
 auto_review is an open-source project with one maintainer, @jwilger. Agents
 run as the maintainer's own GitHub account. The repository ruleset requires
-pull requests and the CI checks listed in `.github/rulesets/require-pr.json`, but no approvals, so every change except
-the factory's own merges once the factory's review and approve stations pass
-and CI is green.
+pull requests and the CI checks listed in `.github/rulesets/require-pr.json`,
+but no approvals, so every change except the factory's own merges once the
+factory's review and approve stations pass and CI is green.
 
 ## Authority
 - Merge: agents, for every change class except `factory`; humans for `factory`

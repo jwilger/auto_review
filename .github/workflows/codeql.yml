@@ -5,6 +5,7 @@ name: CodeQL
 # needs no Nix toolchain.
 on:
   pull_request:
+    branches: [main]
     types: [opened, synchronize, reopened]
   push:
     branches: [main]
@@ -17,7 +18,7 @@ permissions:
 
 jobs:
   analyze:
-    name: CodeQL (${{ matrix.language }})
+    name: Analyze (${{ matrix.language }})
     runs-on: ubuntu-latest
     timeout-minutes: 60
     permissions:

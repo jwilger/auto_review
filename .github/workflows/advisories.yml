@@ -1,13 +1,12 @@
-name: Advisories
+name: Scheduled dependency advisories
 
-# Runs on pull requests so a change cannot add a dependency with a known
-# advisory, and on a daily schedule so advisories published against
-# dependencies already on main surface without waiting for a code change.
-# A failing scheduled run notifies the maintainer through GitHub's
-# workflow-failure notifications.
+# Pull requests run `just advisories` as the `Dependency advisories` job in
+# ci.yml. This workflow reruns the same check against main on a daily
+# schedule (and on demand), so an advisory published against a dependency
+# already on main fails a run without any code change. A failing scheduled
+# run notifies the maintainer through GitHub's workflow-failure
+# notifications.
 on:
-  pull_request:
-    types: [opened, synchronize, reopened]
   schedule:
     - cron: "17 5 * * *"
   workflow_dispatch:
@@ -17,12 +16,13 @@ permissions:
 
 jobs:
   advisories:
-    name: Advisories
+    name: Scheduled dependency advisories
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: main
           persist-credentials: false
 
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23

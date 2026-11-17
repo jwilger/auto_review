@@ -104,6 +104,21 @@ jobs:
       - name: Run just build
         run: nix develop .#ci --command just build
 
+  advisories:
+    name: Dependency advisories
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
+      - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
+
+      - name: Run just advisories
+        run: nix develop .#ci --command just advisories
+
   shellcheck:
     name: Shellcheck
     runs-on: ubuntu-latest
@@ -116,8 +131,8 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
 
-      - name: Run just lint-scripts
-        run: nix develop .#ci --command just lint-scripts
+      - name: Run just shellcheck
+        run: nix develop .#ci --command just shellcheck
 
   actionlint:
     name: Actionlint
@@ -131,8 +146,8 @@ jobs:
       - uses: DeterminateSystems/nix-installer-action@3138316df39ed29be04236d7ffc686fa525866aa # v23
       - uses: DeterminateSystems/magic-nix-cache-action@84c0677f58dcedf3b91f8223ce36a9ea5b3c84b7 # v15
 
-      - name: Run just lint-workflows
-        run: nix develop .#ci --command just lint-workflows
+      - name: Run just actionlint
+        run: nix develop .#ci --command just actionlint
 
   flake-check:
     name: Nix flake check

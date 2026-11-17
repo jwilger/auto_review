@@ -37,8 +37,8 @@ just clippy
 just test
 just deny
 just build
-just lint-scripts
-just lint-workflows
+just shellcheck
+just actionlint
 
 # Checks that `just ci` leaves out:
 just advisories   # cargo deny check advisories; needs network
@@ -53,23 +53,37 @@ Advisory checks require network access, so `just advisories` stays out
 of `just ci`; run it when bumping a dep. Land no commit that fails any
 required check.
 
-### CI checks
+### Required checks and repository settings
 
-Pull requests run every `just ci` recipe as its own job, plus
-`Advisories` (`.github/workflows/advisories.yml`, also run daily so new
-RustSec advisories surface without a code change), `Nix flake check`
-and CodeQL analysis for Rust and Actions (`.github/workflows/codeql.yml`).
-The checks a pull request must pass are listed in
-`.github/rulesets/require-pr.json`, the source for the `require-pr`
-repository ruleset. After changing it, the maintainer applies it with:
+Every pull request to `main` must pass these GitHub Actions checks before
+it can merge:
+
+| Check | What it runs |
+|---|---|
+| Format check, Clippy, Test, Dependency policy, Build | `just fmt`, `just clippy`, `just test`, `just deny`, `just build` |
+| Dependency advisories | `just advisories` (`cargo deny check advisories`); `.github/workflows/advisories.yml` also runs it daily against `main` so new advisories surface without a code change |
+| Shellcheck | `just shellcheck` on `scripts/release` |
+| Actionlint | `just actionlint` on `.github/workflows/` |
+| Nix flake check | `just flake-check`, which runs the Nix packaging, NixOS module and OCI image contract checks |
+| Analyze (rust), Analyze (actions) | CodeQL analysis of the Rust code and the workflows (`.github/workflows/codeql.yml`) |
+
+The `require-pr` ruleset that enforces this lives in
+`.github/rulesets/require-pr.json`. Each check name in that file must match
+a job `name:` in `.github/workflows/`; a required check that no job reports
+blocks every pull request. GitHub does not read the file, so after a change
+to it merges, a repository admin applies it:
 
 ```sh
 gh api --method PUT repos/jwilger/auto_review/rulesets/18404081 \
   --input .github/rulesets/require-pr.json
 ```
 
-Workflows pin every action to a full commit SHA with the release tag in
-a trailing comment; Renovate's `github-actions` manager bumps both.
+Workflows pin every action to a full commit SHA with the release tag in a
+trailing `# vX.Y.Z` comment; Renovate (`helpers:pinGitHubActionDigests`)
+opens pull requests that bump both. Pin any new action the same way.
+
+Secret scanning and push protection are repository settings, not checks:
+a repository admin turns them on in Settings -> Code security.
 
 ### Bumping the toolchain or a dep
 

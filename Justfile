@@ -21,10 +21,10 @@ advisories:
 build:
 	cargo build --workspace
 
-lint-scripts:
+shellcheck:
 	shellcheck scripts/release
 
-lint-workflows:
+actionlint:
 	actionlint
 
 # Builds the packages and evaluates the Nix contract checks; slow on a cold store.
@@ -37,4 +37,4 @@ serve:
 watch:
 	AR_GATEWAY_BIND=0.0.0.0:8090 bacon --job gateway-dev
 
-ci: fmt clippy test deny build lint-scripts lint-workflows
+ci: fmt clippy test deny build shellcheck actionlint

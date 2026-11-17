@@ -19,9 +19,13 @@ just clippy
 just test
 just deny
 just build
+just shellcheck    # shellcheck on scripts/release
+just actionlint    # actionlint on .github/workflows/
+just advisories    # cargo deny check advisories; needs network
+just flake-check   # nix flake check; slow, builds the packages
 ```
 
-`cargo deny check advisories` requires network and is excluded from the default `just deny`/CI policy gate; run it manually when bumping dependencies.
+`just ci` runs `fmt`, `clippy`, `test`, `deny`, `build`, `shellcheck` and `actionlint`. `just advisories` (`cargo deny check advisories`) requires network and is excluded from `just ci` and `just deny`; `just flake-check` is excluded to keep the local loop fast. CI now runs both on every PR (`Dependency advisories`, `Nix flake check`), and advisories also run on a daily schedule against `main`. Run `just advisories` manually when bumping dependencies. `CONTRIBUTING.md` lists every required check and how the `require-pr` ruleset in `.github/rulesets/require-pr.json` is applied.
 
 Use `bacon`, `bacon clippy`, or `bacon test` for focused Rust check loops.
 

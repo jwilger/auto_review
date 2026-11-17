@@ -66,7 +66,7 @@
             "integration_id": 15368
           },
           {
-            "context": "Advisories",
+            "context": "Dependency advisories",
             "integration_id": 15368
           },
           {
@@ -82,11 +82,11 @@
             "integration_id": 15368
           },
           {
-            "context": "CodeQL (rust)",
+            "context": "Analyze (rust)",
             "integration_id": 15368
           },
           {
-            "context": "CodeQL (actions)",
+            "context": "Analyze (actions)",
             "integration_id": 15368
           }
         ]

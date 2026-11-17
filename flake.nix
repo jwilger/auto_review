@@ -282,8 +282,8 @@
               python3
               nodejs_24
               jq
-              # Shell and workflow linters run by `just lint-scripts`
-              # and `just lint-workflows`.
+              # Shell and workflow linters run by `just shellcheck`
+              # and `just actionlint`.
               shellcheck
               actionlint
               openssh
