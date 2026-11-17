@@ -16,8 +16,8 @@
 //! neither smuggle instructions past a human reader nor hide a marker
 //! prefix from the neutralizer.
 
+use core::hash::{BuildHasher as _, Hash as _, Hasher as _};
 use std::collections::hash_map::{DefaultHasher, RandomState};
-use std::hash::{BuildHasher, Hash, Hasher};
 
 /// Prefix shared by the open and close markers. Untrusted text never
 /// contains it after fencing.
@@ -51,6 +51,13 @@ pub const FENCE_MARKER_PREFIX: &str = "<<<";
 /// nonce lose quotes, angle brackets, backslashes, control characters
 /// (including CR and LF) and the same hidden characters, so they cannot
 /// break out of the open marker.
+#[inline]
+#[must_use = "the fenced text is the only output; dropping it leaves the untrusted text unfenced"]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "public name imported by ar-review (pipeline, red_team_pipeline) as \
+              ar_prompts::fence_untrusted; renaming it changes the crate API"
+)]
 pub fn fence_untrusted(
     label: &str,
     attrs: &[(&str, &str)],
@@ -58,18 +65,18 @@ pub fn fence_untrusted(
     cap: usize,
     nonce: &str,
 ) -> String {
-    let label = sanitize_marker_field(label);
-    let nonce = sanitize_marker_field(nonce);
+    let safe_label = sanitize_marker_field(label);
+    let safe_nonce = sanitize_marker_field(nonce);
     let body = neutralize_marker_prefix(&sanitize_untrusted_text(text));
 
-    let mut out = String::with_capacity(body.len().min(cap) + 256);
+    let mut out = String::with_capacity(body.len().min(cap).saturating_add(256));
     out.push_str(FENCE_MARKER_PREFIX);
     out.push_str("UNTRUSTED_DATA label=\"");
-    out.push_str(&label);
+    out.push_str(&safe_label);
     out.push_str("\" nonce=\"");
-    out.push_str(&nonce);
+    out.push_str(&safe_nonce);
     out.push('"');
-    for (key, value) in attrs {
+    for &(key, value) in attrs {
         out.push(' ');
         out.push_str(&sanitize_marker_field(key));
         out.push_str("=\"");
@@ -78,7 +85,7 @@ pub fn fence_untrusted(
     }
     out.push_str(">>>\n");
 
-    let truncation = format!("\n[{label} truncated]");
+    let truncation = format!("\n[{safe_label} truncated]");
     push_capped(&mut out, &body, cap, &truncation);
     if !out.ends_with('\n') {
         out.push('\n');
@@ -86,7 +93,7 @@ pub fn fence_untrusted(
 
     out.push_str(FENCE_MARKER_PREFIX);
     out.push_str("END_UNTRUSTED_DATA nonce=\"");
-    out.push_str(&nonce);
+    out.push_str(&safe_nonce);
     out.push_str("\">>>\n");
     out
 }
@@ -95,6 +102,13 @@ pub fn fence_untrusted(
 /// the PR `head_sha` and a `salt` (normally [`process_nonce_salt`]). Tests pass a
 /// fixed salt for a stable nonce; production passes the process-random
 /// salt so a PR author cannot predict the nonce from the head SHA.
+#[inline]
+#[must_use = "the nonce is the only output and must be passed to every fence in the run"]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "public name imported by ar-review (pipeline) and ar-cli (bench) as \
+              ar_prompts::fence_nonce; renaming it changes the crate API"
+)]
 pub fn fence_nonce(head_sha: &str, salt: u64) -> String {
     let mut hasher = DefaultHasher::new();
     head_sha.hash(&mut hasher);
@@ -107,6 +121,8 @@ pub fn fence_nonce(head_sha: &str, salt: u64) -> String {
 /// gateway that re-reviews the same head SHA still gets a new nonce per
 /// review run. Call it once per run and reuse the nonce for every fence
 /// in that run.
+#[inline]
+#[must_use = "the salt is the only output and must feed fence_nonce"]
 pub fn process_nonce_salt() -> u64 {
     RandomState::new().build_hasher().finish()
 }
@@ -115,18 +131,18 @@ pub fn process_nonce_salt() -> u64 {
 /// marker prefix: `<<<` becomes `<< <`.
 fn neutralize_marker_prefix(text: &str) -> String {
     let mut out = String::with_capacity(text.len());
-    let mut run = 0usize;
-    for c in text.chars() {
-        if c == '<' {
+    let mut run: usize = 0;
+    for ch in text.chars() {
+        if ch == '<' {
             if run == 2 {
                 out.push(' ');
                 run = 0;
             }
-            run += 1;
+            run = run.saturating_add(1);
         } else {
             run = 0;
         }
-        out.push(c);
+        out.push(ch);
     }
     out
 }
@@ -136,15 +152,15 @@ fn neutralize_marker_prefix(text: &str) -> String {
 fn sanitize_untrusted_text(text: &str) -> String {
     text.replace("\r\n", "\n")
         .chars()
-        .filter(|c| !is_hidden_char(*c))
-        .map(|c| if c == '\r' { '\n' } else { c })
+        .filter(|ch| !is_hidden_char(*ch))
+        .map(|ch| if ch == '\r' { '\n' } else { ch })
         .collect()
 }
 
 /// Bidi overrides and isolates, zero-width characters, and Unicode tags.
-fn is_hidden_char(c: char) -> bool {
+fn is_hidden_char(ch: char) -> bool {
     matches!(
-        c,
+        ch,
         '\u{202A}'..='\u{202E}'
             | '\u{2066}'..='\u{2069}'
             | '\u{200B}'..='\u{200D}'
@@ -158,24 +174,26 @@ fn is_hidden_char(c: char) -> bool {
 fn sanitize_marker_field(field: &str) -> String {
     field
         .chars()
-        .filter(|c| !c.is_control() && !is_hidden_char(*c) && !matches!(c, '"' | '<' | '>' | '\\'))
+        .filter(|ch| {
+            !ch.is_control() && !is_hidden_char(*ch) && !matches!(ch, '"' | '<' | '>' | '\\')
+        })
         .collect()
 }
 
-/// Append `s` to `out`, capping at `max_bytes`. When the cap fires,
+/// Append `text` to `out`, capping at `max_bytes`. When the cap fires,
 /// the truncated prefix is appended followed by `marker` (no
 /// trailing newline — the caller decides how to frame). Walks back
 /// to a UTF-8 char boundary so multi-byte codepoints aren't split.
-fn push_capped(out: &mut String, s: &str, max_bytes: usize, marker: &str) {
-    if s.len() <= max_bytes {
-        out.push_str(s);
+fn push_capped(out: &mut String, text: &str, max_bytes: usize, marker: &str) {
+    if text.len() <= max_bytes {
+        out.push_str(text);
         return;
     }
     let mut cut = max_bytes;
-    while cut > 0 && !s.is_char_boundary(cut) {
-        cut -= 1;
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut = cut.saturating_sub(1);
     }
-    out.push_str(&s[..cut]);
+    out.push_str(text.get(..cut).unwrap_or_default());
     out.push_str(marker);
 }
 
@@ -283,7 +301,7 @@ mod tests {
 
     #[test]
     fn cap_straddling_multibyte_character_cuts_at_char_boundary() {
-        let fenced = fence_untrusted("t", &[], "aéé", 2, NONCE);
+        let fenced = fence_untrusted("t", &[], "a\u{e9}\u{e9}", 2, NONCE);
         assert!(fenced.contains("\na\n[t truncated]\n"), "{fenced}");
         assert_one_fence(&fenced);
     }
@@ -385,6 +403,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "`c` is the closure parameter inside the assertion below; renaming it would edit \
+                  that assertion line, which this lint-only change leaves untouched"
+    )]
     fn nonce_is_lowercase_hex_of_at_least_16_chars() {
         let nonce = fence_nonce("deadbeef", 7);
         assert!(nonce.len() >= 16, "{nonce}");

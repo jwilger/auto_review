@@ -2,6 +2,11 @@ use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "variants run from least to most severe, the order of the severity enum in \
+              schemas/review.json and of the severity definitions in the system prompt"
+)]
 pub enum ReviewSeverity {
     Note,
     Warning,
@@ -15,6 +20,11 @@ pub enum ReviewSeverity {
 /// the model fails validation instead of reaching a metric label.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "variants follow the category enum order in schemas/review.json, which ALL repeats \
+              and the schema test pins"
+)]
 pub enum FindingCategory {
     /// Default for findings that omit a category, so nothing is
     /// accidentally suppressed as a low-value category.
@@ -48,8 +58,10 @@ impl FindingCategory {
         FindingCategory::Style,
     ];
 
-    /// The snake_case identifier, identical to the serde form. Safe to use
+    /// The `snake_case` identifier, identical to the serde form. Safe to use
     /// as a metric label because the set is closed.
+    #[inline]
+    #[must_use = "returns the label without side effects"]
     pub fn as_str(self) -> &'static str {
         match self {
             FindingCategory::Correctness => "correctness",
@@ -69,6 +81,16 @@ impl FindingCategory {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "ar-review (mapping, pipeline, verify, agentic_verify) and ar-cli (bench) build \
+              findings by struct literal; every consumer is in this publish = false workspace"
+)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "field order is the serialized JSON key order and follows the finding properties in \
+              schemas/review.json; reordering would change emitted JSON"
+)]
 pub struct ReviewFinding {
     pub path: String,
     pub line_start: u32,
@@ -87,12 +109,22 @@ pub struct ReviewFinding {
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "ar-review (mapping, pipeline, verify, agentic_verify) and ar-cli (bench) build \
+              review outputs by struct literal; every consumer is in this publish = false workspace"
+)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "field order is the serialized JSON key order and follows the top-level properties in \
+              schemas/review.json; reordering would change emitted JSON"
+)]
 pub struct ReviewOutput {
     pub summary: String,
     /// Optional longer-form walkthrough in markdown.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub walkthrough: String,
-    /// Optional Mermaid diagram source (without the ```mermaid fence).
+    /// Optional Mermaid diagram source (without the `` ```mermaid `` fence).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub mermaid: String,
     pub findings: Vec<ReviewFinding>,
@@ -103,6 +135,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "serializing a unit enum variant cannot fail; a failure must abort this test"
+    )]
     fn category_as_str_matches_serde_form() {
         for category in FindingCategory::ALL {
             let serialized = serde_json::to_value(category).expect("serialize");
