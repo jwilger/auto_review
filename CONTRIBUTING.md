@@ -95,6 +95,29 @@ gh label create factory:approved \
   --description 'maintainer approval for the factory to merge' --color 0E8A16
 ```
 
+After those checks pass, the `Semantic review` job in
+`.github/workflows/ci.yml` asks an auto_review gateway to review the pull
+request through the published auto_review action
+(`deploy/github-action`). It runs for non-draft pull requests into `main`.
+It is not a required check and is not in the ruleset, so a reviewer outage
+never blocks a merge. Until both settings below are present (and on pull
+requests from forks, which get no secrets) it finishes successfully with one
+notice and sends no request. It needs:
+
+- Repository variable `AUTO_REVIEW_GATEWAY_URL`: the gateway's base URL.
+- Repository secret `AUTO_REVIEW_ACTION_TOKEN`: the bearer token matching
+  the gateway's `AR_CI_REVIEW_TOKEN`.
+- The gateway's GitHub App installed on `jwilger/auto_review`; the gateway
+  posts reviews as that App, not with the workflow's `GITHUB_TOKEN`.
+
+A repository admin sets them; each command reads the value from a prompt or
+standard input, so it never lands in shell history:
+
+```sh
+gh variable set AUTO_REVIEW_GATEWAY_URL --repo jwilger/auto_review
+gh secret set AUTO_REVIEW_ACTION_TOKEN --repo jwilger/auto_review
+```
+
 Workflows pin every action to a full commit SHA with the release tag in a
 trailing `# vX.Y.Z` comment; Dependabot (`.github/dependabot.yml`) opens
 pull requests that update both the pinned SHA and the trailing comment. Pin
