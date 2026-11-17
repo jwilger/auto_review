@@ -115,15 +115,18 @@ fn finding_to_comment(f: &ReviewFinding) -> ReviewComment {
     } else {
         f.message.clone()
     };
+    let label = severity_label(f.severity);
+    let title = sanitize_title(&f.title);
+    let prefix = if title.is_empty() {
+        label.to_string()
+    } else {
+        format!("{label} **{title}** —")
+    };
     let body = match f.line_end {
         Some(end) if end > f.line_start => {
-            let label = severity_label(f.severity);
-            format!("{label} **Lines {}–{}:** {message}", f.line_start, end)
+            format!("{prefix} **Lines {}–{}:** {message}", f.line_start, end)
         }
-        _ => {
-            let label = severity_label(f.severity);
-            format!("{label} {message}")
-        }
+        _ => format!("{prefix} {message}"),
     };
     ReviewComment {
         path: f.path.clone(),
@@ -131,6 +134,43 @@ fn finding_to_comment(f: &ReviewFinding) -> ReviewComment {
         old_position: None,
         new_position: Some(f.line_start),
     }
+}
+
+/// Cap on the rendered finding title. The schema asks for 8 words or
+/// fewer but does not bound the length, so the model's title is not
+/// trusted to stay short.
+const FINDING_TITLE_MAX_BYTES: usize = 120;
+
+/// Make a model-supplied title safe to inline after the severity label:
+/// trim it, collapse every run of whitespace or control characters
+/// (newlines included) to a single space so it stays on one line, and cap
+/// it at [`FINDING_TITLE_MAX_BYTES`] on a char boundary with `…` appended
+/// when cut.
+fn sanitize_title(raw: &str) -> String {
+    let mut collapsed = String::with_capacity(raw.len().min(FINDING_TITLE_MAX_BYTES + 4));
+    let mut pending_space = false;
+    for ch in raw.chars() {
+        if ch.is_whitespace() || ch.is_control() {
+            pending_space = !collapsed.is_empty();
+        } else {
+            if pending_space {
+                collapsed.push(' ');
+                pending_space = false;
+            }
+            collapsed.push(ch);
+        }
+    }
+    if collapsed.len() <= FINDING_TITLE_MAX_BYTES {
+        return collapsed;
+    }
+    // Leave room for the ellipsis so the rendered title stays within the cap.
+    let mut cut = FINDING_TITLE_MAX_BYTES - '…'.len_utf8();
+    while cut > 0 && !collapsed.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    let mut truncated = collapsed[..cut].trim_end().to_string();
+    truncated.push('…');
+    truncated
 }
 
 fn severity_label(s: ReviewSeverity) -> &'static str {
@@ -163,6 +203,118 @@ mod tests {
             message: "do the thing".into(),
             title: String::new(),
             category: ar_prompts::FindingCategory::Correctness,
+        }
+    }
+
+    fn titled(mut f: ReviewFinding, title: &str) -> ReviewFinding {
+        f.title = title.into();
+        f
+    }
+
+    #[test]
+    fn titled_single_line_finding_renders_bold_title_after_severity() {
+        let req = output_to_review_request(
+            &output(
+                "",
+                vec![titled(
+                    finding(ReviewSeverity::Warning, 4, None),
+                    "Unchecked index",
+                )],
+            ),
+            "x",
+        );
+        assert_eq!(
+            req.comments[0].body,
+            "🟡 **Warning:** **Unchecked index** — do the thing"
+        );
+    }
+
+    #[test]
+    fn titled_multi_line_finding_renders_title_before_line_range() {
+        let req = output_to_review_request(
+            &output(
+                "",
+                vec![titled(
+                    finding(ReviewSeverity::Warning, 5, Some(9)),
+                    "Unchecked index",
+                )],
+            ),
+            "x",
+        );
+        assert_eq!(
+            req.comments[0].body,
+            "🟡 **Warning:** **Unchecked index** — **Lines 5–9:** do the thing"
+        );
+    }
+
+    #[test]
+    fn whitespace_only_title_renders_exactly_as_untitled() {
+        for (start, end) in [(4, None), (5, Some(9))] {
+            let untitled = output_to_review_request(
+                &output("", vec![finding(ReviewSeverity::Note, start, end)]),
+                "x",
+            );
+            let blank = output_to_review_request(
+                &output(
+                    "",
+                    vec![titled(finding(ReviewSeverity::Note, start, end), " \t\n ")],
+                ),
+                "x",
+            );
+            assert_eq!(blank.comments[0].body, untitled.comments[0].body);
+        }
+    }
+
+    #[test]
+    fn multi_line_and_overlong_title_renders_on_one_line_within_cap() {
+        let raw = format!("Unchecked\n\n index\r\t{}", "y".repeat(500));
+        let req = output_to_review_request(
+            &output(
+                "",
+                vec![titled(finding(ReviewSeverity::Warning, 4, None), &raw)],
+            ),
+            "x",
+        );
+        let body = &req.comments[0].body;
+        assert!(!body.contains('\n') && !body.contains('\r') && !body.contains('\t'));
+        let title = body
+            .strip_prefix("🟡 **Warning:** **")
+            .and_then(|rest| rest.split_once("** — "))
+            .map(|(title, _)| title)
+            .expect("title segment");
+        assert!(
+            title.starts_with("Unchecked index y"),
+            "title was {title:?}"
+        );
+        assert!(title.ends_with('…'));
+        assert!(
+            title.len() <= FINDING_TITLE_MAX_BYTES,
+            "len {}",
+            title.len()
+        );
+        assert!(body.ends_with("do the thing"));
+    }
+
+    #[test]
+    fn category_does_not_affect_review_event() {
+        use ar_prompts::FindingCategory;
+        for severity in [
+            ReviewSeverity::Note,
+            ReviewSeverity::Warning,
+            ReviewSeverity::Error,
+        ] {
+            let events: Vec<ReviewEvent> = FindingCategory::ALL
+                .iter()
+                .map(|category| {
+                    let mut f = finding(severity, 1, None);
+                    f.category = *category;
+                    output_to_review_request(&output("", vec![f]), "x").event
+                })
+                .collect();
+            assert!(
+                events.iter().all(|e| *e == events[0]),
+                "{severity:?} gave differing events {events:?}"
+            );
         }
     }
 

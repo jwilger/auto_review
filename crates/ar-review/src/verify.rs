@@ -213,6 +213,19 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn kept_findings_keep_their_title_and_category() {
+        let json = r#"{"verdicts":[{"finding_index": 0, "keep": false},{"finding_index": 1, "keep": true}]}"#;
+        let provider = Arc::new(CannedProvider(Mutex::new(Some(json.into()))));
+        let router = Router::new().with(ModelTier::Cheap, provider);
+        let mut input = out(2);
+        input.findings[1].title = "Slow loop".into();
+        input.findings[1].category = ar_prompts::FindingCategory::Performance;
+        let expected = input.findings[1].clone();
+        let result = verify_findings(&router, input, "diff").await.expect("ok");
+        assert_eq!(result.findings, vec![expected]);
+    }
+
+    #[tokio::test]
     async fn preserves_summary_walkthrough_and_mermaid_unchanged() {
         let json = r#"{"verdicts":[{"finding_index": 0, "keep": true}]}"#;
         let provider = Arc::new(CannedProvider(Mutex::new(Some(json.into()))));
