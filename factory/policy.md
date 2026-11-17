@@ -53,6 +53,13 @@ gives in the session.
 ## Escalate
 A change that matches any of these is built and opened for review, and a human reviews and merges it.
 - any change in class factory
+- a spec decision marked needs_human
+- review that needed every allowed round
+
+A spec decision is marked `needs_human` only when it is a product, policy or
+security choice with no clearly recommendable option. Every other recorded
+decision appears in the pull request body's `## Decisions` section and does
+not block auto-merge.
 
 ## Auto-merge
 - docs

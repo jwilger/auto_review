@@ -7,7 +7,7 @@ forge: forge-github
 scm: scm-git
 runners: [local]                 # add `routine` once a cloud sandbox can run `nix develop`
 loops:
-  deliver: { max_concurrent: 1 }
+  deliver: { max_concurrent: 1, max_awaiting_human: 2 }   # max_awaiting_human: open factory PRs with no auto-merge before `next` stops
   upkeep:  { schedule: "mondays 06:00", scans: [dependencies] }
 stations:
   - { id: spec,    agent: factory-spec-writer, model: inherit, effort: medium, verdict: [READY, ESCALATE] }

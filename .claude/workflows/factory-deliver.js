@@ -25,10 +25,14 @@ const FINDINGS = { type: 'array', items: { type: 'object', properties: {
   needs_human: { type: 'boolean' }, reason: { type: 'string' } },
   required: ['file', 'line', 'severity', 'summary'] } }
 const OWNER = { type: 'array', items: { type: 'string', enum: ['engineer', 'design-lead', 'product-owner'] } }
-// Open choices the spec writer settled by picking its recommendation. An item
-// that carries any is built, but a human reviews and merges its change request.
+// Open choices the spec writer settled by picking its recommendation. Every
+// decision is listed in the change request body. needs_human (absent means
+// false) marks a product, policy or security choice with no clearly
+// recommendable option, with `reason` saying why; only those keep the change
+// from auto-merge.
 const DECISIONS = { type: 'array', items: { type: 'object', properties: {
-  question: { type: 'string' }, chosen: { type: 'string' }, alternatives: STRINGS, why: { type: 'string' } },
+  question: { type: 'string' }, chosen: { type: 'string' }, alternatives: STRINGS, why: { type: 'string' },
+  needs_human: { type: 'boolean' }, reason: { type: 'string' } },
   required: ['question', 'chosen', 'alternatives', 'why'] } }
 // A BLOCKED build says what blocks it, so the orchestrator can requeue work that
 // waits on another item or a fixable environment problem and send only what a
@@ -55,6 +59,20 @@ const itemText = `Item ${a.item.id}: ${a.item.title}\n\n${a.item.body}` +
   (a.item.images?.length ? `\n\nImages attached to the item (open them with Read):\n${a.item.images.map((i) => `- ${i}`).join('\n')}` : '')
 const bullets = (xs) => `- ${xs.join('\n- ')}`
 const itemBranch = `factory/${a.item.id}`
+// Slice branches live outside the item branch's ref path, because git cannot
+// hold `factory/<n>` and `factory/<n>/<slice>` at once (#190).
+const sliceBranch = (id) => `factory-slice/${a.item.id}/${id}`
+// Builders keep their memory out of item branches; a build that reports a path
+// under it has not finished, whatever its gate says.
+const memoryPaths = (b) => (b?.paths || []).filter((p) => p.startsWith('.claude/agent-memory/'))
+const decisionLines = (ds) => ds.map((d) =>
+  `- ${d.question} -> ${d.chosen} (needs_human: ${d.needs_human === true}${d.reason ? `; ${d.reason}` : ''})`).join('\n')
+// Every build starts from, or first merges, current origin/main, so a change
+// is never verified against the main of an older day.
+const freshBase = (branch, base) => base
+  ? `After creating it, run \`git fetch origin\` and merge current origin/main into ${branch} with a merge commit before any other change.\n`
+  : `Run \`git fetch origin\`. When ${branch} exists (locally or on origin), check it out, fetch it, and merge current origin/main ` +
+    `into it with a merge commit before any other change. Otherwise create ${branch} from current origin/main, never from the local HEAD or an old main.\n`
 // A visual gate that ran must pass too: new accessibility, token or console
 // problems, or a renderer that broke, block the build like a red check. When
 // the project has a visual gate and the builder says the change touches
@@ -63,7 +81,7 @@ const itemBranch = `factory/${a.item.id}`
 // out `ui` cannot skip the evidence. Slices of a multi-slice item are built
 // without rendering (the integrate step renders the whole item), so they pass
 // needVisual = false.
-const built = (b, needVisual = true) => b && b.verdict === 'DONE' && b.gate?.passed
+const built = (b, needVisual = true) => b && b.verdict === 'DONE' && b.gate?.passed && !memoryPaths(b).length
   && (!b.visual || b.visual.passed)
   && !(needVisual && a.visual && b.ui !== false && !b.visual)
 // Continue the history of the run being resumed, so the item's metrics keep
@@ -83,6 +101,7 @@ const blockerOf = (b) => {
 // change without evidence is unfinished work, not a blocker: the orchestrator
 // requeues it at build with these findings, as it does an exhausted item.
 const gateFindings = (b, needVisual) => [
+  ...(memoryPaths(b).length ? [`agent memory on the branch: remove ${memoryPaths(b).join(', ')} from it`] : []),
   ...(!b.gate?.passed ? [`${b.gate?.command ?? 'check'}: ${b.gate?.summary ?? 'the gate did not pass'}`] : []),
   ...(b.visual && !b.visual.passed ? [`visual: ${b.visual.summary ?? `exit ${b.visual.exit}`}`] : []),
   ...(needVisual && a.visual && b.ui !== false && !b.visual ? ['visual: a UI change rendered no visual evidence'] : []),
@@ -99,7 +118,7 @@ const approveStation = async (branch, criteria, round, paths = [], evidence = nu
   const approve = await station(`Decide whether the factory may auto-merge ${branch} for ${a.item.id} under factory/policy.md ` +
     `(APPROVE), or whether a human must review and merge it (ESCALATE).\n` +
     `Criteria:\n${bullets(criteria)}\nReview rounds used: ${round} of ${a.rounds}.${score}\n` +
-    `Open spec decisions:\n${decisions.length ? JSON.stringify(decisions, null, 2) : '- (none)'}\n` +
+    `Spec decisions:\n${decisions.length ? decisionLines(decisions) : '- (none)'}\n` +
     `Changed paths:\n${paths.length ? bullets(paths) : '- (not reported)'}` +
     (evidence ? `\nVisual evidence: ${evidence}` : ''), {
     ...opt('approve'), agentType: 'factory-approver', label: 'approve',
@@ -111,13 +130,15 @@ const approveStation = async (branch, criteria, round, paths = [], evidence = nu
   })
   if (!approve) return done('approve', 'agent-failed')
   // Fail closed: an approval that cannot say what changed, or which classes
-  // that falls in, or that carries open spec decisions, needs human review, so
-  // dark mode never merges it unclassified or with a choice nobody confirmed.
+  // that falls in, or that carries a decision only a person can make, needs
+  // human review, so dark mode never merges it unclassified or with such a
+  // choice unconfirmed. Other decisions go in the change request body and do
+  // not block auto-merge.
   // A human-review verdict may truthfully have no classes, but it always needs
   // an owner to request review from, so one without falls to an engineer.
   const gap = approve.verdict !== 'APPROVE' ? null
     : !paths?.length ? 'changed paths not reported' : !approve.classes?.length ? 'no change class given'
-    : decisions.length ? 'open spec decisions' : null
+    : decisions.some((d) => d.needs_human === true) ? 'decisions needing a person' : null
   const verdict = gap ? 'ESCALATE' : approve.verdict
   const decided = verdict === 'APPROVE' ? approve : { ...approve, verdict,
     reason: gap ? `${approve.reason} (human review required: ${gap})` : approve.reason,
@@ -169,6 +190,7 @@ const buildSlice = (s, findings, round, branch, notes, base, render = true) => s
   `${itemText}\n\nSlice ${s.id} criteria:\n${bullets(s.criteria)}\n\nCheck: ${a.check}\n` +
   (render ? visualFor(round, s.id) : '') +
   (base ? `Create ${branch} from ${base}, which holds the preceding slices, before changing anything.\n` : '') +
+  freshBase(branch, base) +
   `Commit on branch ${branch}.\n` +
   (notes ? `\nHuman rework notes:\n${notes}\n` : '') +
   (findings.length ? `\nReview findings to address:\n${JSON.stringify(findings, null, 2)}` : ''), {
@@ -182,10 +204,10 @@ for (let round = 1; round <= a.rounds; round++) {
   if (round === 1 && slices.length > 1) {
     // Independent slices build in parallel worktrees. Dependent ones build in order, each
     // branched from the previous dependent slice so it sees that slice's changes.
-    const parallelOut = await parallel(slices.filter((s) => s.independent).map((s) => () => buildSlice(s, [], round, `${itemBranch}/${s.id}`, null, null, false)))
+    const parallelOut = await parallel(slices.filter((s) => s.independent).map((s) => () => buildSlice(s, [], round, sliceBranch(s.id), null, null, false)))
     const ordered = []
     for (const s of slices.filter((s) => !s.independent)) {
-      const b = await buildSlice(s, [], round, `${itemBranch}/${s.id}`, null, ordered.at(-1)?.branch, false)
+      const b = await buildSlice(s, [], round, sliceBranch(s.id), null, ordered.at(-1)?.branch, false)
       ordered.push(b)
       if (!built(b, false)) break
     }
@@ -196,7 +218,8 @@ for (let round = 1; round <= a.rounds; round++) {
     // The dependent loop stops at the first unbuilt slice, so a short list always holds one.
     const failed = results.find((r) => !built(r, false))
     if (failed) return unbuilt(failed, false, { criteria, round, results })
-    build = await station(`Merge branches ${results.map((r) => r.branch).join(', ')} into ${itemBranch}, ` +
+    build = await station(freshBase(itemBranch) +
+      `Then merge the slice branches ${results.map((r) => r.branch).join(', ')} (each named factory-slice/${a.item.id}/<slice>) into ${itemBranch}, ` +
       `resolve conflicts against the criteria:\n${bullets(criteria)}\n\nThen run ${a.check}.` +
       (a.visual ? `\n${visualFor(round, 'integrate')}` : ''), {
       ...opt('build'), agentType: 'factory-implementer', isolation: 'worktree', label: 'integrate', schema: BUILD,
