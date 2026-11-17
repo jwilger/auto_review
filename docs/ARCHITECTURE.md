@@ -289,5 +289,11 @@ supersession metadata. A changed decision is recorded as a new ADR that
 supersedes the old one, the older record gets only a `Superseded` status and a
 short `Superseded By` section, and this document is updated in the same change.
 Per ADR-0023, enforcement comes from the `.claude/rules/adr-event-stream.md`
-rule, the architecture reviewer agent and human review, not from mechanical
-tooling.
+rule, the architecture reviewer agent and the maintainer's approval of every
+`factory` class change, not from mechanical tooling. Per ADR-0028, the factory
+merges a `factory` class change itself only after a person under `## Roles` in
+`factory/policy.md` records approval on the pull request's head, with an
+approving review or the `factory:approved` label. The merge is pinned to that
+head and never scheduled as auto-merge. `.claude/hooks/factory-merge-guard.sh`
+verifies the approval before the merge runs, and it blocks agents from adding
+that label or submitting an approving review.

@@ -33,6 +33,7 @@ case "$1 ${2:-}" in
       */contents/factory/policy.md\?ref=main) cat "$fix/policy.md" ;;
       */pulls/*/reviews) cat "$fix/reviews.json" ;;
       */issues/*/events) cat "$fix/events.json" ;;
+      */activity\?*) cat "$fix/activity.json" ;;
       */commits/*) cat "$fix/commits/${path##*/}.json" ;;
       */compare/*) base=${path##*/compare/}; cat "$fix/compare/${base%%...*}.json" ;;
       *) exit 1 ;;
@@ -67,6 +68,7 @@ fixture() {
   mkdir -p "$fix/commits" "$fix/compare" "$fix/merges"
   echo '[]' >"$fix/reviews.json"
   echo '[]' >"$fix/events.json"
+  echo '[]' >"$fix/activity.json"
   # The trusted Roles, as `main` has them.
   printf '%s\n' '# Autonomy policy' '' '## Roles' '- engineer: @jwilger' '' '## Change classes' >"$fix/policy.md"
 }
@@ -78,7 +80,15 @@ pr() {
   local files
   files=$(printf '%s\n' "$@" | jq -R '{path: .}' | jq -s .)
   jq -n --arg head "$head" --argjson files "$files" --argjson labels "${LABELS:-[]}" \
-    '{headRefOid: $head, files: $files, labels: ($labels | map({name: .}))}' >"$fix/pr.json"
+    '{headRefOid: $head, headRefName: "factory/7", files: $files, labels: ($labels | map({name: .}))}' >"$fix/pr.json"
+}
+
+# push <after> <timestamp>: the branch head became <after> at <timestamp>,
+# as the repository activity API reports it.
+push() {
+  jq --arg a "$1" --arg t "$2" \
+    '. + [{activity_type: "push", ref: "refs/heads/factory/7", after: $a, timestamp: $t}]' \
+    "$fix/activity.json" >"$fix/activity.tmp" && mv "$fix/activity.tmp" "$fix/activity.json"
 }
 
 # commit <sha> <committer date> <parent...>; its tree is t-<sha>.
@@ -242,13 +252,40 @@ on_main m1
 clean_merge h1 r1 m1
 commit r1 2026-11-17T10:00:00Z p0
 label_event labeled jwilger factory:approved 2026-11-17T11:00:00Z
+push r1 2026-11-17T10:05:00Z
+push h1 2026-11-17T12:05:00Z
 expect 0 "allows a Roles label newer than the last branch-own commit" "$merge"
 
 fixture
 LABELS='["Factory:Approved"]' pr h1 factory/policy.md
 commit h1 2026-11-17T10:00:00Z p0
 label_event labeled jwilger Factory:Approved 2026-11-17T11:00:00Z
+push h1 2026-11-17T10:05:00Z
 expect 0 "reads the label case-insensitively, as GitHub names it" "$merge"
+
+# The committer sets a commit's date, and a commit made before the label can
+# be pushed after it. The label covers only the head the branch had when it
+# was applied, read from the push times GitHub records.
+fixture
+LABELS='["factory:approved"]' pr h1 factory/policy.md
+commit h1 2026-11-17T10:00:00Z p0
+label_event labeled jwilger factory:approved 2026-11-17T11:00:00Z
+push p0 2026-11-17T09:00:00Z
+push h1 2026-11-17T11:30:00Z
+expect 2 "denies a label applied before its commit was pushed" "$merge"
+
+fixture
+LABELS='["factory:approved"]' pr h1 factory/policy.md
+commit h1 2026-11-17T10:00:00Z p0
+label_event labeled jwilger factory:approved 2026-11-17T11:00:00Z
+expect 2 "denies a label when no push of the head is recorded" "$merge"
+
+fixture
+LABELS='["factory:approved"]' pr h1 factory/policy.md
+commit h1 2026-11-17T10:00:00Z p0
+label_event labeled jwilger factory:approved 2026-11-17T11:00:00Z
+rm "$fix/activity.json"
+expect 2 "fails closed when the push activity cannot be read" "$merge"
 
 fixture
 LABELS='["factory:approved"]' pr h1 factory/policy.md
@@ -308,6 +345,8 @@ expect 2 "denies a REST merge after an approved one" "$merge && gh api -X PUT re
 expect 2 "denies a GraphQL merge after an approved one" "$merge ; gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'"
 expect 2 "reads the pin from the merge's own segment" 'gh pr merge 7 --squash ; echo --match-head-commit h1'
 expect 0 "allows two pinned, approved merges" "$merge ; $merge"
+# shellcheck disable=SC2016 # the command text carries a literal $(
+expect 0 "allows a pinned, approved merge inside \$( )" 'out=$(gh pr merge 7 --squash --match-head-commit h1)'
 
 fixture
 pr h1 factory/policy.md
@@ -318,6 +357,42 @@ expect 2 "checks a merge after a shell keyword" 'if true; then gh pr merge 7 --s
 # Bash splits words on tabs as well as spaces.
 expect 2 "checks a tab-separated merge" $'gh\tpr\tmerge 7 --squash'
 expect 2 "blocks a tab-separated label add" $'gh\tpr\tedit 5 --add-label factory:approved'
+# A command substitution runs its command too, wherever it stands.
+# shellcheck disable=SC2016 # the command texts carry literal $( and backticks
+expect 2 "checks a merge inside \$( )" 'echo $(gh pr merge 7 --squash)'
+# shellcheck disable=SC2016
+expect 2 "checks a merge inside an assignment's \$( )" 'x=$(gh pr merge 7 --squash)'
+# shellcheck disable=SC2016
+expect 2 "checks an auto-merge inside an assignment's \$( )" 'x=$(gh pr merge 7 --auto --squash)'
+# shellcheck disable=SC2016
+expect 2 "checks a merge inside backticks" 'echo `gh pr merge 7 --squash`'
+expect 2 "checks a merge inside a subshell after a command" 'true && (gh pr merge 7 --squash)'
+# shellcheck disable=SC2016
+expect 2 "blocks a label add inside \$( )" 'echo $(gh pr edit 5 --add-label factory:approved)'
+# shellcheck disable=SC2016
+expect 2 "blocks a label add inside an assignment's \$( )" 'x=$(gh pr edit 5 --add-label factory:approved)'
+# shellcheck disable=SC2016
+expect 2 "blocks a label add inside backticks" 'echo `gh pr edit 5 --add-label factory:approved`'
+# shellcheck disable=SC2016
+expect 2 "blocks an approving review inside \$( )" 'x=$(gh pr review 7 --approve)'
+# Wrappers that run their arguments as a command.
+expect 2 "checks a merge under timeout" 'timeout 60 gh pr merge 7 --squash'
+expect 2 "checks a merge under timeout with flags" 'timeout -k 5 --signal=TERM 60s gh pr merge 7 --squash'
+expect 2 "checks a merge under nice" 'nice gh pr merge 7 --squash'
+expect 2 "checks a merge under nice -n" 'nice -n 5 gh pr merge 7 --squash'
+expect 2 "checks a merge under stdbuf" 'stdbuf -oL -e 0 gh pr merge 7 --squash'
+expect 2 "checks a merge under setsid" 'setsid -f gh pr merge 7 --squash'
+expect 2 "checks a merge under nohup --" 'nohup -- gh pr merge 7 --squash'
+expect 2 "checks a merge under ionice" 'ionice -c 3 gh pr merge 7 --squash'
+expect 2 "checks a merge under env with flags" 'env -u GH_TOKEN -i gh pr merge 7 --squash'
+expect 2 "blocks a label add under timeout" 'timeout 30 gh pr edit 5 --add-label factory:approved'
+expect 2 "blocks a label add under nice" 'nice gh pr edit 5 --add-label factory:approved'
+# A GET of pulls/<n>/merge only reads whether the pull request was merged.
+expect 0 "allows reading a pull request's merge status" 'gh api repos/o/r/pulls/7/merge'
+expect 0 "allows an explicit GET of a pull request's merge status" 'gh api -X GET repos/o/r/pulls/7/merge'
+expect 2 "denies a REST merge by PUT" 'gh api --method PUT repos/o/r/pulls/7/merge'
+expect 2 "denies a REST merge sent with fields" 'gh api repos/o/r/pulls/7/merge -f merge_method=squash'
+expect 2 "denies a REST merge outside gh" 'curl -X PUT https://api.github.com/repos/o/r/pulls/7/merge'
 
 # The pull request is the merge's argument, not a flag's value: here #7
 # touches no factory paths, and #218 is the one gh would merge.

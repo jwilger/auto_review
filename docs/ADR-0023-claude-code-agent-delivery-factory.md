@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted
+Partially superseded
+
+## Superseded By
+
+ADR-0028: the factory merges `factory` class changes itself once the maintainer has recorded approval on the pull request's head. The merge guard hook verifies that approval.
 
 ## Date
 

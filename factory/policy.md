@@ -43,7 +43,12 @@ and one head: the hook lets the factory merge a `factory` pull request when the
 merge is pinned with `--match-head-commit <sha>` to its current head and a
 person under `## Roles` either approved a commit on the branch with only clean
 merges of `main` after it, or applied the `factory:approved` label after the
-branch's last own commit. A merge of `main` is clean only when its tree is
+branch's last own commit, while that commit (or a clean merge of `main` after
+it) was the pushed head. The label time is compared both with that commit's
+committer date and with the push times GitHub records for the branch, because
+a commit made before the label was applied can be pushed after it, and its
+committer date alone would then let the label approve a head the maintainer
+never saw. A merge of `main` is clean only when its tree is
 exactly the automatic merge of its parents, so a hand-resolved conflict voids
 the approval. The hook reads the Roles from this file on `main`, never from
 the pull request's own branch, reads the rest through `gh api`, bounds every

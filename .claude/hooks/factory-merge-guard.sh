@@ -13,9 +13,11 @@
 #     review (their latest approve/request-changes decision) on a commit R of
 #     the pull request, and every commit after R on the branch is a clean merge
 #     of `main`; or
-#   - the `factory:approved` label is on the pull request, and its latest
-#     application was by a Roles person after the branch's last own commit
-#     (clean merges of `main` after it do not count).
+#   - the `factory:approved` label is on the pull request, its latest
+#     application was by a Roles person after the committer date of the
+#     branch's last own commit (clean merges of `main` after it do not count),
+#     and the branch head at that moment, read from the push times in the
+#     repository activity API, was that commit or a clean merge after it.
 # A merge of `main` is clean when its tree is exactly what `git merge-tree`
 # makes of its parents; one with hand-resolved conflicts or extra edits is an
 # own commit and voids an earlier approval. The Roles are read from `main`,
@@ -28,12 +30,18 @@
 # mutations, which name no pull request number, are denied. Anything the hook
 # cannot read, within its time budget, denies.
 #
-# Known residual risks: the label is compared with the committer date of the
-# branch's last own commit, which the committer sets, so a backdated commit
-# pushed after the label would inherit it (the factory removes the label
-# before every push other than a clean merge of main to close that gap); and
-# a review that GitHub dismissed on push (`dismiss_stale_reviews_on_push`)
-# no longer counts, so the label is the approval that survives a refresh.
+# Why the push time: the committer sets a commit's date, and a commit made
+# before the label was applied can be pushed after it (a rework committed
+# before the maintainer labels the old head and pushed later, or a label
+# re-applied between the factory's label removal and its push). By committer
+# date alone such a commit would inherit the label, which would then approve
+# a head the maintainer never saw. Comparing with the head the branch had when
+# the label was applied closes that race; the factory also removes the label
+# before every push other than a clean merge of main. Known residual risks:
+# the activity API keeps a limited history, so an old branch with no recorded
+# push before the label denies; and a review that GitHub dismissed on push
+# (`dismiss_stale_reviews_on_push`) no longer counts, so the label is the
+# approval that survives a refresh.
 #
 # Because agents act as the maintainer's account, they must never add the
 # `factory:approved` label themselves: this hook also blocks commands that add
@@ -42,9 +50,11 @@
 # values come from `--input` or a `-F field=@file`, and label names held in
 # shell variables, which it cannot check). Labels are read after removing
 # shell quoting and compared case-insensitively, as GitHub names labels;
-# words may be split by spaces or tabs; and commands are read from command
+# words may be split by spaces or tabs; commands are read from command
 # position behind wrappers such as `nix develop .#ci --command`, `sh -c`,
-# `xargs` and shell keywords.
+# `env`, `xargs`, `timeout`, `nice`, `stdbuf`, `setsid`, `ionice`, `nohup`
+# (with their flags) and shell keywords; and the command inside `$( )`,
+# `( )` or backticks is read as a command of its own, wherever it stands.
 #
 # For the same reason agents never submit an approving review, which would
 # count as a Roles approval on a pull request another account (such as a bot)
@@ -67,9 +77,20 @@ deny() {
 
 approved_label='factory:approved'
 
+# segments: the command split into the pieces that can each start a command:
+# at `;`, `&`, `|` and newlines, and at `(`, `)` and backticks, so the command
+# inside `$( )`, `( )` or backticks, wherever it stands (`x=$(gh ...)`,
+# `echo $(gh ...)`), reads from command position. A parenthesis inside quoted
+# text splits too; that can only make the guard read more segments, so a
+# merge whose pin follows such a quote denies rather than slips through.
+segments() {
+  tr ';&|()`' '\n' <<<"$cmd"
+}
+
 # normalize <segment>: drop what can stand before a command (assignments,
-# env, command, exec, eval, nohup, time, sudo, xargs and its flags, shell
-# keywords such as `then` and `do`, a subshell or brace opener, `sh -c` or
+# env, command, exec, eval, time, sudo, wrappers that run their arguments
+# such as nohup, timeout, nice, stdbuf, setsid, ionice and xargs, with their
+# flags, shell keywords such as `then` and `do`, a brace opener, `sh -c` or
 # `bash -c` and the quote that opens its script, `nix develop <flake>
 # --command`, a path to gh) and gh's global repository flag, so
 # `nix develop .#ci --command env gh -R o/r pr edit` reads as `gh pr edit`.
@@ -80,8 +101,14 @@ normalize() {
     prev=$s
     s=$(sed -E '
       s/^[[:space:]]+//
-      s/^(\$\(|\(|`|\{|!)//
-      s/^(then|do|else|elif|if|while|until|env|command|exec|eval|nohup|time|sudo)([[:space:]]+|$)//
+      s/^(\$|\{|!)//
+      s/^(then|do|else|elif|if|while|until|command|exec|eval|time|sudo)([[:space:]]+|$)//
+      s/^(nohup|setsid)([[:space:]]+-[^[:space:]]*)*([[:space:]]+|$)//
+      s/^env([[:space:]]+(-[uCS][[:space:]]*[^-[:space:]][^[:space:]]*|--[a-z-]+(=[^[:space:]]*)?|-[A-Za-z0]*))*([[:space:]]+|$)//
+      s/^timeout([[:space:]]+(-[sk][[:space:]]*[^-[:space:]][^[:space:]]*|--[a-z-]+(=[^[:space:]]*)?|-[A-Za-z]+))*[[:space:]]+[0-9.]+[smhd]?([[:space:]]+|$)//
+      s/^nice([[:space:]]+(-n[[:space:]]*-?[0-9]+|--adjustment=-?[0-9]+|-[0-9]+))*([[:space:]]+|$)//
+      s/^stdbuf([[:space:]]+(-[ioe][[:space:]]*[^-[:space:]][^[:space:]]*|--(input|output|error)=[^[:space:]]*))*([[:space:]]+|$)//
+      s/^ionice([[:space:]]+(-[cnp][[:space:]]*[^-[:space:]][^[:space:]]*|-[tu]|--[a-z-]+(=[^[:space:]]*)?))*([[:space:]]+|$)//
       s/^[A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*([[:space:]]+|$)//
       s/^xargs([[:space:]]+-[^[:space:]]+)*([[:space:]]+|$)//
       s/^([^[:space:]]*\/)?(ba|da|k|z)?sh([[:space:]]+-[A-Za-z]+)*[[:space:]]+-[A-Za-z]*c[A-Za-z]*([[:space:]]+|$)//
@@ -174,6 +201,22 @@ review_approves() {
   return 1
 }
 
+# api_method <segment>: the HTTP method a `gh api` segment sends: its -X or
+# --method, else POST when it sends fields or a body, as gh does, else GET.
+api_method() {
+  local method
+  method=$(grep -Eo -- '(-X|--method)[[:space:]=]*[A-Za-z]+' <<<"$1" | head -n1 \
+    | sed -E 's/^(-X|--method)[[:space:]=]*//' | tr '[:lower:]' '[:upper:]' || true)
+  if [[ -z "$method" ]]; then
+    if grep -Eq -- '(^| )(-f|-F|--field|--raw-field|--input)( |=|$)' <<<"$1"; then
+      method=POST
+    else
+      method=GET
+    fi
+  fi
+  echo "$method"
+}
+
 # Label guard. Each shell segment is checked on its own, from command
 # position, so prose such as a pull request body that names the label passes.
 while IFS= read -r segment; do
@@ -195,15 +238,7 @@ while IFS= read -r segment; do
     deny "only a person approves a pull request; agents never submit an approving review."
   fi
   if grep -Eq '^gh +api( |$)' <<<"$segment"; then
-    method=$(grep -Eo -- '(-X|--method)[[:space:]=]*[A-Za-z]+' <<<"$segment" | head -n1 \
-      | sed -E 's/^(-X|--method)[[:space:]=]*//' | tr '[:lower:]' '[:upper:]' || true)
-    if [[ -z "$method" ]]; then
-      if grep -Eq -- '(^| )(-f|-F|--field|--raw-field|--input)( |=|$)' <<<"$segment"; then
-        method=POST
-      else
-        method=GET
-      fi
-    fi
+    method=$(api_method "$segment")
     if [[ "$method" != GET && "$method" != DELETE ]]; then
       if dequote <<<"$segment" | grep -qiF "$approved_label"; then
         deny "only the maintainer adds the $approved_label label."
@@ -230,12 +265,13 @@ while IFS= read -r segment; do
       fi
     fi
   fi
-done < <(tr ';&|' '\n' <<<"$cmd")
+done < <(segments)
 
 # Only merge-shaped commands are checked: `gh pr merge` in command position
 # (each shell segment, read from command position as the label guard reads
 # it), so prose that mentions it, such as a pull request body, does not trip
-# the guard; and the GraphQL or REST merge calls anywhere. Every merge in the
+# the guard; and the GraphQL or REST merge calls anywhere, except a `gh api`
+# GET of `pulls/<n>/merge`, which only reads merge status. Every merge in the
 # command is checked on its own, with the pin read from its own segment, so
 # one approved merge never carries another along.
 if grep -Eq 'enablePullRequestAutoMerge|mergePullRequest' <<<"$cmd"; then
@@ -264,10 +300,15 @@ while IFS= read -r raw; do
     fi
     merges+=("$pr $override $auto $pin")
   fi
+  # A REST merge, by gh or any other client. A `gh api` GET of the same path
+  # only reads whether the pull request was merged.
+  if grep -Eq '^gh +api( |$)' <<<"$segment" && [[ $(api_method "$segment") == GET ]]; then
+    continue
+  fi
   for pr in $(grep -Eo 'pulls/[0-9]+/merge' <<<"$raw" | grep -Eo '[0-9]+' || true); do
     merges+=("$pr 0 0")
   done
-done < <(tr ';&|' '\n' <<<"$cmd")
+done < <(segments)
 
 ((${#merges[@]} > 0)) || exit 0
 
@@ -290,7 +331,7 @@ check_merge() {
   ((override == 0)) || exit 0
 
   local view files hits held
-  view=$(bounded gh pr view "$pr" --json files,headRefOid,labels) \
+  view=$(bounded gh pr view "$pr" --json files,headRefOid,headRefName,labels) \
     || deny "could not read pull request #$pr."
   files=$(jq -r '.files[].path' <<<"$view") \
     || deny "could not read the files of pull request #$pr."
@@ -398,26 +439,47 @@ $hits"
   [[ "$review_ok" == true ]] && exit 0
 
   # Signal 2: the label is present, last applied by a Roles person after the
-  # branch's last own commit. Known residual risk: the committer sets that
-  # commit's date, so a backdated commit pushed after the label would inherit
-  # it; the factory removes the label before every push other than a clean
-  # merge of main (references/follow-through.md, step 4) to close that gap.
-  local events label_ok
+  # branch's last own commit, and the branch head when it was applied was the
+  # last own commit or a clean merge of main after it. The committer sets a
+  # commit's date, and a commit made before the label can be pushed after it,
+  # so the date alone could let the label cover a head the maintainer never
+  # saw; the push times GitHub records (the repository activity API) say which
+  # head the branch had when the label was applied.
+  local events label_at branch activity label_ok
   if jq -e --arg l "$approved_label" 'any(.labels[]?; (.name | ascii_downcase) == $l)' <<<"$view" >/dev/null; then
     events=$(bounded gh api --paginate "repos/{owner}/{repo}/issues/$pr/events") \
       || deny "$held
 (could not read the events of #$pr)"
-    label_ok=$(jq -s --argjson roles "$roles_json" --arg l "$approved_label" --arg own "$own_date" '
+    label_at=$(jq -rs --argjson roles "$roles_json" --arg l "$approved_label" --arg own "$own_date" '
+      def t: sub("\\.[0-9]+"; "") | fromdateiso8601;
       add // []
       | map(select(.event == "labeled" and (.label.name | ascii_downcase) == $l))
-      | sort_by(.created_at) | last
-      | if . == null then false
-        else ((.actor.login as $u | $roles | index($u)) != null)
-             and ((.created_at | fromdateiso8601) > ($own | fromdateiso8601))
+      | sort_by(.created_at | t) | last
+      | if . == null then empty
+        elif ((.actor.login as $u | $roles | index($u)) != null) and ((.created_at | t) > ($own | t))
+        then .created_at
+        else empty
         end
     ' <<<"$events") || deny "$held
 (could not parse the events of #$pr)"
-    [[ "$label_ok" == true ]] && exit 0
+    if [[ -n "$label_at" ]]; then
+      branch=$(jq -r '.headRefName // empty' <<<"$view")
+      [[ -n "$branch" ]] || deny "$held
+(could not read the branch of #$pr)"
+      activity=$(bounded gh api --paginate \
+        "repos/{owner}/{repo}/activity?ref=$(jq -rn --arg r "refs/heads/$branch" '$r | @uri')&per_page=100") \
+        || deny "$held
+(could not read the push activity of $branch)"
+      label_ok=$(jq -s --arg at "$label_at" --argjson cands "$candidates" '
+        def t: sub("\\.[0-9]+"; "") | fromdateiso8601;
+        add // []
+        | map(select((.timestamp | t) < ($at | t)))
+        | sort_by(.timestamp | t) | last
+        | if . == null then false else (.after as $a | $cands | index($a)) != null end
+      ' <<<"$activity") || deny "$held
+(could not parse the push activity of $branch)"
+      [[ "$label_ok" == true ]] && exit 0
+    fi
   fi
 
   deny "$held
