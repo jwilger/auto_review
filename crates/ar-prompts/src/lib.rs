@@ -22,7 +22,7 @@ pub use triage::{
     triage_schema, triage_system_prompt, validate_triage_output, TriageClass, TriageEntry,
     TriageOutput, TriageValidationError,
 };
-pub use types::{ReviewFinding, ReviewOutput, ReviewSeverity};
+pub use types::{FindingCategory, ReviewFinding, ReviewOutput, ReviewSeverity};
 pub use validate::{validate_review_output, ValidationError};
 pub use verification::{
     validate_verification_output, verification_schema, verification_system_prompt,

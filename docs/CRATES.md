@@ -35,6 +35,43 @@ LLM calls flow through `ar-llm::Router`. Review prompts and schemas come from
 `ar-forge`; Forgejo keeps compatibility DTO re-exports for existing callers
 while host-neutral code migrates to the common crate.
 
+## `ar-prompts` review contract
+
+The review LLM call is constrained by `crates/ar-prompts/schemas/review.json`
+(OpenAI strict mode: every property is listed in `required`) and parsed into
+`ReviewOutput` by `validate_review_output`. Each `ReviewFinding` carries
+`path`, `line_start`, `line_end`, `severity`, `message`, plus:
+
+- `title`: a short headline, 8 words or fewer. Inline comments show it in bold
+  after the severity label; `ar-review` trims it, collapses whitespace and
+  control characters to single spaces, and caps it at 120 bytes before
+  rendering.
+- `category`: exactly one `FindingCategory` from a closed taxonomy, the single
+  category set for metrics, noise controls, feedback suppression, fan-out and
+  the bench. There is no catch-all value; an unknown or wrong-case category
+  fails validation with `ValidationError::SchemaMismatch`, so
+  `FindingCategory::as_str` is the only source of category labels.
+
+| Category | Meaning |
+|---|---|
+| `correctness` | Wrong behaviour, logic errors, broken invariants. |
+| `security` | Any security issue, even when it is also a correctness bug. |
+| `reliability` | Error handling, panics, retries, resource leaks, races. |
+| `performance` | Needless work, allocations, slow queries or algorithms. |
+| `compatibility` | Breaking API, schema, config or platform changes. |
+| `ci_coverage` | Missing CI linter or check (the CI coverage advisory). |
+| `tests` | Missing, weak or incorrect tests. |
+| `documentation` | Missing, stale or wrong docs and comments. |
+| `refactor` | Structural suggestions such as extracting or merging code. |
+| `naming` | Unclear or misleading names. |
+| `style` | Formatting and stylistic nits. |
+
+JSON that omits `title` or `category` still deserializes, with `title = ""` and
+`category = correctness`, so older fixtures parse and nothing is accidentally
+treated as a low-value category. Serialized findings always include both
+fields. The review event and severity floor are derived from `severity` only;
+`category` does not change them.
+
 ## Host capabilities
 
 `ReviewHost::capabilities()` (in `ar-forge`) reports which optional

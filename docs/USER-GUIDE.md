@@ -39,8 +39,19 @@ Each finding renders with a severity icon and label:
 | 🟡 **Warning** | Likely issue. Worth addressing but doesn't block. |
 | 💡 **Note** | Stylistic or low-confidence observation. Take or leave. |
 
-Multi-line ranges render as `**Lines N–M:**` because Forgejo's
-inline-comment schema doesn't carry an end line.
+When the finding has a title, it follows the severity label in bold, then an
+em dash and the comment:
+
+```text
+🟡 **Warning:** **Unchecked index** — …
+```
+
+The title is a short headline kept on one line. When a finding has no title,
+the bold title and dash are omitted and the comment follows the label
+directly (`🟡 **Warning:** …`).
+
+Multi-line ranges render as `**Lines N–M:**` (after the title, when present)
+because Forgejo's inline-comment schema doesn't carry an end line.
 
 ## Talking to the bot
 
