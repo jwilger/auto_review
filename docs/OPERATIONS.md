@@ -178,11 +178,20 @@ the dedicated 1Password `Github Secrets` vault. GitHub Actions loads it through
 to preparing release PR branches, opening release PRs, creating release tags,
 and creating GitHub Releases in `jwilger/auto_review`.
 
+Release prepare does not commit or push with git. The repository rulesets
+require verified signatures and forbid force-pushes on every branch, so the
+workflow creates the `chore: release vX.Y.Z` commit through the GraphQL
+`createCommitOnBranch` mutation, which GitHub signs as verified for the token's
+account. When `release/vX.Y.Z` already exists but is not a single release
+commit on top of the current `main`, the workflow deletes the branch and creates
+it again from `main`. Deleting the branch closes any open release PR, and the
+workflow then opens a new one. Re-running against an up-to-date branch leaves it
+and its PR alone.
+
 Use the dedicated SSH signing key stored as `RELEASE_SIGNING_KEY` in the
-`Github Secrets` 1Password vault. Its public key is registered on the GitHub
-account used by the release automation, and repository variables
-`RELEASE_BOT_NAME` and `RELEASE_BOT_EMAIL` identify the signing identity.
-Release publish also uses that SSH signing key to sign `SHA256SUMS`.
+`Github Secrets` 1Password vault only for release artifacts. Release publish
+uses it to sign `SHA256SUMS`, and repository variables `RELEASE_BOT_NAME` and
+`RELEASE_BOT_EMAIL` identify that signing identity.
 
 Release publishing uses the same `GH_RELEASE_AUTOMATION_TOKEN` only after
 artifacts exist. It creates GitHub Releases with Linux binary artifacts,
