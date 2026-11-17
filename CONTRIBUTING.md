@@ -39,6 +39,8 @@ just deny
 just build
 just shellcheck
 just actionlint
+just hermetic-git      # test code clears GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE before spawning git
+just conflict-markers  # no unresolved merge conflict markers in tracked files
 
 # Checks that `just ci` leaves out:
 just advisories   # cargo deny check advisories; needs network
@@ -47,8 +49,15 @@ just flake-check  # nix flake check; builds the packages
 
 `just ci` runs rustfmt, clippy (with `-D warnings`), the full
 nextest application test suite, cargo-deny (licenses + bans + sources),
-a workspace build, shellcheck on `scripts/release` and actionlint on
-`.github/workflows/`.
+a workspace build, shellcheck on `scripts/release`, actionlint on
+`.github/workflows/`, `scripts/check-hermetic-git` and a conflict-marker
+scan of tracked files. The hermetic-git check exists because git exports
+`GIT_DIR` to its hooks: a test fixture that runs `git init` under the
+pre-push gate without clearing it rewrites this repository's config (one
+set `core.bare = true`). Clear `GIT_DIR`, `GIT_WORK_TREE` and
+`GIT_INDEX_FILE` in the same statement as `Command::new("git")`, or spawn
+through a helper that does. These two run in `just ci` and the pre-push
+hook, not as GitHub Actions jobs.
 Advisory checks require network access, so `just advisories` stays out
 of `just ci`; run it when bumping a dep. Land no commit that fails any
 required check.

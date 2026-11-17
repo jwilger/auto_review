@@ -1,0 +1,166 @@
+#!/usr/bin/env python3
+"""Fail when test code under crates/ spawns git without clearing the
+repository-locating variables.
+
+Git exports GIT_DIR (and sometimes GIT_WORK_TREE / GIT_INDEX_FILE) to its
+hooks. A test fixture that runs `git init` inside the pre-push hook without
+clearing them operates on the repository being pushed instead of its tempdir;
+one such fixture once set `core.bare = true` on the shared repository.
+
+Scanned: every `.rs` file under `crates/*/tests/`, and every line from the
+first `#[cfg(test)]` onward in `crates/*/src/**/*.rs`. Each statement that
+contains `Command::new("git")` must also contain `.env_remove("GIT_DIR")`,
+`.env_remove("GIT_WORK_TREE")` and `.env_remove("GIT_INDEX_FILE")` before the
+statement ends. Spawn through a shared helper that does this to satisfy the
+rule once.
+
+Usage: scripts/check-hermetic-git [ROOT]   (ROOT defaults to the repo root)
+"""
+
+import re
+import sys
+from pathlib import Path
+
+REQUIRED = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE")
+RAW_STRING = re.compile(r'b?r(#*)"')
+SPAWN = re.compile(r'Command::new\(\s*"git"\s*\)')
+CFG_TEST = "#[cfg(test)]"
+
+
+def strip(text):
+    """Return (kept, skeleton), both the same length as `text`.
+
+    `kept` blanks comments; `skeleton` also blanks string and char literal
+    contents, so brackets and `;` inside literals do not end a statement.
+    Newlines survive in both so offsets map back to line numbers.
+    """
+    kept = list(text)
+    skel = list(text)
+    n = len(text)
+    i = 0
+
+    def blank(buf, start, end):
+        for k in range(start, end):
+            if buf[k] != "\n":
+                buf[k] = " "
+
+    while i < n:
+        c = text[i]
+        if text.startswith("//", i):
+            end = text.find("\n", i)
+            end = n if end == -1 else end
+            blank(kept, i, end)
+            blank(skel, i, end)
+            i = end
+        elif text.startswith("/*", i):
+            depth, j = 1, i + 2
+            while j < n and depth:
+                if text.startswith("/*", j):
+                    depth, j = depth + 1, j + 2
+                elif text.startswith("*/", j):
+                    depth, j = depth - 1, j + 2
+                else:
+                    j += 1
+            blank(kept, i, j)
+            blank(skel, i, j)
+            i = j
+        elif (m := RAW_STRING.match(text, i)) and (
+            i == 0 or not (text[i - 1].isalnum() or text[i - 1] == "_")
+        ):
+            close = '"' + m.group(1)
+            end = text.find(close, m.end())
+            end = n if end == -1 else end + len(close)
+            blank(skel, m.end(), max(m.end(), end - len(close)))
+            i = end
+        elif c == '"':
+            j = i + 1
+            while j < n and text[j] != '"':
+                j += 2 if text[j] == "\\" else 1
+            blank(skel, i + 1, min(j, n))
+            i = j + 1
+        elif c == "'":
+            if text.startswith("\\", i + 1):
+                end = text.find("'", i + 3)
+                end = n if end == -1 else end + 1
+            elif i + 2 < n and text[i + 2] == "'":
+                end = i + 3
+            else:
+                i += 1  # lifetime or label
+                continue
+            blank(skel, i + 1, end - 1)
+            i = end
+        else:
+            i += 1
+    return "".join(kept), "".join(skel)
+
+
+def statement_end(skel, start):
+    """Offset of the `;` ending the statement that contains `start`, or of
+    the bracket that closes the enclosing block when there is no `;`."""
+    depth = 0
+    for k in range(start, len(skel)):
+        ch = skel[k]
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+            if depth < 0:
+                return k
+        elif ch == ";" and depth == 0:
+            return k
+    return len(skel)
+
+
+def check_text(text, first_line=1):
+    """Return (line, missing) for each non-hermetic git spawn in `text`."""
+    kept, skel = strip(text)
+    problems = []
+    for m in SPAWN.finditer(kept):
+        if skel[m.start() : m.end()] != kept[m.start() : m.end()].replace(
+            '"git"', '"   "'
+        ):
+            continue  # the match sits inside a string literal
+        stmt = kept[m.start() : statement_end(skel, m.end())]
+        missing = [
+            var
+            for var in REQUIRED
+            if not re.search(r'\.env_remove\(\s*"' + var + r'"\s*\)', stmt)
+        ]
+        if missing:
+            problems.append((first_line + text.count("\n", 0, m.start()), missing))
+    return problems
+
+
+def scanned_sources(root):
+    crates = root / "crates"
+    for path in sorted(crates.glob("*/tests/**/*.rs")):
+        yield path, path.read_text(encoding="utf-8"), 1
+    for path in sorted(crates.glob("*/src/**/*.rs")):
+        lines = path.read_text(encoding="utf-8").splitlines(keepends=True)
+        for idx, line in enumerate(lines):
+            if line.strip().startswith(CFG_TEST):
+                yield path, "".join(lines[idx:]), idx + 1
+                break
+
+
+def main(argv):
+    root = Path(argv[1]) if len(argv) > 1 else Path(__file__).resolve().parent.parent
+    failures = 0
+    for path, text, first_line in scanned_sources(root):
+        for line, missing in check_text(text, first_line):
+            failures += 1
+            rel = path.relative_to(root)
+            print(
+                f"{rel}:{line}: test code spawns git without clearing "
+                f"{', '.join(missing)}; add .env_remove(...) for each or use a "
+                "hermetic git helper",
+                file=sys.stderr,
+            )
+    if failures:
+        print(f"hermetic-git: {failures} non-hermetic git spawn(s)", file=sys.stderr)
+        return 1
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main(sys.argv))
