@@ -1,6 +1,8 @@
 use ar_chat::{parse_chat_command, ChatCommand, ChatContext, ChatHandler};
 use ar_forgejo::Client as ForgejoClient;
-use ar_index::{InMemoryLearningsStore, LearningSource, LearningsStore};
+use ar_index::{
+    InMemoryLearningsStore, LearningSource, LearningsFilter, LearningsStore, RepoScope,
+};
 use ar_llm::{
     CompleteRequest, CompleteResponse, Error as LlmError, LlmProvider, ModelTier, ResponseFormat,
     Router,
@@ -174,9 +176,23 @@ async fn directed_approval_with_nothing_outstanding_approves_and_stores_learning
         .await
         .expect("ok");
 
-    let stored = learnings.list().await.expect("list");
+    let stored = learnings.list(LearningsFilter::All).await.expect("list");
     assert_eq!(stored.len(), 1);
     assert_eq!(stored[0].source, LearningSource::Chat);
+    assert_eq!(stored[0].repo, Some(RepoScope::new("alice", "widgets")));
+    assert_eq!(stored[0].origin_pr, Some(42));
+    assert!(
+        !stored[0].text.starts_with("Repository "),
+        "scope lives in the repo field, not a text prefix: {}",
+        stored[0].text
+    );
+    assert!(!stored[0].text.contains("Repository alice/widgets only."));
+    assert!(stored[0]
+        .text
+        .starts_with("Review correction from PR feedback: "));
+    assert!(stored[0]
+        .text
+        .ends_with("User feedback: Looks good, please approve."));
 
     let received = server.received_requests().await.expect("requests");
     let approvals = received

@@ -743,7 +743,10 @@ pub async fn list_learnings(args: ListLearningsArgs) -> Result<()> {
     let store = ar_index::SqliteLearningsStore::open(&args.learnings_db)
         .await
         .with_context(|| format!("open learnings db at {}", args.learnings_db.display()))?;
-    let learnings = store.list().await.context("list learnings")?;
+    let learnings = store
+        .list(ar_index::LearningsFilter::All)
+        .await
+        .context("list learnings")?;
     if args.json {
         for l in &learnings {
             // The embedding is many floats and rarely useful in a
@@ -797,7 +800,7 @@ pub async fn forget_learning(args: ForgetLearningArgs) -> Result<()> {
         .await
         .with_context(|| format!("open learnings db at {}", args.learnings_db.display()))?;
     store
-        .remove(args.id)
+        .remove(args.id, None)
         .await
         .with_context(|| format!("remove learning {}", args.id))?;
     println!("Forgot learning {}.", args.id);
@@ -2473,6 +2476,8 @@ mod tests {
                     LearningSource::Guideline,
                     vec![0.1; 4],
                     1700000000,
+                    &ar_index::RepoScope::new("acme", "widget"),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -2492,7 +2497,14 @@ mod tests {
         {
             let store = SqliteLearningsStore::open(&path).await.unwrap();
             store
-                .add("x".into(), LearningSource::Chat, vec![1.0; 3], 100)
+                .add(
+                    "x".into(),
+                    LearningSource::Chat,
+                    vec![1.0; 3],
+                    100,
+                    &ar_index::RepoScope::new("acme", "widget"),
+                    Some(1),
+                )
                 .await
                 .unwrap();
         }
@@ -2529,6 +2541,8 @@ mod tests {
                     LearningSource::Chat,
                     vec![0.5; 3],
                     100,
+                    &ar_index::RepoScope::new("acme", "widget"),
+                    None,
                 )
                 .await
                 .unwrap()
@@ -2540,7 +2554,11 @@ mod tests {
         };
         forget_learning(args).await.expect("ok");
         let store = SqliteLearningsStore::open(&path).await.unwrap();
-        assert!(store.list().await.unwrap().is_empty());
+        assert!(store
+            .list(ar_index::LearningsFilter::All)
+            .await
+            .unwrap()
+            .is_empty());
     }
 
     #[tokio::test]

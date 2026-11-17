@@ -53,8 +53,8 @@ in your Forgejo instance for the exact handle.
 |---------|--------------|
 | `@<bot> help` | List every available command. |
 | `@<bot> re-review` | Re-run the full review against the current head SHA, even if it was already reviewed. |
-| `@<bot> remember <text>` | Save a guideline to the repo's learnings store. Future semantic retrieval requires an embedding tier (`LLM_EMBEDDING_MODEL`); otherwise the entry is stored but not retrieved by similarity search. |
-| `@<bot> forget <id>` | Delete a learnings entry. The id is printed when `remember` stores the entry; operators can also audit ids with `auto-review learnings list`. |
+| `@<bot> remember <text>` | Save a guideline for this repository only. Learnings are scoped to the lowercased `owner/repo` of the PR, so they are never retrieved into another repository's reviews. Future semantic retrieval requires an embedding tier (`LLM_EMBEDDING_MODEL`); otherwise the entry is stored but not retrieved by similarity search. |
+| `@<bot> forget <id>` | Delete a learnings entry of this repository. The id is printed when `remember` stores the entry; operators can also audit ids with `auto-review learnings list`. An id that belongs to another repository, or does not exist, gets the same reply: "No learning with id N in this repository". |
 | `@<bot> autofix` | Ask the cheap-tier model for diff-based inline patch suggestions. The bot does not push commits — you decide what to apply. |
 | `@<bot> docstring` | Suggest docstrings for newly-added public APIs. Requires the cheap-tier model (`LLM_CHEAP_MODEL`). Same: comment-only, you apply. |
 | `@<bot> tests` | Suggest scaffolded test cases for added code. Requires the cheap-tier model. Same. |

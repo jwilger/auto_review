@@ -1,4 +1,4 @@
-use ar_index::{LearningRecord, LearningSource, LearningsStore};
+use ar_index::{LearningRecord, LearningSource, LearningsFilter, LearningsStore, RepoScope};
 use async_trait::async_trait;
 use std::sync::{Arc, Mutex};
 
@@ -88,11 +88,15 @@ async fn dynamodb_learnings_store_uses_stable_keys_and_trait_behavior() {
             LearningSource::Guideline,
             vec![0.1, 0.2, 0.3],
             1_800_000_000,
+            &RepoScope::new("Acme", "Widget"),
+            Some(12),
         )
         .await
         .expect("add learning");
 
     assert_eq!(record.id, 7);
+    assert_eq!(record.repo, Some(RepoScope::new("acme", "widget")));
+    assert_eq!(record.origin_pr, Some(12));
     assert_eq!(
         client.allocated.lock().expect("allocated").as_slice(),
         &["agentcore-learnings".to_string()]
@@ -106,15 +110,18 @@ async fn dynamodb_learnings_store_uses_stable_keys_and_trait_behavior() {
         }]
     );
 
-    assert_eq!(store.list().await.expect("list"), vec![record.clone()]);
+    assert_eq!(
+        store.list(LearningsFilter::All).await.expect("list"),
+        vec![record.clone()]
+    );
     let nearest = store
-        .query_nearest(&[0.1, 0.2, 0.3], 1)
+        .query_nearest(&[0.1, 0.2, 0.3], 1, &RepoScope::new("acme", "widget"))
         .await
         .expect("nearest");
     assert_eq!(nearest.len(), 1);
     assert_eq!(nearest[0].learning, record);
 
-    store.remove(7).await.expect("remove");
+    store.remove(7, None).await.expect("remove");
     assert_eq!(
         client.removes.lock().expect("removes").as_slice(),
         &[RemoveLearning {
@@ -125,7 +132,7 @@ async fn dynamodb_learnings_store_uses_stable_keys_and_trait_behavior() {
 
     *client.remove_found.lock().expect("remove found") = false;
     assert!(matches!(
-        store.remove(99).await,
+        store.remove(99, None).await,
         Err(ar_index::LearningsError::NotFound(99))
     ));
 }

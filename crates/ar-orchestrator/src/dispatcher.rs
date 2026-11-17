@@ -83,6 +83,14 @@ pub struct ReviewJob {
     pub force: bool,
 }
 
+impl ReviewJob {
+    /// Learnings scope of the reviewed repository: the lowercased
+    /// `owner/repo`, so a mixed-case job still finds its learnings.
+    pub fn repo_scope(&self) -> ar_index::RepoScope {
+        ar_index::RepoScope::new(&self.owner, &self.repo)
+    }
+}
+
 impl From<&PullRequestEvent> for ReviewJob {
     fn from(evt: &PullRequestEvent) -> Self {
         Self {
@@ -788,6 +796,7 @@ async fn prepare_workspace_context(
             llm,
             &raw_diff,
             learnings,
+            &job.repo_scope(),
             5,
             vector_store,
         )
@@ -1067,6 +1076,39 @@ mod tests {
 
     fn router_with(provider: Arc<CannedProvider>) -> Router {
         Router::new().with(ModelTier::Reasoning, provider)
+    }
+
+    #[tokio::test]
+    async fn mixed_case_job_scope_matches_learnings_stored_in_lowercase() {
+        use ar_index::{InMemoryLearningsStore, LearningSource, RepoScope};
+
+        let store = InMemoryLearningsStore::new();
+        store
+            .add(
+                "Prefer Result.".into(),
+                LearningSource::Chat,
+                vec![1.0],
+                0,
+                &RepoScope::new("acme", "widget"),
+                None,
+            )
+            .await
+            .unwrap();
+        let job = ReviewJob {
+            owner: "Acme".to_string(),
+            repo: "Widget".to_string(),
+            pr_number: 1,
+            head_sha: "abc".to_string(),
+            pr_title: String::new(),
+            pr_body: String::new(),
+            force: false,
+        };
+
+        let hits = store
+            .query_nearest(&[1.0], 5, &job.repo_scope())
+            .await
+            .unwrap();
+        assert_eq!(hits.len(), 1);
     }
 
     #[tokio::test]
