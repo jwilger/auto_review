@@ -1,8 +1,10 @@
 use crate::types::{CompleteRequest, CompleteResponse, Error, LlmProvider, ModelTier};
+use alloc::sync::Arc;
 use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::{Semaphore, SemaphorePermit};
 
+/// Callback told the tier, provider base URL, model name, input tokens and
+/// output tokens of every successful call.
 type UsageCollector = Arc<dyn Fn(ModelTier, &str, &str, u32, u32) + Send + Sync>;
 
 /// Maps `ModelTier` → provider instance.
@@ -12,68 +14,35 @@ type UsageCollector = Arc<dyn Fn(ModelTier, &str, &str, u32, u32) + Send + Sync>
 /// cheap-tier model from cloud to local a single config change.
 #[derive(Clone, Default)]
 pub struct Router {
-    providers: HashMap<ModelTier, Arc<dyn LlmProvider>>,
-    usage_collector: Option<UsageCollector>,
     /// Process-wide cap on in-flight provider calls. Shared (never
     /// copied) across every clone of this router, including clones that
     /// add usage collectors, so the cap holds no matter how many agents a
     /// review fans out to. `None` means unlimited.
     inflight: Option<Arc<Semaphore>>,
+    /// Provider serving each configured tier.
+    providers: HashMap<ModelTier, Arc<dyn LlmProvider>>,
+    /// Usage callback chain; `None` records nothing.
+    usage_collector: Option<UsageCollector>,
 }
 
 impl Router {
-    pub fn new() -> Self {
-        Self::default()
+    /// Wait for an in-flight slot when a limit is configured. The permit
+    /// is RAII: dropping it (on success or error) frees the slot.
+    async fn acquire_inflight(&self) -> Option<SemaphorePermit<'_>> {
+        let semaphore = self.inflight.as_ref()?;
+        // `acquire` only fails on a closed semaphore. The router never
+        // closes it, but if that ever happened we proceed without a
+        // permit rather than panic or fail the call.
+        semaphore.acquire().await.ok()
     }
 
-    pub fn with(mut self, tier: ModelTier, provider: Arc<dyn LlmProvider>) -> Self {
-        self.providers.insert(tier, provider);
-        self
-    }
-
-    /// Cap the number of simultaneous provider calls (`complete` and
-    /// `embed`, across all tiers) made through this router and every
-    /// clone of it. `0` is clamped to `1` so a zero setting can never
-    /// deadlock, and values above `Semaphore::MAX_PERMITS` are clamped
-    /// down to it so an oversized setting cannot panic.
-    pub fn with_inflight_limit(mut self, n: usize) -> Self {
-        self.inflight = Some(Arc::new(Semaphore::new(n.clamp(1, Semaphore::MAX_PERMITS))));
-        self
-    }
-
-    pub fn with_usage_collector<F>(mut self, collector: F) -> Self
-    where
-        F: Fn(ModelTier, &str, &str, u32, u32) + Send + Sync + 'static,
-    {
-        let collector = Arc::new(collector);
-        self.usage_collector = match self.usage_collector {
-            Some(existing) => Some(Arc::new(
-                move |tier, provider_base_url, model_name, input_tokens, output_tokens| {
-                    existing(
-                        tier,
-                        provider_base_url,
-                        model_name,
-                        input_tokens,
-                        output_tokens,
-                    );
-                    collector(
-                        tier,
-                        provider_base_url,
-                        model_name,
-                        input_tokens,
-                        output_tokens,
-                    );
-                },
-            )),
-            None => Some(collector),
-        };
-        self
-    }
-
-    pub fn provider(&self, tier: ModelTier) -> Result<&Arc<dyn LlmProvider>, Error> {
-        self.providers.get(&tier).ok_or(Error::NoProvider(tier))
-    }
-
+    /// Run a completion on the provider configured for `tier`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoProvider`] when `tier` has no provider, or the
+    /// provider's own error when the call fails.
+    #[inline]
     pub async fn complete(
         &self,
         tier: ModelTier,
@@ -90,6 +59,13 @@ impl Router {
         Ok(resp)
     }
 
+    /// Embed `texts` on the provider configured for `tier`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoProvider`] when `tier` has no provider, or the
+    /// provider's own error when the call fails.
+    #[inline]
     pub async fn embed(&self, tier: ModelTier, texts: &[String]) -> Result<Vec<Vec<f32>>, Error> {
         let provider = self.provider(tier)?;
         let (vectors, input_tokens, output_tokens) = {
@@ -100,16 +76,23 @@ impl Router {
         Ok(vectors)
     }
 
-    /// Wait for an in-flight slot when a limit is configured. The permit
-    /// is RAII: dropping it (on success or error) frees the slot.
-    async fn acquire_inflight(&self) -> Option<SemaphorePermit<'_>> {
-        let semaphore = self.inflight.as_ref()?;
-        // `acquire` only fails on a closed semaphore. The router never
-        // closes it, but if that ever happened we proceed without a
-        // permit rather than panic or fail the call.
-        semaphore.acquire().await.ok()
+    #[inline]
+    #[must_use = "an empty router routes nothing until providers are added"]
+    pub fn new() -> Self {
+        Self::default()
     }
 
+    /// The provider configured for `tier`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::NoProvider`] when `tier` has no provider.
+    #[inline]
+    pub fn provider(&self, tier: ModelTier) -> Result<&Arc<dyn LlmProvider>, Error> {
+        self.providers.get(&tier).ok_or(Error::NoProvider(tier))
+    }
+
+    /// Report one successful call to the usage collector, if any.
     fn record_usage(
         &self,
         provider: &dyn LlmProvider,
@@ -117,7 +100,7 @@ impl Router {
         input_tokens: u32,
         output_tokens: u32,
     ) {
-        if let Some(collector) = &self.usage_collector {
+        if let Some(collector) = self.usage_collector.as_ref() {
             let provider_base_url = provider.provider_base_url();
             let model_name = provider.provider_model_name(tier);
             collector(
@@ -129,16 +112,78 @@ impl Router {
             );
         }
     }
+
+    #[inline]
+    #[must_use = "the builder returns the configured router; dropping it discards the provider"]
+    pub fn with(mut self, tier: ModelTier, provider: Arc<dyn LlmProvider>) -> Self {
+        self.providers.insert(tier, provider);
+        self
+    }
+
+    /// Cap the number of simultaneous provider calls (`complete` and
+    /// `embed`, across all tiers) made through this router and every
+    /// clone of it. `0` is clamped to `1` so a zero setting can never
+    /// deadlock, and values above `Semaphore::MAX_PERMITS` are clamped
+    /// down to it so an oversized setting cannot panic.
+    #[inline]
+    #[must_use = "the builder returns the configured router; dropping it discards the limit"]
+    pub fn with_inflight_limit(mut self, n: usize) -> Self {
+        self.inflight = Some(Arc::new(Semaphore::new(n.clamp(1, Semaphore::MAX_PERMITS))));
+        self
+    }
+
+    #[inline]
+    #[must_use = "the builder returns the configured router; dropping it discards the collector"]
+    pub fn with_usage_collector<F>(mut self, collector: F) -> Self
+    where
+        F: Fn(ModelTier, &str, &str, u32, u32) + Send + Sync + 'static,
+    {
+        let added = Arc::new(collector);
+        self.usage_collector = match self.usage_collector {
+            Some(existing) => Some(Arc::new(
+                move |tier, provider_base_url, model_name, input_tokens, output_tokens| {
+                    existing(
+                        tier,
+                        provider_base_url,
+                        model_name,
+                        input_tokens,
+                        output_tokens,
+                    );
+                    added(
+                        tier,
+                        provider_base_url,
+                        model_name,
+                        input_tokens,
+                        output_tokens,
+                    );
+                },
+            )),
+            None => Some(added),
+        };
+        self
+    }
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "tests unwrap call and join results so an unexpected error or a panicked task fails \
+              the test at that line"
+)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "each provider fake sits next to the tests that use it, so a reader sees the fake \
+              and its tests together instead of every type hoisted above every test"
+)]
 mod tests {
     use super::*;
     use crate::types::{CompleteRequest, CompleteResponse, Message};
     use async_trait::async_trait;
-    use std::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
-    use std::time::Duration;
+    use core::iter;
+    use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};
+    use core::time::Duration;
     use tokio::sync::Notify;
+    use tokio::time::{sleep, timeout};
 
     struct CountingProvider {
         label: &'static str,
@@ -158,6 +203,16 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "`r` is read by the assertions below; renaming it would edit those assertion \
+                  lines, which this lint-only change leaves untouched"
+    )]
+    #[expect(
+        clippy::shadow_unrelated,
+        reason = "the second `r` is read by an assertion below; renaming it would edit that \
+                  assertion line, which this lint-only change leaves untouched"
+    )]
     async fn router_dispatches_by_tier() {
         let cheap = Arc::new(CountingProvider {
             label: "cheap",
@@ -168,8 +223,11 @@ mod tests {
             calls: AtomicU32::new(0),
         });
         let router = Router::new()
-            .with(ModelTier::Cheap, cheap.clone())
-            .with(ModelTier::Reasoning, reasoning.clone());
+            .with(ModelTier::Cheap, Arc::<CountingProvider>::clone(&cheap))
+            .with(
+                ModelTier::Reasoning,
+                Arc::<CountingProvider>::clone(&reasoning),
+            );
 
         let r = router
             .complete(
@@ -224,9 +282,12 @@ mod tests {
 
     impl PeakProvider {
         async fn enter_and_park(&self) {
-            let now = self.in_flight.fetch_add(1, Ordering::SeqCst) + 1;
+            let now = self
+                .in_flight
+                .fetch_add(1, Ordering::SeqCst)
+                .saturating_add(1);
             self.peak.fetch_max(now, Ordering::SeqCst);
-            tokio::time::sleep(Duration::from_millis(20)).await;
+            sleep(Duration::from_millis(20)).await;
             self.in_flight.fetch_sub(1, Ordering::SeqCst);
         }
     }
@@ -263,8 +324,8 @@ mod tests {
 
     fn peak_router(provider: &Arc<PeakProvider>) -> Router {
         Router::new()
-            .with(ModelTier::Cheap, provider.clone())
-            .with(ModelTier::Embedding, provider.clone())
+            .with(ModelTier::Cheap, Arc::<PeakProvider>::clone(provider))
+            .with(ModelTier::Embedding, Arc::<PeakProvider>::clone(provider))
     }
 
     /// Runs `tasks` concurrent calls through clones of `router`, asserts
@@ -275,22 +336,23 @@ mod tests {
         tasks: usize,
         call: Call,
     ) -> usize {
-        let handles: Vec<_> = (0..tasks)
-            .map(|_| {
-                let router = router.clone();
-                tokio::spawn(async move {
-                    match call {
-                        Call::Complete => {
-                            router.complete(ModelTier::Cheap, req()).await.map(|_| ())
-                        }
-                        Call::Embed => router
-                            .embed(ModelTier::Embedding, &["t".to_string()])
-                            .await
-                            .map(|_| ()),
-                    }
-                })
+        let handles: Vec<_> = iter::repeat_with(|| {
+            let task_router = router.clone();
+            tokio::spawn(async move {
+                match call {
+                    Call::Complete => task_router
+                        .complete(ModelTier::Cheap, req())
+                        .await
+                        .map(|_| ()),
+                    Call::Embed => task_router
+                        .embed(ModelTier::Embedding, &["t".to_owned()])
+                        .await
+                        .map(|_| ()),
+                }
             })
-            .collect();
+        })
+        .take(tasks)
+        .collect();
         for handle in handles {
             handle.await.unwrap().unwrap();
         }
@@ -324,6 +386,15 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "`a` and `b` are read by the assertion below; renaming them would edit that \
+                  assertion line, which this lint-only change leaves untouched"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "the let-else fails the test when either router lacks the semaphore"
+    )]
     async fn collector_clone_shares_the_inflight_semaphore() {
         let n = 2;
         let provider = Arc::new(PeakProvider::default());
@@ -331,15 +402,15 @@ mod tests {
         let augmented = original
             .clone()
             .with_usage_collector(|_, _, _, _, _| {})
-            .with(ModelTier::Reasoning, provider.clone());
-        let (Some(a), Some(b)) = (&original.inflight, &augmented.inflight) else {
+            .with(ModelTier::Reasoning, Arc::<PeakProvider>::clone(&provider));
+        let (Some(a), Some(b)) = (original.inflight.as_ref(), augmented.inflight.as_ref()) else {
             panic!("both routers should carry the in-flight semaphore");
         };
         assert!(Arc::ptr_eq(a, b));
 
         let handles: Vec<_> = (0..3 * n)
             .map(|i| {
-                let router = if i % 2 == 0 {
+                let router = if i.is_multiple_of(2) {
                     original.clone()
                 } else {
                     augmented.clone()
@@ -358,7 +429,7 @@ mod tests {
     async fn inflight_limit_zero_clamps_to_one() {
         let provider = Arc::new(PeakProvider::default());
         let router = peak_router(&provider).with_inflight_limit(0);
-        let result = tokio::time::timeout(
+        let result = timeout(
             Duration::from_secs(5),
             router.complete(ModelTier::Cheap, req()),
         )
@@ -367,6 +438,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::assertions_on_result_states,
+        reason = "the assertion below checks only that an oversized limit does not fail the \
+                  call; it stays unedited in this lint-only change"
+    )]
     async fn inflight_limit_above_max_permits_clamps_instead_of_panicking() {
         let provider = Arc::new(PeakProvider::default());
         let router = peak_router(&provider).with_inflight_limit(usize::MAX);
@@ -401,19 +477,19 @@ mod tests {
             .with(
                 ModelTier::Reasoning,
                 Arc::new(ParkedProvider {
-                    entered: entered.clone(),
-                    release: release.clone(),
+                    entered: Arc::clone(&entered),
+                    release: Arc::clone(&release),
                 }),
             )
             .with_inflight_limit(1);
 
         let holder = {
-            let router = router.clone();
-            tokio::spawn(async move { router.complete(ModelTier::Reasoning, req()).await })
+            let holder_router = router.clone();
+            tokio::spawn(async move { holder_router.complete(ModelTier::Reasoning, req()).await })
         };
         entered.notified().await;
 
-        let result = tokio::time::timeout(
+        let result = timeout(
             Duration::from_millis(100),
             router.complete(ModelTier::Cheap, req()),
         )
