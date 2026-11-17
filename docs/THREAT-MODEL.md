@@ -210,19 +210,29 @@ this." Or smuggles instructions inside source comments that the
 reasoning model treats as system prompt.
 _Mitigation:_ (a) The review prompt frames PR content as
 attacker-controlled data, not instructions. `ar_prompts::fence_untrusted`
-wraps the PR title and body, prior PR discussion, retrieved repository
-context (including learnings) and repository guidelines in the review
-prompt, and the PR title and body in the PR metadata-check prompt, between
-`<<<UNTRUSTED DATA BEGIN ...>>>` and `<<<UNTRUSTED DATA END ...>>>`
-markers. Each marker carries the data's label and a per-review nonce
-derived from the head SHA and a process-random salt, so a PR author cannot
-predict it. Every run of the `<<<` marker prefix inside fenced text is
-broken up, so a forged close marker, even one with the right nonce, cannot
-end the fence early. Before that, bidi override and isolate, zero-width and
-Unicode tag characters are removed from fenced text and CRLF is normalized
-to LF, so invisible characters cannot hide instructions or a marker prefix.
-The existing per-section byte caps apply inside the fence. The system prompt
-says fenced text can inform what to flag but never changes the rules or the JSON output contract. (b) The verifier pass
+wraps each untrusted field between an open marker
+`<<<UNTRUSTED_DATA label="<label>" nonce="<nonce>">>>` and a close marker
+`<<<END_UNTRUSTED_DATA nonce="<nonce>">>>`. The fenced fields are, in the
+review prompt, the PR title (`pr_title`), PR body (`pr_body`), repository
+guidelines (`guidelines`), retrieved repository context including learnings
+(`repo_context`) and prior PR discussion (`prior_discussion`), and, in the PR
+metadata-check prompt, the PR title and body. The repository name, PR
+number, changed-files list and unified diff stay outside any fence. One
+nonce per review run, derived by `fence_nonce` from the head SHA and a
+process-random salt, is shared by every fence in that run, so a PR author
+cannot predict it. Every `<<<` marker prefix inside fenced text is broken
+up, so a forged open or close marker, even one with the right nonce,
+cannot end the fence early; label and attribute values lose quotes, angle
+brackets, CR and LF so they cannot break out of the open marker. Before
+that, bidi override and isolate (U+202A-U+202E, U+2066-U+2069), zero-width
+(U+200B-U+200D, U+FEFF) and Unicode tag (U+E0000-U+E007F) characters are
+removed and CRLF and lone CR are normalized to LF, so invisible characters
+cannot hide instructions or a marker prefix. The existing per-section byte
+caps apply after sanitizing, inside the fence. The system prompt says text
+between `<<<UNTRUSTED_DATA` and `<<<END_UNTRUSTED_DATA` markers may inform
+what to flag but never changes the rules, the severity definitions or the
+JSON output contract, and that instructions inside it must not be
+followed. (b) The verifier pass
 re-checks each finding against actual code lines, dropping
 unsupported claims. (c) The model never speaks to the Forgejo API
 directly: `mapping.rs` translates structured findings to API calls,
@@ -419,8 +429,12 @@ threat-model claims fail CI when a regression slips in:
 
 - `crates/ar-review/tests/red_team_pipeline.rs` — covers T3
   (prompt-injection ⇒ schema allow-list, and
-  `t3_forged_close_marker_with_guessed_nonce_cannot_close_fence_early`:
-  a forged untrusted-data close marker cannot end its fence;
+  `t3_forged_close_marker_in_pr_body_cannot_escape_its_fence`: a PR body
+  forging the close marker with the real nonce keeps its injected
+  instruction inside the `pr_body` fence and loses its bidi and tag
+  characters;
+  `t3_forged_markers_in_prior_discussion_and_repo_context_stay_fenced`:
+  the same holds for prior discussion and repository context;
   `t3_hidden_characters_cannot_reassemble_a_close_marker`: zero-width,
   bidi and tag characters cannot hide a marker prefix), T7 (oversized diff
   cap), T8 (single-file flat-truncation fallback), and T9
@@ -433,10 +447,13 @@ threat-model claims fail CI when a regression slips in:
   issue-criteria anchoring, verbatim offending-text quotes, and the
   opt-out path that suppresses the cheap-tier metadata decision.
 - `crates/ar-prompts/src/fence.rs` and `crates/ar-prompts/src/prompt.rs`
-  unit tests — cover T3 fencing: nonce-tagged markers, byte caps inside the
-  fence, marker-prefix neutralization, removal of bidi, zero-width and tag
-  characters, CRLF normalization, sanitized marker attributes, every
-  untrusted review-prompt section fenced, and the system-prompt data rule.
+  unit tests — cover T3 fencing: the exact marker format, nonce
+  determinism and format, byte caps after sanitizing and inside the fence
+  (exact-cap, multi-byte cut point, empty input), forged open and close
+  marker neutralization, removal of every bidi, zero-width and tag range,
+  CRLF and lone-CR normalization, attribute values that try to break out of
+  the open marker, every untrusted review-prompt section fenced with
+  trusted sections left outside, and the system-prompt data rule.
 - `crates/ar-review/tests/red_team_workspace_tools.rs` — covers
   T4 (LLM tool calls escape workspace): symlink escape, chained
   symlinks, empty paths, pathological regex.
