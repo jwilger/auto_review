@@ -702,6 +702,37 @@ async fn get_file_content_uses_contents_raw_media_type_and_ref() {
 }
 
 #[tokio::test]
+async fn get_file_content_percent_encodes_branch_ref_with_query_metacharacters() {
+    let github = MockServer::start().await;
+    // `query_param` matches against the decoded query pairs, so this only
+    // matches when `&` in the branch name is percent-encoded instead of
+    // splitting the ref into `ref=feature/a` and a stray `b` parameter.
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/contents/.auto_review.yaml"))
+        .and(query_param("ref", "feature/a&b"))
+        .and(header("accept", "application/vnd.github.raw+json"))
+        .respond_with(ResponseTemplate::new(200).set_body_string("enabled: true\n"))
+        .expect(1)
+        .mount(&github)
+        .await;
+
+    let client = Client::new(&github.uri(), "app-jwt").expect("client");
+
+    let contents = client
+        .get_file_content(
+            "owner",
+            "repo",
+            ".auto_review.yaml",
+            "feature/a&b",
+            "installation-token",
+        )
+        .await
+        .expect("file content");
+
+    assert_eq!(contents.as_deref(), Some("enabled: true\n"));
+}
+
+#[tokio::test]
 async fn get_file_content_returns_none_when_github_returns_404() {
     let github = MockServer::start().await;
     Mock::given(method("GET"))

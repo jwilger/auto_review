@@ -736,9 +736,7 @@ impl Client {
         ref_: &str,
         installation_token: &str,
     ) -> Result<Option<String>, Error> {
-        let url = self.url(&format!(
-            "repos/{owner}/{repo}/contents/{file_path}?ref={ref_}"
-        ))?;
+        let url = self.contents_url(owner, repo, file_path, ref_)?;
         self.get_optional_text_with_installation_token(
             url,
             installation_token,
@@ -912,6 +910,26 @@ impl Client {
 
     fn url(&self, path: &str) -> Result<Url, Error> {
         Ok(self.base.join(path.trim_start_matches('/'))?)
+    }
+
+    /// Builds the `contents` API URL with every path segment and the `ref`
+    /// query value percent-encoded, so branch names such as `feature/a&b`
+    /// or file paths with reserved characters cannot alter the request.
+    fn contents_url(
+        &self,
+        owner: &str,
+        repo: &str,
+        file_path: &str,
+        ref_: &str,
+    ) -> Result<Url, Error> {
+        let mut url = self.base.clone();
+        url.path_segments_mut()
+            .map_err(|()| Error::InvalidBaseUrl(self.base.to_string()))?
+            .pop_if_empty()
+            .extend(["repos", owner, repo, "contents"])
+            .extend(file_path.split('/').filter(|segment| !segment.is_empty()));
+        url.query_pairs_mut().append_pair("ref", ref_);
+        Ok(url)
     }
 }
 
