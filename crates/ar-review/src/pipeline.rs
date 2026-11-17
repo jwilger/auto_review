@@ -1,14 +1,12 @@
-use crate::agentic_verify::verify_findings_agentic;
 use crate::diff::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 use crate::error::ReviewError;
-use crate::heal::{generate_with_self_heal, HealConfig};
 use crate::host::ReviewHost;
 use crate::ignored::{diff_changed_paths, filter_changed_files, filter_diff_paths};
 use crate::mapping::output_to_review_request;
-use crate::verify::verify_findings;
+use crate::review_core::{run_review_core, ReviewCoreArgs};
 use ar_forge::{PrReviewComment, ReviewEvent};
 use ar_llm::{CompleteRequest, Message, ModelTier, ResponseFormat, Router as LlmRouter};
-use ar_prompts::{render_review_prompt, system_prompt, ReviewPromptInputs, ReviewSeverity};
+use ar_prompts::ReviewSeverity;
 use globset::GlobSet;
 use serde::Deserialize;
 use std::path::Path;
@@ -68,7 +66,7 @@ fn severity_rank(s: ReviewSeverity) -> u8 {
 /// changed-files API call returned nothing, in which case the LLM
 /// shouldn't have any findings either; we'd rather post the
 /// (likely empty) review than drop everything.
-fn drop_findings_outside_changed_paths(
+pub(crate) fn drop_findings_outside_changed_paths(
     output: &mut ar_prompts::ReviewOutput,
     changed_paths: &[String],
 ) -> usize {
@@ -92,7 +90,7 @@ fn drop_findings_outside_changed_paths(
 /// kept/dropped counts so operators can confirm the floor is
 /// engaging on a per-review basis. Idempotent: a second
 /// invocation with the same floor is a no-op.
-fn apply_severity_floor(output: &mut ar_prompts::ReviewOutput, min: ReviewSeverity) {
+pub(crate) fn apply_severity_floor(output: &mut ar_prompts::ReviewOutput, min: ReviewSeverity) {
     let before = output.findings.len();
     output
         .findings
@@ -625,7 +623,8 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         }
     };
     let prior_discussion = render_prior_pr_discussion(&prior_discussion_comments);
-    let prompt = render_review_prompt(&ReviewPromptInputs {
+    let draft = run_review_core(ReviewCoreArgs {
+        llm: &llm,
         repo_full_name: &repo_full,
         pr_number: args.pr_number,
         pr_title: args.pr_title,
@@ -636,35 +635,13 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         repo_context: args.repo_context,
         previous_review_sha: args.previous_review_sha,
         prior_discussion: &prior_discussion,
-    });
-
-    // Track the post-floor / pre-verifier count so we can report how many
-    // findings the verifier dropped.
-    let mut output =
-        generate_with_self_heal(&llm, system_prompt(), &prompt, HealConfig::default()).await?;
-    apply_severity_floor(&mut output, args.min_severity);
-    let pre_verify_count = output.findings.len();
-    output = match (args.verify_mode, args.workspace_path) {
-        (VerifyMode::Agentic, Some(workspace)) => {
-            verify_findings_agentic(&llm, output, workspace, &diff).await?
-        }
-        _ => verify_findings(&llm, output, &diff).await?,
-    };
-    // Snapshot the post-verifier count BEFORE the severity-floor /
-    // path-guard passes. `verifier_dropped` reports specifically
-    // what the verifier removed, not what later filters did, or the
-    // metric drifts every time we add a new post-verifier filter.
-    let post_verify_count = output.findings.len();
-    // Idempotent second pass after verification in case verifier rewrites
-    // severity in future implementations.
-    apply_severity_floor(&mut output, args.min_severity);
-
-    // Last-mile path guard: the LLM may have emitted a finding
-    // citing a path it inferred from RAG context rather than the
-    // actual diff. The verifier's job is to catch that, but when
-    // it misses, drop the finding here rather than letting Forgejo
-    // 422 the entire review payload.
-    drop_findings_outside_changed_paths(&mut output, &changed_filenames);
+        verify_mode: args.verify_mode,
+        workspace_path: args.workspace_path,
+        min_severity: args.min_severity,
+    })
+    .await?;
+    let verifier_dropped = draft.verifier_dropped;
+    let output = draft.output;
 
     let findings_count = output.findings.len();
 
@@ -745,7 +722,6 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
             ReviewSeverity::Note => notes += 1,
         }
     }
-    let verifier_dropped = pre_verify_count.saturating_sub(post_verify_count);
     Ok(ReviewOutcome {
         findings_count,
         review_id: created.id,

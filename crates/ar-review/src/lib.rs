@@ -18,6 +18,7 @@ pub mod mapping;
 pub mod override_marker;
 pub mod pipeline;
 pub mod rag_context;
+pub mod review_core;
 pub mod triage;
 pub mod verify;
 pub mod workspace;
@@ -42,6 +43,7 @@ pub use llm_triage::{filter_reviewable, triage_files_with_llm};
 pub use mapping::output_to_review_request;
 pub use pipeline::{review_pull_request, ReviewArgs, ReviewOutcome, VerifyMode};
 pub use rag_context::format_repo_context;
+pub use review_core::{run_review_core, ReviewCoreArgs, ReviewDraft};
 pub use triage::{classify, pr_is_skippable, FileClass};
 pub use verify::verify_findings;
 pub use workspace::{
