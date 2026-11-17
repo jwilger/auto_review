@@ -383,6 +383,10 @@ async fn out_of_enum_finding_category_is_rejected_and_never_posted() {
         enabled: false,
         ..Default::default()
     };
+    let base_ref = ar_review::trusted_files::BaseRef {
+        name: "main".to_string(),
+        sha: "base".to_string(),
+    };
 
     let result = ar_review::review_pull_request(ar_review::ReviewArgs {
         host: &host,
@@ -391,6 +395,7 @@ async fn out_of_enum_finding_category_is_rejected_and_never_posted() {
         repo: "repo",
         pr_number: 7,
         head_sha: "abc123",
+        base_ref: &base_ref,
         pr_title: "fix: something",
         pr_body: "body",
         ignored_paths: &ignored_paths,
