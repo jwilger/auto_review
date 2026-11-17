@@ -1145,6 +1145,21 @@ fn resolve_bot_identity(values: BotIdentityEnvValues<'_>) -> Result<EffectiveBot
     })
 }
 
+/// Build the gateway's Forgejo client, seeded with the startup bot login so
+/// `AR_BOT_LOGIN` (or its default) wins over a `GET /user` lookup.
+fn forgejo_review_client(base_url: &str, token: &str, bot_login: &str) -> Result<ForgejoClient> {
+    Ok(ForgejoClient::new(base_url, token)
+        .context("forgejo client")?
+        .with_bot_login(bot_login))
+}
+
+/// Build the gateway's long-lived GitHub App host, seeded with the startup
+/// bot login so `GITHUB_BOT_LOGIN` (or the `GET /app` slug already fetched)
+/// is reused instead of looked up again.
+fn github_review_host(client: ar_github::Client, bot_login: &str) -> Arc<ar_github::AppReviewHost> {
+    Arc::new(ar_github::AppReviewHost::new(client).with_bot_login(bot_login))
+}
+
 /// Resolve the GitHub App's comment login (`<slug>[bot]`) and the mention
 /// handle users type. Explicit `GITHUB_BOT_LOGIN` / `GITHUB_BOT_NAME`
 /// override what `GET /app` reports.
@@ -1299,9 +1314,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     let forgejo = forgejo_config
         .as_ref()
         .map(|config| {
-            ForgejoClient::new(&config.base_url, &config.token)
-                .map(Arc::new)
-                .context("forgejo client")
+            forgejo_review_client(&config.base_url, &config.token, &bot_login).map(Arc::new)
         })
         .transpose()?;
 
@@ -1579,13 +1592,12 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
                     .context("GITHUB_APP_PRIVATE_KEY must be the GitHub App's PEM private key")?;
             let client = ar_github::Client::with_app_signer(&config.api_url, signer)
                 .context("github client")?;
-            let host = Arc::new(ar_github::AppReviewHost::new(client));
             let login_override = read_non_empty_env("GITHUB_BOT_LOGIN");
             let name_override = read_non_empty_env("GITHUB_BOT_NAME");
             let app = if login_override.is_some() && name_override.is_some() {
                 None
             } else {
-                Some(host.client().get_authenticated_app().await.context(
+                Some(client.get_authenticated_app().await.context(
                     "authenticate as the GitHub App (GET /app); check GITHUB_APP_ID, \
                      GITHUB_APP_PRIVATE_KEY, and GITHUB_API_URL",
                 )?)
@@ -1595,6 +1607,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
                 name_override.as_deref(),
                 app.as_ref(),
             )?;
+            let host = github_review_host(client, &identity.login);
             let host_dyn: Arc<dyn ar_forge::ReviewHost> = host.clone();
             let dispatcher: Arc<dyn ar_orchestrator::JobDispatcher> =
                 Arc::new(with_shared_review_state(SpawningDispatcher::new_with_host(
@@ -1976,6 +1989,32 @@ mod tests {
                 self.message = Some(format!("{value:?}").trim_matches('"').to_string());
             }
         }
+    }
+
+    #[tokio::test]
+    async fn gateway_github_host_is_seeded_with_the_startup_bot_login() {
+        // Port 9 (discard) is unreachable, so a GET /app lookup would fail.
+        let client = ar_github::Client::new("http://127.0.0.1:9", "app-jwt").expect("client");
+        let host = github_review_host(client, "configured[bot]");
+
+        let login = ar_forge::ReviewHost::bot_login(host.as_ref())
+            .await
+            .expect("seeded login");
+
+        assert_eq!(login, "configured[bot]");
+    }
+
+    #[tokio::test]
+    async fn gateway_forgejo_client_is_seeded_with_the_startup_bot_login() {
+        // Port 9 (discard) is unreachable, so a network lookup would fail.
+        let client = forgejo_review_client("http://127.0.0.1:9", "tok", "configured-bot")
+            .expect("forgejo client");
+
+        let login = ar_forge::ReviewHost::bot_login(&client)
+            .await
+            .expect("seeded login");
+
+        assert_eq!(login, "configured-bot");
     }
 
     #[test]
