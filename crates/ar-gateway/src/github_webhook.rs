@@ -198,6 +198,7 @@ async fn handle_mention(state: &AppState, github: &GitHubDeps, evt: MentionEvent
             issue_number,
             commenter_login: &commenter_login,
             bot_login: &bot_login,
+            reply_to_comment_id: None,
         };
         if let Err(error) = handler.handle(ctx, command).await {
             tracing::error!(

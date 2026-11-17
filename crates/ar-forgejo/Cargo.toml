@@ -16,8 +16,9 @@ thiserror.workspace = true
 tracing.workspace = true
 async-trait.workspace = true
 url.workspace = true
+tokio = { workspace = true, features = ["sync", "time"] }
 base64 = "0.23"
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 wiremock.workspace = true

@@ -15,11 +15,17 @@
 //!   style linear matching, so this MUST complete in milliseconds.
 //! - Search inside a directory that contains a binary file: must
 //!   skip silently rather than emit garbage findings or panic.
+//! - `read_file(".git/config")` on a workspace prepared from a clone
+//!   URL: the clone remote (whose URL carries the bot credential in
+//!   production) is removed after checkout, so the tool returns no
+//!   `[remote "origin"]` section, `url =` entry or `://user@` URL (T5).
 
+use ar_review::workspace::prepare_workspace_from_clone_url;
 use ar_review::workspace_tools::{read_file, search, WorkspaceToolError};
 use std::fs;
 use std::os::unix::fs::symlink;
 use std::path::Path;
+use std::process::Command;
 
 fn write(dir: &Path, rel: &str, body: &str) {
     let p = dir.join(rel);
@@ -147,5 +153,90 @@ fn search_with_relative_dot_dot_in_path_is_rejected() {
     assert!(
         matches!(r, Err(WorkspaceToolError::PathEscape(_))),
         "dot-dot path must be rejected, got {r:?}"
+    );
+}
+
+/// Run git for fixture setup only, isolated from the host git config so the
+/// fixture does not depend on (or run) anything the developer configured.
+fn fixture_git(dir: &Path, args: &[&str]) -> String {
+    let output = Command::new("git")
+        .env("GIT_CONFIG_NOSYSTEM", "true")
+        .env("GIT_CONFIG_GLOBAL", "/dev/null")
+        .env("GIT_TERMINAL_PROMPT", "0")
+        .env("HOME", "/dev/null")
+        .env("XDG_CONFIG_HOME", "/dev/null")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "fixture git {args:?} failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    String::from_utf8(output.stdout).unwrap()
+}
+
+#[tokio::test]
+async fn read_file_on_prepared_workspace_git_config_exposes_no_clone_url() {
+    let fixture = tempfile::tempdir().unwrap();
+    let src = fixture.path().join("src");
+    let bare = fixture.path().join("bare.git");
+    fs::create_dir_all(&src).unwrap();
+    fixture_git(&src, &["init", "--quiet"]);
+    write(&src, "lib.rs", "pub fn f() {}\n");
+    fixture_git(&src, &["add", "lib.rs"]);
+    fixture_git(
+        &src,
+        &[
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "-m",
+            "fixture",
+        ],
+    );
+    let head_sha = fixture_git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+    fixture_git(
+        fixture.path(),
+        &[
+            "clone",
+            "--quiet",
+            "--bare",
+            src.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+
+    let workspace =
+        prepare_workspace_from_clone_url(&format!("file://{}", bare.display()), &head_sha)
+            .await
+            .unwrap();
+
+    let seen = match read_file(workspace.path(), ".git/config", None, None, 64 * 1024) {
+        Ok(content) => content.content,
+        Err(err) => err.to_string(),
+    };
+    let userinfo_url = regex::Regex::new(r"://[^/@\s]+@").unwrap();
+    assert!(
+        !seen.contains("[remote \"origin\"]"),
+        "origin remote leaked into .git/config:\n{seen}"
+    );
+    assert!(
+        !seen.contains("url ="),
+        "a remote URL leaked into .git/config:\n{seen}"
+    );
+    assert!(
+        !userinfo_url.is_match(&seen),
+        "a URL with userinfo leaked into .git/config:\n{seen}"
     );
 }

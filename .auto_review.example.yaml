@@ -1,6 +1,11 @@
 # Example .auto_review.yaml.
 # Copy this to .auto_review.yaml at the root of any repo the bot reviews
 # and tune to taste. Anything you omit falls back to defaults.
+#
+# auto_review reads this file from the pull request's BASE branch, never
+# from the PR's head. A PR that changes this file is still reviewed under
+# the base branch's config: changes take effect only after they merge to the
+# base branch, and then apply to open PRs on their next review.
 
 # Master switch. Set to false to skip review for this repo entirely while
 # leaving the webhook in place. The bot will post a "skipped" commit
@@ -20,9 +25,13 @@ pr_metadata_check:
     - "Security-sensitive changes must describe the threat model impact."
     - "Schema migrations must mention rollback risk."
 
-# Free-form text injected into the LLM system prompt as authoritative
-# project conventions. Use sparingly — every byte costs tokens, and the
-# model already follows reasonable defaults. Examples of good content:
+# Free-form project conventions. They reach the model as fenced untrusted
+# data in the review prompt (see "How guidelines reach the model" in
+# docs/USER-GUIDE.md): they shape what the reviewer flags, not how it
+# behaves, so text like "ignore security issues" is not followed. Write
+# them as facts about the project or things worth flagging. Use sparingly —
+# every byte costs tokens, and the model already follows reasonable
+# defaults. Examples of good content:
 #
 #   - "All public APIs must have rustdoc."
 #   - "Forbid unwrap() and expect() outside #[cfg(test)]."

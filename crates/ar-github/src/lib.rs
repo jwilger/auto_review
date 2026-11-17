@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 use url::Url;
 
 pub use webhook::{
@@ -44,6 +44,8 @@ pub enum Error {
     UrlBuild(#[from] url::ParseError),
     #[error("invalid expires_at timestamp: {0}")]
     InvalidExpiresAt(#[from] time::error::Parse),
+    #[error("request timed out after {0:?}")]
+    Timeout(std::time::Duration),
 }
 
 pub fn build_clone_url(
@@ -80,6 +82,8 @@ pub fn with_clone_credentials(clone_url: &str, installation_token: &str) -> Resu
 pub struct InstallationReviewHost {
     client: Client,
     installation_token: String,
+    bot_login: OnceCell<String>,
+    identity_timeout: std::time::Duration,
 }
 
 impl InstallationReviewHost {
@@ -87,12 +91,39 @@ impl InstallationReviewHost {
         Self {
             client,
             installation_token: installation_token.into(),
+            bot_login: OnceCell::new(),
+            identity_timeout: IDENTITY_TIMEOUT,
         }
+    }
+
+    /// Seed a bot login already known to the caller, so
+    /// [`ar_forge::ReviewHost::bot_login`] never calls `GET /app`.
+    pub fn with_bot_login(mut self, login: impl Into<String>) -> Self {
+        self.bot_login = OnceCell::new_with(Some(login.into()));
+        self
+    }
+
+    /// Override the bound on the `GET /app` identity request
+    /// (default [`IDENTITY_TIMEOUT`]).
+    pub fn with_identity_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.identity_timeout = timeout;
+        self
     }
 }
 
 #[async_trait]
 impl ar_forge::ReviewHost for InstallationReviewHost {
+    async fn capabilities(&self) -> ar_forge::HostCapabilities {
+        ar_forge::HostCapabilities::all()
+    }
+
+    async fn bot_login(&self) -> Result<String, ar_forge::HostError> {
+        self.bot_login
+            .get_or_try_init(|| resolve_bot_login(&self.client, self.identity_timeout))
+            .await
+            .cloned()
+    }
+
     async fn clone_url(&self, owner: &str, repo: &str) -> Result<String, ar_forge::HostError> {
         let clone_url = self
             .client
@@ -201,6 +232,18 @@ impl ar_forge::ReviewHost for InstallationReviewHost {
             .map_err(host_error)
     }
 
+    async fn get_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+    ) -> Result<Option<ar_forge::IssueSummary>, ar_forge::HostError> {
+        self.client
+            .get_issue(owner, repo, issue_number, &self.installation_token)
+            .await
+            .map_err(host_error)
+    }
+
     async fn update_pull_request(
         &self,
         owner: &str,
@@ -260,10 +303,53 @@ impl ar_forge::ReviewHost for InstallationReviewHost {
             .await
             .map_err(host_error)
     }
+
+    async fn edit_issue_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<(), ar_forge::HostError> {
+        self.client
+            .edit_issue_comment(owner, repo, comment_id, body, &self.installation_token)
+            .await
+            .map_err(host_error)
+    }
+
+    async fn edit_review_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<(), ar_forge::HostError> {
+        self.client
+            .edit_review_comment(owner, repo, comment_id, body, &self.installation_token)
+            .await
+            .map_err(host_error)
+    }
 }
 
 fn host_error(error: Error) -> ar_forge::HostError {
     ar_forge::HostError::new(error.to_string())
+}
+
+/// Default bound on the `GET /app` request behind
+/// [`ar_forge::ReviewHost::bot_login`]. Callers share one cached result, so a
+/// server that accepts the connection but never answers must not block them
+/// all indefinitely.
+pub const IDENTITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn resolve_bot_login(
+    client: &Client,
+    timeout: std::time::Duration,
+) -> Result<String, ar_forge::HostError> {
+    tokio::time::timeout(timeout, client.get_authenticated_app())
+        .await
+        .unwrap_or(Err(Error::Timeout(timeout)))
+        .map(|app| app.bot_login())
+        .map_err(host_error)
 }
 
 #[derive(Debug, Clone)]
@@ -710,6 +796,39 @@ impl Client {
         Ok(created.id)
     }
 
+    /// Replace the body of a top-level issue/PR comment. Callers must
+    /// pass only ids of comments the bot authored (THREAT-MODEL.md T9).
+    pub async fn edit_issue_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+        installation_token: &str,
+    ) -> Result<(), Error> {
+        let url = self.url(&format!(
+            "repos/{owner}/{repo}/issues/comments/{comment_id}"
+        ))?;
+        self.patch_with_installation_token(url, &CreateIssueComment { body }, installation_token)
+            .await
+    }
+
+    /// Replace the body of an inline pull request review comment.
+    /// Callers must pass only ids of comments the bot authored
+    /// (THREAT-MODEL.md T9).
+    pub async fn edit_review_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+        installation_token: &str,
+    ) -> Result<(), Error> {
+        let url = self.url(&format!("repos/{owner}/{repo}/pulls/comments/{comment_id}"))?;
+        self.patch_with_installation_token(url, &CreateIssueComment { body }, installation_token)
+            .await
+    }
+
     pub async fn update_pull_request(
         &self,
         owner: &str,
@@ -728,6 +847,14 @@ impl Client {
         .await
     }
 
+    /// Fetch a file's raw contents from the repo at `ref_` (a branch, tag, or
+    /// commit SHA). Returns `Ok(None)` when the file does not exist (404).
+    ///
+    /// This is the transport for the trusted base-branch loader
+    /// (`ar_review::trusted_files`): both the review dispatcher and the chat
+    /// handler read `.auto_review.yaml` through it at the PR's base branch,
+    /// never from the head checkout. The whole body is read into memory; the
+    /// loader's size cap applies after the read.
     pub async fn get_file_content(
         &self,
         owner: &str,
@@ -736,15 +863,67 @@ impl Client {
         ref_: &str,
         installation_token: &str,
     ) -> Result<Option<String>, Error> {
-        let url = self.url(&format!(
-            "repos/{owner}/{repo}/contents/{file_path}?ref={ref_}"
-        ))?;
+        let url = self.contents_url(owner, repo, file_path, ref_)?;
         self.get_optional_text_with_installation_token(
             url,
             installation_token,
             HeaderValue::from_static("application/vnd.github.raw+json"),
         )
         .await
+    }
+
+    /// Fetch an issue by number with the installation token. GitHub serves
+    /// pull requests on the issues endpoint and marks them with a
+    /// `pull_request` object, which becomes `is_pull_request`. Returns
+    /// `Ok(None)` on 404; every other non-success status is an error whose
+    /// body is capped on a UTF-8 char boundary.
+    pub async fn get_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+        installation_token: &str,
+    ) -> Result<Option<ar_forge::IssueSummary>, Error> {
+        #[derive(Deserialize)]
+        struct RawIssue {
+            number: u64,
+            title: String,
+            #[serde(default)]
+            body: Option<String>,
+            state: String,
+            #[serde(default)]
+            html_url: String,
+            #[serde(default)]
+            pull_request: Option<serde_json::Value>,
+        }
+        let url = self.url(&format!("repos/{owner}/{repo}/issues/{issue_number}"))?;
+        let auth_value = Self::installation_auth_header(installation_token)?;
+        let response = self
+            .http
+            .get(url)
+            .header(AUTHORIZATION, auth_value)
+            .send()
+            .await?;
+        let status = response.status();
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body: cap_for_error_on_char_boundary(&body),
+            });
+        }
+        let raw: RawIssue = serde_json::from_str(&body)?;
+        Ok(Some(ar_forge::IssueSummary {
+            number: raw.number,
+            title: raw.title,
+            body: raw.body.unwrap_or_default(),
+            state: raw.state,
+            is_pull_request: raw.pull_request.is_some_and(|value| !value.is_null()),
+            html_url: raw.html_url,
+        }))
     }
 
     async fn get_with_installation_token<T>(
@@ -912,6 +1091,26 @@ impl Client {
 
     fn url(&self, path: &str) -> Result<Url, Error> {
         Ok(self.base.join(path.trim_start_matches('/'))?)
+    }
+
+    /// Builds the `contents` API URL with every path segment and the `ref`
+    /// query value percent-encoded, so branch names such as `feature/a&b`
+    /// or file paths with reserved characters cannot alter the request.
+    fn contents_url(
+        &self,
+        owner: &str,
+        repo: &str,
+        file_path: &str,
+        ref_: &str,
+    ) -> Result<Url, Error> {
+        let mut url = self.base.clone();
+        url.path_segments_mut()
+            .map_err(|()| Error::InvalidBaseUrl(self.base.to_string()))?
+            .pop_if_empty()
+            .extend(["repos", owner, repo, "contents"])
+            .extend(file_path.split('/').filter(|segment| !segment.is_empty()));
+        url.query_pairs_mut().append_pair("ref", ref_);
+        Ok(url)
     }
 }
 
@@ -1135,4 +1334,18 @@ fn cap_for_error(body: &str) -> String {
     } else {
         format!("{}...[truncated]", &body[..MAX])
     }
+}
+
+/// Like [`cap_for_error`], but cuts on a UTF-8 char boundary so a
+/// multi-byte character straddling the cap cannot panic the slice.
+fn cap_for_error_on_char_boundary(body: &str) -> String {
+    const MAX: usize = 1024;
+    if body.len() <= MAX {
+        return body.to_string();
+    }
+    let mut cut = MAX;
+    while cut > 0 && !body.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...[truncated]", &body[..cut])
 }

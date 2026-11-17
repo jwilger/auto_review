@@ -1,1 +1,2 @@
 - [Worktree git guard](feedback_worktree_git_guard.md) — use absolute git path + -C for commit/checkout; diff paths against origin/main
+- [Scratch python scripts](feedback_scratch_python_scripts.md) — heredoc edits refused; no stdlib-named scratch scripts; run python3 -I

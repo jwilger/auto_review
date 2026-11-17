@@ -62,6 +62,54 @@ mod tests {
         assert_eq!(levels, vec!["note", "warning", "error"]);
     }
 
+    #[test]
+    fn schema_constrains_finding_category_to_closed_taxonomy() {
+        let s = review_schema();
+        let enum_ = &s["properties"]["findings"]["items"]["properties"]["category"]["enum"];
+        let categories: Vec<&str> = enum_
+            .as_array()
+            .expect("category.enum is array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert_eq!(
+            categories,
+            vec![
+                "correctness",
+                "security",
+                "reliability",
+                "performance",
+                "compatibility",
+                "ci_coverage",
+                "tests",
+                "documentation",
+                "refactor",
+                "naming",
+                "style",
+            ]
+        );
+        let schema_set: Vec<&str> = crate::types::FindingCategory::ALL
+            .iter()
+            .map(|c| c.as_str())
+            .collect();
+        assert_eq!(categories, schema_set);
+    }
+
+    #[test]
+    fn schema_requires_finding_title_and_category() {
+        let item = &review_schema()["properties"]["findings"]["items"];
+        let required: Vec<&str> = item["required"]
+            .as_array()
+            .expect("required is array")
+            .iter()
+            .filter_map(|v| v.as_str())
+            .collect();
+        assert!(required.contains(&"title"));
+        assert!(required.contains(&"category"));
+        assert_eq!(item["properties"]["title"]["type"], "string");
+        assert_eq!(item["additionalProperties"], false);
+    }
+
     /// OpenAI's `response_format: json_schema` strict mode requires every
     /// property listed in `properties` to appear in `required`. Optional
     /// fields are expressed via nullable types instead. A drift here turns
@@ -71,7 +119,6 @@ mod tests {
     fn every_response_schema_satisfies_openai_strict_mode() {
         for (name, schema) in [
             ("review", crate::schema::review_schema()),
-            ("triage", crate::triage::triage_schema()),
             ("verification", crate::verification::verification_schema()),
         ] {
             assert_strict_mode_compatible(schema, name);

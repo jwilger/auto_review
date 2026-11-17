@@ -168,6 +168,17 @@ async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
             pr_number: evt.issue.number,
         };
         if !crate::poller::claim_chat_comment(cursors, key, evt.comment.id).await {
+            // Either already dispatched (by the poller or an earlier
+            // delivery) or below the poll watermark. The latter can drop
+            // a top-level mention created mid-poll-cycle whose webhook
+            // arrives late; logged so operators can spot it.
+            tracing::debug!(
+                owner = %evt.repository.owner.login,
+                repo = %evt.repository.name,
+                pr = evt.issue.number,
+                comment_id = evt.comment.id,
+                "chat mention already claimed or below the poll watermark; skipping"
+            );
             return (StatusCode::ACCEPTED, "").into_response();
         }
     }
@@ -196,6 +207,7 @@ async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
                 issue_number,
                 commenter_login: &commenter_login,
                 bot_login: &bot_login,
+                reply_to_comment_id: None,
             };
             if let Err(e) = handler.handle(ctx, cmd).await {
                 tracing::error!(
