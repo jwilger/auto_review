@@ -18,7 +18,6 @@
 
 use std::collections::hash_map::{DefaultHasher, RandomState};
 use std::hash::{BuildHasher, Hash, Hasher};
-use std::sync::OnceLock;
 
 /// Prefix shared by the open and close markers. Untrusted text never
 /// contains it after fencing.
@@ -103,11 +102,13 @@ pub fn fence_nonce(head_sha: &str, salt: u64) -> String {
     format!("{:016x}", hasher.finish())
 }
 
-/// A random `u64` chosen once per process, for use as the
-/// [`fence_nonce`] salt.
+/// A fresh process-random `u64` from std's `RandomState`, for use as the
+/// [`fence_nonce`] salt. Each call returns a new value, so a long-lived
+/// gateway that re-reviews the same head SHA still gets a new nonce per
+/// review run. Call it once per run and reuse the nonce for every fence
+/// in that run.
 pub fn process_nonce_salt() -> u64 {
-    static SALT: OnceLock<u64> = OnceLock::new();
-    *SALT.get_or_init(|| RandomState::new().build_hasher().finish())
+    RandomState::new().build_hasher().finish()
 }
 
 /// Break every run of three or more `<` so the text cannot contain the
@@ -359,6 +360,11 @@ mod tests {
     #[test]
     fn nonce_changes_with_head_sha() {
         assert_ne!(fence_nonce("deadbeef", 7), fence_nonce("cafebabe", 7));
+    }
+
+    #[test]
+    fn nonce_salt_is_fresh_on_each_call() {
+        assert_ne!(process_nonce_salt(), process_nonce_salt());
     }
 
     #[test]
