@@ -245,7 +245,11 @@ required path for every later repository-controlled instruction file
 (`AGENTS.md`, `CLAUDE.md`, `REVIEW.md`, path instructions).
 _Residual risk:_ a maintainer who merges a hostile config change to
 the base branch disables or narrows review for every open PR on its
-next review. That is a base-branch write, outside this threat.
+next review. That is a base-branch write, outside this threat. The
+64 KiB cap applies after the host client has read the response body,
+so it bounds YAML parsing but not the download: an oversized
+base-branch file is fetched in full, then not parsed. Only someone
+with base-branch write access controls that body.
 
 ### T4. LLM-issued tool calls escape the workspace
 

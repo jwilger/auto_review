@@ -136,10 +136,11 @@ the PR's own head. A PR that adds or edits `.auto_review.yaml` is reviewed under
 the config already on the base branch, so a PR cannot disable, narrow, or
 re-instruct its own review. Config changes take effect only after they merge to
 the base branch; from then on they apply to every open PR on its next review.
-Use `auto-review config validate` to check a change before merging it. Runtime loading caps the config file at 64 KiB, rejects
-malformed YAML by falling back to defaults, and skips malformed ignored-path
-globs. Use `--strict` locally to catch unknown keys before that permissive
-runtime fallback hides a typo.
+Use `auto-review config validate` to check a change before merging it.
+Runtime loading caps the config file at 64 KiB, rejects malformed YAML by
+falling back to defaults, and skips malformed ignored-path globs. Use `--strict`
+locally to catch unknown keys before that permissive runtime fallback hides a
+typo.
 
 ```yaml
 # Top-level switch. False = the bot skips reviewing this repo.

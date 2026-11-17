@@ -1,5 +1,5 @@
 use ar_github::Client;
-use wiremock::matchers::{body_json, header, method, path, query_param};
+use wiremock::matchers::{body_json, header, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 #[test]
@@ -710,6 +710,7 @@ async fn get_file_content_percent_encodes_branch_ref_with_query_metacharacters()
     Mock::given(method("GET"))
         .and(path("/repos/owner/repo/contents/.auto_review.yaml"))
         .and(query_param("ref", "feature/a&b"))
+        .and(query_param_is_missing("b"))
         .and(header("accept", "application/vnd.github.raw+json"))
         .respond_with(ResponseTemplate::new(200).set_body_string("enabled: true\n"))
         .expect(1)
