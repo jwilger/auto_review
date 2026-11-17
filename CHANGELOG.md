@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [1.5.1] - 2026-11-17
+
+### Fixed
+
+- *(factory)* auto-merge by default, cap PRs awaiting a human, and merge on approval (#226)
+
 ## [1.5.0] - 2026-11-17
 
 ### Added
