@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 use url::Url;
 
 pub use webhook::{
@@ -80,6 +80,7 @@ pub fn with_clone_credentials(clone_url: &str, installation_token: &str) -> Resu
 pub struct InstallationReviewHost {
     client: Client,
     installation_token: String,
+    bot_login: OnceCell<String>,
 }
 
 impl InstallationReviewHost {
@@ -87,12 +88,30 @@ impl InstallationReviewHost {
         Self {
             client,
             installation_token: installation_token.into(),
+            bot_login: OnceCell::new(),
         }
     }
 }
 
 #[async_trait]
 impl ar_forge::ReviewHost for InstallationReviewHost {
+    async fn capabilities(&self) -> ar_forge::HostCapabilities {
+        ar_forge::HostCapabilities::all()
+    }
+
+    async fn bot_login(&self) -> Result<String, ar_forge::HostError> {
+        self.bot_login
+            .get_or_try_init(|| async {
+                self.client
+                    .get_authenticated_app()
+                    .await
+                    .map(|app| app.bot_login())
+                    .map_err(host_error)
+            })
+            .await
+            .cloned()
+    }
+
     async fn clone_url(&self, owner: &str, repo: &str) -> Result<String, ar_forge::HostError> {
         let clone_url = self
             .client

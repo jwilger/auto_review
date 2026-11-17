@@ -12,7 +12,7 @@ use crate::{
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
 /// Permissions requested for every review-host installation token. The token
 /// is also restricted to the single repository being reviewed.
@@ -28,6 +28,7 @@ pub fn review_installation_token_request(repo: &str) -> InstallationTokenRequest
 pub struct AppReviewHost {
     client: Client,
     installations: Mutex<HashMap<String, u64>>,
+    bot_login: OnceCell<String>,
 }
 
 impl AppReviewHost {
@@ -37,7 +38,16 @@ impl AppReviewHost {
         Self {
             client,
             installations: Mutex::new(HashMap::new()),
+            bot_login: OnceCell::new(),
         }
+    }
+
+    /// Seed the bot login resolved elsewhere (the gateway's startup
+    /// identity, which honours `GITHUB_BOT_LOGIN`), so
+    /// [`ar_forge::ReviewHost::bot_login`] never calls `GET /app`.
+    pub fn with_bot_login(mut self, login: impl Into<String>) -> Self {
+        self.bot_login = OnceCell::new_with(Some(login.into()));
+        self
     }
 
     pub fn client(&self) -> &Client {
@@ -113,6 +123,23 @@ fn installation_key(owner: &str, repo: &str) -> String {
 
 #[async_trait]
 impl ar_forge::ReviewHost for AppReviewHost {
+    async fn capabilities(&self) -> ar_forge::HostCapabilities {
+        ar_forge::HostCapabilities::all()
+    }
+
+    async fn bot_login(&self) -> Result<String, ar_forge::HostError> {
+        self.bot_login
+            .get_or_try_init(|| async {
+                self.client
+                    .get_authenticated_app()
+                    .await
+                    .map(|app| app.bot_login())
+                    .map_err(host_error)
+            })
+            .await
+            .cloned()
+    }
+
     async fn clone_url(&self, owner: &str, repo: &str) -> Result<String, ar_forge::HostError> {
         let token = self.token(owner, repo).await?;
         let clone_url = self
