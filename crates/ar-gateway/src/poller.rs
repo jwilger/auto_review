@@ -17,9 +17,14 @@
 //!   thread replies land.
 //!
 //! Per-cycle cost per PR: one issue-comments list, one reviews list,
-//! and one comments list per review. Every review is re-listed each
-//! cycle because a thread reply may be attached to the review that
-//! opened the thread rather than to a new review record.
+//! and one comments list per submitted review that may hold inline
+//! comments, so 2 + R requests where R is that review count. Reviews
+//! reporting `comments_count: 0` are not listed. Every other review is
+//! re-listed each cycle because a thread reply may be attached to the
+//! review that opened the thread rather than to a new review record.
+//! Every PR in review history is polled, open or not, one after
+//! another, so a PR with many reviews delays the rest of the pass; see
+//! THREAT-MODEL T7 and the operator notes in `docs/OPERATIONS.md`.
 //!
 //! Cursor: one per-(repo, pr) highest-seen comment id covers both
 //! sources. Forgejo issues comment ids from a single sequence, so
@@ -33,6 +38,12 @@
 //! of a PR (including after a gateway restart) the cursor is seeded to
 //! the highest current comment id across both sources and nothing is
 //! dispatched, so history is never reprocessed.
+//!
+//! Known gap: Forgejo assigns a draft (`PENDING`) review comment its id
+//! when the draft is created, but the comment only becomes visible when
+//! the review is submitted. If a newer comment advances the cursor in
+//! between, a mention in that draft arrives below the cursor and is never
+//! dispatched. The failure is a missed reply, never an extra one.
 //!
 //! Bot's own comments are filtered out by login, so reading a comment
 //! the bot itself posted doesn't trigger an infinite reply loop.
@@ -349,7 +360,10 @@ impl ChatPoller {
 
     /// List the inline review-thread comments of every submitted review
     /// on the PR. Pending (draft) reviews are skipped: their comments are
-    /// not visible to anyone but their author yet.
+    /// not visible to anyone but their author yet. Reviews that report
+    /// `comments_count: 0` are skipped too: they hold no inline thread a
+    /// reply could land in, and listing them every cycle would let anyone
+    /// who can submit an empty review add a request per poll (T7).
     async fn list_inline_comments(
         &self,
         key: &PrKey,
@@ -363,6 +377,7 @@ impl ChatPoller {
         for review in reviews
             .iter()
             .filter(|r| !r.state.eq_ignore_ascii_case("PENDING"))
+            .filter(|r| r.comments_count != Some(0))
         {
             let comments = self
                 .forgejo
@@ -1389,6 +1404,37 @@ mod tests {
             serde_json::json!([bot_finding(), help_reply()]),
         )
         .await;
+
+        assert_inline_help_reply_dispatches_once(server).await;
+    }
+
+    #[tokio::test]
+    async fn reviews_reporting_no_inline_comments_are_not_listed() {
+        // A review whose `comments_count` is 0 has no inline thread to reply
+        // to, so listing its comments every cycle is pure load (THREAT-MODEL
+        // T7). Reviews that omit the field are still listed.
+        let server = MockServer::start().await;
+        mount_reviews(
+            &server,
+            "widgets",
+            1,
+            serde_json::json!([
+                {"id": 1, "state": "REQUEST_CHANGES", "user": {"login": "auto-review"}},
+                {"id": 2, "state": "COMMENT", "user": {"login": "bob"}, "comments_count": 1},
+                {"id": 3, "state": "COMMENT", "user": {"login": "mallory"}, "comments_count": 0}
+            ]),
+        )
+        .await;
+        mount_review_comments(&server, "widgets", 1, 1, serde_json::json!([bot_finding()])).await;
+        mount_review_comments(&server, "widgets", 1, 2, serde_json::json!([help_reply()])).await;
+        Mock::given(method("GET"))
+            .and(path(
+                "/api/v1/repos/alice/widgets/pulls/1/reviews/3/comments",
+            ))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+            .expect(0)
+            .mount(&server)
+            .await;
 
         assert_inline_help_reply_dispatches_once(server).await;
     }

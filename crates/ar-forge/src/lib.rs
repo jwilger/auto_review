@@ -237,6 +237,10 @@ pub struct PullReviewSummary {
     pub state: String,
     #[serde(default)]
     pub user: PrReviewCommentUser,
+    /// Number of inline (code) comments the review holds, when the host
+    /// reports it. `None` means unknown, not zero.
+    #[serde(default)]
+    pub comments_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

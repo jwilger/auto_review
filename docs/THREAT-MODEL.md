@@ -347,9 +347,19 @@ intake. The throttle runs **before** HMAC verification so a flood
 of unsigned junk can't burn CPU on signature math. Rejected
 requests get a `429` and increment
 `auto_review_webhook_rate_limited_total`.
+The chat poller skips reviews that report no inline comments
+(`comments_count: 0`), so an empty review adds no polling cost.
 _Residual risk:_ operators who don't set concurrency/rate-limit env vars can
 still exhaust disk or LLM budget under bursty load. Documented as opt-in to
-avoid accidentally throttling existing deployments.
+avoid accidentally throttling existing deployments. The chat poller makes
+2 + R Forgejo requests per PR in review history each cycle (issue comments,
+the reviews list, and one comment list per review that may hold inline
+comments), sequentially and for closed and merged PRs as well as open ones.
+Anyone who can submit a review with an inline comment on a reviewed PR adds
+one request per poll interval until the PR leaves history (bounded by the
+pagination cap per PR), and a PR with many reviews delays mention polling for
+the others. Operators bound this by raising `AR_POLL_INTERVAL_SECS` or pruning
+history with `reset-pr` / `purge-history`.
 
 ### T8. Token-cost amplification (cloud LLM profile)
 
