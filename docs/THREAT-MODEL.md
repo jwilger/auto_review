@@ -441,7 +441,7 @@ threat-model claims fail CI when a regression slips in:
   issue-criteria anchoring, verbatim offending-text quotes, and the
   opt-out path that suppresses the cheap-tier metadata decision.
 - `crates/ar-orchestrator/src/dispatcher.rs` test
-  `hostile_head_repo_config_does_not_disable_review` — covers T3a
+  `tests::hostile_head_config_does_not_disable_or_narrow_review` — covers T3a
   (PR-supplied config): the head workspace holds `.auto_review.yaml`
   with `enabled: false` and `ignored_paths: ["**"]`, the fake host
   returns 404 for the base-branch file, and the review still runs
