@@ -2,9 +2,9 @@
 
 auto_review is an open-source project with one maintainer, @jwilger. Agents
 run as the maintainer's own GitHub account. The repository ruleset requires
-pull requests and the five CI checks, but no approvals, so every change except
-the factory's own merges once the factory's review and approve stations pass
-and CI is green.
+pull requests and the CI checks listed in `CONTRIBUTING.md`, but no
+approvals, so every change except the factory's own merges once the
+factory's review and approve stations pass and CI is green.
 
 ## Authority
 - Merge: agents, for every change class except `factory`; humans for `factory`
@@ -49,7 +49,7 @@ A change that matches any of these is built and opened for review, and a human r
 - code
 
 Auto-merge is scheduled only on a head the approve station approved, and
-GitHub merges it once the five required checks pass.
+GitHub merges it once the required checks pass.
 
 ## Mode
 dark

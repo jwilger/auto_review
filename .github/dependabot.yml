@@ -1,0 +1,17 @@
+# Dependabot owns GitHub Actions updates. Every third-party action in
+# .github/workflows is pinned to a full commit SHA with a trailing
+# `# vX.Y.Z` comment; Dependabot bumps the SHA and the comment together.
+# Rust crates and flake inputs are not managed here.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      github-actions:
+        patterns:
+          - "*"

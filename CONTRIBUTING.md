@@ -46,6 +46,39 @@ Advisory checks require network access, so run
 `cargo deny check advisories` separately when bumping a dep. Land no
 commit that fails any required check.
 
+### Required checks and repository settings
+
+Every pull request to `main` must pass these GitHub Actions checks before
+it can merge:
+
+| Check | What it runs |
+|---|---|
+| Format check, Clippy, Test, Dependency policy, Build | `just fmt`, `just clippy`, `just test`, `just deny`, `just build` |
+| Dependency advisories | `cargo deny check advisories`, on every PR and on a weekly schedule so new advisories surface without a code change |
+| CodeQL (rust), CodeQL (actions) | CodeQL analysis of the Rust code and the workflows |
+| Shellcheck | `shellcheck` on `scripts/release` |
+| Actionlint | `actionlint` on `.github/workflows/**` |
+| Nix flake check | `nix flake check`, which runs the Nix packaging and NixOS module contract checks |
+
+The `require-pr` ruleset that enforces this lives in
+`.github/rulesets/require-pr.json`. Each check name in that file must match
+a job `name:` in `.github/workflows/`; a required check that no job reports
+blocks every pull request. GitHub does not read the file, so after a change
+to it merges, a repository admin applies it:
+
+```sh
+gh api --method PUT repos/jwilger/auto_review/rulesets/18404081 \
+  --input .github/rulesets/require-pr.json
+```
+
+Third-party actions are pinned to full commit SHAs with a trailing
+`# vX.Y.Z` comment. Dependabot (`.github/dependabot.yml`) opens a weekly
+grouped pull request that bumps the SHAs and comments together. Pin any new
+action the same way.
+
+Secret scanning and push protection are repository settings, not checks:
+a repository admin turns them on in Settings -> Code security.
+
 ### Bumping the toolchain or a dep
 
 ```sh

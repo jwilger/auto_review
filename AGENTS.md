@@ -21,7 +21,7 @@ just deny
 just build
 ```
 
-`cargo deny check advisories` requires network and is excluded from the default `just deny`/CI policy gate; run it manually when bumping dependencies.
+`cargo deny check advisories` requires network and is excluded from `just deny`; CI runs it as its own job on every PR and weekly. Run it manually when bumping dependencies. `CONTRIBUTING.md` lists every required check and how the `require-pr` ruleset in `.github/rulesets/require-pr.json` is applied.
 
 Use `bacon`, `bacon clippy`, or `bacon test` for focused Rust check loops.
 

@@ -51,5 +51,9 @@
   },
   "rust": {
     "enabled": true
+  },
+  "github-actions": {
+    "description": "Dependabot (.github/dependabot.yml) bumps the SHA-pinned GitHub Actions; keep Renovate off them so the two never open competing PRs.",
+    "enabled": false
   }
 }
