@@ -282,9 +282,13 @@ skip paths, webhook intake, and chat surface.
 - Load on Forgejo: each cycle makes 2 + R requests per PR in
   review history (issue comments, the PR's reviews list, and one
   comment list per submitted review that may hold inline
-  comments), where R is that review count. Merged and closed PRs
-  stay in history and are polled too, so 200 historical PRs with
-  about 5 reviews each cost about 1,400 requests per interval.
+  comments), where R is that review count. The issue-comments and
+  reviews lists page at 50 entries, so a PR with more than 50 of
+  either costs one more request per extra page; each review's
+  comment list is a single request whatever its size. Merged and
+  closed PRs stay in history and are polled too, so 200 historical
+  PRs with about 5 reviews each cost about 1,400 requests per
+  interval.
   When Forgejo load matters, raise `AR_POLL_INTERVAL_SECS` or
   prune history with `reset-pr` or `purge-history`.
 - `auto_review_poll_mentions_dispatched_total` — inline-thread

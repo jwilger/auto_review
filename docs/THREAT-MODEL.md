@@ -352,14 +352,19 @@ The chat poller skips reviews that report no inline comments
 _Residual risk:_ operators who don't set concurrency/rate-limit env vars can
 still exhaust disk or LLM budget under bursty load. Documented as opt-in to
 avoid accidentally throttling existing deployments. The chat poller makes
-2 + R Forgejo requests per PR in review history each cycle (issue comments,
-the reviews list, and one comment list per review that may hold inline
-comments), sequentially and for closed and merged PRs as well as open ones.
-Anyone who can submit a review with an inline comment on a reviewed PR adds
-one request per poll interval until the PR leaves history (bounded by the
-pagination cap per PR), and a PR with many reviews delays mention polling for
-the others. Operators bound this by raising `AR_POLL_INTERVAL_SECS` or pruning
-history with `reset-pr` / `purge-history`.
+at least 2 + R Forgejo requests per PR in review history each cycle, where R
+is the number of reviews that may hold inline comments: the issue-comments
+list and the reviews list (each one request per 50 entries), plus one
+request per such review. Polling runs sequentially and covers closed and
+merged PRs as well as open ones. Forgejo's review-comments endpoint is not
+paginated, so each review costs exactly one request however many comments
+it holds, but that response grows with the review's comment count. Anyone
+who can submit a review with an inline comment on a reviewed PR adds one
+request per poll interval until the PR leaves history (the reviews list
+itself stops at 100 pages, 5,000 reviews, per PR), and a PR with many
+reviews delays mention polling for the others. Operators bound this by
+raising `AR_POLL_INTERVAL_SECS` or pruning history with `reset-pr` /
+`purge-history`.
 
 ### T8. Token-cost amplification (cloud LLM profile)
 
