@@ -1,0 +1,1 @@
+- [Worktree git guard](feedback_worktree_git_guard.md) — use absolute git path + -C for commit/checkout; diff paths against origin/main
