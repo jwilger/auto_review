@@ -1,0 +1,52 @@
+# Dependency updates. Dependabot is built into GitHub and needs no app
+# installed. Every ecosystem runs weekly on Monday and groups all minor and
+# patch bumps into one pull request; majors arrive as separate pull requests.
+version: 2
+updates:
+  - package-ecosystem: cargo
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      cargo:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+    ignore:
+      # tower-http majors can change middleware behaviour in subtle ways;
+      # bump them by hand after reviewing the changelog.
+      - dependency-name: tower-http
+        update-types: ["version-update:semver-major"]
+      # sqlx majors can include schema-incompatible behaviour; bump them by
+      # hand after reviewing migrations and query behaviour.
+      - dependency-name: sqlx
+        update-types: ["version-update:semver-major"]
+
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "ci(deps)"
+    groups:
+      github-actions:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
+
+  # Dependabot's nix ecosystem updates flake.lock inputs (nixpkgs, crane,
+  # rust-overlay) to newer upstream commits. It does not rewrite refs pinned
+  # inside flake.nix; see CONTRIBUTING.md "Bumping the toolchain or a dep".
+  - package-ecosystem: nix
+    directory: "/"
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: "chore(deps)"
+    groups:
+      nix:
+        patterns: ["*"]
+        update-types: ["minor", "patch"]
