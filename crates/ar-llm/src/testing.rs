@@ -9,17 +9,20 @@
 //! script returns an error instead of aborting the test.
 
 use crate::types::{CompleteRequest, CompleteResponse, Error, LlmProvider};
+use alloc::collections::VecDeque;
 use async_trait::async_trait;
-use std::collections::VecDeque;
-use std::sync::{Mutex, PoisonError};
+use std::sync::{Mutex, MutexGuard, PoisonError};
 
 /// Body of the error returned once every scripted response is used.
 pub const EXHAUSTED_BODY: &str = "ScriptedProvider: no scripted responses left";
 
+/// Script and call log behind the [`ScriptedProvider`] lock.
 #[derive(Default)]
 struct State {
-    responses: VecDeque<CompleteResponse>,
+    /// Every request received so far, in call order.
     requests: Vec<CompleteRequest>,
+    /// Responses still to hand out, first call first.
+    responses: VecDeque<CompleteResponse>,
 }
 
 /// Provider that answers calls from a script, in call order (FIFO:
@@ -30,60 +33,73 @@ struct State {
 /// `Error::Provider { status: 500, body: EXHAUSTED_BODY }`.
 #[derive(Default)]
 pub struct ScriptedProvider {
+    /// Script and call log, shared by concurrent calls.
     state: Mutex<State>,
 }
 
 impl ScriptedProvider {
+    /// Number of `complete` calls received so far, including calls
+    /// made after the script ran out.
+    #[inline]
+    pub fn call_count(&self) -> usize {
+        self.lock().requests.len()
+    }
+
+    /// Lock the state, recovering it if a panicking test poisoned the lock.
+    fn lock(&self) -> MutexGuard<'_, State> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
     /// Script plain-text responses in call order, each reporting zero
     /// input and output tokens.
+    #[inline]
+    #[must_use = "the scripted provider is the only output"]
     pub fn new(responses: Vec<&str>) -> Self {
         Self::with_responses(responses.into_iter().map(|content| CompleteResponse {
-            content: content.to_string(),
+            content: content.to_owned(),
             input_tokens: 0,
             output_tokens: 0,
         }))
     }
 
-    /// Script full responses in call order, so a test can set
-    /// per-response `input_tokens` / `output_tokens`.
-    pub fn with_responses(responses: impl IntoIterator<Item = CompleteResponse>) -> Self {
-        Self {
-            state: Mutex::new(State {
-                responses: responses.into_iter().collect(),
-                requests: Vec::new(),
-            }),
-        }
-    }
-
     /// Every request received so far, in call order.
+    #[inline]
     pub fn requests(&self) -> Vec<CompleteRequest> {
         self.lock().requests.clone()
     }
 
-    /// Number of `complete` calls received so far, including calls
-    /// made after the script ran out.
-    pub fn call_count(&self) -> usize {
-        self.lock().requests.len()
-    }
-
-    fn lock(&self) -> std::sync::MutexGuard<'_, State> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    /// Script full responses in call order, so a test can set
+    /// per-response `input_tokens` / `output_tokens`.
+    #[inline]
+    pub fn with_responses(responses: impl IntoIterator<Item = CompleteResponse>) -> Self {
+        Self {
+            state: Mutex::new(State {
+                requests: Vec::new(),
+                responses: responses.into_iter().collect(),
+            }),
+        }
     }
 }
 
 #[async_trait]
 impl LlmProvider for ScriptedProvider {
+    #[inline]
     async fn complete(&self, req: CompleteRequest) -> Result<CompleteResponse, Error> {
         let mut state = self.lock();
         state.requests.push(req);
         state.responses.pop_front().ok_or_else(|| Error::Provider {
             status: 500,
-            body: EXHAUSTED_BODY.to_string(),
+            body: EXHAUSTED_BODY.to_owned(),
         })
     }
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "tests call the fake with expect so an unexpected error fails the test at that line \
+              with a label"
+)]
 mod tests {
     use super::*;
     use crate::types::Message;
@@ -96,6 +112,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "`a` and `b` are read by the assertions below; renaming them would edit those \
+                  assertion lines, which this lint-only change leaves untouched"
+    )]
     async fn answers_calls_in_fifo_order() {
         let provider = ScriptedProvider::new(vec!["first", "second"]);
         let a = provider.complete(req("a")).await.expect("first");
@@ -105,6 +126,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "every request built by req() carries exactly one message, so index 0 exists"
+    )]
     async fn records_requests_in_call_order() {
         let provider = ScriptedProvider::new(vec!["x", "y"]);
         provider.complete(req("one")).await.expect("one");
@@ -112,7 +137,7 @@ mod tests {
         let seen: Vec<String> = provider
             .requests()
             .into_iter()
-            .map(|r| r.messages[0].content.clone())
+            .map(|request| request.messages[0].content.clone())
             .collect();
         assert_eq!(seen, vec!["one", "two"]);
         assert_eq!(provider.call_count(), 2);
@@ -137,6 +162,15 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::panic,
+        reason = "the catch-all arm fails the test and names the unexpected error variant"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "every variant other than Provider is a test failure, so one catch-all arm \
+                  reports them all"
+    )]
     async fn exhausted_script_returns_provider_error_without_panicking() {
         let provider = ScriptedProvider::new(vec![]);
         let err = provider.complete(req("q")).await.expect_err("exhausted");

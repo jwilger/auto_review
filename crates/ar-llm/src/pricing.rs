@@ -1,8 +1,20 @@
+use alloc::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeMap;
+use std::fs;
+use std::io;
 use std::path::Path;
 
 #[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "the public fields are the per-model price-table JSON shape; #[non_exhaustive] \
+              would stop callers from building or destructuring a price by struct literal"
+)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "field order is the serialized key order of the price table JSON; reordering \
+              changes the serialized table"
+)]
 pub struct ModelPrice {
     #[serde(default)]
     pub input: f64,
@@ -14,11 +26,19 @@ pub struct ModelPrice {
 
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct PriceTable {
+    /// Prices keyed by `<provider base URL>|<model>` or bare model name.
     #[serde(flatten)]
     models: BTreeMap<String, ModelPrice>,
 }
 
 impl PriceTable {
+    #[inline]
+    #[must_use = "the estimate is the only output; dropping it records no cost"]
+    #[expect(
+        clippy::float_arithmetic,
+        reason = "a USD cost estimate from per-million-token f64 rates is inherently floating \
+                  point; the result is reported, never used for exact accounting"
+    )]
     pub fn estimate_usage_usd(
         &self,
         provider_base_url: &str,
@@ -32,32 +52,57 @@ impl PriceTable {
             .get(&price_key(provider_base_url, model))
             .or_else(|| self.models.get(model))?;
         Some(
-            (input_tokens as f64 * price.input
-                + output_tokens as f64 * price.output
-                + embedding_tokens as f64 * price.embedding)
+            (f64::from(input_tokens) * price.input
+                + f64::from(output_tokens) * price.output
+                + f64::from(embedding_tokens) * price.embedding)
                 / 1_000_000.0,
         )
     }
 
+    /// Replace or add every entry from `overrides`.
     fn extend(&mut self, overrides: PriceTable) {
         self.models.extend(overrides.models);
     }
 }
 
+#[derive(Debug, thiserror::Error)]
+#[expect(
+    clippy::error_impl_error,
+    reason = "public error type of load_openai_price_table (used by ar-review); renaming it \
+              changes the crate API"
+)]
+pub enum Error {
+    #[error("decode price table at {path}: {source}")]
+    Decode {
+        path: String,
+        source: serde_json::Error,
+    },
+    #[error("read price table at {path}: {source}")]
+    Read { path: String, source: io::Error },
+}
+
+/// Key for a provider-qualified price entry.
 fn price_key(provider_base_url: &str, model: &str) -> String {
     format!("{}|{}", provider_base_url.trim_end_matches('/'), model)
 }
 
+/// Built-in prices, overlaid with the JSON table at `path` when given.
+///
+/// # Errors
+///
+/// Returns [`Error::Read`] when the override file cannot be read and
+/// [`Error::Decode`] when it is not a valid price table.
+#[inline]
 pub fn load_openai_price_table(path: Option<&Path>) -> Result<PriceTable, Error> {
     let mut table = default_openai_price_table();
-    if let Some(path) = path {
-        let body = std::fs::read_to_string(path).map_err(|source| Error::Read {
-            path: path.display().to_string(),
+    if let Some(override_path) = path {
+        let body = fs::read_to_string(override_path).map_err(|source| Error::Read {
+            path: override_path.display().to_string(),
             source,
         })?;
         let overrides: PriceTable =
             serde_json::from_str(&body).map_err(|source| Error::Decode {
-                path: path.display().to_string(),
+                path: override_path.display().to_string(),
                 source,
             })?;
         table.extend(overrides);
@@ -65,11 +110,13 @@ pub fn load_openai_price_table(path: Option<&Path>) -> Result<PriceTable, Error>
     Ok(table)
 }
 
+#[inline]
+#[must_use = "the default table is the only output"]
 pub fn default_openai_price_table() -> PriceTable {
     PriceTable {
         models: BTreeMap::from([
             (
-                "gpt-4o".to_string(),
+                "gpt-4o".to_owned(),
                 ModelPrice {
                     input: 5.0,
                     output: 15.0,
@@ -77,7 +124,7 @@ pub fn default_openai_price_table() -> PriceTable {
                 },
             ),
             (
-                "gpt-4o-mini".to_string(),
+                "gpt-4o-mini".to_owned(),
                 ModelPrice {
                     input: 0.15,
                     output: 0.60,
@@ -85,7 +132,7 @@ pub fn default_openai_price_table() -> PriceTable {
                 },
             ),
             (
-                "text-embedding-3-small".to_string(),
+                "text-embedding-3-small".to_owned(),
                 ModelPrice {
                     input: 0.0,
                     output: 0.0,
@@ -94,18 +141,4 @@ pub fn default_openai_price_table() -> PriceTable {
             ),
         ]),
     }
-}
-
-#[derive(Debug, thiserror::Error)]
-pub enum Error {
-    #[error("read price table at {path}: {source}")]
-    Read {
-        path: String,
-        source: std::io::Error,
-    },
-    #[error("decode price table at {path}: {source}")]
-    Decode {
-        path: String,
-        source: serde_json::Error,
-    },
 }
