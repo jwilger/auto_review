@@ -97,6 +97,8 @@ mod tests {
                 source,
                 embedding: vec![],
                 created_at: 0,
+                repo: None,
+                origin_pr: None,
             },
             score: 0.9,
         }

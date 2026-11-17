@@ -385,6 +385,8 @@ mod tests {
             line_end: None,
             severity: ReviewSeverity::Warning,
             message: msg.into(),
+            title: String::new(),
+            category: ar_prompts::FindingCategory::Correctness,
         }
     }
 
@@ -457,6 +459,22 @@ mod tests {
         .await
         .expect("ok");
         assert_eq!(result.findings.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn kept_finding_keeps_its_title_and_category() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            r#"{"tool":"verdict","keep":true,"reason":"confirmed"}"#,
+        ]));
+        let router = Router::new().with(ModelTier::Cheap, provider);
+        let mut f = finding(1, "real", "a.rs");
+        f.title = "Unchecked index".into();
+        f.category = ar_prompts::FindingCategory::Security;
+        let result = verify_findings_agentic(&router, output(vec![f.clone()]), dir.path(), "diff")
+            .await
+            .expect("ok");
+        assert_eq!(result.findings, vec![f]);
     }
 
     #[tokio::test]

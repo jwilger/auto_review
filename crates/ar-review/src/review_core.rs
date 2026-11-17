@@ -38,6 +38,9 @@ pub struct ReviewCoreArgs<'a> {
     pub previous_review_sha: Option<&'a str>,
     /// Prior PR discussion, already rendered for the prompt.
     pub prior_discussion: &'a str,
+    /// Per-run nonce for the untrusted-data fences in the review prompt;
+    /// the caller shares it with any other prompt it fences in the same run.
+    pub fence_nonce: &'a str,
     /// Verifier strategy. `Agentic` without `workspace_path` falls back
     /// to `Simple`.
     pub verify_mode: VerifyMode,
@@ -96,6 +99,7 @@ pub async fn run_review_core(args: ReviewCoreArgs<'_>) -> Result<ReviewDraft, Re
         repo_context: args.repo_context,
         previous_review_sha: args.previous_review_sha,
         prior_discussion: args.prior_discussion,
+        fence_nonce: args.fence_nonce,
     });
 
     // Track the post-floor / pre-verifier count so we can report how many
@@ -197,6 +201,7 @@ mod tests {
             repo_context: "",
             previous_review_sha: None,
             prior_discussion: "",
+            fence_nonce: "0123456789abcdef",
             verify_mode: VerifyMode::Simple,
             workspace_path: None,
             min_severity: ReviewSeverity::Warning,
