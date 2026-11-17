@@ -248,6 +248,9 @@ _Mitigation:_ Token scoped to the minimum the bot needs
 documents this scoping. The token is loaded from the process
 environment only and is never logged. The orchestrator log redactor
 (`workspace::redact_token`) strips the token from any URL we log.
+The clone remote is removed after checkout, so the workspace
+`.git/config` that the LLM `read_file` tool can reach holds no
+credential-bearing URL.
 _Residual risk:_ a stolen token has the bot's full repo write
 access until rotated. Operators should rotate periodically; the
 `init` flow makes minting a new one cheap.
@@ -420,7 +423,9 @@ threat-model claims fail CI when a regression slips in:
   opt-out path that suppresses the cheap-tier metadata decision.
 - `crates/ar-review/tests/red_team_workspace_tools.rs` — covers
   T4 (LLM tool calls escape workspace): symlink escape, chained
-  symlinks, empty paths, pathological regex.
+  symlinks, empty paths, pathological regex; and T5 (clone credential
+  absent from workspace `.git/config`:
+  `read_file_on_prepared_workspace_git_config_exposes_no_clone_url`).
 - `crates/ar-gateway/src/webhook.rs` HMAC unit tests — cover T2
   (webhook forgery: missing-signature, wrong-secret, malformed
   hex).
