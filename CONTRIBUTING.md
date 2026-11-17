@@ -213,6 +213,10 @@ templates.
 Document the new subcommand in `docs/CLI.md`, and in `docs/OPERATIONS.md` if it
 changes operator workflows. Nothing checks this automatically; code review
 enforces it.
+The deploy metrics contract test
+(`crates/ar-gateway/tests/deploy_metrics_contract.rs`) fails when the
+Prometheus rules or Grafana dashboard reference a metric not exposed by
+`Metrics::render()`, or a recording rule not defined in the rules file.
 
 For docs-only changes, do not add deterministic tests that assert exact wording
 or required phrases. Use human/operator review for prose. Keep tests for
