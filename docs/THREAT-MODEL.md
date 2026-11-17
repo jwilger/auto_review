@@ -99,7 +99,7 @@ PR title/body.
 
 **A2 — Authenticated collaborator.** Can additionally invoke
 `@auto-review` chat commands (`re-review`, `remember`, `forget`,
-`autofix`, `tests`, `docstring`). Goal: poison the learnings store
+`autofix`, `tests`). Goal: poison the learnings store
 to degrade future reviews, or push autofix patches that smuggle
 malicious code past human review.
 
@@ -284,9 +284,9 @@ _relative_ paths and resolve them under the prepared workspace
 root using `std::path::PathBuf::canonicalize`. Symlinks pointing
 outside the root are rejected. There is no LLM-callable tool that
 runs arbitrary shell — the verifier reads files and greps; it
-does not run subprocesses. The chat agent's `autofix`/`tests`/
-`docstring` commands fetch Forgejo diffs and post suggested text,
-inline suggestions, or test scaffolds for humans to apply; the bot
+does not run subprocesses. The chat agent's `autofix`/`tests`
+commands fetch Forgejo diffs and post inline suggestions or test
+scaffolds for humans to apply; the bot
 does not execute those suggestions or run tests locally.
 _Residual risk:_ a future tool that spawns untrusted subprocesses
 would re-open T1; new tools must go through this threat-model

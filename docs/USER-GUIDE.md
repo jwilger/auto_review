@@ -67,8 +67,8 @@ in your Forgejo instance for the exact handle.
 | `@<bot> remember <text>` | Save a guideline for this repository. It only affects reviews of this repository (see [Learnings are per repository](#learnings-are-per-repository)). Future semantic retrieval requires an embedding tier (`LLM_EMBEDDING_MODEL`); otherwise the entry is stored but not retrieved by similarity search. |
 | `@<bot> forget <id>` | Delete one of this repository's learnings. An id that belongs to another repository, or that does not exist, gets the same reply: "No learning with id N in this repository". The id is printed when `remember` stores the entry; operators can also audit ids with `auto-review learnings list`. |
 | `@<bot> autofix` | Ask the cheap-tier model for diff-based inline patch suggestions. The bot does not push commits — you decide what to apply. |
-| `@<bot> docstring` | Suggest docstrings for newly-added public APIs. Requires the cheap-tier model (`LLM_CHEAP_MODEL`). Same: comment-only, you apply. |
-| `@<bot> tests` | Suggest scaffolded test cases for added code. Requires the cheap-tier model. Same. |
+| `@<bot> docstring` | Retired. Replies with a notice pointing to `autofix` or your own coding agent; no suggestions are generated. |
+| `@<bot> tests` | Suggest scaffolded test cases for added code. Requires the cheap-tier model. Comment-only, you apply. |
 | `@<bot> <freeform>` | Anything else is read for intent. A question is answered by the cheap-tier model; an approval request is handled as below; a request to re-review re-runs the review. If the cheap tier is not configured, it falls back to a free-form Q&A reply. |
 
 You don't have to phrase things a particular way. The bot reads the intent of a
