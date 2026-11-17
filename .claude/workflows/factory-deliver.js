@@ -65,10 +65,16 @@ const sliceBranch = (id) => `factory-slice/${a.item.id}/${id}`
 // Builders keep their memory out of item branches; a build that reports a path
 // under it has not finished, whatever its gate says.
 const memoryPaths = (b) => (b?.paths || []).filter((p) => p.startsWith('.claude/agent-memory/'))
+// Whether a decision needs a person. Decisions rebuilt from a change request's
+// `## Decisions` section on rework or approve may carry needs_human as text,
+// so this fails closed: only an absent value, false, or the text "false" lets
+// the decision through; "true", any other text and any other type count as true.
+const needsHuman = (d) => !(d.needs_human === undefined || d.needs_human === null || d.needs_human === false ||
+  (typeof d.needs_human === 'string' && d.needs_human.trim().toLowerCase() === 'false'))
 // Each decision with everything the approver's brief repeats for a
 // needs_human one: the chosen option, the alternatives, why, and the reason.
 const decisionLines = (ds) => ds.map((d) =>
-  `- ${d.question} -> ${d.chosen} (needs_human: ${d.needs_human === true}${d.reason ? `; ${d.reason}` : ''})\n` +
+  `- ${d.question} -> ${d.chosen} (needs_human: ${needsHuman(d)}${d.reason ? `; ${d.reason}` : ''})\n` +
   `  alternatives: ${(d.alternatives || []).length ? d.alternatives.join('; ') : '(none)'}\n` +
   `  why: ${d.why || '(not given)'}`).join('\n')
 // Every build starts from, or first merges, current origin/main, so a change
@@ -142,7 +148,7 @@ const approveStation = async (branch, criteria, round, paths = [], evidence = nu
   // an owner to request review from, so one without falls to an engineer.
   const gap = approve.verdict !== 'APPROVE' ? null
     : !paths?.length ? 'changed paths not reported' : !approve.classes?.length ? 'no change class given'
-    : decisions.some((d) => d.needs_human === true) ? 'decisions needing a person' : null
+    : decisions.some(needsHuman) ? 'decisions needing a person' : null
   const verdict = gap ? 'ESCALATE' : approve.verdict
   const decided = verdict === 'APPROVE' ? approve : { ...approve, verdict,
     reason: gap ? `${approve.reason} (human review required: ${gap})` : approve.reason,

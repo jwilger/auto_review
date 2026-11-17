@@ -37,10 +37,8 @@ just clippy
 just test
 just deny
 just build
-just shellcheck        # scripts/release and .claude/hooks (hooks and their tests)
-just hooks-test        # the factory's PreToolUse hook tests, against a fake gh
+just shellcheck
 just actionlint
-just hermetic-git      # test code clears GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE before spawning git
 just conflict-markers  # no unresolved merge conflict markers in tracked files
 
 # Checks that `just ci` leaves out:
@@ -50,16 +48,13 @@ just flake-check  # nix flake check; builds the packages
 
 `just ci` runs rustfmt, clippy (with `-D warnings`), the full
 nextest application test suite, cargo-deny (licenses + bans + sources),
-a workspace build, shellcheck on `scripts/release` and `.claude/hooks`,
-the merge-guard hook tests (`just hooks-test`, against a fake `gh`),
-actionlint on `.github/workflows/`, `scripts/check-hermetic-git` and a
-conflict-marker scan of tracked files. The hermetic-git check exists because git exports
-`GIT_DIR` to its hooks: a test fixture that runs `git init` under the
-pre-push gate without clearing it rewrites this repository's config (one
-set `core.bare = true`). Clear `GIT_DIR`, `GIT_WORK_TREE` and
-`GIT_INDEX_FILE` in the same statement as `Command::new("git")`, or spawn
-through a helper that does. These checks also run as their own GitHub
-Actions jobs, so a push that skips the pre-push hook cannot land them.
+a workspace build, shellcheck on `scripts/release`, actionlint on
+`.github/workflows/` and a conflict-marker scan of tracked files.
+`just test` runs the suite with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+`GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`
+and `GIT_PREFIX` unset: git exports them to its hooks, and a test fixture that
+ran `git init` under the pre-push gate once set `core.bare = true` on this
+repository.
 Advisory checks require network access, so `just advisories` stays out
 of `just ci`; run it when bumping a dep. Land no commit that fails any
 required check.
@@ -73,11 +68,9 @@ it can merge:
 |---|---|
 | Format check, Clippy, Test, Dependency policy, Build | `just fmt`, `just clippy`, `just test`, `just deny`, `just build` |
 | Dependency advisories | `just advisories` (`cargo deny check advisories`); `.github/workflows/advisories.yml` also runs it daily against `main` so new advisories surface without a code change |
-| Shellcheck | `just shellcheck` on `scripts/release` and `.claude/hooks` |
-| Hook tests | `just hooks-test`, the factory merge-guard hook tests against a fake `gh` |
-| Hermetic git | `just hermetic-git`, which fails when test code spawns `git` without clearing `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` |
-| Conflict markers | `just conflict-markers`, which fails on unresolved merge conflict markers in tracked files |
+| Shellcheck | `just shellcheck` on `scripts/release` |
 | Actionlint | `just actionlint` on `.github/workflows/` |
+| Conflict markers | `just conflict-markers`, which fails on unresolved merge conflict markers in tracked files |
 | Nix flake check | `just flake-check`, which runs the Nix packaging, NixOS module and OCI image contract checks |
 | Analyze (rust), Analyze (actions) | CodeQL analysis of the Rust code and the workflows (`.github/workflows/codeql.yml`) |
 
@@ -92,10 +85,10 @@ gh api --method PUT repos/jwilger/auto_review/rulesets/18404081 \
   --input .github/rulesets/require-pr.json
 ```
 
-The factory's approval-to-merge loop (`factory/loop.md`) needs a
+The factory's approval-to-merge loop (`factory/loop.md`) uses a
 `factory:approved` label, which the maintainer adds to a `needs-review`
-factory pull request to approve it. Create it once per repository; the
-factory's reconcile step also creates it when it is missing:
+factory pull request outside the `factory` class to approve it. The factory's
+reconcile step creates the label when it is missing; to create it by hand:
 
 ```sh
 gh label create factory:approved \

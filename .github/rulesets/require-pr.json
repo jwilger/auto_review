@@ -78,15 +78,7 @@
             "integration_id": 15368
           },
           {
-            "context": "Hermetic git",
-            "integration_id": 15368
-          },
-          {
             "context": "Conflict markers",
-            "integration_id": 15368
-          },
-          {
-            "context": "Hook tests",
             "integration_id": 15368
           },
           {

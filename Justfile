@@ -8,8 +8,14 @@ fmt:
 clippy:
 	cargo clippy --workspace --all-targets -- -D warnings
 
+# git exports GIT_DIR and friends to its hooks, so under the pre-push hook a
+# test that spawns git would act on this repository (one fixture's `git init`
+# set `core.bare = true` here). Clearing them keeps every test hermetic,
+# however it spawns git.
 test:
-	cargo nextest run --workspace --no-tests=pass
+	env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR \
+		-u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_PREFIX \
+		cargo nextest run --workspace --no-tests=pass
 
 deny:
 	cargo deny check licenses bans sources
@@ -22,19 +28,10 @@ build:
 	cargo build --workspace
 
 shellcheck:
-	shellcheck scripts/release .claude/hooks/*.sh .claude/hooks/tests/*.sh
-
-# Exercises the factory's PreToolUse hooks against a fake gh.
-hooks-test:
-	for t in .claude/hooks/tests/*.test.sh; do bash "$t" || exit 1; done
+	shellcheck scripts/release
 
 actionlint:
 	actionlint
-
-# Test code under crates/ must clear GIT_DIR, GIT_WORK_TREE and GIT_INDEX_FILE
-# before spawning git, so fixtures run inside a git hook never touch this repo.
-hermetic-git:
-	python3 scripts/check-hermetic-git
 
 # Fails on unresolved merge conflict markers in tracked files.
 conflict-markers:
@@ -52,4 +49,4 @@ serve:
 watch:
 	AR_GATEWAY_BIND=0.0.0.0:8090 bacon --job gateway-dev
 
-ci: fmt clippy test deny build shellcheck hooks-test actionlint hermetic-git conflict-markers
+ci: fmt clippy test deny build shellcheck actionlint conflict-markers

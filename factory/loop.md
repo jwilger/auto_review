@@ -54,31 +54,34 @@ gh label create factory:approved --description 'maintainer approval for the fact
 Reconcile also creates it when it is missing; creating the label approves
 nothing.
 
-To let the factory land a `needs-review` pull request, add the
-`factory:approved` label to it after reviewing its current head. Factory
-agents run as your own account, so you author every factory pull request, and
-GitHub does not let an author approve their own pull request: the label is
-your approval. Only a `## Roles` account in `factory/policy.md` (as `main` has
-it) counts, and the label counts only when you applied it after the branch's
-newest own commit. An approving review works the same way, but only from
-another `## Roles` account that did not author the pull request, and only
-while GitHub keeps it (the ruleset dismisses stale reviews on push, which may
-include the factory's merge of `main`), so prefer the label.
+To let the factory land a `needs-review` pull request outside the `factory`
+class, add the `factory:approved` label to it after reviewing its current
+head, or approve that head with a review from a `## Roles` account in
+`factory/policy.md` that did not author it. Factory agents run as your own
+account, so you author every factory pull request and GitHub does not let
+you approve it: the label is your practical approval. The same fact means
+GitHub cannot tell whether you or an agent applied the label or review, so
+the signal is a convenience for you, not a security boundary.
 
 The next reconcile merges current `main` into the branch with a merge
-commit, runs `nix develop .#ci --command just ci`, pushes with
-`nix develop .#ci --command git push`, waits (bounded) for the required
-checks on that head, and squash-merges pinned to it (`--match-head-commit`).
-A conflict, a red gate or a check the change failed removes the label,
-comments on the pull request and requeues the item for rework, which needs a
-fresh approval; a transient check failure is rerun instead. The factory
-removes the label before any push other than a clean merge of `main`
-(rework, requeue or resume), so it never sits beside unreviewed commits. The
-factory never adds `factory:approved` itself or submits an approving review;
-the merge guard hook blocks agents from doing either. For a pull request
-that touches `factory` paths the factory never schedules auto-merge on your
-approval, because a scheduled auto-merge outlives the head you approved; it
-waits for the checks and merges pinned to that head instead.
+commit (no rebase, no force push), runs `nix develop .#ci --command just ci`,
+pushes with `nix develop .#ci --command git push`, waits for the required
+checks on that head (`gh pr checks <n> --required --watch`), and
+squash-merges pinned to it (`gh pr merge <n> --squash --match-head-commit
+<sha>`). A conflicting merge of `main` is aborted before anything is
+committed; a conflict, a red gate or a failed required check removes the
+label, comments on the pull request and requeues the item for rework, which
+needs a fresh approval. Any push other than a clean merge of `main` removes
+the label, so it never sits beside unreviewed commits.
+
+The factory never merges a `factory` class pull request, approved or not:
+you review and merge it yourself. The merge guard hook
+(`.claude/hooks/factory-merge-guard.sh`) denies agent merges of pull
+requests touching `factory` paths unless the command carries
+`FACTORY_MERGE_APPROVED=<pr>`. It is a tripwire against the factory's own
+scripted mistakes, not a security boundary: anything running as your
+account can still merge. The enforceable boundary is a separate factory
+identity, tracked in its own issue.
 
 ## Branches and bases
 
@@ -99,11 +102,13 @@ waits for the checks and merges pinned to that head instead.
 
 ## Checks that guard the factory
 
-`just ci` includes two checks added after factory runs broke the repository:
-`just hermetic-git` fails when test code under `crates/` spawns `git` without
-clearing `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` (or using the shared
-hermetic helper), and `just conflict-markers` fails when a tracked file holds
-a `<<<<<<< ` or `>>>>>>> ` conflict marker line.
+Two parts of `just ci` exist because factory runs broke the repository.
+`just test` runs the suite with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+`GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`
+and `GIT_PREFIX` unset, so a test that spawns `git` under the pre-push hook
+cannot reach this repository (a fixture's `git init` once set
+`core.bare = true` here). `just conflict-markers` fails when a tracked file
+holds a `<<<<<<< ` or `>>>>>>> ` conflict marker line.
 
 ## Cloud routine (later)
 

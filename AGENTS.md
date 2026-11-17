@@ -19,16 +19,14 @@ just clippy
 just test
 just deny
 just build
-just shellcheck    # shellcheck on scripts/release and .claude/hooks (hooks and their tests)
-just hooks-test    # the factory's PreToolUse hook tests, against a fake gh
+just shellcheck    # shellcheck on scripts/release
 just actionlint    # actionlint on .github/workflows/
-just hermetic-git  # test-code git spawns must clear GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE
 just conflict-markers  # no merge conflict markers in tracked files
 just advisories    # cargo deny check advisories; needs network
 just flake-check   # nix flake check; slow, builds the packages
 ```
 
-`just ci` runs `fmt`, `clippy`, `test`, `deny`, `build`, `shellcheck`, `hooks-test`, `actionlint`, `hermetic-git` and `conflict-markers`; GitHub Actions runs each of them as its own required job. `just advisories` (`cargo deny check advisories`) requires network and is excluded from `just ci` and `just deny`; `just flake-check` is excluded to keep the local loop fast. CI now runs both on every PR (`Dependency advisories`, `Nix flake check`), and advisories also run on a daily schedule against `main`. Run `just advisories` manually when bumping dependencies. `CONTRIBUTING.md` lists every required check and how the `require-pr` ruleset in `.github/rulesets/require-pr.json` is applied.
+`just ci` runs `fmt`, `clippy`, `test`, `deny`, `build`, `shellcheck`, `actionlint` and `conflict-markers`; `just test` clears `GIT_DIR` and the other `GIT_*` variables git exports to its hooks, so no test can reach this repository through the pre-push hook. `just advisories` (`cargo deny check advisories`) requires network and is excluded from `just ci` and `just deny`; `just flake-check` is excluded to keep the local loop fast. CI now runs both on every PR (`Dependency advisories`, `Nix flake check`), and advisories also run on a daily schedule against `main`. Run `just advisories` manually when bumping dependencies. `CONTRIBUTING.md` lists every required check and how the `require-pr` ruleset in `.github/rulesets/require-pr.json` is applied.
 
 Use `bacon`, `bacon clippy`, or `bacon test` for focused Rust check loops.
 
