@@ -535,7 +535,7 @@ Forgejo API access.
   factory's own scripted mistakes, not a security boundary: it does not
   try to read every way a shell command could merge. The enforceable
   boundary is a separate factory identity that cannot merge `factory`
-  paths, tracked in its own issue; until then the maintainer merges every
+  paths, tracked in issue #223; until then the maintainer merges every
   `factory` class change.
 
 ## Test coverage of these threats

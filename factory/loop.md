@@ -63,7 +63,11 @@ you approve it: the label is your practical approval. The same fact means
 GitHub cannot tell whether you or an agent applied the label or review, so
 the signal is a convenience for you, not a security boundary.
 
-The next reconcile merges current `main` into the branch with a merge
+The next `/factory next` reconcile, when a deliver slot is free, checks the
+change is not `factory` class (empty or missing approver classes, or any
+changed path matching a `factory` pattern in `main`'s `factory/policy.md`,
+count as `factory`), then, in a throwaway `git worktree` rather than your
+checkout, merges current `main` into the branch with a merge
 commit (no rebase, no force push), runs `nix develop .#ci --command just ci`,
 pushes with `nix develop .#ci --command git push`, waits for the required
 checks on that head (`gh pr checks <n> --required --watch`), and
@@ -75,13 +79,14 @@ needs a fresh approval. Any push other than a clean merge of `main` removes
 the label, so it never sits beside unreviewed commits.
 
 The factory never merges a `factory` class pull request, approved or not:
-you review and merge it yourself. The merge guard hook
+you review and merge it yourself. `/factory status` only reports approved
+pull requests; it never runs the gate, pushes or merges. The merge guard hook
 (`.claude/hooks/factory-merge-guard.sh`) denies agent merges of pull
 requests touching `factory` paths unless the command carries
 `FACTORY_MERGE_APPROVED=<pr>`. It is a tripwire against the factory's own
 scripted mistakes, not a security boundary: anything running as your
 account can still merge. The enforceable boundary is a separate factory
-identity, tracked in its own issue.
+identity, tracked in issue #223.
 
 ## Branches and bases
 

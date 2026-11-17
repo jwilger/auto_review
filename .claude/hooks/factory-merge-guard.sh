@@ -6,7 +6,7 @@
 # scripted mistakes, not a security boundary: it does not try to read every
 # way a shell command could merge, and anything running as the maintainer's
 # account can still merge. The enforceable boundary is a separate factory
-# identity that cannot merge factory paths, tracked in its own issue.
+# identity that cannot merge factory paths, tracked in issue #223.
 #
 # Override, only on the maintainer's explicit instruction in the session:
 # prefix the command with FACTORY_MERGE_APPROVED=<pr number>.

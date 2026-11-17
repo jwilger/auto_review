@@ -43,7 +43,7 @@ read every way a shell command could merge. It denies a merge of a pull
 request touching `factory` paths unless the command carries
 `FACTORY_MERGE_APPROVED=<pr>`, which is reserved for an instruction the
 maintainer gives in the session. The enforceable boundary is a separate
-factory identity that cannot merge `factory` paths, tracked in its own issue.
+factory identity that cannot merge `factory` paths, tracked in issue #223.
 The factory never merges a `factory` class pull request; the maintainer does.
 
 ## Intake
@@ -66,8 +66,9 @@ not block auto-merge.
 - tests
 - code
 
-Auto-merge is scheduled only on a head the approve station approved, and
-GitHub merges it once the required checks pass.
+Auto-merge is scheduled only on a head the approve station approved, or on
+that head followed only by clean merges of `main`, and GitHub merges it once
+the required checks pass.
 
 ## Mode
 dark
