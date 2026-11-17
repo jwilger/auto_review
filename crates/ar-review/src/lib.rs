@@ -19,6 +19,7 @@ pub mod override_marker;
 pub mod pipeline;
 pub mod rag_context;
 pub mod triage;
+pub mod trusted_files;
 pub mod verify;
 pub mod workspace;
 pub mod workspace_tools;
