@@ -46,7 +46,9 @@ probe per client (`ar_forgejo::capabilities::parse_major_version` reads the
 leading major component after an optional `v`); a failed probe is retried on the
 next call. It resolves the login through `GET /api/v1/user`. Both requests are
 bounded by a 10-second timeout. `ar-github` reports every capability and
-resolves `<app slug>[bot]` through `GET /app`. Each host type offers
+resolves `<app slug>[bot]` through `GET /app`, bounded by the same 10-second
+timeout (`ar_github::IDENTITY_TIMEOUT`, overridable with
+`with_identity_timeout`); a timed-out lookup is not cached. Each host type offers
 `with_bot_login` to seed a known login, and hosts built by the gateway are
 seeded with the startup bot identity.
 

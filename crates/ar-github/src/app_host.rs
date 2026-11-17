@@ -8,7 +8,8 @@
 //! reuse it until shortly before expiry.
 
 use crate::{
-    host_error, with_clone_credentials, Client, Error, InstallationTokenRequest, Permission,
+    host_error, resolve_bot_login, with_clone_credentials, Client, Error, InstallationTokenRequest,
+    Permission, IDENTITY_TIMEOUT,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
@@ -29,6 +30,7 @@ pub struct AppReviewHost {
     client: Client,
     installations: Mutex<HashMap<String, u64>>,
     bot_login: OnceCell<String>,
+    identity_timeout: std::time::Duration,
 }
 
 impl AppReviewHost {
@@ -39,6 +41,7 @@ impl AppReviewHost {
             client,
             installations: Mutex::new(HashMap::new()),
             bot_login: OnceCell::new(),
+            identity_timeout: IDENTITY_TIMEOUT,
         }
     }
 
@@ -47,6 +50,13 @@ impl AppReviewHost {
     /// [`ar_forge::ReviewHost::bot_login`] never calls `GET /app`.
     pub fn with_bot_login(mut self, login: impl Into<String>) -> Self {
         self.bot_login = OnceCell::new_with(Some(login.into()));
+        self
+    }
+
+    /// Override the bound on the `GET /app` identity request
+    /// (default [`IDENTITY_TIMEOUT`]).
+    pub fn with_identity_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.identity_timeout = timeout;
         self
     }
 
@@ -129,13 +139,7 @@ impl ar_forge::ReviewHost for AppReviewHost {
 
     async fn bot_login(&self) -> Result<String, ar_forge::HostError> {
         self.bot_login
-            .get_or_try_init(|| async {
-                self.client
-                    .get_authenticated_app()
-                    .await
-                    .map(|app| app.bot_login())
-                    .map_err(host_error)
-            })
+            .get_or_try_init(|| resolve_bot_login(&self.client, self.identity_timeout))
             .await
             .cloned()
     }

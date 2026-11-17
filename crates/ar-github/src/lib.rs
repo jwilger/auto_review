@@ -44,6 +44,8 @@ pub enum Error {
     UrlBuild(#[from] url::ParseError),
     #[error("invalid expires_at timestamp: {0}")]
     InvalidExpiresAt(#[from] time::error::Parse),
+    #[error("request timed out after {0:?}")]
+    Timeout(std::time::Duration),
 }
 
 pub fn build_clone_url(
@@ -81,6 +83,7 @@ pub struct InstallationReviewHost {
     client: Client,
     installation_token: String,
     bot_login: OnceCell<String>,
+    identity_timeout: std::time::Duration,
 }
 
 impl InstallationReviewHost {
@@ -89,6 +92,7 @@ impl InstallationReviewHost {
             client,
             installation_token: installation_token.into(),
             bot_login: OnceCell::new(),
+            identity_timeout: IDENTITY_TIMEOUT,
         }
     }
 
@@ -96,6 +100,13 @@ impl InstallationReviewHost {
     /// [`ar_forge::ReviewHost::bot_login`] never calls `GET /app`.
     pub fn with_bot_login(mut self, login: impl Into<String>) -> Self {
         self.bot_login = OnceCell::new_with(Some(login.into()));
+        self
+    }
+
+    /// Override the bound on the `GET /app` identity request
+    /// (default [`IDENTITY_TIMEOUT`]).
+    pub fn with_identity_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.identity_timeout = timeout;
         self
     }
 }
@@ -108,13 +119,7 @@ impl ar_forge::ReviewHost for InstallationReviewHost {
 
     async fn bot_login(&self) -> Result<String, ar_forge::HostError> {
         self.bot_login
-            .get_or_try_init(|| async {
-                self.client
-                    .get_authenticated_app()
-                    .await
-                    .map(|app| app.bot_login())
-                    .map_err(host_error)
-            })
+            .get_or_try_init(|| resolve_bot_login(&self.client, self.identity_timeout))
             .await
             .cloned()
     }
@@ -290,6 +295,23 @@ impl ar_forge::ReviewHost for InstallationReviewHost {
 
 fn host_error(error: Error) -> ar_forge::HostError {
     ar_forge::HostError::new(error.to_string())
+}
+
+/// Default bound on the `GET /app` request behind
+/// [`ar_forge::ReviewHost::bot_login`]. Callers share one cached result, so a
+/// server that accepts the connection but never answers must not block them
+/// all indefinitely.
+pub const IDENTITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn resolve_bot_login(
+    client: &Client,
+    timeout: std::time::Duration,
+) -> Result<String, ar_forge::HostError> {
+    tokio::time::timeout(timeout, client.get_authenticated_app())
+        .await
+        .unwrap_or(Err(Error::Timeout(timeout)))
+        .map(|app| app.bot_login())
+        .map_err(host_error)
 }
 
 #[derive(Debug, Clone)]

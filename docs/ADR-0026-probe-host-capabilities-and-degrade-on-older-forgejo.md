@@ -69,8 +69,10 @@ Features degrade on Forgejo v11–v17 rather than being refused:
   optional features only for the calls made while it is down; the next call
   probes again. One that reports a non-standard version string loses them until
   a new client is built. The warning log tells operators which case applies.
-- Host-identity requests are bounded by a timeout, so a server that accepts the
-  connection but never answers cannot block every caller waiting on the cached
-  result.
+- Host-identity requests are bounded by a 10-second timeout on both providers:
+  Forgejo's `GET /api/v1/version` and `GET /api/v1/user`, and GitHub's
+  `GET /app`. A server that accepts the connection but never answers cannot
+  block every caller waiting on the cached result, and a timed-out request is
+  not cached, so the next call asks again.
 - New capability flags extend `HostCapabilities` and its per-version table in
   `docs/CRATES.md` and `docs/DEPLOYMENT.md`.
