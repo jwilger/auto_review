@@ -96,8 +96,9 @@ gh label create factory:approved \
 ```
 
 Workflows pin every action to a full commit SHA with the release tag in a
-trailing `# vX.Y.Z` comment; Renovate (`helpers:pinGitHubActionDigests`)
-opens pull requests that bump both. Pin any new action the same way.
+trailing `# vX.Y.Z` comment; Dependabot (`.github/dependabot.yml`) opens
+pull requests that update both the pinned SHA and the trailing comment. Pin
+any new action the same way.
 
 Secret scanning and push protection are repository settings, not checks:
 a repository admin turns them on in Settings -> Code security.
