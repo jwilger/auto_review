@@ -1950,55 +1950,6 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
-    struct CapturingSubscriber {
-        messages: Arc<Mutex<Vec<String>>>,
-    }
-
-    impl tracing::Subscriber for CapturingSubscriber {
-        fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
-            true
-        }
-
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
-        }
-
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
-
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
-
-        fn event(&self, event: &tracing::Event<'_>) {
-            let mut visitor = MessageVisitor::default();
-            event.record(&mut visitor);
-            if let Some(message) = visitor.message {
-                self.messages.lock().unwrap().push(message);
-            }
-        }
-
-        fn enter(&self, _span: &tracing::span::Id) {}
-
-        fn exit(&self, _span: &tracing::span::Id) {}
-    }
-
-    #[derive(Default)]
-    struct MessageVisitor {
-        message: Option<String>,
-    }
-
-    impl tracing::field::Visit for MessageVisitor {
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            if field.name() == "message" {
-                self.message = Some(value.to_string());
-            }
-        }
-
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            if field.name() == "message" {
-                self.message = Some(format!("{value:?}").trim_matches('"').to_string());
-            }
-        }
-    }
-
     /// One captured tracing event: its level and every field rendered
     /// as a string (the message under `message`).
     #[derive(Debug, Clone)]
@@ -2016,11 +1967,23 @@ mod tests {
         }
     }
 
-    struct EventCapturingSubscriber {
+    /// Records every event's level and fields; the single capture
+    /// helper for the startup logging tests.
+    struct CapturingSubscriber {
         events: Arc<Mutex<Vec<CapturedEvent>>>,
     }
 
-    impl tracing::Subscriber for EventCapturingSubscriber {
+    /// Messages of the events captured so far, in order.
+    fn captured_messages(events: &Mutex<Vec<CapturedEvent>>) -> Vec<String> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| event.field("message").map(str::to_string))
+            .collect()
+    }
+
+    impl tracing::Subscriber for CapturingSubscriber {
         fn enabled(&self, _metadata: &tracing::Metadata<'_>) -> bool {
             true
         }
@@ -2132,7 +2095,7 @@ mod tests {
 
     async fn capture_unscoped_learnings_log(unscoped: Option<usize>) -> Vec<CapturedEvent> {
         let events = Arc::new(Mutex::new(Vec::new()));
-        let subscriber = EventCapturingSubscriber {
+        let subscriber = CapturingSubscriber {
             events: Arc::clone(&events),
         };
         let _guard = tracing::subscriber::set_default(subscriber);
@@ -3615,7 +3578,7 @@ mod tests {
     fn explicit_bare_launcher_selection_emits_prominent_warning() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let subscriber = CapturingSubscriber {
-            messages: Arc::clone(&captured),
+            events: Arc::clone(&captured),
         };
 
         tracing::subscriber::with_default(subscriber, || {
@@ -3629,7 +3592,7 @@ mod tests {
             .unwrap();
         });
 
-        let messages = captured.lock().unwrap();
+        let messages = captured_messages(&captured);
         assert!(
             messages
                 .iter()
@@ -3695,7 +3658,7 @@ mod tests {
     fn external_container_isolation_continues_without_bare_warning_or_oci_preparation() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let subscriber = CapturingSubscriber {
-            messages: Arc::clone(&captured),
+            events: Arc::clone(&captured),
         };
 
         let outcome = tracing::subscriber::with_default(subscriber, || {
@@ -3710,7 +3673,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome, GatewayLaunchOutcome::ContinueInProcess);
-        let messages = captured.lock().unwrap();
+        let messages = captured_messages(&captured);
         assert!(
             messages
                 .iter()
