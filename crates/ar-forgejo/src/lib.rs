@@ -213,6 +213,32 @@ impl ar_forge::ReviewHost for Client {
             .await
             .map_err(host_error)
     }
+
+    async fn edit_issue_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<(), ar_forge::HostError> {
+        self.edit_issue_comment(owner, repo, comment_id, body)
+            .await
+            .map_err(host_error)
+    }
+
+    /// Forgejo v11+ edits inline code comments through the
+    /// issue-comment endpoint; there is no `pulls/comments/{id}` PATCH.
+    async fn edit_review_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<(), ar_forge::HostError> {
+        self.edit_issue_comment(owner, repo, comment_id, body)
+            .await
+            .map_err(host_error)
+    }
 }
 
 /// Upper bound on a host-identity request (`GET /version`, `GET /user`).

@@ -305,6 +305,16 @@ Actions with `deploy/github-action`. For Helm, set `config.githubAppId` and the
 `secrets.secretRef`). App permissions, events, and the workflow snippet are in
 [GitHub repositories](./GITHUB.md).
 
+### Comment editing permissions
+
+The bot can edit comments it posted earlier (for example a persistent
+summary or an "addressed" acknowledgement). On Forgejo this needs a bot
+token with the `write:issue` scope; on GitHub it needs the App's
+**Issues: Read and write** and **Pull requests: Read and write**
+permissions. Both are already part of the token scopes in
+[QUICKSTART.md](./QUICKSTART.md) and the App permissions in
+[GITHUB.md](./GITHUB.md), so existing deployments need no change.
+
 ## Repository host versions
 
 auto_review probes each Forgejo server's version once per client

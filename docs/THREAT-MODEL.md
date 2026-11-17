@@ -493,6 +493,14 @@ instructions embedded in them, and requires verbatim offending-text
 quotes so humans can see the trigger. PR authors can still resolve a
 false block by editing the PR metadata or disabling the gate in repo
 config; the bot does not auto-merge, auto-approve, or auto-close.
+The comment-edit verbs (`ReviewHost::edit_issue_comment` and
+`edit_review_comment`; Forgejo `PATCH issues/comments/{id}`, GitHub
+`PATCH issues/comments/{id}` and `PATCH pulls/comments/{id}`) follow
+the same rule: the LLM supplies at most the new body and cannot
+choose the comment id. Callers must pass only ids of comments the
+bot itself authored, such as ids returned by `post_issue_comment` or
+`create_review`, or comments filtered by the bot's login, so the bot
+token cannot be used to rewrite human comments.
 _Residual risk:_ the metadata gate may false-block a PR if prompt
 injection or model judgment causes an incorrect failed result. The
 blast radius is a review-body `REQUEST_CHANGES` event, not arbitrary

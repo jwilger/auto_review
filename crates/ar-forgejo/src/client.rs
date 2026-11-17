@@ -414,6 +414,39 @@ impl Client {
         Ok(resp.id)
     }
 
+    /// Replace the body of an existing comment. Forgejo v11+ edits
+    /// both top-level issue/PR comments and inline code comments
+    /// through this endpoint. Callers must pass only ids of comments
+    /// the bot authored (THREAT-MODEL.md T9).
+    ///
+    /// Forgejo answers `204 No Content` without editing when the
+    /// comment type does not support content, so a 204 is an error.
+    pub async fn edit_issue_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<(), Error> {
+        #[derive(serde::Serialize)]
+        struct Req<'a> {
+            body: &'a str,
+        }
+        let url = self.url(&format!(
+            "repos/{owner}/{repo}/issues/comments/{comment_id}"
+        ))?;
+        let status = json_patch(&self.http, url, &Req { body }).await?;
+        if status == reqwest::StatusCode::NO_CONTENT {
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body: format!(
+                    "comment {comment_id} was not edited (Forgejo returned 204 No Content)"
+                ),
+            });
+        }
+        Ok(())
+    }
+
     /// List the top-level conversation-tab comments on a PR.
     ///
     /// Forgejo treats PRs as issues for the conversation thread, so this
@@ -546,6 +579,25 @@ async fn json_post<I: Serialize, T: for<'de> Deserialize<'de>>(
         status: 200,
         body: format!("decode error: {e}: {}", cap_for_error(&body)),
     })
+}
+
+/// PATCH a JSON body and return the 2xx status without decoding the
+/// response, which callers may not need.
+async fn json_patch<I: Serialize>(
+    http: &reqwest::Client,
+    url: Url,
+    input: &I,
+) -> Result<reqwest::StatusCode, Error> {
+    let resp = http.patch(url).json(input).send().await?;
+    let status = resp.status();
+    if !status.is_success() {
+        let body = resp.text().await?;
+        return Err(Error::Api {
+            status: status.as_u16(),
+            body: cap_for_error(&body),
+        });
+    }
+    Ok(status)
 }
 
 /// Cap the response body included in error messages. Forgejo

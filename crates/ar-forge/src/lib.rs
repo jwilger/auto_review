@@ -174,6 +174,42 @@ pub trait ReviewHost: Send + Sync {
             "issue comments not available for {owner}/{repo}#{issue_number}"
         )))
     }
+
+    /// Replace the body of an existing top-level issue/PR comment.
+    ///
+    /// Callers must pass only ids of comments the bot itself authored
+    /// (ids returned by `post_issue_comment`, or comments filtered by
+    /// the bot's login); see THREAT-MODEL.md T9.
+    async fn edit_issue_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<(), HostError> {
+        let _ = body;
+        Err(HostError::new(format!(
+            "issue comment editing not available for {owner}/{repo} comment {comment_id}"
+        )))
+    }
+
+    /// Replace the body of an existing inline review comment.
+    ///
+    /// Callers must pass only ids of comments the bot itself authored
+    /// (ids from its own `create_review`, or comments filtered by the
+    /// bot's login); see THREAT-MODEL.md T9.
+    async fn edit_review_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<(), HostError> {
+        let _ = body;
+        Err(HostError::new(format!(
+            "review comment editing not available for {owner}/{repo} comment {comment_id}"
+        )))
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -328,6 +364,126 @@ pub struct PrReviewCommentUser {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Minimal host that implements only the required methods. Every
+    /// required method bumps `calls`, so a default edit method that
+    /// tried to reach the host would show up as a non-zero count.
+    #[derive(Default)]
+    struct MinimalHost {
+        calls: std::sync::atomic::AtomicUsize,
+    }
+
+    impl MinimalHost {
+        fn record<T>(&self) -> Result<T, HostError> {
+            self.calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            Err(HostError::new("minimal host"))
+        }
+    }
+
+    #[async_trait]
+    impl ReviewHost for MinimalHost {
+        async fn get_pull_request(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+        ) -> Result<PullRequestSummary, HostError> {
+            self.record()
+        }
+        async fn get_pr_diff(&self, _: &str, _: &str, _: u64) -> Result<String, HostError> {
+            self.record()
+        }
+        async fn get_compare_diff(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &str,
+        ) -> Result<String, HostError> {
+            self.record()
+        }
+        async fn list_changed_files(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+        ) -> Result<Vec<ChangedFile>, HostError> {
+            self.record()
+        }
+        async fn list_pr_review_comments(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+        ) -> Result<Vec<PrReviewComment>, HostError> {
+            self.record()
+        }
+        async fn list_pull_reviews(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+        ) -> Result<Vec<PullReviewSummary>, HostError> {
+            self.record()
+        }
+        async fn list_pull_review_comments(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+            _: u64,
+        ) -> Result<Vec<PrReviewComment>, HostError> {
+            self.record()
+        }
+        async fn update_pull_request(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+            _: Option<&str>,
+            _: Option<&str>,
+        ) -> Result<(), HostError> {
+            self.record()
+        }
+        async fn post_commit_status(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &CommitStatus,
+        ) -> Result<(), HostError> {
+            self.record()
+        }
+        async fn create_review(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+            _: &CreateReviewRequest,
+        ) -> Result<CreatedReview, HostError> {
+            self.record()
+        }
+    }
+
+    #[tokio::test]
+    async fn default_edit_methods_return_err_without_touching_the_host() {
+        let host = MinimalHost::default();
+
+        let issue = host
+            .edit_issue_comment("o", "r", 11, "new body")
+            .await
+            .expect_err("default edit_issue_comment must fail");
+        let review = host
+            .edit_review_comment("o", "r", 12, "new body")
+            .await
+            .expect_err("default edit_review_comment must fail");
+
+        assert!(issue.message().contains("o/r"), "{issue}");
+        assert!(issue.message().contains("11"), "{issue}");
+        assert!(review.message().contains("o/r"), "{review}");
+        assert!(review.message().contains("12"), "{review}");
+        assert_eq!(host.calls.load(std::sync::atomic::Ordering::SeqCst), 0);
+    }
 
     #[test]
     fn pull_request_summary_treats_null_body_as_empty() {
