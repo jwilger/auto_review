@@ -1337,7 +1337,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         tracing::info!("LLM_EMBEDDING_MODEL not set; RAG disabled");
     }
 
-    // Optional Cheap tier — used by the LLM-driven file triage step.
+    // Optional Cheap tier, used by finding verification.
     if let Some(cheap_model) = read_non_empty_env("LLM_CHEAP_MODEL") {
         let cheap_base =
             read_non_empty_env("LLM_CHEAP_BASE_URL").unwrap_or_else(|| llm_base.clone());
@@ -1347,9 +1347,9 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
                 .context("cheap LLM provider")?,
         );
         router = router.with(ModelTier::Cheap, provider);
-        tracing::info!(model = %cheap_model, "cheap tier configured; LLM triage enabled");
+        tracing::info!(model = %cheap_model, "cheap tier configured");
     } else {
-        tracing::info!("LLM_CHEAP_MODEL not set; LLM triage disabled (heuristic only)");
+        tracing::info!("LLM_CHEAP_MODEL not set; cheap tier disabled");
     }
 
     let llm_router = Arc::new(router);

@@ -71,7 +71,6 @@ mod tests {
     fn every_response_schema_satisfies_openai_strict_mode() {
         for (name, schema) in [
             ("review", crate::schema::review_schema()),
-            ("triage", crate::triage::triage_schema()),
             ("verification", crate::verification::verification_schema()),
         ] {
             assert_strict_mode_compatible(schema, name);

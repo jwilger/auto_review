@@ -144,7 +144,7 @@ pub async fn build_review_context_with_store(
         None => Vec::new(),
     };
 
-    Ok(format_repo_context(&scored_symbols, &scored_learnings, &[]))
+    Ok(format_repo_context(&scored_symbols, &scored_learnings))
 }
 
 async fn embed_and_query_symbols(

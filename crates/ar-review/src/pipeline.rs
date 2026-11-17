@@ -525,9 +525,9 @@ pub struct ReviewArgs<'a> {
     pub pr_body: &'a str,
     pub ignored_paths: &'a GlobSet,
     pub guidelines: &'a str,
-    /// RAG-retrieved markdown context (similar code, learnings,
-    /// co-change neighbors). Empty string when the index hasn't
-    /// been built or returned no matches.
+    /// RAG-retrieved markdown context (similar code and learnings).
+    /// Empty string when the index hasn't been built or returned no
+    /// matches.
     pub repo_context: &'a str,
     /// Pre-fetched diff to use instead of `forgejo.get_pr_diff`.
     /// `Some` for incremental reviews where the orchestrator already
