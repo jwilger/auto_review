@@ -34,9 +34,10 @@ impl Router {
     /// Cap the number of simultaneous provider calls (`complete` and
     /// `embed`, across all tiers) made through this router and every
     /// clone of it. `0` is clamped to `1` so a zero setting can never
-    /// deadlock.
+    /// deadlock, and values above `Semaphore::MAX_PERMITS` are clamped
+    /// down to it so an oversized setting cannot panic.
     pub fn with_inflight_limit(mut self, n: usize) -> Self {
-        self.inflight = Some(Arc::new(Semaphore::new(n.max(1))));
+        self.inflight = Some(Arc::new(Semaphore::new(n.clamp(1, Semaphore::MAX_PERMITS))));
         self
     }
 
@@ -363,6 +364,14 @@ mod tests {
         )
         .await;
         assert!(matches!(result, Ok(Ok(_))));
+    }
+
+    #[tokio::test]
+    async fn inflight_limit_above_max_permits_clamps_instead_of_panicking() {
+        let provider = Arc::new(PeakProvider::default());
+        let router = peak_router(&provider).with_inflight_limit(usize::MAX);
+        let result = router.complete(ModelTier::Cheap, req()).await;
+        assert!(result.is_ok());
     }
 
     /// Parks inside `complete` until released, holding the router permit.
