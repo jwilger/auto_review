@@ -160,7 +160,7 @@ providers, Ollama, vLLM, OpenRouter, Together, Groq, and similar endpoints.
 | `ar-github` | GitHub App REST client for review-host operations |
 | `ar-agentcore` | AWS Bedrock AgentCore-compatible runtime HTTP surface |
 | `ar-llm` | LLM provider trait and tier router |
-| `ar-index` | Tree-sitter symbols, embeddings, vector stores, co-change graph, learnings store |
+| `ar-index` | Tree-sitter symbols, embeddings, vector stores, learnings store |
 | `ar-prompts` | Prompt templates and JSON schemas |
 | `ar-review` | Review pipeline activities |
 | `ar-chat` | `@auto-review` chat handling |

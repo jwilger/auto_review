@@ -159,7 +159,7 @@ Crate-level navigation is centralized in `docs/CRATES.md`. The summary table:
 | `ar-review` | Pipeline activities (review, verify, self-heal, RAG context, repo config) |
 | `ar-cli` | Operator CLI (`auto-review`; see `docs/CLI.md`) |
 | `ar-chat` | Agentic `@auto_review` chat handler (7 specific commands + freeform fallback) |
-| `ar-index` | Tree-sitter symbols, embeddings, co-change graph, learnings store |
+| `ar-index` | Tree-sitter symbols, embeddings, learnings store |
 
 ## Adding a new CLI subcommand
 

@@ -84,9 +84,8 @@ clone workspace
   -> inline review and commit-status posting
 ```
 
-The cheap-tier LLM triage module exists as an implementation seam, but the 1.0
-runtime path relies on deterministic trivial-PR/file triage unless a later ADR and
-code change wire LLM triage back into dispatch.
+Runtime triage is deterministic only: trivial-PR and per-file classification use
+path and extension heuristics, with no model call (ADR-0027).
 
 Repository-host operations are represented by provider-neutral DTOs and the
 `ReviewHost` trait in `ar-forge`. `ar-forgejo` is the current adapter and still
@@ -212,11 +211,9 @@ Vector-store rows are not scoped yet: `SqliteVectorStore` is still shared
 across repositories, and keying its rows by the same `RepoScope` is planned
 under ADR-0025 in issue #40.
 
-Repository context uses the diff, changed paths, tree-sitter symbols, embeddings
-when an embedding tier is configured, and repository-scoped persistent
-learnings. Co-change graph
-support exists in `ar-index`, but the 1.0 review pipeline does not inject
-co-change data into prompts. The review pipeline depends on the `VectorStore`
+Repository context draws on the diff, changed paths, tree-sitter symbols,
+embeddings when an embedding tier is configured, and repository-scoped
+persistent learnings. Git-history signals are not used (ADR-0027). The review pipeline depends on the `VectorStore`
 abstraction; `SqliteVectorStore` is the current persistent default. LanceDB or
 another dedicated vector database should be revisited only when measured scale,
 latency, or filtering requirements justify it.

@@ -1,5 +1,5 @@
-//! Format retrieved context (similar code, learnings, co-change
-//! neighbors) as markdown for the LLM prompt's `repo_context` slot.
+//! Format retrieved context (similar code and learnings) as
+//! markdown for the LLM prompt's `repo_context` slot.
 //!
 //! Pure function — the caller does the actual retrieval (querying
 //! ar-index's stores) and hands the results in. Keeps this layer
@@ -15,7 +15,6 @@ use ar_index::{ScoredLearning, ScoredSymbol};
 pub fn format_repo_context(
     similar_symbols: &[ScoredSymbol],
     relevant_learnings: &[ScoredLearning],
-    co_changed: &[(String, u32)],
 ) -> String {
     let mut out = String::new();
 
@@ -48,14 +47,6 @@ pub fn format_repo_context(
                 "- ({:?}) {}\n",
                 l.learning.source, l.learning.text
             ));
-        }
-        out.push('\n');
-    }
-
-    if !co_changed.is_empty() {
-        out.push_str("### Files that often change with these\n");
-        for (path, count) in co_changed {
-            out.push_str(&format!("- `{path}` (co-changed {count} times)\n"));
         }
         out.push('\n');
     }
@@ -106,7 +97,7 @@ mod tests {
 
     #[test]
     fn empty_inputs_produce_empty_output() {
-        let out = format_repo_context(&[], &[], &[]);
+        let out = format_repo_context(&[], &[]);
         assert!(out.is_empty());
     }
 
@@ -117,7 +108,7 @@ mod tests {
             "process",
             "fn process() {\n    todo!()\n}",
         )];
-        let out = format_repo_context(&symbols, &[], &[]);
+        let out = format_repo_context(&symbols, &[]);
         assert!(out.contains("Similar code in this repo"));
         assert!(out.contains("**process**"));
         assert!(out.contains("`src/lib.rs`:1-3"));
@@ -131,27 +122,17 @@ mod tests {
             learning("Forbid unwrap() outside tests.", LearningSource::Guideline),
             learning("We use Result::Err for I/O failures.", LearningSource::Chat),
         ];
-        let out = format_repo_context(&[], &learnings, &[]);
+        let out = format_repo_context(&[], &learnings);
         assert!(out.contains("Project conventions and past feedback"));
         assert!(out.contains("(Guideline) Forbid unwrap"));
         assert!(out.contains("(Chat) We use Result"));
     }
 
     #[test]
-    fn co_changed_renders_with_count() {
-        let co = vec![("README.md".into(), 7u32), ("CHANGELOG.md".into(), 3u32)];
-        let out = format_repo_context(&[], &[], &co);
-        assert!(out.contains("Files that often change with these"));
-        assert!(out.contains("`README.md` (co-changed 7 times)"));
-        assert!(out.contains("`CHANGELOG.md` (co-changed 3 times)"));
-    }
-
-    #[test]
     fn omits_section_headers_for_empty_inputs() {
         let symbols = vec![sym("a.rs", "x", "fn x() {}")];
-        let out = format_repo_context(&symbols, &[], &[]);
+        let out = format_repo_context(&symbols, &[]);
         assert!(out.contains("Similar code"));
         assert!(!out.contains("Project conventions"));
-        assert!(!out.contains("change with these"));
     }
 }

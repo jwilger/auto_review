@@ -1,10 +1,9 @@
 //! Repository indexing and retrieval support.
 //!
 //! Provides tree-sitter symbol extraction, embedding helpers, SQLite and
-//! in-memory vector stores, co-change graph utilities, and learnings stores used
-//! by review context construction and chat `remember`/`forget` workflows.
+//! in-memory vector stores, and learnings stores used by review context
+//! construction and chat `remember`/`forget` workflows.
 
-pub mod co_change;
 pub mod dynamodb_learnings;
 pub mod embed;
 pub mod learnings;
@@ -15,7 +14,6 @@ pub mod symbols;
 pub mod vector_store;
 pub mod walker;
 
-pub use co_change::{compute_co_change, parse_git_log_co_change, CoChangeError, CoChangeGraph};
 pub use dynamodb_learnings::{
     AwsDynamoDbLearningsClient, DynamoDbLearningsClient, DynamoDbLearningsStore,
 };

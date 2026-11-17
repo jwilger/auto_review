@@ -14,7 +14,7 @@ pub struct ReviewPromptInputs<'a> {
     /// project conventions. Empty when no config is present.
     pub guidelines: &'a str,
     /// RAG-retrieved context: relevant code snippets from the index,
-    /// matching learnings, co-change neighbors, etc. Free-form markdown
+    /// matching learnings, etc. Free-form markdown
     /// — the orchestrator decides how to format it. Empty when the
     /// index hasn't been built or returned no matches.
     pub repo_context: &'a str,
