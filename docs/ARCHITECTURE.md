@@ -257,7 +257,10 @@ obligations.
 ## ADR event stream
 
 Architecture decisions are recorded as ADR events under `docs/ADR-*.md`.
-Accepted or rejected ADRs are immutable except for brief supersession metadata.
-When the architecture changes, use the ADR workflow tools to create or update a
-proposed ADR carrying the intended projection patch. The patch is applied to
-this document only when that ADR is accepted.
+ADRs are append-only: accepted or rejected ADRs are immutable except for brief
+supersession metadata. A changed decision is recorded as a new ADR that
+supersedes the old one, the older record gets only a `Superseded` status and a
+short `Superseded By` section, and this document is updated in the same change.
+Per ADR-0023, enforcement comes from the `.claude/rules/adr-event-stream.md`
+rule, the architecture reviewer agent and human review, not from mechanical
+tooling.
