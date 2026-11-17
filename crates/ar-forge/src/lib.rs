@@ -246,6 +246,22 @@ pub struct PrReviewComment {
     pub body: String,
     #[serde(default)]
     pub user: PrReviewCommentUser,
+    /// File path an inline review comment is anchored to. Empty for
+    /// top-level conversation comments.
+    #[serde(default, deserialize_with = "empty_string_when_null")]
+    pub path: String,
+    /// Diff position the inline comment was originally anchored at.
+    /// Replies in the same thread share `path` and `original_position`.
+    /// Zero for top-level conversation comments.
+    #[serde(default, deserialize_with = "zero_when_null")]
+    pub original_position: u64,
+}
+
+fn zero_when_null<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -271,5 +287,33 @@ mod tests {
 
         assert_eq!(summary.body, "");
         assert_eq!(summary.state, "open");
+    }
+
+    #[test]
+    fn pr_review_comment_reads_inline_thread_location_when_present() {
+        let comment: PrReviewComment = serde_json::from_value(serde_json::json!({
+            "id": 12,
+            "body": "@auto-review help",
+            "user": {"login": "bob"},
+            "path": "src/lib.rs",
+            "original_position": 4
+        }))
+        .expect("comment");
+
+        assert_eq!(comment.path, "src/lib.rs");
+        assert_eq!(comment.original_position, 4);
+    }
+
+    #[test]
+    fn pr_review_comment_without_inline_location_still_deserializes() {
+        let comment: PrReviewComment = serde_json::from_value(serde_json::json!({
+            "id": 3,
+            "body": "top-level",
+            "user": {"login": "carol"}
+        }))
+        .expect("comment");
+
+        assert_eq!(comment.path, "");
+        assert_eq!(comment.original_position, 0);
     }
 }
