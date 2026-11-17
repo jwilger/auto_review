@@ -28,6 +28,7 @@ pub fn validate_review_output(json: &str) -> Result<ReviewOutput, ValidationErro
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::types::FindingCategory;
 
     #[test]
     fn rejects_non_json() {
@@ -55,6 +56,45 @@ mod tests {
         let out = validate_review_output(json).expect("ok");
         assert_eq!(out.findings.len(), 2);
         assert_eq!(out.findings[1].line_end, Some(5));
+    }
+
+    #[test]
+    fn finding_with_title_and_category_round_trips() {
+        let json = r#"{"summary":"ok","findings":[
+            {"path":"a.rs","line_start":1,"severity":"note","message":"m","title":"Nit","category":"style"}
+        ]}"#;
+        let out = validate_review_output(json).expect("ok");
+        assert_eq!(out.findings[0].category, FindingCategory::Style);
+        assert_eq!(out.findings[0].title, "Nit");
+        let reserialized = serde_json::to_string(&out).expect("serialize");
+        let again = validate_review_output(&reserialized).expect("round-trip");
+        assert_eq!(again, out);
+    }
+
+    #[test]
+    fn finding_without_title_or_category_defaults_to_empty_title_and_correctness() {
+        let json = r#"{"summary":"x","findings":[
+            {"path":"a.rs","line_start":1,"severity":"warning","message":"m"}
+        ]}"#;
+        let out = validate_review_output(json).expect("ok");
+        assert_eq!(out.findings[0].title, "");
+        assert_eq!(out.findings[0].category, FindingCategory::Correctness);
+    }
+
+    #[test]
+    fn rejects_out_of_enum_wrong_case_and_non_string_categories() {
+        for category in [r#""nitpick""#, r#""Style""#, "7"] {
+            let json = format!(
+                r#"{{"summary":"x","findings":[
+                    {{"path":"a","line_start":1,"severity":"note","message":"m","category":{category}}}
+                ]}}"#
+            );
+            let err = validate_review_output(&json).expect_err("should err");
+            assert!(
+                matches!(err, ValidationError::SchemaMismatch(_)),
+                "category {category} gave {err:?}"
+            );
+        }
     }
 
     #[test]

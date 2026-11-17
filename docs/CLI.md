@@ -50,16 +50,33 @@ auto-review ops status --gateway-url https://reviewer.example.com
 | Command | Purpose |
 |---|---|
 | `config validate` | Parses `.auto_review.yaml`; add `--strict` to reject unknown top-level keys. |
-| `learnings list` | Lists persistent learnings, optionally as JSON. |
-| `learnings forget` | Deletes one learning by id. |
+| `learnings list` | Lists every persistent learning with its repository and origin PR, optionally as JSON. |
+| `learnings forget` | Deletes one learning by id, in any repository. |
 | `history reset-pr` | Clears the last-reviewed SHA for one PR so the next review is fresh. |
 | `history purge` | Deletes review-history rows older than N days. |
+
+### Learnings
+
+Learnings are scoped to one repository, written as lowercased `owner/repo`.
+`learnings list` prints each learning's repository and the PR it was taught
+on; the text table shows `-` for either when it is unknown, and `--json` emits
+`repo` and `origin_pr` as `null`. Two flags narrow the list, and they cannot be
+combined:
+
+| Flag | Lists |
+|---|---|
+| `--repo OWNER/REPO` | Only learnings of that repository. The value is matched case-insensitively. |
+| `--unscoped` | Only legacy learnings with no repository. Reviews never retrieve these, and the gateway logs their count once at startup. |
+
+`learnings forget --id N` is the operator path and removes any learning,
+including unscoped ones. The chat `forget` command only removes learnings of
+the repository it is posted in.
 
 ## Debugging and benchmarks
 
 | Command | Purpose |
 |---|---|
-| `review once` | Runs a one-shot reasoning-path review against one PR without the gateway. It does not wire every gateway runtime store or optional LLM tier. `--dry-run` prints the base rendered LLM prompt and exits without clone/RAG/repo-config loading/posting. |
+| `review once` | Runs a one-shot reasoning-path review against one PR without the gateway. It does not wire every gateway runtime store or optional LLM tier. `--dry-run` prints the base rendered LLM prompt and exits without clone/RAG/repo-config loading/posting. The PR title and body appear inside `<<<UNTRUSTED_DATA ...>>>` fences whose `nonce` is drawn at random on every invocation, so two dry runs of the same PR differ in the nonce. |
 | `bench run` | Replays PR fixtures through the LLM review path. `--baseline FILE` compares against an earlier JSON run; `--fail-on-regression` exits non-zero on configured precision/recall/latency regressions. |
 
 Benchmark fixture details live in [Benchmarks](./BENCHMARKS.md).

@@ -12,7 +12,7 @@ use std::collections::{BTreeMap, HashMap};
 use thiserror::Error;
 use time::format_description::well_known::Rfc3339;
 use time::{Duration, OffsetDateTime};
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 use url::Url;
 
 pub use webhook::{
@@ -44,6 +44,8 @@ pub enum Error {
     UrlBuild(#[from] url::ParseError),
     #[error("invalid expires_at timestamp: {0}")]
     InvalidExpiresAt(#[from] time::error::Parse),
+    #[error("request timed out after {0:?}")]
+    Timeout(std::time::Duration),
 }
 
 pub fn build_clone_url(
@@ -80,6 +82,8 @@ pub fn with_clone_credentials(clone_url: &str, installation_token: &str) -> Resu
 pub struct InstallationReviewHost {
     client: Client,
     installation_token: String,
+    bot_login: OnceCell<String>,
+    identity_timeout: std::time::Duration,
 }
 
 impl InstallationReviewHost {
@@ -87,12 +91,39 @@ impl InstallationReviewHost {
         Self {
             client,
             installation_token: installation_token.into(),
+            bot_login: OnceCell::new(),
+            identity_timeout: IDENTITY_TIMEOUT,
         }
+    }
+
+    /// Seed a bot login already known to the caller, so
+    /// [`ar_forge::ReviewHost::bot_login`] never calls `GET /app`.
+    pub fn with_bot_login(mut self, login: impl Into<String>) -> Self {
+        self.bot_login = OnceCell::new_with(Some(login.into()));
+        self
+    }
+
+    /// Override the bound on the `GET /app` identity request
+    /// (default [`IDENTITY_TIMEOUT`]).
+    pub fn with_identity_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.identity_timeout = timeout;
+        self
     }
 }
 
 #[async_trait]
 impl ar_forge::ReviewHost for InstallationReviewHost {
+    async fn capabilities(&self) -> ar_forge::HostCapabilities {
+        ar_forge::HostCapabilities::all()
+    }
+
+    async fn bot_login(&self) -> Result<String, ar_forge::HostError> {
+        self.bot_login
+            .get_or_try_init(|| resolve_bot_login(&self.client, self.identity_timeout))
+            .await
+            .cloned()
+    }
+
     async fn clone_url(&self, owner: &str, repo: &str) -> Result<String, ar_forge::HostError> {
         let clone_url = self
             .client
@@ -290,6 +321,23 @@ impl ar_forge::ReviewHost for InstallationReviewHost {
 
 fn host_error(error: Error) -> ar_forge::HostError {
     ar_forge::HostError::new(error.to_string())
+}
+
+/// Default bound on the `GET /app` request behind
+/// [`ar_forge::ReviewHost::bot_login`]. Callers share one cached result, so a
+/// server that accepts the connection but never answers must not block them
+/// all indefinitely.
+pub const IDENTITY_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn resolve_bot_login(
+    client: &Client,
+    timeout: std::time::Duration,
+) -> Result<String, ar_forge::HostError> {
+    tokio::time::timeout(timeout, client.get_authenticated_app())
+        .await
+        .unwrap_or(Err(Error::Timeout(timeout)))
+        .map(|app| app.bot_login())
+        .map_err(host_error)
 }
 
 #[derive(Debug, Clone)]
@@ -787,6 +835,14 @@ impl Client {
         .await
     }
 
+    /// Fetch a file's raw contents from the repo at `ref_` (a branch, tag, or
+    /// commit SHA). Returns `Ok(None)` when the file does not exist (404).
+    ///
+    /// This is the transport for the trusted base-branch loader
+    /// (`ar_review::trusted_files`): both the review dispatcher and the chat
+    /// handler read `.auto_review.yaml` through it at the PR's base branch,
+    /// never from the head checkout. The whole body is read into memory; the
+    /// loader's size cap applies after the read.
     pub async fn get_file_content(
         &self,
         owner: &str,
@@ -795,9 +851,7 @@ impl Client {
         ref_: &str,
         installation_token: &str,
     ) -> Result<Option<String>, Error> {
-        let url = self.url(&format!(
-            "repos/{owner}/{repo}/contents/{file_path}?ref={ref_}"
-        ))?;
+        let url = self.contents_url(owner, repo, file_path, ref_)?;
         self.get_optional_text_with_installation_token(
             url,
             installation_token,
@@ -971,6 +1025,26 @@ impl Client {
 
     fn url(&self, path: &str) -> Result<Url, Error> {
         Ok(self.base.join(path.trim_start_matches('/'))?)
+    }
+
+    /// Builds the `contents` API URL with every path segment and the `ref`
+    /// query value percent-encoded, so branch names such as `feature/a&b`
+    /// or file paths with reserved characters cannot alter the request.
+    fn contents_url(
+        &self,
+        owner: &str,
+        repo: &str,
+        file_path: &str,
+        ref_: &str,
+    ) -> Result<Url, Error> {
+        let mut url = self.base.clone();
+        url.path_segments_mut()
+            .map_err(|()| Error::InvalidBaseUrl(self.base.to_string()))?
+            .pop_if_empty()
+            .extend(["repos", owner, repo, "contents"])
+            .extend(file_path.split('/').filter(|segment| !segment.is_empty()));
+        url.query_pairs_mut().append_pair("ref", ref_);
+        Ok(url)
     }
 }
 

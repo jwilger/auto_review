@@ -1,15 +1,12 @@
 //! Repo-level `.auto_review.yaml` configuration.
 //!
-//! Read once per review from the cloned workspace. Anything missing falls
-//! back to defaults. Callers should treat the loader as best-effort: a
-//! malformed YAML shouldn't break the review pipeline, just emit defaults
-//! and log a warning.
+//! This module only parses config bodies. Runtime loading goes through
+//! [`crate::trusted_files::load_repo_config_from_base`], which reads the
+//! file from the pull request's base branch, never from the head checkout,
+//! so a pull request cannot change how it is reviewed. Anything missing
+//! falls back to defaults.
 
 use serde::{Deserialize, Serialize};
-use std::path::Path;
-
-const CONFIG_FILENAME: &str = ".auto_review.yaml";
-const ALT_CONFIG_FILENAME: &str = ".auto_review.yml";
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepoConfig {
@@ -18,9 +15,11 @@ pub struct RepoConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// Repo-author free-form rules, injected into the LLM system prompt.
-    /// Use this for project-specific conventions ("we never use raw
-    /// SQL", "always prefer immutable types", etc.).
+    /// Repo-author free-form project conventions ("we never use raw
+    /// SQL", "always prefer immutable types", etc.). They reach the
+    /// review prompt inside a `guidelines` untrusted-data fence, so they
+    /// shape what the reviewer flags but cannot override the system
+    /// prompt's rules, severity definitions or output contract.
     #[serde(default)]
     pub guidelines: String,
 
@@ -125,7 +124,8 @@ impl Default for RepoConfig {
 
 /// Parse a `.auto_review.yaml` body into a [`RepoConfig`], surfacing
 /// errors verbatim. Used by the `auto_review validate-config` CLI
-/// subcommand; the runtime loader [`load_repo_config`] swallows the
+/// subcommand; the runtime loader
+/// [`crate::trusted_files::load_repo_config_from_base`] swallows the
 /// same errors and falls back to defaults so a malformed config
 /// can't break the review pipeline.
 pub fn parse_repo_config(yaml: &str) -> Result<RepoConfig, serde_yaml::Error> {
@@ -216,66 +216,9 @@ pub enum RepoConfigStrictError {
     UnknownKeys(Vec<String>),
 }
 
-/// Hard cap on the bytes we'll read from a repo-supplied
-/// `.auto_review.yaml`. The file lives in the PR-cloned
-/// workspace, so an attacker submitting a PR controls its
-/// content. Without a cap, a malicious 1 GiB YAML would OOM the
-/// gateway during load. 64 KiB easily holds any real config (the
-/// example file in the repo is well under 1 KiB) — beyond that is
-/// almost certainly an attack or a paste mistake.
-const REPO_CONFIG_MAX_BYTES: u64 = 64 * 1024;
-
-/// Load the repo-level config from a cloned workspace. Returns
-/// `RepoConfig::default()` if no config file is present or parsing fails;
-/// in the latter case, a warning is logged.
-pub fn load_repo_config(workspace_path: &Path) -> RepoConfig {
-    for name in [CONFIG_FILENAME, ALT_CONFIG_FILENAME] {
-        let path = workspace_path.join(name);
-        // Refuse to read pathologically large YAML files. A PR
-        // can commit anything; without this, the read_to_string
-        // call below would happily slurp gigabytes into RAM.
-        if let Ok(meta) = std::fs::metadata(&path) {
-            if meta.len() > REPO_CONFIG_MAX_BYTES {
-                tracing::warn!(
-                    path = %path.display(),
-                    bytes = meta.len(),
-                    cap = REPO_CONFIG_MAX_BYTES,
-                    "repo config exceeds size cap; using defaults"
-                );
-                return RepoConfig::default();
-            }
-        }
-        match std::fs::read_to_string(&path) {
-            Ok(contents) => match serde_yaml::from_str::<RepoConfig>(&contents) {
-                Ok(cfg) => {
-                    tracing::debug!(
-                        path = %path.display(),
-                        enabled = cfg.enabled,
-                        ignored = cfg.ignored_paths.len(),
-                        "loaded repo config"
-                    );
-                    return cfg;
-                }
-                Err(e) => {
-                    tracing::warn!(path = %path.display(), error = %e, "failed to parse repo config; using defaults");
-                    return RepoConfig::default();
-                }
-            },
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => continue,
-            Err(e) => {
-                tracing::warn!(path = %path.display(), error = %e, "failed to read repo config; using defaults");
-                return RepoConfig::default();
-            }
-        }
-    }
-    RepoConfig::default()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::fs;
-    use tempfile::tempdir;
 
     #[test]
     fn default_config_enables_review_with_no_overrides() {
@@ -344,17 +287,8 @@ mod tests {
     }
 
     #[test]
-    fn missing_config_file_returns_default() {
-        let dir = tempdir().unwrap();
-        let cfg = load_repo_config(dir.path());
-        assert_eq!(cfg, RepoConfig::default());
-    }
-
-    #[test]
     fn parses_full_yaml_config() {
-        let dir = tempdir().unwrap();
-        fs::write(
-            dir.path().join(".auto_review.yaml"),
+        let cfg = parse_repo_config(
             r#"
 enabled: true
 guidelines: |
@@ -365,9 +299,7 @@ ignored_paths:
   - "src/generated/**"
 "#,
         )
-        .unwrap();
-
-        let cfg = load_repo_config(dir.path());
+        .expect("parse config");
         assert!(cfg.enabled);
         assert!(cfg.guidelines.contains("total functions"));
         assert_eq!(cfg.ignored_paths.len(), 2);
@@ -375,39 +307,15 @@ ignored_paths:
 
     #[test]
     fn enabled_false_disables_review() {
-        let dir = tempdir().unwrap();
-        fs::write(dir.path().join(".auto_review.yaml"), "enabled: false\n").unwrap();
-        let cfg = load_repo_config(dir.path());
+        let cfg = parse_repo_config("enabled: false\n").expect("parse config");
         assert!(!cfg.enabled);
     }
 
     #[test]
-    fn yml_extension_is_also_recognized() {
-        let dir = tempdir().unwrap();
-        fs::write(dir.path().join(".auto_review.yml"), "enabled: false\n").unwrap();
-        let cfg = load_repo_config(dir.path());
-        assert!(!cfg.enabled);
-    }
-
-    #[test]
-    fn yaml_takes_precedence_over_yml_when_both_present() {
-        let dir = tempdir().unwrap();
-        fs::write(dir.path().join(".auto_review.yaml"), "enabled: true\n").unwrap();
-        fs::write(dir.path().join(".auto_review.yml"), "enabled: false\n").unwrap();
-        let cfg = load_repo_config(dir.path());
-        assert!(cfg.enabled);
-    }
-
-    #[test]
-    fn malformed_yaml_falls_back_to_default() {
-        let dir = tempdir().unwrap();
-        fs::write(
-            dir.path().join(".auto_review.yaml"),
-            "enabled: not_a_bool\n",
-        )
-        .unwrap();
-        let cfg = load_repo_config(dir.path());
-        assert_eq!(cfg, RepoConfig::default());
+    fn malformed_yaml_is_a_parse_error() {
+        // The runtime loader turns this error into defaults plus a
+        // warning; see trusted_files::tests.
+        assert!(parse_repo_config("enabled: not_a_bool\n").is_err());
     }
 
     /// Contract test: the `KNOWN_KEYS` allow-list must match the
@@ -533,31 +441,8 @@ ignored_paths:
     }
 
     #[test]
-    fn oversized_config_file_falls_back_to_defaults_without_reading() {
-        // A malicious PR could commit a multi-MB .auto_review.yaml
-        // and OOM the gateway during load. The size-cap check
-        // bypasses the read entirely on oversized files.
-        let dir = tempdir().unwrap();
-        // 200 KiB > 64 KiB cap. Content is irrelevant — the loader
-        // shouldn't even parse it.
-        let huge: String = "ignored_paths:\n  - foo\n".repeat(20_000);
-        fs::write(dir.path().join(".auto_review.yaml"), &huge).unwrap();
-        let cfg = load_repo_config(dir.path());
-        // Default config — the oversize triggered the bypass, so
-        // `ignored_paths` came from RepoConfig::default() (empty).
-        assert!(cfg.ignored_paths.is_empty());
-        assert!(cfg.enabled);
-    }
-
-    #[test]
     fn partial_config_merges_with_defaults() {
-        let dir = tempdir().unwrap();
-        fs::write(
-            dir.path().join(".auto_review.yaml"),
-            "ignored_paths:\n  - vendor/**\n",
-        )
-        .unwrap();
-        let cfg = load_repo_config(dir.path());
+        let cfg = parse_repo_config("ignored_paths:\n  - vendor/**\n").expect("parse config");
         // Unset fields keep their defaults.
         assert!(cfg.enabled);
         assert!(cfg.guidelines.is_empty());

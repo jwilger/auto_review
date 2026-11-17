@@ -2,11 +2,11 @@
 //!
 //! Linters need files on disk, not just a diff. `prepare_workspace` shallow-
 //! clones the target repo into a temp directory, fetches the PR's head SHA,
-//! and checks it out. The returned [`PreparedWorkspace`] auto-deletes its
-//! tempdir when dropped.
+//! checks it out, and removes the credential-bearing `origin` remote. The
+//! returned [`PreparedWorkspace`] auto-deletes its tempdir when dropped.
 
 use crate::error::ReviewError;
-use std::{env, path::Path};
+use std::{env, ffi::OsStr, path::Path};
 use tempfile::TempDir;
 use tokio::process::Command;
 use url::Url;
@@ -68,7 +68,8 @@ pub fn build_clone_url(
 ///
 /// Strategy: `git clone --no-checkout --depth=1`, then `git fetch --depth=1
 /// origin <sha>`, then `git checkout <sha>`. This works even when the head
-/// SHA isn't on the default branch.
+/// SHA isn't on the default branch. The `origin` remote is then removed so
+/// the token never stays in the workspace `.git/config`.
 pub async fn prepare_workspace(
     base: &str,
     token: &str,
@@ -85,6 +86,10 @@ pub async fn prepare_workspace(
 /// This is the provider-neutral clone seam: host adapters prepare their own
 /// clone URL/auth material, while workspace preparation keeps the same hermetic
 /// git execution and SHA validation.
+///
+/// The `origin` remote is removed right after checkout so the workspace
+/// `.git/config` holds no credential-bearing URL. Any further fetch from the
+/// clone source must happen before that removal.
 pub async fn prepare_workspace_from_clone_url(
     clone_url: &str,
     head_sha: &str,
@@ -108,15 +113,21 @@ pub async fn prepare_workspace_from_clone_url(
     let path = dir.path().to_owned();
 
     git(&[
-        "clone",
-        "--no-checkout",
-        "--depth=1",
-        clone_url,
-        path.to_str().expect("tempdir path is utf-8"),
+        OsStr::new("clone"),
+        OsStr::new("--no-checkout"),
+        OsStr::new("--depth=1"),
+        OsStr::new(clone_url),
+        path.as_os_str(),
     ])
     .await?;
     git_in(&path, &["fetch", "--depth=1", "origin", head_sha]).await?;
     git_in(&path, &["checkout", head_sha]).await?;
+    // The clone URL carries the bot credential in its userinfo and `git
+    // clone` stores it as `remote.origin.url` in `.git/config`, which the
+    // LLM-driven `read_file` tool can reach. Drop the remote now that the
+    // checkout is done. On failure `dir` is dropped here, so no workspace
+    // that still holds the credential escapes (fail closed).
+    git_in(&path, &["remote", "remove", "origin"]).await?;
 
     Ok(PreparedWorkspace { dir })
 }
@@ -130,7 +141,7 @@ fn is_valid_git_sha(s: &str) -> bool {
     (7..=64).contains(&len) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
 
-async fn git(args: &[&str]) -> Result<(), WorkspaceError> {
+async fn git<S: AsRef<OsStr>>(args: &[S]) -> Result<(), WorkspaceError> {
     let output = hermetic_git_command().args(args).output().await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -524,6 +535,91 @@ mod tests {
             !sentinel.exists(),
             "ambient askpass helper executed and created {}",
             sentinel.display()
+        );
+    }
+
+    /// Run hermetic git in `dir` for test fixture setup and return stdout.
+    async fn fixture_git(dir: &Path, args: &[&str]) -> String {
+        let output = hermetic_git_command()
+            .arg("-C")
+            .arg(dir)
+            .args(args)
+            .output()
+            .await
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "fixture git {args:?} failed: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    /// Build a bare repository holding one commit with `README.md`, and
+    /// return its `file://` URL and the commit SHA.
+    async fn bare_repo_with_one_commit(root: &Path) -> (String, String) {
+        let src = root.join("src");
+        let bare = root.join("bare.git");
+        fs::create_dir_all(&src).unwrap();
+        fixture_git(&src, &["init", "--quiet"]).await;
+        fs::write(src.join("README.md"), "hello from fixture\n").unwrap();
+        fixture_git(&src, &["add", "README.md"]).await;
+        fixture_git(
+            &src,
+            &[
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                "fixture",
+            ],
+        )
+        .await;
+        let sha = fixture_git(&src, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+        fixture_git(
+            root,
+            &[
+                "clone",
+                "--quiet",
+                "--bare",
+                src.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        )
+        .await;
+        (format!("file://{}", bare.display()), sha)
+    }
+
+    #[tokio::test]
+    async fn prepare_workspace_from_clone_url_removes_origin_remote_after_checkout() {
+        let fixture = TempDir::new().unwrap();
+        let (clone_url, head_sha) = bare_repo_with_one_commit(fixture.path()).await;
+
+        let workspace = prepare_workspace_from_clone_url(&clone_url, &head_sha)
+            .await
+            .unwrap();
+
+        let remotes = fixture_git(workspace.path(), &["remote"]).await;
+        assert_eq!(remotes, "", "workspace must keep no git remote");
+        let config = fs::read_to_string(workspace.path().join(".git/config")).unwrap();
+        assert!(
+            !config.contains("[remote \"origin\"]") && !config.contains("url ="),
+            "workspace .git/config must hold no clone URL, got:\n{config}"
+        );
+
+        let head = fixture_git(workspace.path(), &["rev-parse", "HEAD"]).await;
+        assert_eq!(head.trim(), head_sha);
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("README.md")).unwrap(),
+            "hello from fixture\n"
         );
     }
 

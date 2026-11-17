@@ -315,6 +315,35 @@ permissions. Both are already part of the token scopes in
 [QUICKSTART.md](./QUICKSTART.md) and the App permissions in
 [GITHUB.md](./GITHUB.md), so existing deployments need no change.
 
+## Repository host versions
+
+auto_review probes each Forgejo server's version once per client
+(`GET /api/v1/version`) and enables review-thread features the server supports.
+GitHub supports all of them. The gateway uses its startup bot identity
+(`AR_BOT_LOGIN` or `GITHUB_BOT_LOGIN`, or their defaults) to recognise its own
+reviews and comments; the AgentCore runtime looks the login up through
+`GET /api/v1/user` on Forgejo or `GET /app` on GitHub. A Forgejo bot token
+therefore needs read access to `GET /api/v1/user` unless `AR_BOT_LOGIN` is set,
+which overrides the lookup for hosts the gateway builds.
+
+| Host | multi-line comments | suggestion blocks | thread replies | resolve threads |
+|---|---|---|---|---|
+| Forgejo ≤15 (including legacy `1.x` numbering) | no | no | no | no |
+| Forgejo 16, 17 | yes | no | no | no |
+| Forgejo ≥18 | yes | yes | yes | yes |
+| GitHub | yes | yes | yes | yes |
+
+On Forgejo v11–v17, suggested changes appear as plain code blocks, and
+addressed findings are marked by editing the original comment instead of
+replying to and resolving the thread. If the version probe fails (the server
+is unreachable, returns an HTTP error or a malformed body, or does not answer
+within 10 seconds), auto_review logs a warning, uses none of the optional
+features for that call, and probes again on the next one. If the probe returns
+an unrecognised version string, auto_review logs a warning and uses none of the
+optional features until it restarts. A successful probe is kept for the life of
+the process, so restart the service after upgrading Forgejo to pick up new
+capabilities.
+
 ## Prometheus and Grafana
 
 Prometheus rules ship at `deploy/prometheus/auto_review.rules.yaml`. Install them
