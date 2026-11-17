@@ -22,7 +22,11 @@ build:
 	cargo build --workspace
 
 shellcheck:
-	shellcheck scripts/release
+	shellcheck scripts/release .claude/hooks/*.sh .claude/hooks/tests/*.sh
+
+# Exercises the factory's PreToolUse hooks against a fake gh.
+hooks-test:
+	for t in .claude/hooks/tests/*.test.sh; do bash "$t"; done
 
 actionlint:
 	actionlint
@@ -37,4 +41,4 @@ serve:
 watch:
 	AR_GATEWAY_BIND=0.0.0.0:8090 bacon --job gateway-dev
 
-ci: fmt clippy test deny build shellcheck actionlint
+ci: fmt clippy test deny build shellcheck hooks-test actionlint

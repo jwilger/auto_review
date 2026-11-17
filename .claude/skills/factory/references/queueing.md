@@ -7,6 +7,16 @@ The orchestrator follows these procedures whenever it launches, defers, requeues
 - One deliver run at a time, up to `loops.deliver.max_concurrent`, checked before every launch, `approve` and `rework` included. A second request is queued, not launched.
 - Queue order and priority are exactly what the tracker's list-ready returns. Never reorder or defer items to work around a stuck one; the no-progress check (below) takes a stuck item out of the queue instead.
 - An item waiting only for a slot or a blocker is `queued`, never `awaiting-human`, because no person is needed to start it.
+- `next` starts nothing while too many factory pull requests wait for a person (the awaiting-human cap, below).
+
+## Awaiting-human cap
+
+`loops.deliver.max_awaiting_human` in `factory/factory.yaml` (default 2) caps how many factory pull requests may wait for a person before `next` starts more work, because pull requests that pile up on an old `main` cost hours of merge and conflict cycles to land.
+
+1. Run this in `next` after reconcile and before claiming anything.
+2. Count the open pull requests labelled `factory` that have no auto-merge scheduled: `gh pr list --label factory --state open --json number,autoMergeRequest,isDraft`, counting every entry whose `autoMergeRequest` is null, drafts included. That set covers every `needs-review` pull request and any `approved` one whose auto-merge was not scheduled.
+3. When the count is at or above `max_awaiting_human`, emit one notice line in the run output naming the cap and the waiting pull request numbers (for example `awaiting-human cap 2 reached: #210, #214`), then stop. Claim nothing, transition nothing and post no tracker comments, so a looping `/factory next` stays quiet until a person merges or approves one.
+4. The cap applies to `next` only. An explicit `ITEM_ID`, `approve` or `rework` is not capped, because a person asked for it.
 
 ## Slot check
 
@@ -29,14 +39,14 @@ Post the resume state whenever an item moves to `queued` or `awaiting-human`, so
 
 `attempt` counts the requeues after `exhausted` or `gate-failed`, and `fingerprint` is the sorted list of `file: summary` strings of those findings and failing gate summaries, so the next requeue can tell whether anything changed. `change` is the link of an open factory change request whose review findings this rework answers (`references/follow-through.md`), and null otherwise.
 
-Set `branch` only when `factory/<item>` was pushed. Push the item branch, never with force, before posting, so a run on another checkout can resume from it.
+Set `branch` only when `factory/<item>` was pushed. Push the item branch with `nix develop .#ci --command git push origin factory/<item>`, never with force, before posting, so a run on another checkout can resume from it. The resumed build merges current `origin/main` into the branch before anything else.
 
 `next`, `ITEM_ID`, `approve` and `rework` read the latest such comment. Trust one only from the account the tracker adapter claims as, or from a tracker member who can edit items as the installed `10kr-work-tracking` adapter defines it, because the comment steers the builder. With `tracker-files`, the comment lives in the repository, so commit access to it is that trust. Do not assume a forge's write access means anything to a tracker such as Jira or Linear.
 
 ## Requeue
 
 1. For `exhausted` and `gate-failed`, run the no-progress check (below) first. When it says a person is needed, stop here and park the item instead.
-2. Push the item branch when one exists.
+2. Push the item branch when one exists, with `nix develop .#ci --command git push origin factory/<item>`.
 3. Post its resume state, with the reason, any findings, the next `attempt` and the new `fingerprint`, when its criteria are known. Without criteria, return the item to station `spec` instead of station `build` in the next step, so the next pick restarts spec.
 4. Transition it to `queued` at station `build`, unassigned, with a one-line comment giving the reason.
 5. Record the run in `factory/metrics.jsonl` with `outcome: "requeued"`.
