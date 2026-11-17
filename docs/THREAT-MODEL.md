@@ -347,6 +347,10 @@ intake. The throttle runs **before** HMAC verification so a flood
 of unsigned junk can't burn CPU on signature math. Rejected
 requests get a `429` and increment
 `auto_review_webhook_rate_limited_total`.
+`AR_LLM_MAX_INFLIGHT` (off by default) bounds concurrent LLM provider
+calls per process, which mitigates fan-out from agentic verification
+and concurrent stages overloading self-hosted backends or tripping
+provider rate limits.
 _Residual risk:_ operators who don't set concurrency/rate-limit env vars can
 still exhaust disk or LLM budget under bursty load. Documented as opt-in to
 avoid accidentally throttling existing deployments.

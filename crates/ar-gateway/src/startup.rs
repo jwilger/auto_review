@@ -234,6 +234,7 @@ const INNER_GATEWAY_ENV_ALLOWLIST: &[&str] = &[
     "AR_POLL_INTERVAL_SECS",
     "AR_READINESS_TTL_SECS",
     "AR_REVIEW_CONCURRENCY",
+    "AR_LLM_MAX_INFLIGHT",
     "AR_WEBHOOK_RATE_PER_SEC",
     "AR_WEBHOOK_BURST",
     "AR_SEVERITY_FLOOR",
@@ -1350,6 +1351,14 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         tracing::info!(model = %cheap_model, "cheap tier configured; LLM triage enabled");
     } else {
         tracing::info!("LLM_CHEAP_MODEL not set; LLM triage disabled (heuristic only)");
+    }
+
+    // Optional process-wide cap on simultaneous LLM provider calls.
+    // Applied before the router is shared so every dispatcher and chat
+    // clone draws from the same semaphore.
+    if let Some(max) = parse_env::<usize>("AR_LLM_MAX_INFLIGHT") {
+        router = router.with_inflight_limit(max);
+        tracing::info!(max, "LLM in-flight request cap enabled (per process)");
     }
 
     let llm_router = Arc::new(router);

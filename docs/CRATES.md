@@ -29,7 +29,8 @@ Forgejo or GitHub App webhook / CI trigger
   -> ReviewHost adapter (ar-forgejo or ar-github) review + commit status
 ```
 
-LLM calls flow through `ar-llm::Router`. Review prompts and schemas come from
+LLM calls flow through `ar-llm::Router`; `Router::with_inflight_limit(n)`
+caps simultaneous provider calls across the router and all its clones. Review prompts and schemas come from
 `ar-prompts`. RAG context, persistent learnings, and vector storage come from
 `ar-index`. Provider-neutral host DTOs and the `ReviewHost` trait come from
 `ar-forge`; Forgejo keeps compatibility DTO re-exports for existing callers
