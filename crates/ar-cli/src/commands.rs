@@ -21,7 +21,7 @@ use ar_orchestrator::{
     run_review_job, InMemoryReviewHistory, InlineDispatcher, JobDispatcher, ReviewHistory,
     ReviewJob,
 };
-use ar_prompts::{render_review_prompt, ReviewPromptInputs};
+use ar_prompts::{fence_nonce, process_nonce_salt, render_review_prompt, ReviewPromptInputs};
 use ar_review::{cap_diff, DEFAULT_MAX_DIFF_BYTES};
 use async_trait::async_trait;
 use hmac::{Hmac, KeyInit, Mac};
@@ -585,6 +585,7 @@ async fn print_dry_run_prompt(
         .context("fetch changed files")?;
     let changed_files: Vec<String> = files.iter().map(|f| f.filename.clone()).collect();
     let repo_full = format!("{}/{}", args.owner, args.repo);
+    let nonce = fence_nonce(&format!("{repo_full}#{}", args.pr), process_nonce_salt());
     let prompt = render_review_prompt(&ReviewPromptInputs {
         repo_full_name: &repo_full,
         pr_number: args.pr,
@@ -596,6 +597,7 @@ async fn print_dry_run_prompt(
         guidelines: "",
         repo_context: "",
         prior_discussion: "",
+        fence_nonce: &nonce,
     });
     println!("{prompt}");
     Ok(())
