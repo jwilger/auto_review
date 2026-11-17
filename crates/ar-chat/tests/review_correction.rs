@@ -77,6 +77,7 @@ fn ctx_with(commenter: &'static str) -> ChatContext<'static> {
         issue_number: 42,
         commenter_login: commenter,
         bot_login: "auto-review",
+        reply_to_comment_id: None,
     }
 }
 

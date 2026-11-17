@@ -24,6 +24,7 @@ fn ctx_in(owner: &'static str, repo: &'static str) -> ChatContext<'static> {
         issue_number: 7,
         commenter_login: "mallory",
         bot_login: "auto-review",
+        reply_to_comment_id: None,
     }
 }
 

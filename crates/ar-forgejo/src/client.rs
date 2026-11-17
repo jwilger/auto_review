@@ -414,26 +414,14 @@ impl Client {
         Ok(resp.id)
     }
 
-    /// List inline review-thread comments on a pull request.
+    /// List the top-level conversation-tab comments on a PR.
     ///
-    /// Used by the chat poller as a fallback for the
-    /// `pull_request_review_comment` webhook, which Forgejo doesn't
-    /// fire reliably for thread replies. Returns every review
-    /// comment on the PR; the caller filters by id cursor to detect
-    /// new ones.
-    ///
-    /// List the inline review-thread comments on a PR. Used by
-    /// `ChatPoller` to scan for `@<bot>` mentions inside review
-    /// threads (which Forgejo's `pull_request_review_comment`
-    /// webhook doesn't fire reliably for; gitea#26023).
-    /// Paginates internally — chatty PR threads with > 50
-    /// comments now return the full set instead of the first
-    /// page only.
-    /// List top-level conversation-tab comments on a PR. Forgejo treats
-    /// PRs as issues for the conversation thread, so this hits the
-    /// issues endpoint — `pulls/{n}/comments` does not exist in Forgejo
-    /// (verified against 15.0.0; returns 404). The chat poller uses this
-    /// to detect new `@<bot>` mentions on the PR.
+    /// Forgejo treats PRs as issues for the conversation thread, so this
+    /// hits `issues/{n}/comments` (`pulls/{n}/comments` does not exist in
+    /// Forgejo; verified against 15.0.0, returns 404). Forgejo filters
+    /// this endpoint to plain comments, so inline review-thread comments
+    /// are never included; list those per review with
+    /// [`Self::list_pull_review_comments`]. Paginates internally.
     pub async fn list_pr_review_comments(
         &self,
         owner: &str,
@@ -478,6 +466,12 @@ impl Client {
     }
 
     /// List comments attached to one pull request review.
+    ///
+    /// Forgejo's `pulls/{n}/reviews/{id}/comments` endpoint takes no
+    /// `page`/`limit` parameters and returns the review's whole comment
+    /// list, so this is a single request. Paging it would fetch the same
+    /// full list repeatedly until `PAGINATION_MAX_PAGES` for any review
+    /// with at least `PAGINATION_PAGE_SIZE` comments.
     pub async fn list_pull_review_comments(
         &self,
         owner: &str,
@@ -485,19 +479,10 @@ impl Client {
         n: u64,
         review_id: u64,
     ) -> Result<Vec<crate::types::PrReviewComment>, Error> {
-        let mut all = Vec::new();
-        for page in 1..=PAGINATION_MAX_PAGES {
-            let url = self.url(&format!(
-                "repos/{owner}/{repo}/pulls/{n}/reviews/{review_id}/comments?page={page}&limit={PAGINATION_PAGE_SIZE}"
-            ))?;
-            let chunk: Vec<crate::types::PrReviewComment> = json_get(&self.http, url).await?;
-            let chunk_len = chunk.len();
-            all.extend(chunk);
-            if chunk_len < PAGINATION_PAGE_SIZE as usize {
-                break;
-            }
-        }
-        Ok(all)
+        let url = self.url(&format!(
+            "repos/{owner}/{repo}/pulls/{n}/reviews/{review_id}/comments"
+        ))?;
+        json_get(&self.http, url).await
     }
 
     /// Fetch the Forgejo server's reported version string. Used as a
@@ -1315,5 +1300,39 @@ mod tests {
             }
             other => panic!("unexpected err: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn list_pull_review_comments_fetches_an_unpaginated_endpoint_once() {
+        // Forgejo's review-comments endpoint takes no page/limit and
+        // returns the whole list on every request. A client that paged it
+        // would get the same full page back until the page cap, every
+        // poll cycle, for any review with 50 or more comments.
+        let (server, client) = mock_client().await;
+        let comments: Vec<serde_json::Value> = (1..=60)
+            .map(|i| {
+                serde_json::json!({
+                    "id": i,
+                    "body": "nit",
+                    "user": {"login": "bob"},
+                    "path": "src/lib.rs",
+                    "position": i,
+                    "original_position": 0
+                })
+            })
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews/3/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&comments))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let got = client
+            .list_pull_review_comments("o", "r", 7, 3)
+            .await
+            .expect("comments");
+        assert_eq!(got.len(), 60);
+        server.verify().await;
     }
 }

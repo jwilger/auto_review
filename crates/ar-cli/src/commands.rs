@@ -234,6 +234,7 @@ impl InvocationHandler for ForgejoAgentcoreHandler {
                             issue_number: payload.pr_number,
                             commenter_login: "agentcore",
                             bot_login: "auto-review",
+                            reply_to_comment_id: None,
                         },
                         command,
                     )
@@ -440,6 +441,7 @@ impl GitHubAgentcoreSemanticReviewHandler {
                     issue_number: payload.pr_number,
                     commenter_login: "agentcore",
                     bot_login: "auto-review",
+                    reply_to_comment_id: None,
                 },
                 command,
             )

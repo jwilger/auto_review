@@ -282,6 +282,10 @@ pub struct PullReviewSummary {
     pub state: String,
     #[serde(default)]
     pub user: PrReviewCommentUser,
+    /// Number of inline (code) comments the review holds, when the host
+    /// reports it. `None` means unknown, not zero.
+    #[serde(default)]
+    pub comments_count: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -291,6 +295,28 @@ pub struct PrReviewComment {
     pub body: String,
     #[serde(default)]
     pub user: PrReviewCommentUser,
+    /// File path an inline review comment is anchored to. Empty for
+    /// top-level conversation comments.
+    #[serde(default, deserialize_with = "empty_string_when_null")]
+    pub path: String,
+    /// New-side (head) line the inline comment is anchored to. Forgejo
+    /// sets exactly one of `position` and `original_position`, depending
+    /// on which side of the diff the comment is on, and leaves the other
+    /// at zero. Replies in the same thread share `path`, `position` and
+    /// `original_position`. Zero for top-level conversation comments.
+    #[serde(default, deserialize_with = "zero_when_null")]
+    pub position: u64,
+    /// Old-side (base) line the inline comment is anchored to; zero for
+    /// comments on the new side of the diff. See `position`.
+    #[serde(default, deserialize_with = "zero_when_null")]
+    pub original_position: u64,
+}
+
+fn zero_when_null<'de, D>(deserializer: D) -> Result<u64, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Ok(Option::<u64>::deserialize(deserializer)?.unwrap_or_default())
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -316,6 +342,37 @@ mod tests {
 
         assert_eq!(summary.body, "");
         assert_eq!(summary.state, "open");
+    }
+
+    #[test]
+    fn pr_review_comment_reads_inline_thread_location_when_present() {
+        let comment: PrReviewComment = serde_json::from_value(serde_json::json!({
+            "id": 12,
+            "body": "@auto-review help",
+            "user": {"login": "bob"},
+            "path": "src/lib.rs",
+            "position": 4,
+            "original_position": 0
+        }))
+        .expect("comment");
+
+        assert_eq!(comment.path, "src/lib.rs");
+        assert_eq!(comment.position, 4);
+        assert_eq!(comment.original_position, 0);
+    }
+
+    #[test]
+    fn pr_review_comment_without_inline_location_still_deserializes() {
+        let comment: PrReviewComment = serde_json::from_value(serde_json::json!({
+            "id": 3,
+            "body": "top-level",
+            "user": {"login": "carol"}
+        }))
+        .expect("comment");
+
+        assert_eq!(comment.path, "");
+        assert_eq!(comment.position, 0);
+        assert_eq!(comment.original_position, 0);
     }
 
     #[test]
