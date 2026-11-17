@@ -385,6 +385,8 @@ mod tests {
             line_end: None,
             severity: ReviewSeverity::Warning,
             message: msg.into(),
+            title: String::new(),
+            category: ar_prompts::FindingCategory::Correctness,
         }
     }
 

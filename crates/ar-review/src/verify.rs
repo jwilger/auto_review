@@ -145,6 +145,8 @@ mod tests {
             line_end: None,
             severity: ReviewSeverity::Warning,
             message: format!("issue {i}"),
+            title: String::new(),
+            category: ar_prompts::FindingCategory::Correctness,
         }
     }
 

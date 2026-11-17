@@ -161,6 +161,8 @@ mod tests {
             line_end,
             severity,
             message: "do the thing".into(),
+            title: String::new(),
+            category: ar_prompts::FindingCategory::Correctness,
         }
     }
 
@@ -334,6 +336,8 @@ mod tests {
             line_end: None,
             severity: ReviewSeverity::Note,
             message: huge,
+            title: String::new(),
+            category: ar_prompts::FindingCategory::Correctness,
         };
         let req = output_to_review_request(&output("ok", vec![f]), "x");
         let comment_body = &req.comments[0].body;

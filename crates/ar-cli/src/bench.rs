@@ -903,6 +903,8 @@ mod tests {
                     line_end: None,
                     severity: ReviewSeverity::Warning,
                     message: "x".into(),
+                    title: String::new(),
+                    category: ar_prompts::FindingCategory::Correctness,
                 },
                 ReviewFinding {
                     path: "src/util.rs".into(),
@@ -910,6 +912,8 @@ mod tests {
                     line_end: None,
                     severity: ReviewSeverity::Note,
                     message: "y".into(),
+                    title: String::new(),
+                    category: ar_prompts::FindingCategory::Correctness,
                 },
             ],
         };
@@ -951,6 +955,8 @@ mod tests {
                     line_end: None,
                     severity: ReviewSeverity::Warning,
                     message: "a".into(),
+                    title: String::new(),
+                    category: ar_prompts::FindingCategory::Correctness,
                 },
                 ReviewFinding {
                     path: "x.rs".into(),
@@ -958,6 +964,8 @@ mod tests {
                     line_end: None,
                     severity: ReviewSeverity::Warning,
                     message: "b".into(),
+                    title: String::new(),
+                    category: ar_prompts::FindingCategory::Correctness,
                 },
             ],
         };

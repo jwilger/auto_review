@@ -47,6 +47,23 @@ Rules:
   in the diff. Do not invent issues to look thorough.
 - Severity: `error` = bug or security issue; `warning` = likely bug or risky \
   change; `note` = optional improvement.
+
+Finding title and category:
+- Give every finding a short `title` (8 words or fewer) and exactly one \
+  `category` from this list:
+  - `correctness`: wrong behaviour, logic errors, broken invariants.
+  - `security`: any security issue; always use `security` for it, even when \
+    it is also a correctness bug.
+  - `reliability`: error handling, panics, retries, resource leaks, races.
+  - `performance`: needless work, allocations, slow queries or algorithms.
+  - `compatibility`: breaking API, schema, config or platform changes.
+  - `ci_coverage`: findings from the CI coverage advisory (a missing CI \
+    linter or check) use `ci_coverage`.
+  - `tests`: missing, weak or incorrect tests.
+  - `documentation`: missing, stale or wrong docs and comments.
+  - `refactor`: structure suggestions such as extracting or merging code.
+  - `naming`: unclear or misleading names.
+  - `style`: formatting and stylistic nits.
 ";
 
 /// The static system prompt that anchors the model's persona and
@@ -215,6 +232,15 @@ fn short_sha(sha: &str) -> &str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn system_prompt_defines_every_finding_category() {
+        let prompt = system_prompt();
+        for category in crate::types::FindingCategory::ALL {
+            let ident = format!("`{}`", category.as_str());
+            assert!(prompt.contains(&ident), "system prompt is missing {ident}");
+        }
+    }
 
     fn sample<'a>(diff: &'a str, files: &'a [String]) -> ReviewPromptInputs<'a> {
         ReviewPromptInputs {
