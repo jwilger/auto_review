@@ -49,7 +49,7 @@ Hosts built by the gateway are seeded with the startup bot identity.
 
 | Host | multi-line comments | suggestion blocks | thread replies | resolve threads |
 |---|---|---|---|---|
-| Forgejo ≤15 | no | no | no | no |
+| Forgejo ≤15 (including legacy `1.x` numbering) | no | no | no | no |
 | Forgejo 16, 17 | yes | no | no | no |
 | Forgejo ≥18 | yes | yes | yes | yes |
 | Forgejo, failed or unparseable version probe | no | no | no | no |

@@ -94,7 +94,7 @@ re-exports the common DTOs for compatibility, but new host-neutral review code
 should depend on `ar-forge` types rather than Forgejo-owned DTOs.
 
 Review-thread features are gated on probed host capabilities, not assumed
-(ADR-0026). `ReviewHost::capabilities()` reports `HostCapabilities`
+([ADR-0026](./ADR-0026-probe-host-capabilities-and-degrade-on-older-forgejo.md)). `ReviewHost::capabilities()` reports `HostCapabilities`
 (multi-line comments, suggestion blocks, thread replies, resolve threads); the
 trait default reports none, GitHub hosts report all four, and the Forgejo
 adapter derives them from `GET /api/v1/version`, probed once per client: major

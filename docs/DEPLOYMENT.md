@@ -312,11 +312,13 @@ auto_review probes each Forgejo server's version once per client
 GitHub supports all of them. The gateway uses its startup bot identity
 (`AR_BOT_LOGIN` or `GITHUB_BOT_LOGIN`, or their defaults) to recognise its own
 reviews and comments; the AgentCore runtime looks the login up through
-`GET /api/v1/user` on Forgejo or `GET /app` on GitHub.
+`GET /api/v1/user` on Forgejo or `GET /app` on GitHub. A Forgejo bot token
+therefore needs read access to `GET /api/v1/user` unless `AR_BOT_LOGIN` is set,
+which overrides the lookup for hosts the gateway builds.
 
 | Host | multi-line comments | suggestion blocks | thread replies | resolve threads |
 |---|---|---|---|---|
-| Forgejo ≤15 | no | no | no | no |
+| Forgejo ≤15 (including legacy `1.x` numbering) | no | no | no | no |
 | Forgejo 16, 17 | yes | no | no | no |
 | Forgejo ≥18 | yes | yes | yes | yes |
 | GitHub | yes | yes | yes | yes |
