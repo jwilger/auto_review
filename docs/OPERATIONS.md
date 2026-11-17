@@ -388,6 +388,31 @@ match the actual bot account. The webhook receives the bot's own
 Update the env var; restart. (As of v0.1.0, both the webhook
 handler and the background poller honour these.)
 
+The gateway also seeds its review hosts with `AR_BOT_LOGIN` (and
+`GITHUB_BOT_LOGIN` for the GitHub App), so the review pipeline finds the
+bot's own reviews and comments without a `GET /api/v1/user` (or
+`GET /app`) lookup. The AgentCore runtime has no seed and does the
+lookup, so its Forgejo token needs read access to `GET /api/v1/user`.
+
+### 4.2 Forgejo capability probe warnings
+
+auto_review reads `GET /api/v1/version` to decide which review-thread
+features the Forgejo server supports (see
+[Repository host versions](./DEPLOYMENT.md#repository-host-versions)).
+Two warnings mean it fell back to none of them:
+
+**`Forgejo version probe failed`.** The request failed: the server was
+unreachable, returned an HTTP error or a malformed body, or did not answer
+within 10 seconds. The failure is not cached; the next review probes
+again. Check that `FORGEJO_BASE_URL` is reachable from the service and
+that `curl -s "$FORGEJO_BASE_URL/api/v1/version"` returns
+`{"version": "..."}`.
+
+**`unparseable Forgejo version`.** The server answered with a version
+string that does not start with a numeric major version (for example a
+reverse proxy rewriting the response). This result is cached until
+auto_review restarts. Fix the response, then restart the service.
+
 ---
 
 ## 5. Resource pressure
@@ -677,6 +702,11 @@ The systemd unit ships under
 
 If the new version fails to start, restore the previous binary from your release
 artifact or host backup, restart, and file an issue.
+
+After upgrading **Forgejo** (not auto_review), restart auto_review too: it
+keeps the Forgejo version it probed at first use for the life of the process,
+so new review-thread capabilities (for example suggestion blocks on v18) are
+picked up only after a restart.
 
 ## 9.1 Forgejo review-comment resolution gap
 

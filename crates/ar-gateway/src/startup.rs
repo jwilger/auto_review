@@ -1145,12 +1145,22 @@ fn resolve_bot_identity(values: BotIdentityEnvValues<'_>) -> Result<EffectiveBot
     })
 }
 
-/// Build the gateway's Forgejo client, seeded with the startup bot login so
-/// `AR_BOT_LOGIN` (or its default) wins over a `GET /user` lookup.
-fn forgejo_review_client(base_url: &str, token: &str, bot_login: &str) -> Result<ForgejoClient> {
-    Ok(ForgejoClient::new(base_url, token)
-        .context("forgejo client")?
-        .with_bot_login(bot_login))
+/// Resolve the startup bot identity and build the gateway's Forgejo client
+/// seeded with it, so `AR_BOT_LOGIN` (or its default) wins over a
+/// `GET /user` lookup.
+fn startup_bot_identity_and_forgejo_host(
+    identity_env: BotIdentityEnvValues<'_>,
+    forgejo_config: Option<&ForgejoStartupConfig>,
+) -> Result<(EffectiveBotIdentity, Option<Arc<ForgejoClient>>)> {
+    let identity = resolve_bot_identity(identity_env)?;
+    let forgejo = forgejo_config
+        .map(|config| {
+            ForgejoClient::new(&config.base_url, &config.token)
+                .context("forgejo client")
+                .map(|client| Arc::new(client.with_bot_login(identity.login.clone())))
+        })
+        .transpose()?;
+    Ok((identity, forgejo))
 }
 
 /// Build the gateway's long-lived GitHub App host, seeded with the startup
@@ -1304,19 +1314,15 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     // every `@` and fire on every PR thread mention, also bad.
     let bot_login_env = env::var("AR_BOT_LOGIN").ok();
     let bot_name_env = env::var("AR_BOT_NAME").ok();
-    let bot_identity = resolve_bot_identity(BotIdentityEnvValues {
-        login: bot_login_env.as_deref(),
-        name: bot_name_env.as_deref(),
-    })?;
+    let (bot_identity, forgejo) = startup_bot_identity_and_forgejo_host(
+        BotIdentityEnvValues {
+            login: bot_login_env.as_deref(),
+            name: bot_name_env.as_deref(),
+        },
+        forgejo_config.as_ref(),
+    )?;
     let bot_login = bot_identity.login;
     let bot_name = bot_identity.name;
-
-    let forgejo = forgejo_config
-        .as_ref()
-        .map(|config| {
-            forgejo_review_client(&config.base_url, &config.token, &bot_login).map(Arc::new)
-        })
-        .transpose()?;
 
     let reasoning_provider = Arc::new(
         OpenAiProvider::new(&llm_base, llm_api_key.as_deref(), &reasoning_model)
@@ -1993,8 +1999,17 @@ mod tests {
 
     #[tokio::test]
     async fn gateway_github_host_is_seeded_with_the_startup_bot_login() {
-        // Port 9 (discard) is unreachable, so a GET /app lookup would fail.
-        let client = ar_github::Client::new("http://127.0.0.1:9", "app-jwt").expect("client");
+        let github = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/app"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "id": 1, "slug": "looked-up" })),
+            )
+            .expect(0)
+            .mount(&github)
+            .await;
+        let client = ar_github::Client::new(&github.uri(), "app-jwt").expect("client");
         let host = github_review_host(client, "configured[bot]");
 
         let login = ar_forge::ReviewHost::bot_login(host.as_ref())
@@ -2005,16 +2020,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn gateway_forgejo_client_is_seeded_with_the_startup_bot_login() {
-        // Port 9 (discard) is unreachable, so a network lookup would fail.
-        let client = forgejo_review_client("http://127.0.0.1:9", "tok", "configured-bot")
-            .expect("forgejo client");
+    async fn ar_bot_login_wins_over_user_lookup_on_the_gateway_forgejo_host() {
+        let forgejo = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/user"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "id": 7, "login": "token-owner" })),
+            )
+            .expect(0)
+            .mount(&forgejo)
+            .await;
+        let config = ForgejoStartupConfig {
+            webhook_secret: "secret".to_string(),
+            base_url: forgejo.uri(),
+            token: "tok".to_string(),
+        };
 
-        let login = ar_forge::ReviewHost::bot_login(&client)
+        let (identity, host) = startup_bot_identity_and_forgejo_host(
+            BotIdentityEnvValues {
+                login: Some("custom-bot"),
+                name: None,
+            },
+            Some(&config),
+        )
+        .expect("startup");
+        let host = host.expect("forgejo host");
+
+        let login = ar_forge::ReviewHost::bot_login(host.as_ref())
             .await
             .expect("seeded login");
 
-        assert_eq!(login, "configured-bot");
+        assert_eq!(
+            (identity.login.as_str(), login.as_str()),
+            ("custom-bot", "custom-bot")
+        );
     }
 
     #[test]

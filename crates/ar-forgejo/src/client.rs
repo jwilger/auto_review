@@ -20,6 +20,8 @@ pub enum Error {
     Api { status: u16, body: String },
     #[error("URL build error: {0}")]
     UrlBuild(#[from] url::ParseError),
+    #[error("request timed out after {0:?}")]
+    Timeout(std::time::Duration),
 }
 
 /// Default Forgejo page size for paginated list endpoints.

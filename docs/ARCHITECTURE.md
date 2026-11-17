@@ -97,9 +97,10 @@ Review-thread features are gated on probed host capabilities, not assumed
 ([ADR-0026](./ADR-0026-probe-host-capabilities-and-degrade-on-older-forgejo.md)). `ReviewHost::capabilities()` reports `HostCapabilities`
 (multi-line comments, suggestion blocks, thread replies, resolve threads); the
 trait default reports none, GitHub hosts report all four, and the Forgejo
-adapter derives them from `GET /api/v1/version`, probed once per client: major
-≥16 enables multi-line comments and ≥18 the other three, while a failed or
-unparseable probe reports none. `ReviewHost::bot_login()` gives the pipeline
+adapter derives them from `GET /api/v1/version`, cached per client after a
+successful probe: major ≥16 enables multi-line comments and ≥18 the other
+three, while a failed or unparseable probe reports none (a failed probe is
+retried on the next call). `ReviewHost::bot_login()` gives the pipeline
 the bot's own login, cached per host (Forgejo `GET /api/v1/user`, GitHub
 `<app slug>[bot]` from `GET /app`); gateway-built hosts are seeded with the
 startup identity so `AR_BOT_LOGIN` still wins. Pipeline and orchestrator code

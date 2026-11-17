@@ -325,9 +325,13 @@ which overrides the lookup for hosts the gateway builds.
 
 On Forgejo v11–v17, suggested changes appear as plain code blocks, and
 addressed findings are marked by editing the original comment instead of
-replying to and resolving the thread. If the version probe fails or returns an
-unrecognised string, auto_review logs a warning and uses none of the optional
-features; restart the service after upgrading Forgejo to pick up new
+replying to and resolving the thread. If the version probe fails (the server
+is unreachable, returns an HTTP error or a malformed body, or does not answer
+within 10 seconds), auto_review logs a warning, uses none of the optional
+features for that call, and probes again on the next one. If the probe returns
+an unrecognised version string, auto_review logs a warning and uses none of the
+optional features until it restarts. A successful probe is kept for the life of
+the process, so restart the service after upgrading Forgejo to pick up new
 capabilities.
 
 ## Prometheus and Grafana

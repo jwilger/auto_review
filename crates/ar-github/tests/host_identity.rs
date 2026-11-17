@@ -66,6 +66,18 @@ async fn installation_review_host_resolves_bot_login_once_from_app_slug() {
 }
 
 #[tokio::test]
+async fn seeded_installation_review_host_never_calls_get_app() {
+    let github = MockServer::start().await;
+    mount_app(&github, 0).await;
+    let client = Client::new(&github.uri(), "app-jwt").expect("client");
+    let host = InstallationReviewHost::new(client, "installation-token")
+        .with_bot_login("custom-login[bot]");
+    let host: &dyn ar_forge::ReviewHost = &host;
+
+    assert_eq!(host.bot_login().await.expect("login"), "custom-login[bot]");
+}
+
+#[tokio::test]
 async fn installation_review_host_supports_every_capability() {
     let github = MockServer::start().await;
     let client = Client::new(&github.uri(), "app-jwt").expect("client");
@@ -73,6 +85,7 @@ async fn installation_review_host_supports_every_capability() {
     let host: &dyn ar_forge::ReviewHost = &host;
 
     assert_eq!(host.capabilities().await, HostCapabilities::all());
+    assert_eq!(github.received_requests().await.map(|r| r.len()), Some(0));
 }
 
 #[tokio::test]
@@ -83,4 +96,5 @@ async fn app_review_host_supports_every_capability() {
     let host: &dyn ar_forge::ReviewHost = &host;
 
     assert_eq!(host.capabilities().await, HostCapabilities::all());
+    assert_eq!(github.received_requests().await.map(|r| r.len()), Some(0));
 }

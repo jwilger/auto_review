@@ -91,6 +91,13 @@ impl InstallationReviewHost {
             bot_login: OnceCell::new(),
         }
     }
+
+    /// Seed a bot login already known to the caller, so
+    /// [`ar_forge::ReviewHost::bot_login`] never calls `GET /app`.
+    pub fn with_bot_login(mut self, login: impl Into<String>) -> Self {
+        self.bot_login = OnceCell::new_with(Some(login.into()));
+        self
+    }
 }
 
 #[async_trait]

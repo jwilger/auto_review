@@ -35,10 +35,13 @@ result through `ReviewHost`.
   suggestion_blocks, thread_replies, resolve_threads }`. The trait default
   reports none of them, so test fakes and new adapters opt in explicitly.
 - GitHub hosts report all four.
-- The Forgejo adapter reads `GET /api/v1/version` once per client and caches
-  the result. The leading numeric major component decides: ≥16 enables
-  multi-line comments; ≥18 enables the other three. A failed probe or an
-  unparseable version reports none of them and logs a warning.
+- The Forgejo adapter reads `GET /api/v1/version` and caches the result per
+  client (clones share it). The leading numeric major component decides, after
+  one optional leading `v`: ≥16 enables multi-line comments; ≥18 enables the
+  other three. A failed probe (transport error, HTTP error, malformed body or
+  timeout) or an unparseable version reports none of them and logs a warning.
+  Only the unparseable version is cached, because it is deterministic; a failed
+  probe is retried on the next call.
 - `ReviewHost::bot_login()` returns the bot's login, cached per host: Forgejo
   through `GET /api/v1/user`, GitHub as `<app slug>[bot]` through `GET /app`.
   Hosts built by the gateway are seeded with the identity resolved at startup,
@@ -59,11 +62,15 @@ Features degrade on Forgejo v11–v17 rather than being refused:
 
 - One code path serves every supported Forgejo release and GitHub; reviewers on
   older Forgejo get the same findings with less interactive presentation.
-- Each Forgejo client makes at most one version request and at most one user
-  request for its lifetime. Upgrading Forgejo takes effect when auto_review
-  restarts or builds a new client.
-- A Forgejo instance whose version endpoint is unreachable or reports a
-  non-standard string loses the optional features until the probe succeeds on a
-  new client; the warning log tells operators why.
+- Each Forgejo client makes at most one successful version request and at
+  most one successful user request for its lifetime. Upgrading Forgejo takes
+  effect when auto_review restarts or builds a new client.
+- A Forgejo instance whose version endpoint is briefly unreachable loses the
+  optional features only for the calls made while it is down; the next call
+  probes again. One that reports a non-standard version string loses them until
+  a new client is built. The warning log tells operators which case applies.
+- Host-identity requests are bounded by a timeout, so a server that accepts the
+  connection but never answers cannot block every caller waiting on the cached
+  result.
 - New capability flags extend `HostCapabilities` and its per-version table in
   `docs/CRATES.md` and `docs/DEPLOYMENT.md`.

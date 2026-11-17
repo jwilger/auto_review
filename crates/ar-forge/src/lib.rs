@@ -27,7 +27,9 @@ impl HostError {
 /// multi-line review comments in v16 and suggestion blocks, thread replies
 /// and thread resolution in v18. Callers must check these flags and degrade
 /// instead of assuming a feature exists.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+///
+/// [`HostCapabilities::default`] supports nothing: the safe fallback.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct HostCapabilities {
     /// Inline review comments can span a line range.
     pub multi_line_comments: bool,
@@ -50,16 +52,6 @@ impl HostCapabilities {
             resolve_threads: true,
         }
     }
-
-    /// No capability supported; the safe fallback.
-    pub const fn none() -> Self {
-        Self {
-            multi_line_comments: false,
-            suggestion_blocks: false,
-            thread_replies: false,
-            resolve_threads: false,
-        }
-    }
 }
 
 #[async_trait]
@@ -67,7 +59,7 @@ pub trait ReviewHost: Send + Sync {
     /// Review features this host supports. The default reports none, so a
     /// host that cannot tell gets the plain-comment fallback.
     async fn capabilities(&self) -> HostCapabilities {
-        HostCapabilities::none()
+        HostCapabilities::default()
     }
 
     /// Login of the account this host acts as, used to find the bot's own
@@ -324,5 +316,18 @@ mod tests {
 
         assert_eq!(summary.body, "");
         assert_eq!(summary.state, "open");
+    }
+
+    #[test]
+    fn default_host_capabilities_support_nothing() {
+        assert_eq!(
+            HostCapabilities::default(),
+            HostCapabilities {
+                multi_line_comments: false,
+                suggestion_blocks: false,
+                thread_replies: false,
+                resolve_threads: false,
+            }
+        );
     }
 }

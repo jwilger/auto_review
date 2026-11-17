@@ -9,9 +9,9 @@ instructions live in [Quickstart](./QUICKSTART.md) and [Deployment](./DEPLOYMENT
 | `ar-agentcore` | AWS Bedrock AgentCore-compatible HTTP runtime surface, including `/ping` health handling, provider-neutral `/invocations` payload parsing, handler-backed serving, in-memory and DynamoDB invocation idempotency, semantic-review dispatch, and stale-head rejection. |
 | `ar-gateway` | HTTP server, Forgejo HMAC and GitHub `X-Hub-Signature-256` verification, Forgejo and GitHub App webhook intake, provider-routed CI-triggered dispatch, Forgejo chat poller, health/readiness/info/metrics routes. |
 | `ar-orchestrator` | `JobDispatcher`, production `SpawningDispatcher`, in-memory/SQLite/DynamoDB review history, provider-neutral context diff, incremental compare-diff, changed-file triage, and status calls, and per-PR lifecycle observations for metrics. |
-| `ar-forge` | Provider-neutral repository-host DTOs, host error type, and `ReviewHost` trait for clone URLs, PR summaries, diffs, reviews, issue comments, repo config reads, PR metadata, and statuses shared by Forgejo and GitHub adapters. |
-| `ar-forgejo` | Forgejo REST client, webhook DTOs, review/comment/status/webhook APIs, Basic-auth bootstrap client. |
-| `ar-github` | GitHub App REST client foundation, including app JWT minting, installation-token exchange/cache, `ReviewHost` wrapper, clone URL auth material, PR summary reads, PR and compare-diff reads, changed-file reads, top-level PR comment reads/posts, pull-review and review-comment reads, PR metadata updates, repo config file reads, pull request review posting, commit-status posting, `X-Hub-Signature-256` webhook signature verification, typed issue-comment and review-comment webhook payloads, and the long-lived `AppReviewHost` that signs fresh app JWTs, resolves per-repository installations, and mints repository-scoped installation tokens for the gateway. |
+| `ar-forge` | Provider-neutral repository-host DTOs, host error type, `HostCapabilities`, and `ReviewHost` trait for clone URLs, PR summaries, diffs, reviews, issue comments, repo config reads, PR metadata, statuses, host capabilities, and the bot login, shared by Forgejo and GitHub adapters. See [Host capabilities](#host-capabilities) for the per-version matrix. |
+| `ar-forgejo` | Forgejo REST client, webhook DTOs, review/comment/status/webhook APIs, Basic-auth bootstrap client, server-version capability probe and bot-login lookup (see [Host capabilities](#host-capabilities)). |
+| `ar-github` | GitHub App REST client foundation, including app JWT minting, installation-token exchange/cache, `ReviewHost` wrapper, clone URL auth material, PR summary reads, PR and compare-diff reads, changed-file reads, top-level PR comment reads/posts, pull-review and review-comment reads, PR metadata updates, repo config file reads, pull request review posting, commit-status posting, `X-Hub-Signature-256` webhook signature verification, typed issue-comment and review-comment webhook payloads, and the long-lived `AppReviewHost` that signs fresh app JWTs, resolves per-repository installations, and mints repository-scoped installation tokens for the gateway. Both hosts report every capability and resolve the `<app slug>[bot]` login (see [Host capabilities](#host-capabilities)). |
 | `ar-llm` | Provider trait, OpenAI-compatible provider, and tier router for `Reasoning`, `Cheap`, and `Embedding`. |
 | `ar-index` | Tree-sitter symbols, embeddings, SQLite/in-memory vector stores, co-change graph utilities, and in-memory/SQLite/DynamoDB learnings store. |
 | `ar-prompts` | Prompt templates, JSON schemas, DTOs, and validators for review, triage, and verification LLM calls. |
@@ -41,11 +41,14 @@ while host-neutral code migrates to the common crate.
 review-thread features the connected host supports, and
 `ReviewHost::bot_login()` returns the bot's own login, cached per host
 (ADR-0026). The trait defaults report no capabilities and an error for the
-login. `ar-forgejo` probes `GET /api/v1/version` once per client
-(`ar_forgejo::capabilities::parse_major_version` reads the leading major
-component) and resolves the login through `GET /api/v1/user`; `ar-github`
-reports every capability and resolves `<app slug>[bot]` through `GET /app`.
-Hosts built by the gateway are seeded with the startup bot identity.
+login. `ar-forgejo` probes `GET /api/v1/version` and caches a successful
+probe per client (`ar_forgejo::capabilities::parse_major_version` reads the
+leading major component after an optional `v`); a failed probe is retried on the
+next call. It resolves the login through `GET /api/v1/user`. Both requests are
+bounded by a 10-second timeout. `ar-github` reports every capability and
+resolves `<app slug>[bot]` through `GET /app`. Each host type offers
+`with_bot_login` to seed a known login, and hosts built by the gateway are
+seeded with the startup bot identity.
 
 | Host | multi-line comments | suggestion blocks | thread replies | resolve threads |
 |---|---|---|---|---|

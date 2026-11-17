@@ -30,35 +30,41 @@ pub use webhook::{
 #[async_trait]
 impl ar_forge::ReviewHost for Client {
     async fn capabilities(&self) -> ar_forge::HostCapabilities {
-        *self
+        // Transport, HTTP and timeout failures leave the cell empty so the
+        // next call probes again; an unparseable version is deterministic
+        // and is cached.
+        let probed = self
             .capabilities
-            .get_or_init(|| async {
-                let version = match self.get_server_version().await {
-                    Ok(version) => version,
-                    Err(error) => {
+            .get_or_try_init(|| async {
+                let version = probe(self.get_server_version()).await?;
+                Ok::<_, Error>(
+                    capabilities::capabilities_for_version(&version).unwrap_or_else(|| {
                         tracing::warn!(
-                            error = %error,
-                            "Forgejo version probe failed; treating the server as \
+                            version = %client::cap_for_error(&version),
+                            "unparseable Forgejo version; treating the server as \
                              supporting no optional review features"
                         );
-                        return ar_forge::HostCapabilities::none();
-                    }
-                };
-                capabilities::capabilities_for_version(&version).unwrap_or_else(|| {
-                    tracing::warn!(
-                        version = %client::cap_for_error(&version),
-                        "unparseable Forgejo version; treating the server as \
-                         supporting no optional review features"
-                    );
-                    ar_forge::HostCapabilities::none()
-                })
+                        ar_forge::HostCapabilities::default()
+                    }),
+                )
             })
-            .await
+            .await;
+        match probed {
+            Ok(capabilities) => *capabilities,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Forgejo version probe failed; treating the server as \
+                     supporting no optional review features until a later probe succeeds"
+                );
+                ar_forge::HostCapabilities::default()
+            }
+        }
     }
 
     async fn bot_login(&self) -> Result<String, ar_forge::HostError> {
         self.bot_login
-            .get_or_try_init(|| async { self.get_authenticated_user_login().await })
+            .get_or_try_init(|| probe(self.get_authenticated_user_login()))
             .await
             .cloned()
             .map_err(host_error)
@@ -209,6 +215,31 @@ impl ar_forge::ReviewHost for Client {
     }
 }
 
+/// Upper bound on a host-identity request (`GET /version`, `GET /user`).
+/// Concurrent callers wait on the same cached initialiser, so a server that
+/// accepts the connection but never answers must not block them forever.
+const PROBE_TIMEOUT: std::time::Duration = std::time::Duration::from_secs(10);
+
+async fn probe<T>(
+    request: impl std::future::Future<Output = Result<T, Error>>,
+) -> Result<T, Error> {
+    tokio::time::timeout(PROBE_TIMEOUT, request)
+        .await
+        .unwrap_or(Err(Error::Timeout(PROBE_TIMEOUT)))
+}
+
 fn host_error(error: Error) -> ar_forge::HostError {
     ar_forge::HostError::new(error.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[tokio::test(start_paused = true)]
+    async fn probe_times_out_a_request_that_never_answers() {
+        let result = probe(std::future::pending::<Result<(), Error>>()).await;
+
+        assert!(matches!(result, Err(Error::Timeout(_))), "{result:?}");
+    }
 }

@@ -17,16 +17,21 @@ async fn capabilities_for_server_version(version: &str) -> HostCapabilities {
     let client = Client::new(&forgejo.uri(), "tok").expect("client");
 
     let first = client.capabilities().await;
-    let second = client.clone().capabilities().await;
-    assert_eq!(first, second, "cached result must not change");
+    let second = client.capabilities().await;
+    let from_clone = client.clone().capabilities().await;
+    assert_eq!(
+        (first, second),
+        (from_clone, from_clone),
+        "cached result must not change"
+    );
     first
 }
 
 #[tokio::test]
 async fn forgejo_15_supports_nothing() {
     assert_eq!(
-        capabilities_for_server_version("15.0.3").await,
-        HostCapabilities::none()
+        capabilities_for_server_version("15.0.1").await,
+        HostCapabilities::default()
     );
 }
 
@@ -36,7 +41,7 @@ async fn forgejo_16_supports_multi_line_comments_only() {
         capabilities_for_server_version("16.0.7").await,
         HostCapabilities {
             multi_line_comments: true,
-            ..HostCapabilities::none()
+            ..HostCapabilities::default()
         }
     );
 }
@@ -47,7 +52,7 @@ async fn forgejo_17_dev_build_supports_multi_line_comments_only() {
         capabilities_for_server_version("17.0.0-100-2254cb0+gitea-1.22.0").await,
         HostCapabilities {
             multi_line_comments: true,
-            ..HostCapabilities::none()
+            ..HostCapabilities::default()
         }
     );
 }
@@ -55,7 +60,7 @@ async fn forgejo_17_dev_build_supports_multi_line_comments_only() {
 #[tokio::test]
 async fn forgejo_18_supports_everything() {
     assert_eq!(
-        capabilities_for_server_version("18.0.1").await,
+        capabilities_for_server_version("18.0.0").await,
         HostCapabilities::all()
     );
 }
@@ -64,12 +69,12 @@ async fn forgejo_18_supports_everything() {
 async fn garbage_version_supports_nothing() {
     assert_eq!(
         capabilities_for_server_version("garbage").await,
-        HostCapabilities::none()
+        HostCapabilities::default()
     );
 }
 
 #[tokio::test]
-async fn failed_version_probe_supports_nothing_and_is_not_retried() {
+async fn failed_version_probe_supports_nothing_and_is_retried() {
     let forgejo = MockServer::start().await;
     Mock::given(method("GET"))
         .and(path("/api/v1/version"))
@@ -79,8 +84,17 @@ async fn failed_version_probe_supports_nothing_and_is_not_retried() {
         .await;
     let client = Client::new(&forgejo.uri(), "tok").expect("client");
 
-    assert_eq!(client.capabilities().await, HostCapabilities::none());
-    assert_eq!(client.capabilities().await, HostCapabilities::none());
+    assert_eq!(client.capabilities().await, HostCapabilities::default());
+
+    forgejo.reset().await;
+    Mock::given(method("GET"))
+        .and(path("/api/v1/version"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!({ "version": "18.0.0" })))
+        .expect(1)
+        .mount(&forgejo)
+        .await;
+
+    assert_eq!(client.capabilities().await, HostCapabilities::all());
 }
 
 async fn mount_user(forgejo: &MockServer, expected_calls: u64) {
