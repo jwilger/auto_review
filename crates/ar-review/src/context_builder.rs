@@ -9,7 +9,8 @@
 use crate::rag_context::format_repo_context;
 use ar_index::{
     embed_symbols_with_config, index_workspace, EmbedConfig, EmbedError, EmbeddedSymbol,
-    InMemoryVectorStore, LearningsStore, ScoredLearning, ScoredSymbol, VectorStore, WalkError,
+    InMemoryVectorStore, LearningsStore, RepoScope, ScoredLearning, ScoredSymbol, VectorStore,
+    WalkError,
 };
 use ar_llm::{ModelTier, Router};
 use std::collections::HashMap;
@@ -32,6 +33,8 @@ pub enum ContextBuildError {
 /// gracefully). Errors only on hard failures.
 ///
 /// `top_k` controls how many similar symbols + learnings to include.
+/// Only learnings scoped to `scope`, the reviewed repository, are
+/// retrieved.
 ///
 /// Back-compat shim: builds a fresh in-memory vector store per call.
 /// New callers should prefer [`build_review_context_with_store`] and
@@ -42,9 +45,11 @@ pub async fn build_review_context(
     router: &Router,
     diff: &str,
     learnings: Option<&dyn LearningsStore>,
+    scope: &RepoScope,
     top_k: usize,
 ) -> Result<String, ContextBuildError> {
-    build_review_context_with_store(workspace_path, router, diff, learnings, top_k, None).await
+    build_review_context_with_store(workspace_path, router, diff, learnings, scope, top_k, None)
+        .await
 }
 
 /// Like [`build_review_context`], but threads a caller-owned vector
@@ -60,6 +65,7 @@ pub async fn build_review_context_with_store(
     router: &Router,
     diff: &str,
     learnings: Option<&dyn LearningsStore>,
+    scope: &RepoScope,
     top_k: usize,
     vector_store: Option<&dyn VectorStore>,
 ) -> Result<String, ContextBuildError> {
@@ -135,7 +141,7 @@ pub async fn build_review_context_with_store(
     });
 
     let scored_learnings = match learnings {
-        Some(store) => query_learnings(store, &query_vec, top_k)
+        Some(store) => query_learnings(store, &query_vec, top_k, scope)
             .await
             .unwrap_or_else(|e| {
                 tracing::warn!(error = %e, "learnings query failed; skipping that section");
@@ -297,13 +303,17 @@ async fn query_learnings(
     store: &(dyn LearningsStore + Sync),
     query_vec: &[f32],
     top_k: usize,
+    scope: &RepoScope,
 ) -> Result<Vec<ScoredLearning>, ContextBuildError> {
-    let scored = store.query_nearest(query_vec, top_k).await.map_err(|e| {
-        ContextBuildError::Embed(EmbedError::Llm(ar_llm::Error::Provider {
-            status: 500,
-            body: e.to_string(),
-        }))
-    })?;
+    let scored = store
+        .query_nearest(query_vec, top_k, scope)
+        .await
+        .map_err(|e| {
+            ContextBuildError::Embed(EmbedError::Llm(ar_llm::Error::Provider {
+                status: 500,
+                body: e.to_string(),
+            }))
+        })?;
     Ok(scored)
 }
 
@@ -315,6 +325,10 @@ mod tests {
     use std::fs;
     use std::sync::Mutex;
     use tempfile::tempdir;
+
+    fn scope() -> RepoScope {
+        RepoScope::new("acme", "widget")
+    }
 
     /// Embedder that returns deterministic 3-D vectors keyed off
     /// content and records every batch it was asked to embed.
@@ -360,7 +374,7 @@ mod tests {
     async fn returns_empty_when_no_embedding_tier_configured() {
         let dir = tempdir().unwrap();
         let router = Router::new();
-        let result = build_review_context(dir.path(), &router, "diff", None, 5)
+        let result = build_review_context(dir.path(), &router, "diff", None, &scope(), 5)
             .await
             .expect("ok");
         assert!(result.is_empty());
@@ -375,7 +389,7 @@ mod tests {
 
         let embedder = std::sync::Arc::new(DeterministicEmbedder::new());
         let router = Router::new().with(ModelTier::Embedding, embedder);
-        let result = build_review_context(dir.path(), &router, "diff", None, 5)
+        let result = build_review_context(dir.path(), &router, "diff", None, &scope(), 5)
             .await
             .expect("ok");
         assert!(result.is_empty());
@@ -397,7 +411,7 @@ mod tests {
         let router = Router::new().with(ModelTier::Embedding, embedder);
         let store = InMemoryLearningsStore::new();
 
-        let _ = build_review_context(dir.path(), &router, "diff text", Some(&store), 3)
+        let _ = build_review_context(dir.path(), &router, "diff text", Some(&store), &scope(), 3)
             .await
             .expect("ok");
 
@@ -409,6 +423,48 @@ mod tests {
             calls, 2,
             "expected one symbols embed + one diff embed; got {calls}"
         );
+    }
+
+    #[tokio::test]
+    async fn learnings_of_another_repository_are_never_retrieved() {
+        use ar_index::{InMemoryLearningsStore, LearningSource, LearningsStore, RepoScope};
+
+        let dir = tempdir().unwrap();
+        fs::write(dir.path().join("a.rs"), "pub fn foo() {}\n").unwrap();
+        let embedder = std::sync::Arc::new(DeterministicEmbedder::new());
+        let diff = "diff text";
+        let diff_vec = embedder.embed(&[diff.to_string()]).await.unwrap().remove(0);
+        let router = Router::new().with(ModelTier::Embedding, embedder);
+        let store = InMemoryLearningsStore::new();
+        let repo_a = RepoScope::new("acme", "repo-a");
+        store
+            .add(
+                "Repo A forbids unwrap.".into(),
+                LearningSource::Chat,
+                diff_vec,
+                0,
+                &repo_a,
+                Some(1),
+            )
+            .await
+            .unwrap();
+
+        let for_b = build_review_context(
+            dir.path(),
+            &router,
+            diff,
+            Some(&store),
+            &RepoScope::new("acme", "repo-b"),
+            3,
+        )
+        .await
+        .expect("ok");
+        assert!(!for_b.contains("Repo A forbids unwrap."), "{for_b}");
+
+        let for_a = build_review_context(dir.path(), &router, diff, Some(&store), &repo_a, 3)
+            .await
+            .expect("ok");
+        assert!(for_a.contains("Repo A forbids unwrap."), "{for_a}");
     }
 
     #[tokio::test]
@@ -434,7 +490,7 @@ mod tests {
         // 256 KiB diff — well above the historical 32 KiB cap and
         // many multiples of the 6 KiB default.
         let big_diff = "x".repeat(256 * 1024);
-        let _ = build_review_context(dir.path(), &router, &big_diff, None, 3).await;
+        let _ = build_review_context(dir.path(), &router, &big_diff, None, &scope(), 3).await;
 
         let seen = recorder.seen.lock().unwrap();
         let diff_call = seen
@@ -465,16 +521,32 @@ mod tests {
         let store = SqliteVectorStore::in_memory().await.expect("open store");
 
         // First review: embeds the symbol (1 batch) + the diff.
-        build_review_context_with_store(dir.path(), &router, "diff", None, 5, Some(&store))
-            .await
-            .expect("first review");
+        build_review_context_with_store(
+            dir.path(),
+            &router,
+            "diff",
+            None,
+            &scope(),
+            5,
+            Some(&store),
+        )
+        .await
+        .expect("first review");
         let after_first = calls_handle.call_count();
 
         // Second review with identical workspace + diff: the symbol
         // embedding should be reused; only the diff is re-embedded.
-        build_review_context_with_store(dir.path(), &router, "diff", None, 5, Some(&store))
-            .await
-            .expect("second review");
+        build_review_context_with_store(
+            dir.path(),
+            &router,
+            "diff",
+            None,
+            &scope(),
+            5,
+            Some(&store),
+        )
+        .await
+        .expect("second review");
         let after_second = calls_handle.call_count();
 
         let extra = after_second - after_first;
@@ -501,17 +573,33 @@ mod tests {
         let store = SqliteVectorStore::in_memory().await.expect("open store");
 
         // First review fills the cache.
-        build_review_context_with_store(dir.path(), &router, "diff", None, 5, Some(&store))
-            .await
-            .expect("first review");
+        build_review_context_with_store(
+            dir.path(),
+            &router,
+            "diff",
+            None,
+            &scope(),
+            5,
+            Some(&store),
+        )
+        .await
+        .expect("first review");
         let after_first = calls_handle.call_count();
 
         // Edit foo's body so the snippet bytes change.
         fs::write(dir.path().join("a.rs"), "pub fn foo() { let x = 1; }\n").unwrap();
 
-        build_review_context_with_store(dir.path(), &router, "diff", None, 5, Some(&store))
-            .await
-            .expect("second review");
+        build_review_context_with_store(
+            dir.path(),
+            &router,
+            "diff",
+            None,
+            &scope(),
+            5,
+            Some(&store),
+        )
+        .await
+        .expect("second review");
         let after_second = calls_handle.call_count();
 
         let extra = after_second - after_first;
@@ -532,7 +620,7 @@ mod tests {
 
         let embedder = std::sync::Arc::new(DeterministicEmbedder::new());
         let router = Router::new().with(ModelTier::Embedding, embedder);
-        let result = build_review_context(dir.path(), &router, "diff", None, 5)
+        let result = build_review_context(dir.path(), &router, "diff", None, &scope(), 5)
             .await
             .expect("ok");
         // Markdown should contain the formatted-context section header.

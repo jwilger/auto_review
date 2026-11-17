@@ -13,7 +13,9 @@ use crate::cli::BenchArgs;
 use anyhow::{Context, Result};
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_prompts::ReviewOutput;
-use ar_prompts::{render_review_prompt, system_prompt, ReviewPromptInputs};
+use ar_prompts::{
+    fence_nonce, process_nonce_salt, render_review_prompt, system_prompt, ReviewPromptInputs,
+};
 use ar_review::{generate_with_self_heal, verify_findings, HealConfig};
 use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
@@ -382,6 +384,7 @@ async fn run_one(path: &Path, llm: &LlmRouter, verifier_enabled: bool) -> Fixtur
         }
     };
 
+    let nonce = fence_nonce(&fixture.name, process_nonce_salt());
     let prompt = render_review_prompt(&ReviewPromptInputs {
         repo_full_name: &fixture.repo_full_name,
         pr_number: fixture.pr_number,
@@ -393,6 +396,7 @@ async fn run_one(path: &Path, llm: &LlmRouter, verifier_enabled: bool) -> Fixtur
         guidelines: &fixture.guidelines,
         repo_context: &fixture.repo_context,
         prior_discussion: "",
+        fence_nonce: &nonce,
     });
 
     let started = Instant::now();

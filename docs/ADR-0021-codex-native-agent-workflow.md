@@ -2,7 +2,11 @@
 
 ## Status
 
-Accepted
+Superseded
+
+## Superseded By
+
+ADR-0023: The Codex surface was removed; the Claude Code agent delivery factory is now the maintained agent surface.
 
 ## Date
 
