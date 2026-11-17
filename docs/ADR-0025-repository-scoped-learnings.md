@@ -53,6 +53,9 @@ Scope learnings and vector-store rows by repository.
   attribute get their scope from the same prefix at read time. Rows with no
   recoverable scope stay unscoped and are excluded from retrieval; the gateway
   logs their count once at startup so an operator can review or remove them.
+  The prefix is user-controllable text (before scoping, chat `remember` stored
+  commenter text under the same source as review corrections), so backfilled
+  rows are trusted only as far as an operator audit confirms them.
 - Vector-store rows are keyed by the same `RepoScope`. That change is
   implemented separately (issue #40) and drops and rebuilds the cache table.
 - PR-scoped learnings that apply only to their PR until it merges are deferred.
@@ -71,6 +74,12 @@ Scope learnings and vector-store rows by repository.
 - Legacy learnings without the correction prefix stop influencing reviews until
   an operator handles them. This trades some lost guidance for removing the
   cross-repository leak.
+- A legacy chat `remember` whose text began with "Repository
+  `<owner>/<repo>` only." naming another repository is backfilled into that
+  repository's scope and keeps reaching its reviews. This is narrower than the
+  previous every-repository exposure, but operators should audit learnings with
+  `auto-review learnings list` after upgrading and remove suspicious rows with
+  `auto-review learnings forget`.
 - The scope key differs from findings and feedback vectors, which carry the
   provider. Review history keys stay without a provider, as ADR-0022 notes.
 - Any commenter on a PR can still add learnings to that repository; gating

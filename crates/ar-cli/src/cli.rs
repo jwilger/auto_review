@@ -250,9 +250,11 @@ pub enum LearningsCommand {
     /// reviewer tool.
     List(ListLearningsArgs),
 
-    /// Delete a learning by id. Same effect as `@<bot> forget`
-    /// but operates directly on the SQLite store, so operators
-    /// can script bulk wipes without going through Forgejo.
+    /// Delete a learning by id, in any repository scope or
+    /// unscoped. Unlike `@<bot> forget`, which only removes the
+    /// PR repository's learnings, this operates directly on the
+    /// store, so operators can script bulk wipes without going
+    /// through a forge.
     /// Use `learnings list` to find the id.
     Forget(ForgetLearningArgs),
 }

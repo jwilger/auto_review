@@ -628,21 +628,40 @@ sqlite3 /var/lib/auto_review/learnings.db ".backup '/backup/learnings-$(date -I)
 
 **Inspect:**
 ```bash
-auto-review learnings list   # uses AR_LEARNINGS_DB by default
+auto-review learnings list   # every learning; uses AR_LEARNINGS_DB by default
+auto-review learnings list --repo OWNER/REPO   # one repository's learnings
+auto-review learnings list --unscoped          # legacy rows with no repository
 auto-review learnings list --json | jq    # machine-readable
 ```
+
+Each learning is scoped to one repository (lowercased `owner/repo`) and records
+the PR it was taught on; `list` prints both, with `-` (or `null` in `--json`)
+when unknown. See the [CLI reference](./CLI.md#learnings) for the flags.
 
 (For a custom inspection query, `sqlite3` against the file
 works too — the schema is documented in
 `crates/ar-index/src/sqlite_learnings.rs`.)
 
+**Upgrading an older store:** opening a store created before repository
+scoping adds the `repo` and `origin_pr` columns and assigns a repository to
+rows whose text starts with "Repository `<owner>/<repo>` only." (old review
+corrections). DynamoDB items without a `repo` attribute get the same treatment
+when read. Other older rows stay unscoped and are excluded from review
+retrieval; the gateway logs one startup `warn` with an `unscoped_learnings`
+count while any remain. Review them with `learnings list --unscoped`, then
+re-teach them with `@<bot> remember` on a PR in the right repository or remove
+them. Because that prefix could also have been typed by a commenter through
+chat `remember`, audit the backfilled rows with `learnings list` after
+upgrading and remove any that do not belong to their repository.
+
 **Forget a single learning:**
 ```bash
 auto-review learnings forget --id <ID>
 ```
-Same effect as `@<bot> forget` from a PR thread but operates
-directly on the SQLite store, so operators can script bulk
-wipes without going through Forgejo.
+This removes any learning, including unscoped ones and those of other
+repositories, directly in the store, so operators can script bulk wipes without
+going through a forge. `@<bot> forget` from a PR thread only removes learnings
+of that PR's repository.
 
 **Restore:** stop the gateway, replace the file, restart.
 

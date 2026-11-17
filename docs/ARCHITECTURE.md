@@ -177,7 +177,9 @@ SQLite store adds the columns and backfills the scope from the legacy
 "Repository `<owner>/<repo>` only." text prefix; DynamoDB items without a `repo`
 attribute get the same treatment at read time. Rows with no recoverable scope
 are excluded from retrieval, and the gateway logs their count at startup.
-Vector-store rows follow the same repository key.
+Vector-store rows are not scoped yet: `SqliteVectorStore` is still shared
+across repositories, and keying its rows by the same `RepoScope` is planned
+under ADR-0025 in issue #40.
 
 Repository context uses the diff, changed paths, tree-sitter symbols, embeddings
 when an embedding tier is configured, and repository-scoped persistent

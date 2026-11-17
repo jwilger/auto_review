@@ -329,9 +329,10 @@ same untrusted-data framing in the review prompt as any other repo content.
 _Tests:_ the per-store scoped-query tests for the in-memory store
 (`crates/ar-index/src/learnings.rs`), the SQLite store
 (`crates/ar-index/src/sqlite_learnings.rs`) and the DynamoDB store
-(`crates/ar-index/tests/dynamodb_learnings.rs`), each showing that
-`query_nearest` for repository B excludes repository A's learnings and
-unscoped rows; the context-builder test with two scopes
+(`crates/ar-index/src/dynamodb_learnings.rs`, including the legacy-item
+prefix tests), each showing that `query_nearest` for repository B excludes
+repository A's learnings and unscoped rows, and that a scoped `remove` leaves
+other scopes' and unscoped rows in place; the context-builder test with two scopes
 (`crates/ar-review/src/context_builder.rs`), showing a learning remembered in
 repository A is never returned when reviewing repository B; and the ar-chat
 red-team test in `crates/ar-chat/tests/`, showing `forget <id>` on a
@@ -342,7 +343,14 @@ malicious code; learnings poisoning is a strictly weaker capability
 for them. Any commenter can still poison the learnings of the repository
 they comment in; approver gating of `remember` and `forget` is planned
 separately. Repositories with the same lowercased `owner/repo` on different
-forges (mirrors) share learnings by design. Operators using cloud embedding
+forges (mirrors) share learnings by design. The legacy backfill trusts the
+"Repository `<owner>/<repo>` only." text prefix, and before scoping chat
+`remember` stored commenter text under the same source as review corrections,
+so a commenter could have stored that prefix naming another repository; after
+the upgrade such a row is retrieved into that repository's reviews (a narrower
+exposure than before, when it reached every repository). After upgrading,
+operators should audit learnings with `auto-review learnings list` and remove
+suspicious rows with `auto-review learnings forget`. Operators using cloud embedding
 providers should treat embedded snippets like other LLM-bound repository
 content and choose `AR_VECTOR_DB=:memory:` or rotate/delete the SQLite store if
 long-term snippet retention is undesirable.
