@@ -52,6 +52,34 @@ subtle = "2.6"
 # files can reference them with `.workspace = true`.
 wiremock = "0.6"
 
+[workspace.lints.rust]
+unfulfilled_lint_expectations = "warn"
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+restriction = { level = "warn", priority = -1 }
+# We deliberately triage the whole restriction group rather than handpick rules.
+# Revisit if we replace that review strategy with a targeted baseline.
+blanket_clippy_restriction_lints = "allow"
+# Tail expressions are our expression-oriented Rust style, not missing returns.
+# Revisit if we deliberately adopt explicit returns as a project convention.
+implicit_return = "allow"
+# Typed error composition uses ?; cleanup and cause preservation remain reviewed.
+# Revisit if concrete failures show that a syntax ban improves those guarantees.
+question_mark_used = "allow"
+# Provided trait defaults are intentional behavior, not incomplete implementations.
+# Revisit if an introduced trait requires explicit overrides for correctness.
+missing_trait_methods = "allow"
+# Named responsibility boundaries are useful even with only one caller.
+# Revisit if single-use abstractions demonstrably obscure rather than clarify code.
+single_call_fn = "allow"
+# Argument-position impl Trait is supported in our own and generated APIs.
+# Revisit if named generic parameters become a deliberate API requirement.
+impl_trait_in_params = "allow"
+# Every consumer lives in this workspace (`publish = false`); closed enums permit coordinated exhaustive review.
+# Revisit before exposing independently evolving APIs to consumers outside this workspace.
+exhaustive_enums = "allow"
+
 [profile.release]
 lto = "thin"
 codegen-units = 1

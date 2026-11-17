@@ -21,8 +21,53 @@ impl HostError {
     }
 }
 
+/// Review features the connected repository host supports.
+///
+/// Hosts differ: GitHub supports all of these, while Forgejo gained
+/// multi-line review comments in v16 and suggestion blocks, thread replies
+/// and thread resolution in v18. Callers must check these flags and degrade
+/// instead of assuming a feature exists.
+///
+/// [`HostCapabilities::default`] supports nothing: the safe fallback.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct HostCapabilities {
+    /// Inline review comments can span a line range.
+    pub multi_line_comments: bool,
+    /// Review comments can carry a ```` ```suggestion ```` block the author
+    /// can apply.
+    pub suggestion_blocks: bool,
+    /// The bot can reply inside an existing review-comment thread.
+    pub thread_replies: bool,
+    /// The bot can mark a review-comment thread as resolved.
+    pub resolve_threads: bool,
+}
+
+impl HostCapabilities {
+    /// Every capability supported.
+    pub const fn all() -> Self {
+        Self {
+            multi_line_comments: true,
+            suggestion_blocks: true,
+            thread_replies: true,
+            resolve_threads: true,
+        }
+    }
+}
+
 #[async_trait]
 pub trait ReviewHost: Send + Sync {
+    /// Review features this host supports. The default reports none, so a
+    /// host that cannot tell gets the plain-comment fallback.
+    async fn capabilities(&self) -> HostCapabilities {
+        HostCapabilities::default()
+    }
+
+    /// Login of the account this host acts as, used to find the bot's own
+    /// reviews and comments. Implementations cache it per host.
+    async fn bot_login(&self) -> Result<String, HostError> {
+        Err(HostError::new("bot login not available for this host"))
+    }
+
     async fn clone_url(&self, owner: &str, repo: &str) -> Result<String, HostError> {
         Err(HostError::new(format!(
             "clone URL not available for {owner}/{repo}"
@@ -271,5 +316,18 @@ mod tests {
 
         assert_eq!(summary.body, "");
         assert_eq!(summary.state, "open");
+    }
+
+    #[test]
+    fn default_host_capabilities_support_nothing() {
+        assert_eq!(
+            HostCapabilities::default(),
+            HostCapabilities {
+                multi_line_comments: false,
+                suggestion_blocks: false,
+                thread_replies: false,
+                resolve_threads: false,
+            }
+        );
     }
 }
