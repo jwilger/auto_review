@@ -292,8 +292,13 @@ impl Client {
 
     /// Fetch a file's raw contents from the repo at `ref_` (a branch, tag, or
     /// commit SHA). Returns `Ok(None)` when the file does not exist (404) so
-    /// callers can treat "no config" the same as "default config". Used by the
-    /// chat path to read `.auto_review.yaml` without cloning the repo.
+    /// callers can treat "no config" the same as "default config".
+    ///
+    /// This is the transport for the trusted base-branch loader
+    /// (`ar_review::trusted_files`): both the review dispatcher and the chat
+    /// handler read `.auto_review.yaml` through it at the PR's base branch,
+    /// never from the head checkout. The whole body is read into memory; the
+    /// loader's size cap applies after the read.
     pub async fn get_file_content(
         &self,
         owner: &str,

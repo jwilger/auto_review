@@ -39,6 +39,13 @@ impl From<&ar_forge::PullRequestRefSummary> for BaseRef {
 }
 
 /// Largest repository-controlled file body the trusted loader will parse.
+///
+/// The cap bounds YAML parsing, not the download: `ReviewHost::get_file_content`
+/// returns the whole body, so an oversized file is fetched in full and then
+/// rejected. Only someone with write access to the base branch controls that
+/// body (see THREAT-MODEL T3a residual risk). Before this loader ingests files
+/// whose size is less tightly controlled, the host transports should bound the
+/// read itself (Content-Length check or a streaming limit).
 pub const MAX_TRUSTED_FILE_BYTES: usize = 64 * 1024;
 
 /// Repo config file names, in lookup order: `.yaml` wins over `.yml`.

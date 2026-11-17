@@ -448,8 +448,11 @@ threat-model claims fail CI when a regression slips in:
   `tests::hostile_head_config_does_not_disable_or_narrow_review` — covers T3a
   (PR-supplied config): the head workspace holds `.auto_review.yaml`
   with `enabled: false` and `ignored_paths: ["**"]`, the fake host
-  returns 404 for the base-branch file, and the review still runs
-  and posts a normal review.
+  returns 404 for the base-branch file. The test asserts the review
+  still runs and posts a normal review with a Success/Failure status
+  (not the "disabled by repo config" status), and that the changed
+  file `src/lib.rs` still reaches the review prompt, so the head
+  `ignored_paths: ["**"]` does not narrow the review.
 - `crates/ar-review/tests/red_team_workspace_tools.rs` — covers
   T4 (LLM tool calls escape workspace): symlink escape, chained
   symlinks, empty paths, pathological regex.
