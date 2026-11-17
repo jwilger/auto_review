@@ -33,43 +33,15 @@ jobs:
         env:
           OP_SERVICE_ACCOUNT_TOKEN: ${{ secrets.OP_SERVICE_ACCOUNT_TOKEN }}
           GH_RELEASE_AUTOMATION_TOKEN: op://Github Secrets/GH_RELEASE_AUTOMATION_TOKEN/credential
-          RELEASE_SIGNING_KEY: op://Github Secrets/RELEASE_SIGNING_KEY/private key?ssh-format=openssh
 
       - env:
           GH_TOKEN: ${{ steps.load_secrets.outputs.GH_RELEASE_AUTOMATION_TOKEN }}
-          RELEASE_SIGNING_KEY: ${{ steps.load_secrets.outputs.RELEASE_SIGNING_KEY }}
-          RELEASE_BOT_NAME: ${{ vars.RELEASE_BOT_NAME }}
-          RELEASE_BOT_EMAIL: ${{ vars.RELEASE_BOT_EMAIL }}
         run: |
           set -euo pipefail
           if [ -z "${GH_TOKEN:-}" ]; then
             printf 'missing GH_RELEASE_AUTOMATION_TOKEN\n' >&2
             exit 1
           fi
-          if [ -z "${RELEASE_SIGNING_KEY:-}" ]; then
-            printf 'missing RELEASE_SIGNING_KEY\n' >&2
-            exit 1
-          fi
-          if [ -z "${RELEASE_BOT_NAME:-}" ] || [ -z "${RELEASE_BOT_EMAIL:-}" ]; then
-            printf 'missing release bot identity\n' >&2
-            exit 1
-          fi
-          signing_key="${RUNNER_TEMP:-/tmp}/release-signing-key"
-          printf '%s\n' "$RELEASE_SIGNING_KEY" > "$signing_key"
-          chmod 600 "$signing_key"
-          export GIT_AUTHOR_NAME="$RELEASE_BOT_NAME"
-          export GIT_AUTHOR_EMAIL="$RELEASE_BOT_EMAIL"
-          export GIT_COMMITTER_NAME="$RELEASE_BOT_NAME"
-          export GIT_COMMITTER_EMAIL="$RELEASE_BOT_EMAIL"
-          export GIT_CONFIG_COUNT=4
-          export GIT_CONFIG_KEY_0=gpg.format
-          export GIT_CONFIG_VALUE_0=ssh
-          export GIT_CONFIG_KEY_1=user.signingkey
-          export GIT_CONFIG_VALUE_1="$signing_key"
-          export GIT_CONFIG_KEY_2=commit.gpgsign
-          export GIT_CONFIG_VALUE_2=true
-          export GIT_CONFIG_KEY_3="url.https://x-access-token:${GH_TOKEN}@github.com/.insteadOf"
-          export GIT_CONFIG_VALUE_3=https://github.com/
           git fetch --tags
           release_plan="$(nix develop --command scripts/release plan --workspace .)"
           CONVENTIONAL_RELEASE_TYPE="$(printf '%s\n' "$release_plan" | awk -F= '$1 == "release_type" { print $2 }')"
@@ -108,15 +80,69 @@ jobs:
             exit 1
           fi
           branch="release/v$RELEASE_VERSION"
-          git switch -C "$branch"
+          base_sha="$(git rev-parse HEAD)"
+          release_files=(Cargo.toml Cargo.lock CHANGELOG.md)
           nix develop --command scripts/release prepare --workspace . --version "$RELEASE_VERSION" --date "$(date +%F)"
-          git add Cargo.toml Cargo.lock CHANGELOG.md
-          if git diff --cached --quiet; then
+          mapfile -t changed_files < <(git diff --name-only -- "${release_files[@]}")
+          if [ "${#changed_files[@]}" -eq 0 ]; then
             printf 'release metadata already up to date for v%s\n' "$RELEASE_VERSION"
             exit 0
           fi
-          git commit -m "chore: release v$RELEASE_VERSION"
-          nix develop --command git push --no-verify --force-with-lease origin "$branch"
+
+          # The all-branches ruleset requires verified signatures and forbids
+          # force-pushes. Release commits are therefore created through the
+          # GraphQL createCommitOnBranch mutation (GitHub signs them), and a
+          # stale release branch is deleted and recreated instead of rewritten.
+          branch_is_current=false
+          if head_sha="$(gh api "repos/$GITHUB_REPOSITORY/git/ref/heads/$branch" --jq '.object.sha' 2>/dev/null)"; then
+            head_commit="$(gh api "repos/$GITHUB_REPOSITORY/git/commits/$head_sha")"
+            head_parents="$(printf '%s\n' "$head_commit" | jq -r '[.parents[].sha] | join(" ")')"
+            head_tree="$(printf '%s\n' "$head_commit" | jq -r '.tree.sha')"
+            if [ "$head_parents" = "$base_sha" ]; then
+              remote_tree="$(gh api "repos/$GITHUB_REPOSITORY/git/trees/$head_tree")"
+              branch_is_current=true
+              for release_file in "${release_files[@]}"; do
+                local_blob="$(git hash-object -- "$release_file")"
+                remote_blob="$(printf '%s\n' "$remote_tree" | jq -r --arg path "$release_file" '.tree[] | select(.path == $path) | .sha')"
+                if [ "$local_blob" != "$remote_blob" ]; then
+                  branch_is_current=false
+                  break
+                fi
+              done
+            fi
+            if [ "$branch_is_current" = false ]; then
+              printf 'replacing stale %s (head %s)\n' "$branch" "$head_sha"
+              gh api -X DELETE "repos/$GITHUB_REPOSITORY/git/refs/heads/$branch"
+            fi
+          fi
+
+          if [ "$branch_is_current" = true ]; then
+            printf '%s already holds the release commit for %s\n' "$branch" "$base_sha"
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f "ref=refs/heads/$branch" -f "sha=$base_sha" --silent
+            work_dir="$(mktemp -d "${RUNNER_TEMP:-/tmp}/release-commit.XXXXXX")"
+            trap 'rm -rf "$work_dir"' EXIT
+            for release_file in "${changed_files[@]}"; do
+              base64 -w0 -- "$release_file" | jq -Rs --arg path "$release_file" '{path: $path, contents: .}' >> "$work_dir/additions.jsonl"
+            done
+            jq -s \
+              --arg repo "$GITHUB_REPOSITORY" \
+              --arg branch "$branch" \
+              --arg base_sha "$base_sha" \
+              --arg headline "chore: release v$RELEASE_VERSION" \
+              '{
+                query: "mutation($input: CreateCommitOnBranchInput!) { createCommitOnBranch(input: $input) { commit { oid url } } }",
+                variables: {
+                  input: {
+                    branch: { repositoryNameWithOwner: $repo, branchName: $branch },
+                    expectedHeadOid: $base_sha,
+                    message: { headline: $headline },
+                    fileChanges: { additions: . }
+                  }
+                }
+              }' "$work_dir/additions.jsonl" > "$work_dir/create-commit.json"
+            gh api graphql --input "$work_dir/create-commit.json" --jq '.data.createCommitOnBranch.commit | "created signed release commit \(.oid) \(.url)"'
+          fi
 
           open_prs_json="$(gh pr list --repo "$GITHUB_REPOSITORY" --state open --json number,headRefName --limit 100)"
           superseded_prs="$(printf '%s\n' "$open_prs_json" | jq -r --arg branch "$branch" '.[] | select(.headRefName | startswith("release/v")) | select(.headRefName != $branch) | .number')"
