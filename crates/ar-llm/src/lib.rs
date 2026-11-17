@@ -9,6 +9,8 @@
 pub mod openai;
 pub mod pricing;
 pub mod router;
+#[cfg(any(test, feature = "test-support"))]
+pub mod testing;
 pub mod types;
 
 pub use openai::OpenAiProvider;

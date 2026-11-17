@@ -15,7 +15,7 @@ instructions live in [Quickstart](./QUICKSTART.md) and [Deployment](./DEPLOYMENT
 | `ar-llm` | Provider trait, OpenAI-compatible provider, and tier router for `Reasoning`, `Cheap`, and `Embedding`. |
 | `ar-index` | Tree-sitter symbols, embeddings, SQLite/in-memory vector stores, co-change graph utilities, and in-memory/SQLite/DynamoDB learnings store. |
 | `ar-prompts` | Prompt templates, JSON schemas, DTOs, and validators for review, triage, and verification LLM calls. |
-| `ar-review` | Review activities: provider-supplied clone URL workspace prep, repo config, RAG context, prompt rendering, self-heal, verification, severity filtering, review mapping. |
+| `ar-review` | Review activities: provider-supplied clone URL workspace prep, repo config, RAG context, prompt rendering, self-heal, verification, severity filtering, review mapping, and the bounded JSON-action agent loop (`agent_loop::run_agent_loop`) behind the agentic verifier. |
 | `ar-chat` | `@<bot>` parser and provider-neutral `ReviewHost` handlers for `help`, `remember`, `forget`, `re-review`, `autofix`, `docstring`, `tests`, and free-form Q&A. |
 | `ar-cli` | The `auto-review` binary: gateway and AgentCore entrypoints plus auth, webhook, config, review, bench, ops, history, and learnings commands. |
 
@@ -39,7 +39,10 @@ while host-neutral code migrates to the common crate.
 
 - Pure helpers get adjacent `#[cfg(test)] mod tests`.
 - Forgejo HTTP paths use `wiremock`.
-- LLM paths use canned/scripted providers.
+- LLM paths use canned/scripted providers. The shared FIFO
+  `ar_llm::testing::ScriptedProvider` (records requests, scripts usage tokens)
+  sits behind ar-llm's `test-support` feature; enable it only from
+  `[dev-dependencies]`.
 - Security boundary claims are pinned by red-team tests referenced from
   [Threat Model](./THREAT-MODEL.md).
 - Do not turn prose-only documentation changes into deterministic wording
