@@ -1337,7 +1337,8 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         tracing::info!("LLM_EMBEDDING_MODEL not set; RAG disabled");
     }
 
-    // Optional Cheap tier, used by finding verification.
+    // Optional Cheap tier, used by finding verification, PR metadata checks
+    // and chat commands.
     if let Some(cheap_model) = read_non_empty_env("LLM_CHEAP_MODEL") {
         let cheap_base =
             read_non_empty_env("LLM_CHEAP_BASE_URL").unwrap_or_else(|| llm_base.clone());

@@ -37,7 +37,8 @@ module, and the `ar-prompts` triage prompt and schema. Runtime triage is
 deterministic. Repository context draws on the diff, changed paths, tree-sitter
 symbols, embeddings, and learnings, and does not use git history.
 
-The cheap model tier stays; finding verification uses it.
+The cheap model tier stays; finding verification, PR metadata checks and the
+chat commands use it.
 
 ## Consequences
 

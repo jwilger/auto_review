@@ -355,9 +355,10 @@ avoid accidentally throttling existing deployments.
 
 _Attacker:_ A1.
 _Path:_ PR with a 200,000-line diff to drive up tokens billed.
-_Mitigation:_ Diff cap, triage skip (cheap-tier classifier filters
-trivial files), per-PR token budget; oversize diffs hit the cap and
-the LLM only sees the first N bytes.
+_Mitigation:_ Diff cap, deterministic triage skip (`pr_is_skippable`
+skips PRs whose changed files are all trivial by path/extension, with
+no LLM call), per-PR token budget; oversize diffs hit the cap and the
+LLM only sees the first N bytes.
 _Residual risk:_ operator chooses the cap; default is conservative.
 
 ### T9. Confused-deputy via Forgejo API

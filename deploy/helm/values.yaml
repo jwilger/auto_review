@@ -22,7 +22,7 @@ config:
   llmBaseUrl: ""            # e.g. http://ollama:11434 or https://api.openai.com
   llmReasoningModel: "qwen2.5-coder:32b"
   llmEmbeddingModel: ""     # optional; enables RAG
-  llmCheapModel: ""         # optional; enables the verifier
+  llmCheapModel: ""         # optional; enables the verifier, PR-metadata checks and chat-assist commands
   # Paths to the SQLite databases. NOTE: these need a persistent
   # volume mounted at /data for the data to survive pod restarts
   # — the chart's default `ephemeralStorage:` block only covers
