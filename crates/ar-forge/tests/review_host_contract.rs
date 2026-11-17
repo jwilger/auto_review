@@ -5,36 +5,17 @@ struct FakeHost;
 
 #[async_trait]
 impl ar_forge::ReviewHost for FakeHost {
-    async fn get_pull_request(
-        &self,
-        _owner: &str,
-        _repo: &str,
-        pr_number: u64,
-    ) -> Result<ar_forge::PullRequestSummary, ar_forge::HostError> {
-        Ok(ar_forge::PullRequestSummary {
-            number: pr_number,
-            title: "title".to_string(),
-            body: "body".to_string(),
-            draft: false,
-            state: "open".to_string(),
-            head: ar_forge::PullRequestRefSummary {
-                ref_name: "feature".to_string(),
-                sha: "head".to_string(),
-            },
-            base: ar_forge::PullRequestRefSummary {
-                ref_name: "main".to_string(),
-                sha: "base".to_string(),
-            },
-        })
-    }
-
-    async fn get_pr_diff(
+    async fn create_review(
         &self,
         _owner: &str,
         _repo: &str,
         _pr_number: u64,
-    ) -> Result<String, ar_forge::HostError> {
-        Ok("diff --git a/src/lib.rs b/src/lib.rs".to_string())
+        _request: &ar_forge::CreateReviewRequest,
+    ) -> Result<ar_forge::CreatedReview, ar_forge::HostError> {
+        Ok(ar_forge::CreatedReview {
+            id: 1,
+            state: "COMMENT".to_owned(),
+        })
     }
 
     async fn get_compare_diff(
@@ -44,7 +25,39 @@ impl ar_forge::ReviewHost for FakeHost {
         _base: &str,
         _head: &str,
     ) -> Result<String, ar_forge::HostError> {
-        Ok("diff --git a/src/lib.rs b/src/lib.rs".to_string())
+        Ok("diff --git a/src/lib.rs b/src/lib.rs".to_owned())
+    }
+
+    async fn get_pr_diff(
+        &self,
+        _owner: &str,
+        _repo: &str,
+        _pr_number: u64,
+    ) -> Result<String, ar_forge::HostError> {
+        Ok("diff --git a/src/lib.rs b/src/lib.rs".to_owned())
+    }
+
+    async fn get_pull_request(
+        &self,
+        _owner: &str,
+        _repo: &str,
+        pr_number: u64,
+    ) -> Result<ar_forge::PullRequestSummary, ar_forge::HostError> {
+        Ok(ar_forge::PullRequestSummary {
+            number: pr_number,
+            title: "title".to_owned(),
+            body: "body".to_owned(),
+            draft: false,
+            state: "open".to_owned(),
+            head: ar_forge::PullRequestRefSummary {
+                ref_name: "feature".to_owned(),
+                sha: "head".to_owned(),
+            },
+            base: ar_forge::PullRequestRefSummary {
+                ref_name: "main".to_owned(),
+                sha: "base".to_owned(),
+            },
+        })
     }
 
     async fn list_changed_files(
@@ -65,15 +78,6 @@ impl ar_forge::ReviewHost for FakeHost {
         Ok(Vec::new())
     }
 
-    async fn list_pull_reviews(
-        &self,
-        _owner: &str,
-        _repo: &str,
-        _pr_number: u64,
-    ) -> Result<Vec<ar_forge::PullReviewSummary>, ar_forge::HostError> {
-        Ok(Vec::new())
-    }
-
     async fn list_pull_review_comments(
         &self,
         _owner: &str,
@@ -84,15 +88,13 @@ impl ar_forge::ReviewHost for FakeHost {
         Ok(Vec::new())
     }
 
-    async fn update_pull_request(
+    async fn list_pull_reviews(
         &self,
         _owner: &str,
         _repo: &str,
         _pr_number: u64,
-        _title: Option<&str>,
-        _body: Option<&str>,
-    ) -> Result<(), ar_forge::HostError> {
-        Ok(())
+    ) -> Result<Vec<ar_forge::PullReviewSummary>, ar_forge::HostError> {
+        Ok(Vec::new())
     }
 
     async fn post_commit_status(
@@ -105,21 +107,28 @@ impl ar_forge::ReviewHost for FakeHost {
         Ok(())
     }
 
-    async fn create_review(
+    async fn update_pull_request(
         &self,
         _owner: &str,
         _repo: &str,
         _pr_number: u64,
-        _request: &ar_forge::CreateReviewRequest,
-    ) -> Result<ar_forge::CreatedReview, ar_forge::HostError> {
-        Ok(ar_forge::CreatedReview {
-            id: 1,
-            state: "COMMENT".to_string(),
-        })
+        _title: Option<&str>,
+        _body: Option<&str>,
+    ) -> Result<(), ar_forge::HostError> {
+        Ok(())
     }
 }
 
 #[tokio::test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; \
+              there is no #[cfg(test)] module to place this in"
+)]
+#[expect(
+    clippy::expect_used,
+    reason = "FakeHost always returns a diff; expect aborts the test if the trait object loses it"
+)]
 async fn review_host_trait_is_implemented_from_common_crate() {
     let host: &dyn ar_forge::ReviewHost = &FakeHost;
 
@@ -129,6 +138,11 @@ async fn review_host_trait_is_implemented_from_common_crate() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; \
+              there is no #[cfg(test)] module to place this in"
+)]
 async fn default_capabilities_report_nothing_supported() {
     let host: &dyn ar_forge::ReviewHost = &FakeHost;
 
@@ -144,6 +158,16 @@ async fn default_capabilities_report_nothing_supported() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; \
+              there is no #[cfg(test)] module to place this in"
+)]
+#[expect(
+    clippy::expect_used,
+    reason = "the default bot_login must fail; expect_err aborts the test with that expectation \
+              as the failure message"
+)]
 async fn default_bot_login_is_an_error() {
     let host: &dyn ar_forge::ReviewHost = &FakeHost;
 
