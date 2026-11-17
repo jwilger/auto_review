@@ -85,6 +85,10 @@ spec:
             - name: AR_REVIEW_CONCURRENCY
               value: {{ .Values.config.reviewConcurrency | quote }}
             {{- end }}
+            {{- if .Values.config.llmMaxInflight }}
+            - name: AR_LLM_MAX_INFLIGHT
+              value: {{ .Values.config.llmMaxInflight | quote }}
+            {{- end }}
             {{- if .Values.config.webhookRatePerSec }}
             - name: AR_WEBHOOK_RATE_PER_SEC
               value: {{ .Values.config.webhookRatePerSec | quote }}

@@ -50,6 +50,9 @@ config:
   # PRs spawns N tmpdirs + N concurrent LLM calls. Tune for
   # high-traffic instances or expensive cloud LLMs.
   reviewConcurrency: ""
+  # Cap on simultaneous LLM provider calls per process
+  # (AR_LLM_MAX_INFLIGHT). Blank means unlimited; 0 is treated as 1.
+  llmMaxInflight: ""
   # Webhook rate limiter. Both must be set together; per-second
   # rate and burst capacity. T7 (resource exhaustion) mitigation.
   webhookRatePerSec: ""

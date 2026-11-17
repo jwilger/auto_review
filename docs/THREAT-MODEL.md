@@ -446,6 +446,11 @@ intake. The throttle runs **before** HMAC verification so a flood
 of unsigned junk can't burn CPU on signature math. Rejected
 requests get a `429` and increment
 `auto_review_webhook_rate_limited_total`.
+`AR_LLM_MAX_INFLIGHT` (off by default) bounds concurrent LLM provider
+calls per process, which mitigates fan-out from agentic verification
+and concurrent stages overloading self-hosted backends or tripping
+provider rate limits.
+
 The chat poller skips reviews that report no inline comments
 (`comments_count: 0`), so an empty review adds no polling cost.
 _Residual risk:_ operators who don't set concurrency/rate-limit env vars can

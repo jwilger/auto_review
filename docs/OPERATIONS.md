@@ -497,6 +497,18 @@ Pick a value matching your worker
 capacity (CPU cores × something; rule of thumb: start at the
 number of CPU cores, raise if LLM I/O dominates).
 
+`AR_LLM_MAX_INFLIGHT` caps simultaneous LLM provider calls
+(`complete` and `embed`, across all tiers) for the whole process.
+`AR_REVIEW_CONCURRENCY` caps whole reviews, but one review can fan
+out to many concurrent calls (agentic verification, concurrent
+stages); this cap keeps self-hosted Ollama/vLLM backends and
+provider rate limits safe however many agents run. Unset means
+unlimited; `0` is treated as `1`. Excess calls wait for a slot.
+
+```
+AR_LLM_MAX_INFLIGHT=8
+```
+
 ### 5.2 Long-running reviews
 
 The orchestrator has no global per-PR timeout; each phase has its

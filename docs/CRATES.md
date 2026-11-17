@@ -35,6 +35,9 @@ LLM calls flow through `ar-llm::Router`. Review prompts and schemas come from
 `ar-forge`; Forgejo keeps compatibility DTO re-exports for existing callers
 while host-neutral code migrates to the common crate.
 
+`Router::with_inflight_limit(n)` caps simultaneous provider calls across the
+router and all its clones (`AR_LLM_MAX_INFLIGHT` in the gateway).
+
 ## `ar-prompts` review contract
 
 The review LLM call is constrained by `crates/ar-prompts/schemas/review.json`

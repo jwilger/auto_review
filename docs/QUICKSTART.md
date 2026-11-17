@@ -251,6 +251,7 @@ Common optional env vars:
 | `AR_POLL_INTERVAL_SECS` | `60` | Inline-thread mention poll cadence; `0` disables |
 | `AR_SEVERITY_FLOOR` | `warning` | `note`, `warning`, or `error` |
 | `AR_REVIEW_CONCURRENCY` | — | Cap concurrent reviews |
+| `AR_LLM_MAX_INFLIGHT` | — | Cap simultaneous LLM calls per process |
 | `AR_GATEWAY_BARE` | `false` | Skip the embedded OCI launcher when intentionally using a different isolation boundary |
 | `AR_GATEWAY_EXTERNAL_ISOLATION` | — | Set to `container` for operator-owned container deployments |
 | `AR_WEBHOOK_RATE_PER_SEC` / `AR_WEBHOOK_BURST` | — | Optional webhook rate limiter |
