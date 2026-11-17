@@ -6,6 +6,7 @@
 //! - `POST /repos/{owner}/{repo}/pulls/{n}/reviews` → post review with inline comments
 //! - `POST /repos/{owner}/{repo}/statuses/{sha}` → commit status
 
+pub mod capabilities;
 pub mod client;
 pub mod init;
 pub mod types;
@@ -28,6 +29,41 @@ pub use webhook::{
 
 #[async_trait]
 impl ar_forge::ReviewHost for Client {
+    async fn capabilities(&self) -> ar_forge::HostCapabilities {
+        *self
+            .capabilities
+            .get_or_init(|| async {
+                let version = match self.get_server_version().await {
+                    Ok(version) => version,
+                    Err(error) => {
+                        tracing::warn!(
+                            error = %error,
+                            "Forgejo version probe failed; treating the server as \
+                             supporting no optional review features"
+                        );
+                        return ar_forge::HostCapabilities::none();
+                    }
+                };
+                capabilities::capabilities_for_version(&version).unwrap_or_else(|| {
+                    tracing::warn!(
+                        version = %client::cap_for_error(&version),
+                        "unparseable Forgejo version; treating the server as \
+                         supporting no optional review features"
+                    );
+                    ar_forge::HostCapabilities::none()
+                })
+            })
+            .await
+    }
+
+    async fn bot_login(&self) -> Result<String, ar_forge::HostError> {
+        self.bot_login
+            .get_or_try_init(|| async { self.get_authenticated_user_login().await })
+            .await
+            .cloned()
+            .map_err(host_error)
+    }
+
     async fn clone_url(&self, owner: &str, repo: &str) -> Result<String, ar_forge::HostError> {
         self.clone_url(owner, repo).map_err(host_error)
     }
