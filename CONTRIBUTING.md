@@ -92,6 +92,16 @@ gh api --method PUT repos/jwilger/auto_review/rulesets/18404081 \
   --input .github/rulesets/require-pr.json
 ```
 
+The factory's approval-to-merge loop (`factory/loop.md`) needs a
+`factory:approved` label, which the maintainer adds to a `needs-review`
+factory pull request to approve it. Create it once per repository; the
+factory's reconcile step also creates it when it is missing:
+
+```sh
+gh label create factory:approved \
+  --description 'maintainer approval for the factory to merge' --color 0E8A16
+```
+
 Workflows pin every action to a full commit SHA with the release tag in a
 trailing `# vX.Y.Z` comment; Renovate (`helpers:pinGitHubActionDigests`)
 opens pull requests that bump both. Pin any new action the same way.

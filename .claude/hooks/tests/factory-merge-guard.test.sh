@@ -155,6 +155,13 @@ pr h1 factory/policy.md
 commit h1 2026-11-17T10:00:00Z p0
 expect 2 "denies a factory pull request with no approval" "$merge"
 
+# CI gate scripts decide whether a change may merge, so they are factory
+# paths too (factory/policy.md, `## Change classes`).
+fixture
+pr h1 scripts/check-hermetic-git
+commit h1 2026-11-17T10:00:00Z p0
+expect 2 "denies a pull request changing a CI gate script with no approval" "$merge"
+
 fixture
 pr h1 factory/policy.md
 commit h1 2026-11-17T10:00:00Z p0
@@ -327,6 +334,20 @@ fixture
 pr h1 factory/policy.md
 expect 0 "keeps the in-session FACTORY_MERGE_APPROVED override" 'FACTORY_MERGE_APPROVED=7 gh pr merge 7 --squash'
 
+# A recorded approval covers one head, but a scheduled auto-merge outlives
+# later pushes, so it never schedules auto-merge of a factory pull request.
+fixture
+pr h1 factory/policy.md
+commit h1 2026-11-17T10:00:00Z p0
+review jwilger APPROVED h1 2026-11-17T11:00:00Z
+expect 2 "denies auto-merge of an approved factory pull request" 'gh pr merge 7 --auto --squash --match-head-commit h1'
+expect 2 "denies the --auto=true form" 'gh pr merge 7 --auto=true --squash --match-head-commit h1'
+expect 0 "allows auto-merge of a factory pull request on the in-session override" 'FACTORY_MERGE_APPROVED=7 gh pr merge 7 --auto --squash'
+
+fixture
+pr h1 crates/ar-llm/src/lib.rs
+expect 0 "allows auto-merge of a pull request with no factory paths" 'gh pr merge 7 --auto --squash --match-head-commit h1'
+
 fixture
 expect 2 "blocks gh pr edit adding factory:approved" 'gh pr edit 5 --add-label factory:approved'
 expect 2 "blocks gh issue edit adding factory:approved in a list" 'gh issue edit 5 --add-label "bug,factory:approved"'
@@ -369,6 +390,30 @@ expect 0 "allows gh pr create with other labels and prose naming factory:approve
 expect 0 "allows removing factory:approved" 'gh pr edit 5 --remove-label factory:approved'
 expect 0 "allows a gh api DELETE of factory:approved" 'gh api -X DELETE repos/o/r/issues/5/labels/factory:approved'
 expect 0 "allows prose that mentions the label" 'gh pr create --title t --body "waits for factory:approved"'
+expect 0 "allows creating the factory:approved label itself" "gh label create factory:approved --description 'maintainer approval for the factory to merge'"
+
+# Agents act as a Roles account, so an approving review they submit would
+# read as the maintainer's recorded approval on a pull request someone else
+# (such as a bot) authored. The guard blocks every way of submitting one.
+fixture
+expect 2 "blocks gh pr review --approve" 'gh pr review 7 --approve'
+expect 2 "blocks gh pr review -a" 'gh pr review 7 -a -b lgtm'
+expect 2 "blocks -a inside a short-flag cluster" 'gh pr review 7 -ab lgtm'
+expect 2 "blocks gh pr review --approve under nix develop" 'nix develop .#ci --command gh pr review 7 --approve'
+expect 2 "blocks a REST review with event=APPROVE" 'gh api repos/o/r/pulls/7/reviews -f event=APPROVE'
+expect 2 "blocks a REST review with a lower-case approve event" "gh api repos/o/r/pulls/7/reviews -f 'event=approve'"
+expect 2 "blocks submitting a pending review as APPROVE" 'gh api -X POST repos/o/r/pulls/7/reviews/9/events -f event=APPROVE'
+expect 2 "blocks a REST review from an --input file" 'gh api repos/o/r/pulls/7/reviews --input review.json'
+expect 2 "blocks a REST review whose fields come from a file" 'gh api repos/o/r/pulls/7/reviews -F event=@event.txt'
+# shellcheck disable=SC2016 # the command text carries a literal $event
+expect 2 "blocks a REST review whose event is a shell variable" 'gh api repos/o/r/pulls/7/reviews -f event="$event"'
+expect 2 "blocks a GraphQL addPullRequestReview mutation" "gh api graphql -f query='mutation { addPullRequestReview(input: {pullRequestId: \"x\", event: APPROVE}) { clientMutationId } }'"
+expect 2 "blocks a GraphQL submitPullRequestReview mutation" "gh api graphql -f query='mutation { submitPullRequestReview(input: {pullRequestReviewId: \"x\", event: APPROVE}) { clientMutationId } }'"
+expect 2 "blocks a GraphQL query read from a file" 'gh api graphql -F query=@mutation.graphql'
+expect 0 "allows a commenting review" 'gh pr review 7 --comment -b "please approve once CI is green"'
+expect 0 "allows a review requesting changes" 'gh pr review 7 --request-changes -b "fix the test"'
+expect 0 "allows reading reviews" 'gh api repos/o/r/pulls/7/reviews'
+expect 0 "allows a REST review with event=COMMENT" 'gh api repos/o/r/pulls/7/reviews -f event=COMMENT -f body=x'
 
 if ((failures > 0)); then
   echo "$failures case(s) failed" >&2

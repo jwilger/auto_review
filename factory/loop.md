@@ -43,6 +43,17 @@ It prints one notice naming the cap and the waiting pull requests and stops,
 so a running loop does not pile up work on an old `main`. Explicit
 `/factory <issue>`, `approve` and `rework` are not capped.
 
+The `factory:approved` label must exist in the repository, since neither
+`gh pr edit --add-label` nor the pull request sidebar creates a missing
+label. Create it once:
+
+```sh
+gh label create factory:approved --description 'maintainer approval for the factory to merge' --color 0E8A16
+```
+
+Reconcile also creates it when it is missing; creating the label approves
+nothing.
+
 To let the factory land a `needs-review` pull request, add the
 `factory:approved` label to it after reviewing its current head. Factory
 agents run as your own account, so you author every factory pull request, and
@@ -63,8 +74,11 @@ comments on the pull request and requeues the item for rework, which needs a
 fresh approval; a transient check failure is rerun instead. The factory
 removes the label before any push other than a clean merge of `main`
 (rework, requeue or resume), so it never sits beside unreviewed commits. The
-factory never adds `factory:approved` itself; the merge guard hook blocks
-agents from adding it.
+factory never adds `factory:approved` itself or submits an approving review;
+the merge guard hook blocks agents from doing either. For a pull request
+that touches `factory` paths the factory never schedules auto-merge on your
+approval, because a scheduled auto-merge outlives the head you approved; it
+waits for the checks and merges pinned to that head instead.
 
 ## Branches and bases
 

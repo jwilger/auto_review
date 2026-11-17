@@ -78,7 +78,9 @@ Follow every change request opened above until it is merged or closed, by `refer
 
 ## Reconcile
 
-People review, merge and close change requests after a run ends, so before `next` and `status`, read every item in `reviewing` that has a linked change request, with the installed `10kr-change-requests` skill's status:
+People review, merge and close change requests after a run ends, so before `next` and `status`, read every item in `reviewing` that has a linked change request, with the installed `10kr-change-requests` skill's status.
+
+First make sure the `factory:approved` label exists, because the maintainer approves `needs-review` pull requests with it and neither `gh pr edit --add-label` nor the pull request sidebar can create a missing label: when `gh label list --search factory:approved --json name --jq '.[].name'` does not print it (compare case-insensitively), run `gh label create factory:approved --description 'maintainer approval for the factory to merge' --color 0E8A16`. Creating the label is not approving anything; the factory still never adds it to a pull request, and never submits an approving review (the merge guard hook blocks both).
 
 - **Merged**: `close` the item.
 - **Closed without merging**: transition the item to `awaiting-human` with a comment saying the change request was closed unmerged, so a person decides between `rework` and dropping it.

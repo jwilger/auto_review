@@ -21,7 +21,9 @@
 # own commit and voids an earlier approval. The Roles are read from `main`,
 # never from the checkout, so a pull request cannot name its own approvers.
 # That approval is the maintainer's instruction for that pull request and that
-# head only, not a blanket bypass. Every merge in a command is checked on its
+# head only, not a blanket bypass, so it never allows `gh pr merge --auto` on a
+# factory pull request: a scheduled auto-merge stays enabled across later
+# pushes, so it could merge a head nobody approved. Every merge in a command is checked on its
 # own, with the pin read from that merge's own command segment; GraphQL merge
 # mutations, which name no pull request number, are denied. Anything the hook
 # cannot read, within its time budget, denies.
@@ -43,6 +45,14 @@
 # words may be split by spaces or tabs; and commands are read from command
 # position behind wrappers such as `nix develop .#ci --command`, `sh -c`,
 # `xargs` and shell keywords.
+#
+# For the same reason agents never submit an approving review, which would
+# count as a Roles approval on a pull request another account (such as a bot)
+# authored: the hook blocks `gh pr review --approve` (or `-a`, alone or in a
+# cluster of short flags), `gh api` writes to `pulls/<n>/reviews` (and their
+# `/events`) with `event=APPROVE` or fields it cannot read, the GraphQL
+# `addPullRequestReview` and `submitPullRequestReview` mutations, and GraphQL
+# documents read from a file or stdin.
 #
 # Override, only on the maintainer's explicit instruction in the session:
 # prefix the command with FACTORY_MERGE_APPROVED=<pr number>.
@@ -144,6 +154,26 @@ if grep -Eq '(^|[^A-Za-z])gh[[:space:]]' <<<"$cmd" \
   deny "add labels with gh pr edit --add-label, which this guard can check."
 fi
 
+# Approval guard: an approving review from the account agents act as would
+# read as the maintainer's recorded approval, so agents never submit one.
+if grep -Eq '(^|[^A-Za-z])gh[[:space:]]' <<<"$cmd" \
+  && grep -Eq '(addPullRequestReview|submitPullRequestReview)([^A-Za-z]|$)' <<<"$cmd"; then
+  deny "only a person approves a pull request; agents never submit reviews through GraphQL."
+fi
+
+# review_approves <segment>: whether a `gh pr review` segment approves, by
+# --approve or by -a alone or inside a cluster of short flags.
+review_approves() {
+  local w
+  while IFS= read -r w; do
+    w=$(dequote <<<"$w")
+    if [[ $w =~ ^--approve(=.*)?$ || $w =~ ^-[A-Za-z]*a[A-Za-z]*$ ]]; then
+      return 0
+    fi
+  done < <(grep -Eo "$word" <<<"$1" | tail -n +4)
+  return 1
+}
+
 # Label guard. Each shell segment is checked on its own, from command
 # position, so prose such as a pull request body that names the label passes.
 while IFS= read -r segment; do
@@ -160,6 +190,9 @@ while IFS= read -r segment; do
     if grep -Eq "$unreadable" <<<"$values"; then
       deny "name labels literally, so this guard can check them for $approved_label."
     fi
+  fi
+  if grep -Eq '^gh +pr +review( |$)' <<<"$segment" && review_approves "$segment"; then
+    deny "only a person approves a pull request; agents never submit an approving review."
   fi
   if grep -Eq '^gh +api( |$)' <<<"$segment"; then
     method=$(grep -Eo -- '(-X|--method)[[:space:]=]*[A-Za-z]+' <<<"$segment" | head -n1 \
@@ -180,6 +213,20 @@ while IFS= read -r segment; do
       if grep -Eq "issues/[^[:space:]/]+(/labels)?([[:space:]\"']|\\?|$)" <<<"$segment" \
         && grep -Eq -- "(^| )--input( |=|$)|(^| )(-F|--field)([[:space:]]+|=)[^[:space:]]*=@|$unreadable" <<<"$segment"; then
         deny "name labels literally in issue and label writes, so this guard can check them for $approved_label."
+      fi
+      # A review write that approves, or whose fields the guard cannot read.
+      if grep -Eq 'pulls/[^[:space:]/]+/reviews' <<<"$segment"; then
+        if dequote <<<"$segment" | grep -qiE '(^|[ =])event=approve'; then
+          deny "only a person approves a pull request; agents never submit an approving review."
+        fi
+        if grep -Eq -- "(^| )--input( |=|$)|=@|$unreadable" <<<"$segment"; then
+          deny "give review fields literally, so this guard can check that they do not approve."
+        fi
+      fi
+      # A GraphQL document read from a file or stdin could hold any mutation.
+      if grep -Eq '(^| )graphql( |$)' <<<"$segment" \
+        && grep -Eq -- '(^| )--input( |=|$)|query=@' <<<"$segment"; then
+        deny "give GraphQL queries inline, so this guard can check them."
       fi
     fi
   fi
@@ -209,10 +256,16 @@ while IFS= read -r raw; do
     if grep -Eq "(^|[[:space:]])FACTORY_MERGE_APPROVED=${pr}([[:space:]]|$)" <<<"${raw%%pr merge*}"; then
       override=1
     fi
-    merges+=("$pr $override $pin")
+    # `--auto` schedules the merge for whenever checks pass, which outlives
+    # the head an approval covers.
+    auto=0
+    if grep -Eq '(^| )--auto(=[^ ]*)?( |$)' <<<"$segment"; then
+      auto=1
+    fi
+    merges+=("$pr $override $auto $pin")
   fi
   for pr in $(grep -Eo 'pulls/[0-9]+/merge' <<<"$raw" | grep -Eo '[0-9]+' || true); do
-    merges+=("$pr 0")
+    merges+=("$pr 0 0")
   done
 done < <(tr ';&|' '\n' <<<"$cmd")
 
@@ -230,10 +283,10 @@ bounded() {
   timeout "$call_timeout" "$@"
 }
 
-# check_merge <pr> <override> [<pinned sha>]: exits 0 when the merge may run
-# and denies otherwise. Run it in a subshell, once per merge.
+# check_merge <pr> <override> <auto> [<pinned sha>]: exits 0 when the merge
+# may run and denies otherwise. Run it in a subshell, once per merge.
 check_merge() {
-  local pr=$1 override=$2 pinned=${3:-}
+  local pr=$1 override=$2 auto=$3 pinned=${4:-}
   ((override == 0)) || exit 0
 
   local view files hits held
@@ -243,12 +296,19 @@ check_merge() {
     || deny "could not read the files of pull request #$pr."
 
   # Keep in step with the `factory` class in factory/policy.md.
-  local factory_re='^(\.claude/|factory/|\.github/|AGENTS\.md$|Justfile$|lefthook\.yml$|deny\.toml$|rust-toolchain\.toml$|flake\.nix$|flake\.lock$|Cargo\.toml$)'
+  local factory_re='^(\.claude/|factory/|\.github/|AGENTS\.md$|Justfile$|lefthook\.yml$|deny\.toml$|rust-toolchain\.toml$|flake\.nix$|flake\.lock$|Cargo\.toml$|scripts/check-)'
   hits=$(grep -E "$factory_re" <<<"$files" || true)
   [[ -n "$hits" ]] || exit 0
 
   held="pull request #$pr changes factory paths, which the maintainer merges:
 $hits"
+
+  # A scheduled auto-merge stays enabled when someone pushes, and GitHub
+  # checks --match-head-commit only when it schedules, so a later head nobody
+  # approved could merge. The approval merge sequence waits for the checks and
+  # merges at once instead, so it never needs --auto.
+  ((auto == 0)) || deny "$held
+(a recorded approval covers one head, so it never schedules auto-merge; merge once the required checks pass)"
 
   # --- Recorded approval ----------------------------------------------------
 
@@ -365,7 +425,7 @@ $hits"
 }
 
 for m in "${merges[@]}"; do
-  # shellcheck disable=SC2086 # the entry is "<pr> <override> [<pin>]"
+  # shellcheck disable=SC2086 # the entry is "<pr> <override> <auto> [<pin>]"
   set -- $m
   # errexit is suspended around the subshell only to read its status; the
   # subshell turns it back on for the check itself. Anything but a clean

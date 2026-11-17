@@ -15,7 +15,7 @@ factory's review and approve stations pass and CI is green.
 - engineer: @jwilger
 
 ## Change classes
-- factory: `.claude/**`, `factory/**`, `AGENTS.md`, `.github/**`, `Justfile`, `lefthook.yml`, `deny.toml`, `rust-toolchain.toml`, `flake.nix`, `flake.lock`, `Cargo.toml`
+- factory: `.claude/**`, `factory/**`, `AGENTS.md`, `.github/**`, `Justfile`, `lefthook.yml`, `deny.toml`, `rust-toolchain.toml`, `flake.nix`, `flake.lock`, `Cargo.toml`, `scripts/check-*`
 - docs: `docs/**`, `*.md`
 - tests: `crates/*/tests/**`, `tests/**`
 - code: everything else
@@ -23,7 +23,10 @@ factory's review and approve stations pass and CI is green.
 A change takes the first class any of its paths matches, in the order above.
 `factory` covers the factory itself and every gate that decides whether a
 change may merge, so no agent change can loosen a check and merge itself.
-Crate manifests (`crates/*/Cargo.toml`) are `code`.
+A script that a CI gate runs is named `scripts/check-*` (today
+`scripts/check-hermetic-git`, run by `just hermetic-git`), so it falls in
+`factory`; keep this list and `factory_re` in
+`.claude/hooks/factory-merge-guard.sh` in step. Crate manifests (`crates/*/Cargo.toml`) are `code`.
 
 ## Review routing
 - default required: none (the ruleset requires zero approvals)
@@ -46,8 +49,12 @@ the approval. The hook reads the Roles from this file on `main`, never from
 the pull request's own branch, reads the rest through `gh api`, bounds every
 read with a timeout, and denies whenever it cannot read something in time.
 It is not a blanket bypass: a new own commit voids the approval, and agents
-may not add the `factory:approved` label (in any letter case), which the
-same hook blocks. Because agents open factory pull requests as the
+may not add the `factory:approved` label (in any letter case) or submit an
+approving review, both of which the same hook blocks. The approval never
+lets an agent schedule auto-merge of a `factory` pull request (`gh pr merge
+--auto`), because a scheduled auto-merge stays enabled across later pushes;
+the factory waits for the required checks and merges pinned to the approved
+head instead. Because agents open factory pull requests as the
 maintainer's account, and GitHub does not let an author approve their own
 pull request, the label is the maintainer's practical approval; a review
 counts only from another Roles account. `FACTORY_MERGE_APPROVED=<pr>` stays
