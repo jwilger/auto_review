@@ -44,14 +44,17 @@ so a running loop does not pile up work on an old `main`. Explicit
 `/factory <issue>`, `approve` and `rework` are not capped.
 
 To let the factory land a `needs-review` pull request, approve it on GitHub
-(an approving review on its current head), or add the `factory:approved`
-label. The next reconcile merges current `main` into the branch with a merge
+(an approving review on its current head, which stays valid while only clean
+merges of `main` follow it and until you request changes), or add the
+`factory:approved` label. Approvers are the `## Roles` accounts in
+`factory/policy.md` as `main` has it. The next reconcile merges current `main` into the branch with a merge
 commit, runs `nix develop .#ci --command just ci`, pushes with
 `nix develop .#ci --command git push`, waits for the required checks on that
 head, and squash-merges pinned to it (`--match-head-commit`). A conflict or a
 red check removes the label, comments on the pull request and requeues the
-item for rework, which needs a fresh approval. Any rework push removes the
-label too. The factory never adds `factory:approved` itself.
+item for rework, which needs a fresh approval. The factory removes the
+label before any push other than a clean merge of `main` (rework, requeue or
+resume), so it never sits beside unreviewed commits. The factory never adds `factory:approved` itself.
 
 ## Branches and bases
 

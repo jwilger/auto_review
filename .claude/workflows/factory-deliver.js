@@ -114,9 +114,9 @@ const unbuilt = (b, needVisual, extra) => b.verdict === 'BLOCKED'
 const approveStation = async (branch, criteria, round, paths = [], evidence = null) => {
   phase('Approve')
   const score = a.holdout?.enabled ? ` Holdout satisfaction: ${a.holdout.score} (threshold ${a.holdout.threshold}).` : ''
-  // ESCALATE means "human review required": the change request still opens, but a person merges it.
+  // ESCALATE means "human review required": the change request still opens, a person approves it, and reconcile then merges it.
   const approve = await station(`Decide whether the factory may auto-merge ${branch} for ${a.item.id} under factory/policy.md ` +
-    `(APPROVE), or whether a human must review and merge it (ESCALATE).\n` +
+    `(APPROVE), or whether a human must review and approve it before the factory merges it (ESCALATE).\n` +
     `Criteria:\n${bullets(criteria)}\nReview rounds used: ${round} of ${a.rounds}.${score}\n` +
     `Spec decisions:\n${decisions.length ? decisionLines(decisions) : '- (none)'}\n` +
     `Changed paths:\n${paths.length ? bullets(paths) : '- (not reported)'}` +

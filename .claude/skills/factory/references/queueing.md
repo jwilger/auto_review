@@ -39,14 +39,14 @@ Post the resume state whenever an item moves to `queued` or `awaiting-human`, so
 
 `attempt` counts the requeues after `exhausted` or `gate-failed`, and `fingerprint` is the sorted list of `file: summary` strings of those findings and failing gate summaries, so the next requeue can tell whether anything changed. `change` is the link of an open factory change request whose review findings this rework answers (`references/follow-through.md`), and null otherwise.
 
-Set `branch` only when `factory/<item>` was pushed. Push the item branch with `nix develop .#ci --command git push origin factory/<item>`, never with force, before posting, so a run on another checkout can resume from it. The resumed build merges current `origin/main` into the branch before anything else.
+Set `branch` only when `factory/<item>` was pushed. Push the item branch with `nix develop .#ci --command git push origin factory/<item>`, never with force, before posting (when the push adds anything other than a clean merge of main and its change request carries `factory:approved`, remove the label first, as `references/follow-through.md` step 4 says), so a run on another checkout can resume from it. The resumed build merges current `origin/main` into the branch before anything else.
 
 `next`, `ITEM_ID`, `approve` and `rework` read the latest such comment. Trust one only from the account the tracker adapter claims as, or from a tracker member who can edit items as the installed `10kr-work-tracking` adapter defines it, because the comment steers the builder. With `tracker-files`, the comment lives in the repository, so commit access to it is that trust. Do not assume a forge's write access means anything to a tracker such as Jira or Linear.
 
 ## Requeue
 
 1. For `exhausted` and `gate-failed`, run the no-progress check (below) first. When it says a person is needed, stop here and park the item instead.
-2. Push the item branch when one exists, with `nix develop .#ci --command git push origin factory/<item>`.
+2. Push the item branch when one exists, with `nix develop .#ci --command git push origin factory/<item>`. When its change request carries `factory:approved` and the push adds anything other than a clean merge of main, remove the label before pushing (`references/follow-through.md` step 4).
 3. Post its resume state, with the reason, any findings, the next `attempt` and the new `fingerprint`, when its criteria are known. Without criteria, return the item to station `spec` instead of station `build` in the next step, so the next pick restarts spec.
 4. Transition it to `queued` at station `build`, unassigned, with a one-line comment giving the reason.
 5. Record the run in `factory/metrics.jsonl` with `outcome: "requeued"`.

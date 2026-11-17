@@ -26,7 +26,7 @@ shellcheck:
 
 # Exercises the factory's PreToolUse hooks against a fake gh.
 hooks-test:
-	for t in .claude/hooks/tests/*.test.sh; do bash "$t"; done
+	for t in .claude/hooks/tests/*.test.sh; do bash "$t" || exit 1; done
 
 actionlint:
 	actionlint

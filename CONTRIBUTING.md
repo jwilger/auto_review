@@ -37,7 +37,8 @@ just clippy
 just test
 just deny
 just build
-just shellcheck
+just shellcheck        # scripts/release and .claude/hooks (hooks and their tests)
+just hooks-test        # the factory's PreToolUse hook tests, against a fake gh
 just actionlint
 just hermetic-git      # test code clears GIT_DIR/GIT_WORK_TREE/GIT_INDEX_FILE before spawning git
 just conflict-markers  # no unresolved merge conflict markers in tracked files
@@ -49,15 +50,16 @@ just flake-check  # nix flake check; builds the packages
 
 `just ci` runs rustfmt, clippy (with `-D warnings`), the full
 nextest application test suite, cargo-deny (licenses + bans + sources),
-a workspace build, shellcheck on `scripts/release`, actionlint on
-`.github/workflows/`, `scripts/check-hermetic-git` and a conflict-marker
-scan of tracked files. The hermetic-git check exists because git exports
+a workspace build, shellcheck on `scripts/release` and `.claude/hooks`,
+the merge-guard hook tests (`just hooks-test`, against a fake `gh`),
+actionlint on `.github/workflows/`, `scripts/check-hermetic-git` and a
+conflict-marker scan of tracked files. The hermetic-git check exists because git exports
 `GIT_DIR` to its hooks: a test fixture that runs `git init` under the
 pre-push gate without clearing it rewrites this repository's config (one
 set `core.bare = true`). Clear `GIT_DIR`, `GIT_WORK_TREE` and
 `GIT_INDEX_FILE` in the same statement as `Command::new("git")`, or spawn
-through a helper that does. These two run in `just ci` and the pre-push
-hook, not as GitHub Actions jobs.
+through a helper that does. These checks also run as their own GitHub
+Actions jobs, so a push that skips the pre-push hook cannot land them.
 Advisory checks require network access, so `just advisories` stays out
 of `just ci`; run it when bumping a dep. Land no commit that fails any
 required check.
@@ -71,7 +73,10 @@ it can merge:
 |---|---|
 | Format check, Clippy, Test, Dependency policy, Build | `just fmt`, `just clippy`, `just test`, `just deny`, `just build` |
 | Dependency advisories | `just advisories` (`cargo deny check advisories`); `.github/workflows/advisories.yml` also runs it daily against `main` so new advisories surface without a code change |
-| Shellcheck | `just shellcheck` on `scripts/release` |
+| Shellcheck | `just shellcheck` on `scripts/release` and `.claude/hooks` |
+| Hook tests | `just hooks-test`, the factory merge-guard hook tests against a fake `gh` |
+| Hermetic git | `just hermetic-git`, which fails when test code spawns `git` without clearing `GIT_DIR`, `GIT_WORK_TREE` and `GIT_INDEX_FILE` |
+| Conflict markers | `just conflict-markers`, which fails on unresolved merge conflict markers in tracked files |
 | Actionlint | `just actionlint` on `.github/workflows/` |
 | Nix flake check | `just flake-check`, which runs the Nix packaging, NixOS module and OCI image contract checks |
 | Analyze (rust), Analyze (actions) | CodeQL analysis of the Rust code and the workflows (`.github/workflows/codeql.yml`) |

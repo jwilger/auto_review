@@ -14,10 +14,12 @@ mkdir -p "$work/bin"
 
 # Fake gh: `pr view` serves pr.json; `api <path>` serves the fixture named
 # after the path's tail. A missing fixture fails, like an unreadable API.
+# FAKE_GH_SLEEP makes every call hang, like an unresponsive API.
 cat >"$work/bin/gh" <<'FAKE'
 #!/usr/bin/env bash
 set -euo pipefail
 fix=${FAKE_GH_FIXTURES:?}
+if [[ -n "${FAKE_GH_SLEEP:-}" ]]; then sleep "$FAKE_GH_SLEEP"; fi
 case "$1 ${2:-}" in
   "pr view") cat "$fix/pr.json" ;;
   "api "*)
@@ -25,6 +27,7 @@ case "$1 ${2:-}" in
     [[ "$1" == --paginate ]] && shift
     path=$1
     case "$path" in
+      */contents/factory/policy.md\?ref=main) cat "$fix/policy.md" ;;
       */pulls/*/reviews) cat "$fix/reviews.json" ;;
       */issues/*/events) cat "$fix/events.json" ;;
       */commits/*) cat "$fix/commits/${path##*/}.json" ;;
@@ -37,6 +40,20 @@ esac
 FAKE
 chmod +x "$work/bin/gh"
 
+# Fake git: `merge-tree --write-tree <p1> <p2>` prints the tree recorded for
+# that pair, and exits 1 (a conflict) when none is recorded.
+cat >"$work/bin/git" <<'FAKE'
+#!/usr/bin/env bash
+set -euo pipefail
+fix=${FAKE_GH_FIXTURES:?}
+[[ "$1" == -C ]] && shift 2
+[[ "$1 $2" == "merge-tree --write-tree" ]] || exit 2
+merge="$fix/merges/$3-$4"
+[[ -f "$merge" ]] || exit 1
+cat "$merge"
+FAKE
+chmod +x "$work/bin/git"
+
 failures=0
 case_no=0
 
@@ -44,9 +61,11 @@ case_no=0
 fixture() {
   case_no=$((case_no + 1))
   fix="$work/case$case_no"
-  mkdir -p "$fix/commits" "$fix/compare"
+  mkdir -p "$fix/commits" "$fix/compare" "$fix/merges"
   echo '[]' >"$fix/reviews.json"
   echo '[]' >"$fix/events.json"
+  # The trusted Roles, as `main` has them.
+  printf '%s\n' '# Autonomy policy' '' '## Roles' '- engineer: @jwilger' '' '## Change classes' >"$fix/policy.md"
 }
 
 # pr <head> <files...> [labels via LABELS env]
@@ -59,14 +78,27 @@ pr() {
     '{headRefOid: $head, files: $files, labels: ($labels | map({name: .}))}' >"$fix/pr.json"
 }
 
-# commit <sha> <committer date> <parent...>
+# commit <sha> <committer date> <parent...>; its tree is t-<sha>.
 commit() {
   local sha=$1 date=$2
   shift 2
   local parents
   parents=$(printf '%s\n' "$@" | jq -R '{sha: .}' | jq -s .)
   jq -n --arg sha "$sha" --arg date "$date" --argjson parents "$parents" \
-    '{sha: $sha, parents: $parents, commit: {committer: {date: $date}}}' >"$fix/commits/$sha.json"
+    '{sha: $sha, parents: $parents, commit: {committer: {date: $date}, tree: {sha: ("t-" + $sha)}}}' \
+    >"$fix/commits/$sha.json"
+}
+
+# clean_merge <merge sha> <p1> <p2>: merging p2 into p1 needs no hand edits,
+# so it yields exactly the merge commit's tree.
+clean_merge() {
+  echo "t-$1" >"$fix/merges/$2-$3"
+}
+
+# evil_merge <p1> <p2>: the automatic merge of p2 into p1 gives another tree
+# than the merge commit records (a hand-resolved conflict or extra edits).
+evil_merge() {
+  echo "t-automatic" >"$fix/merges/$1-$2"
 }
 
 # on_main <sha>: <sha> is an ancestor of main.
@@ -95,7 +127,7 @@ label_event() { # label_event <event> <login> <label> <created_at>
 expect() {
   local want=$1 name=$2 cmd=$3 got=0
   jq -n --arg c "$cmd" '{tool_input: {command: $c}}' \
-    | PATH="$work/bin:$PATH" FAKE_GH_FIXTURES="$fix" CLAUDE_PROJECT_DIR="$repo_root" \
+    | PATH="$work/bin:$PATH" FAKE_GH_FIXTURES="$fix" CLAUDE_PROJECT_DIR="${PROJECT_DIR:-$repo_root}" \
       bash "$hook" >/dev/null 2>"$work/stderr" || got=$?
   if [[ "$got" != "$want" ]]; then
     failures=$((failures + 1))
@@ -156,9 +188,27 @@ fixture
 pr h1 factory/policy.md
 commit h1 2026-11-17T12:00:00Z r1 m1
 on_main m1
+clean_merge h1 r1 m1
 commit r1 2026-11-17T10:00:00Z p0
 review jwilger APPROVED r1 2026-11-17T11:00:00Z
 expect 0 "allows an approval followed only by merges of main" "$merge"
+
+fixture
+pr h1 factory/policy.md
+commit h1 2026-11-17T12:00:00Z r1 m1
+on_main m1
+evil_merge r1 m1
+commit r1 2026-11-17T10:00:00Z p0
+review jwilger APPROVED r1 2026-11-17T11:00:00Z
+expect 2 "denies an approval followed by a merge of main with hand edits" "$merge"
+
+fixture
+pr h1 factory/policy.md
+commit h1 2026-11-17T12:00:00Z r1 m1
+on_main m1
+commit r1 2026-11-17T10:00:00Z p0
+review jwilger APPROVED r1 2026-11-17T11:00:00Z
+expect 2 "denies an approval followed by a merge of main that conflicts" "$merge"
 
 fixture
 pr h1 factory/policy.md
@@ -179,6 +229,7 @@ fixture
 LABELS='["factory:approved"]' pr h1 factory/policy.md
 commit h1 2026-11-17T12:00:00Z r1 m1
 on_main m1
+clean_merge h1 r1 m1
 commit r1 2026-11-17T10:00:00Z p0
 label_event labeled jwilger factory:approved 2026-11-17T11:00:00Z
 expect 0 "allows a Roles label newer than the last branch-own commit" "$merge"
@@ -207,6 +258,29 @@ commit h1 2026-11-17T10:00:00Z p0
 rm "$fix/reviews.json"
 expect 2 "fails closed when the reviews cannot be read" "$merge"
 
+# The pull request's own policy.md names another reviewer; only main's Roles
+# count, so the change under review cannot pick who approves it.
+fixture
+pr h1 factory/policy.md
+commit h1 2026-11-17T10:00:00Z p0
+review someone-else APPROVED h1 2026-11-17T11:00:00Z
+mkdir -p "$work/pr-checkout/factory"
+printf '%s\n' '## Roles' '- engineer: @jwilger' '- engineer: @someone-else' >"$work/pr-checkout/factory/policy.md"
+PROJECT_DIR="$work/pr-checkout" expect 2 "reads Roles from main, not the checked-out branch" "$merge"
+
+fixture
+pr h1 factory/policy.md
+commit h1 2026-11-17T10:00:00Z p0
+review jwilger APPROVED h1 2026-11-17T11:00:00Z
+rm "$fix/policy.md"
+expect 2 "fails closed when main's policy cannot be read" "$merge"
+
+fixture
+pr h1 factory/policy.md
+commit h1 2026-11-17T10:00:00Z p0
+review jwilger APPROVED h1 2026-11-17T11:00:00Z
+FAKE_GH_SLEEP=5 FACTORY_MERGE_GUARD_CALL_TIMEOUT=1 expect 2 "fails closed when a gh call hangs" "$merge"
+
 fixture
 pr h1 factory/policy.md
 expect 0 "keeps the in-session FACTORY_MERGE_APPROVED override" 'FACTORY_MERGE_APPROVED=7 gh pr merge 7 --squash'
@@ -216,6 +290,21 @@ expect 2 "blocks gh pr edit adding factory:approved" 'gh pr edit 5 --add-label f
 expect 2 "blocks gh issue edit adding factory:approved in a list" 'gh issue edit 5 --add-label "bug,factory:approved"'
 expect 2 "blocks a gh api label POST naming factory:approved" "gh api repos/o/r/issues/5/labels -f 'labels[]=factory:approved'"
 expect 2 "blocks an explicit PUT naming factory:approved" 'gh api --method PUT repos/o/r/issues/5/labels -F labels[]=factory:approved'
+expect 2 "blocks gh -R <repo> pr edit adding factory:approved" 'gh -R jwilger/auto_review pr edit 5 --add-label factory:approved'
+expect 2 "blocks gh pr --repo <repo> edit adding factory:approved" 'gh pr --repo jwilger/auto_review edit 5 --add-label factory:approved'
+expect 2 "blocks --repo=<repo> and --add-label=<label>" 'gh pr edit --repo=o/r 5 --add-label=factory:approved'
+expect 2 "blocks an env-prefixed gh pr edit" 'env gh pr edit 5 --add-label factory:approved'
+expect 2 "blocks a command-prefixed gh pr edit" 'command gh pr edit 5 --add-label factory:approved'
+expect 2 "blocks a gh api label POST after -R" "gh -R o/r api repos/o/r/issues/5/labels -f 'labels[]=factory:approved'"
+expect 2 "blocks gh pr create labelling factory:approved" 'gh pr create --title x --body y --label factory,factory:approved'
+expect 2 "blocks gh pr create --label=factory:approved" 'gh pr create --title x --body y --label=factory:approved'
+expect 2 "blocks gh issue create -l factory:approved" 'gh issue create --title x --body y -l factory:approved'
+# shellcheck disable=SC2016 # the command text carries a literal $label
+expect 2 "blocks a label held in a shell variable" 'gh pr edit 5 --add-label "$label"'
+expect 2 "blocks a GraphQL addLabelsToLabelable mutation" "gh api graphql -f query='mutation { addLabelsToLabelable(input: {labelableId: \"x\", labelIds: [\"y\"]}) { clientMutationId } }'"
+expect 2 "blocks a label write from an --input file" 'gh api repos/o/r/issues/5/labels --input labels.json'
+expect 0 "allows removing factory:approved while adding another label" 'gh pr edit 5 --remove-label factory:approved --add-label needs-rework'
+expect 0 "allows gh pr create with other labels and prose naming factory:approved" 'gh pr create --title t --body "waits for factory:approved" --label factory'
 expect 0 "allows removing factory:approved" 'gh pr edit 5 --remove-label factory:approved'
 expect 0 "allows a gh api DELETE of factory:approved" 'gh api -X DELETE repos/o/r/issues/5/labels/factory:approved'
 expect 0 "allows prose that mentions the label" 'gh pr create --title t --body "waits for factory:approved"'
