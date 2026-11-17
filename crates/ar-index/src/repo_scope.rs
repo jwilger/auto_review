@@ -27,10 +27,11 @@ impl RepoScope {
     }
 
     /// Parse the `owner/repo` form produced by [`fmt::Display`]. Returns
-    /// `None` when either part is empty or the owner contains a slash.
+    /// `None` unless the value holds exactly one slash with a non-empty
+    /// part on each side.
     pub fn parse(value: &str) -> Option<Self> {
         let (owner, repo) = value.split_once('/')?;
-        if owner.is_empty() || repo.is_empty() {
+        if owner.is_empty() || repo.is_empty() || repo.contains('/') {
             return None;
         }
         Some(Self::new(owner, repo))
@@ -111,6 +112,11 @@ mod tests {
         );
         assert_eq!(RepoScope::parse("acme"), None);
         assert_eq!(RepoScope::parse("/widget"), None);
+    }
+
+    #[test]
+    fn parse_rejects_repo_part_containing_a_slash() {
+        assert_eq!(RepoScope::parse("acme/widget/extra"), None);
     }
 
     #[test]

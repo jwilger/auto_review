@@ -284,6 +284,7 @@ fn learning_to_item(pk: &str, record: &LearningRecord) -> HashMap<String, Attrib
 /// Decode an item. Items written before learnings were scoped have no
 /// `repo` attribute; their scope comes from a legacy
 /// `Repository <owner>/<repo> only.` text prefix, or they stay unscoped.
+/// An item whose `repo` attribute does not parse is unscoped too.
 fn item_to_learning(
     item: &HashMap<String, AttributeValue>,
 ) -> Result<LearningRecord, LearningsError> {
@@ -293,10 +294,20 @@ fn item_to_learning(
     let text = attr_string(item, "text")
         .ok_or_else(|| LearningsError::Storage("missing text".to_string()))?;
     let repo = match attr_string(item, "repo") {
-        Some(repo) => Some(
-            RepoScope::parse(&repo)
-                .ok_or_else(|| LearningsError::Storage(format!("invalid repo: {repo}")))?,
-        ),
+        // An unparseable `repo` makes the item unscoped rather than
+        // failing the read, so one bad item cannot break every query;
+        // the SQLite store treats such rows the same way.
+        Some(repo) => {
+            let scope = RepoScope::parse(&repo);
+            if scope.is_none() {
+                tracing::warn!(
+                    pk = attr_string(item, "pk").unwrap_or_default(),
+                    repo = %repo,
+                    "learning has an unparseable repo; treating it as unscoped"
+                );
+            }
+            scope
+        }
         None => parse_legacy_correction_repo(&text),
     };
     let origin_pr = match item.get("origin_pr") {
@@ -524,6 +535,23 @@ mod tests {
     async fn legacy_item_without_prefix_is_unscoped_and_never_retrieved() {
         let (client, store) = store();
         client.seed_legacy(5, "Prefer Result over panics.");
+        let hits = store
+            .query_nearest(&[1.0, 0.0], 5, &RepoScope::new("acme", "widget"))
+            .await
+            .unwrap();
+        assert!(hits.is_empty());
+        let unscoped = store.list(LearningsFilter::Unscoped).await.unwrap();
+        assert_eq!(unscoped.iter().map(|r| r.id).collect::<Vec<_>>(), vec![5]);
+    }
+
+    #[tokio::test]
+    async fn item_with_unparseable_repo_is_unscoped_and_does_not_fail_queries() {
+        let (client, store) = store();
+        client.seed_legacy(5, "hand edited");
+        client.items.lock().unwrap()[0].insert(
+            "repo".to_string(),
+            AttributeValue::S("not-a-scope".to_string()),
+        );
         let hits = store
             .query_nearest(&[1.0, 0.0], 5, &RepoScope::new("acme", "widget"))
             .await

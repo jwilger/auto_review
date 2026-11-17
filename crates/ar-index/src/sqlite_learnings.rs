@@ -156,26 +156,30 @@ impl LearningsStore for SqliteLearningsStore {
     }
 
     async fn list(&self, filter: LearningsFilter) -> Result<Vec<LearningRecord>, LearningsError> {
+        // `Unscoped` filters after decoding rather than on `repo IS NULL`,
+        // so a row whose stored `repo` does not parse counts as unscoped
+        // here, the same way it decodes everywhere else.
         let query = match &filter {
-            LearningsFilter::All => sqlx::query(
-                "SELECT id, text, source, embedding, created_at, repo, origin_pr \
-                 FROM learnings ORDER BY id",
-            ),
             LearningsFilter::Repo(scope) => sqlx::query(
                 "SELECT id, text, source, embedding, created_at, repo, origin_pr \
                  FROM learnings WHERE repo = ? ORDER BY id",
             )
             .bind(scope.to_string()),
-            LearningsFilter::Unscoped => sqlx::query(
+            LearningsFilter::All | LearningsFilter::Unscoped => sqlx::query(
                 "SELECT id, text, source, embedding, created_at, repo, origin_pr \
-                 FROM learnings WHERE repo IS NULL ORDER BY id",
+                 FROM learnings ORDER BY id",
             ),
         };
         let rows = query
             .fetch_all(&self.pool)
             .await
             .map_err(|e| LearningsError::Storage(e.to_string()))?;
-        rows.into_iter().map(row_to_record).collect()
+        let mut records = rows
+            .into_iter()
+            .map(row_to_record)
+            .collect::<Result<Vec<_>, _>>()?;
+        records.retain(|r| filter.matches(r));
+        Ok(records)
     }
 
     async fn remove(&self, id: u64, scope: Option<&RepoScope>) -> Result<(), LearningsError> {
@@ -213,13 +217,24 @@ fn row_to_record(row: sqlx::sqlite::SqliteRow) -> Result<LearningRecord, Learnin
     let created_at: i64 = row.get("created_at");
     let repo: Option<String> = row.get("repo");
     let origin_pr: Option<i64> = row.get("origin_pr");
+    let repo = repo.as_deref().and_then(|value| {
+        let scope = RepoScope::parse(value);
+        if scope.is_none() {
+            tracing::warn!(
+                learning_id = id,
+                repo = value,
+                "learning has an unparseable repo; treating it as unscoped"
+            );
+        }
+        scope
+    });
     Ok(LearningRecord {
         id: id as u64,
         text,
         source: source_from_str(&source_str)?,
         embedding: bytes_to_vec_f32(&embedding_bytes),
         created_at,
-        repo: repo.as_deref().and_then(RepoScope::parse),
+        repo,
         origin_pr: origin_pr.map(|pr| pr as u64),
     })
 }
@@ -359,6 +374,19 @@ mod tests {
             vec![legacy]
         );
         assert_eq!(store.list(LearningsFilter::All).await.unwrap().len(), 3);
+    }
+
+    #[tokio::test]
+    async fn unparseable_stored_repo_is_listed_as_unscoped() {
+        let store = SqliteLearningsStore::in_memory().await.expect("open");
+        let bad = insert_legacy(&store, "hand edited").await;
+        sqlx::query("UPDATE learnings SET repo = 'not-a-scope' WHERE id = ?")
+            .bind(bad as i64)
+            .execute(&store.pool)
+            .await
+            .expect("corrupt repo");
+        let unscoped = store.list(LearningsFilter::Unscoped).await.unwrap();
+        assert_eq!(unscoped.iter().map(|r| r.id).collect::<Vec<_>>(), vec![bad]);
     }
 
     #[tokio::test]
