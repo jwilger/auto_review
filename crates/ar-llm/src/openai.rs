@@ -1,7 +1,7 @@
 //! OpenAI-compatible chat-completions + embeddings client.
 //!
-//! Works against any backend speaking OpenAI's `/v1/chat/completions` and
-//! `/v1/embeddings` shape: hosted OpenAI, Ollama, vLLM, OpenRouter,
+//! Works against any backend speaking `OpenAI`'s `/v1/chat/completions` and
+//! `/v1/embeddings` shape: hosted `OpenAI`, Ollama, vLLM, `OpenRouter`,
 //! Together.ai, Groq, etc. The base URL is configurable so the same
 //! provider implementation serves all of them.
 
@@ -15,21 +15,33 @@ use url::Url;
 
 #[derive(Debug, Clone)]
 pub struct OpenAiProvider {
-    http: reqwest::Client,
+    /// API root, always ending in `/` so joins keep any subpath.
     base: Url,
+    /// Model named in every `/v1/chat/completions` request.
     chat_model: String,
-    embedding_model: Option<String>,
     /// Optional Ollama `options.num_ctx` sent on every `/v1/embeddings`
-    /// POST. Hosted OpenAI ignores unknown fields, but Ollama uses
+    /// POST. Hosted `OpenAI` ignores unknown fields, but Ollama uses
     /// it to size the model's context window for that request — so
     /// inputs sized to the operator's configured byte cap aren't
     /// silently truncated by Ollama's default `num_ctx=2048`.
     embed_num_ctx: Option<u32>,
+    /// Model named in `/v1/embeddings` requests; `None` makes `embed`
+    /// return [`Error::Unsupported`].
+    embedding_model: Option<String>,
+    /// HTTP client carrying the JSON and optional bearer-auth headers.
+    http: reqwest::Client,
 }
 
 impl OpenAiProvider {
     /// `base_url` should be the API root, e.g. `https://api.openai.com` or
     /// `http://localhost:11434` for Ollama.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidBaseUrl`] when `base_url` does not parse or
+    /// `api_key` is not a valid header value, and [`Error::Http`] when the
+    /// HTTP client cannot be built.
+    #[inline]
     pub fn new(base_url: &str, api_key: Option<&str>, chat_model: &str) -> Result<Self, Error> {
         // Same subpath-deploy normalisation as the Forgejo client.
         // OpenRouter and self-hosted LLM gateways are sometimes
@@ -38,10 +50,15 @@ impl OpenAiProvider {
         // would silently drop the subpath and every LLM call would
         // hit the wrong endpoint.
         let normalized = if base_url.ends_with('/') {
-            base_url.to_string()
+            base_url.to_owned()
         } else {
             format!("{base_url}/")
         };
+        #[expect(
+            clippy::map_err_ignore,
+            reason = "InvalidBaseUrl carries the normalized URL as its whole message; appending \
+                      the parse error would change the error text callers see"
+        )]
         let base =
             Url::parse(&normalized).map_err(|_| Error::InvalidBaseUrl(normalized.clone()))?;
         let mut headers = HeaderMap::new();
@@ -49,6 +66,11 @@ impl OpenAiProvider {
         headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
         if let Some(key) = api_key {
             let auth = format!("Bearer {key}");
+            #[expect(
+                clippy::map_err_ignore,
+                reason = "the error names only the api key setting so nothing derived from the \
+                          secret header value reaches the message"
+            )]
             let mut hv = HeaderValue::from_str(&auth)
                 .map_err(|_| Error::InvalidBaseUrl("api key".into()))?;
             hv.set_sensitive(true);
@@ -58,17 +80,20 @@ impl OpenAiProvider {
             .default_headers(headers)
             .build()?;
         Ok(Self {
-            http,
             base,
-            chat_model: chat_model.to_string(),
-            embedding_model: None,
+            chat_model: chat_model.to_owned(),
             embed_num_ctx: None,
+            embedding_model: None,
+            http,
         })
     }
 
-    pub fn with_embedding_model(mut self, model: impl Into<String>) -> Self {
-        self.embedding_model = Some(model.into());
-        self
+    /// Build the endpoint URL for `path` under `<base>/v1/`.
+    fn url(&self, path: &str) -> Result<Url, Error> {
+        self.base
+            .join("v1/")
+            .and_then(|v1| v1.join(path.trim_start_matches('/')))
+            .map_err(|err| Error::InvalidBaseUrl(err.to_string()))
     }
 
     /// Set Ollama's `options.num_ctx` for embedding requests. Use
@@ -76,22 +101,25 @@ impl OpenAiProvider {
     /// that honours the Ollama options block) so inputs the size
     /// of the operator's configured byte cap aren't silently
     /// truncated by the server's default 2048-token context. Has
-    /// no effect on hosted OpenAI (extra fields are ignored).
+    /// no effect on hosted `OpenAI` (extra fields are ignored).
+    #[inline]
+    #[must_use = "the builder returns the configured provider; dropping it discards the setting"]
     pub fn with_embed_num_ctx(mut self, num_ctx: u32) -> Self {
         self.embed_num_ctx = Some(num_ctx);
         self
     }
 
-    fn url(&self, path: &str) -> Result<Url, Error> {
-        self.base
-            .join("v1/")
-            .and_then(|u| u.join(path.trim_start_matches('/')))
-            .map_err(|e| Error::InvalidBaseUrl(e.to_string()))
+    #[inline]
+    #[must_use = "the builder returns the configured provider; dropping it discards the setting"]
+    pub fn with_embedding_model(mut self, model: impl Into<String>) -> Self {
+        self.embedding_model = Some(model.into());
+        self
     }
 }
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
+    #[inline]
     async fn complete(&self, req: CompleteRequest) -> Result<CompleteResponse, Error> {
         let body = ChatRequest::from_request(&self.chat_model, &req);
         let url = self.url("chat/completions")?;
@@ -105,12 +133,12 @@ impl LlmProvider for OpenAiProvider {
             });
         }
         let parsed: ChatResponse = serde_json::from_str(&text)
-            .map_err(|e| Error::Decode(format!("{e}: {}", cap_for_error(&text))))?;
+            .map_err(|err| Error::Decode(format!("{err}: {}", cap_for_error(&text))))?;
         let content = parsed
             .choices
             .into_iter()
             .next()
-            .map(|c| c.message.content.unwrap_or_default())
+            .and_then(|choice| choice.message.content)
             .unwrap_or_default();
         let usage = parsed.usage.unwrap_or_default();
         Ok(CompleteResponse {
@@ -120,10 +148,17 @@ impl LlmProvider for OpenAiProvider {
         })
     }
 
+    #[inline]
+    fn completion_model_name(&self) -> String {
+        self.chat_model.clone()
+    }
+
+    #[inline]
     async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, Error> {
         Ok(self.embed_with_usage(texts).await?.0)
     }
 
+    #[inline]
     async fn embed_with_usage(&self, texts: &[String]) -> Result<(Vec<Vec<f32>>, u32, u32), Error> {
         let model = self.embedding_model.as_deref().ok_or(Error::Unsupported)?;
         let body = EmbedRequest {
@@ -142,74 +177,77 @@ impl LlmProvider for OpenAiProvider {
             });
         }
         let parsed: EmbedResponse = serde_json::from_str(&text)
-            .map_err(|e| Error::Decode(format!("{e}: {}", cap_for_error(&text))))?;
-        let vectors = parsed.data.into_iter().map(|d| d.embedding).collect();
+            .map_err(|err| Error::Decode(format!("{err}: {}", cap_for_error(&text))))?;
+        let vectors = parsed
+            .data
+            .into_iter()
+            .map(|datum| datum.embedding)
+            .collect();
         let usage = parsed.usage.unwrap_or_default();
         Ok((vectors, usage.prompt_tokens, usage.completion_tokens))
     }
 
-    fn provider_base_url(&self) -> String {
-        self.base.as_str().trim_end_matches('/').to_string()
-    }
-
-    fn completion_model_name(&self) -> String {
-        self.chat_model.clone()
-    }
-
+    #[inline]
     fn embedding_model_name(&self) -> String {
         self.embedding_model
             .clone()
-            .unwrap_or_else(|| "embedding-model".to_string())
+            .unwrap_or_else(|| "embedding-model".to_owned())
     }
-}
 
-/// Cap the response body included in error messages. A misbehaving
-/// proxy or provider can return an HTML error page that's hundreds
-/// of KB; including it verbatim in `Error::Provider` / `Error::Decode`
-/// holds that much in memory and pollutes operator logs. 1 KiB is
-/// enough to surface the actual error message at the top of the
-/// body without dragging the whole HTML stub along.
-fn cap_for_error(s: &str) -> String {
-    const CAP: usize = 1024;
-    if s.len() <= CAP {
-        return s.to_string();
+    #[inline]
+    fn provider_base_url(&self) -> String {
+        self.base.as_str().trim_end_matches('/').to_owned()
     }
-    let mut cut = CAP;
-    while cut > 0 && !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}… [+{} bytes]", &s[..cut], s.len() - cut)
 }
 
 // ---- wire types ----
 
+/// Body of a `/v1/chat/completions` request.
 #[derive(Debug, Serialize)]
-struct ChatRequest<'a> {
-    model: &'a str,
-    messages: Vec<WireMessage<'a>>,
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "field order is the JSON key order of the chat request sent to the provider; \
+              reordering changes the request body on the wire"
+)]
+struct ChatRequest<'req> {
+    /// Chat model name.
+    model: &'req str,
+    /// Optional system prompt followed by the conversation.
+    messages: Vec<WireMessage<'req>>,
+    /// Completion token cap.
     #[serde(skip_serializing_if = "Option::is_none")]
     max_tokens: Option<u32>,
+    /// Sampling temperature.
     #[serde(skip_serializing_if = "Option::is_none")]
     temperature: Option<f32>,
+    /// Structured-output constraint.
     #[serde(skip_serializing_if = "Option::is_none")]
-    response_format: Option<WireResponseFormat<'a>>,
+    response_format: Option<WireResponseFormat<'req>>,
 }
 
-impl<'a> ChatRequest<'a> {
-    fn from_request(model: &'a str, req: &'a CompleteRequest) -> Self {
-        let mut messages: Vec<WireMessage> = Vec::with_capacity(req.messages.len() + 1);
+impl<'req> ChatRequest<'req> {
+    /// Borrow `req` into the wire shape, prepending the system prompt as
+    /// a `system` message.
+    fn from_request(model: &'req str, req: &'req CompleteRequest) -> Self {
+        let mut messages: Vec<WireMessage> =
+            Vec::with_capacity(req.messages.len().saturating_add(1));
         if let Some(sys) = req.system.as_deref() {
             messages.push(WireMessage {
                 role: "system",
                 content: sys,
             });
         }
-        for m in &req.messages {
+        for message in &req.messages {
             messages.push(WireMessage {
-                role: role_str(m.role),
-                content: m.content.as_str(),
+                role: role_str(message.role),
+                content: message.content.as_str(),
             });
         }
+        #[expect(
+            clippy::pattern_type_mismatch,
+            reason = "borrowing name and schema out of &ResponseFormat needs either default \
+                      binding modes or `ref` patterns, and clippy::ref_patterns forbids `ref`"
+        )]
         let response_format = req.response_format.as_ref().map(|rf| match rf {
             ResponseFormat::Text => WireResponseFormat::Text,
             ResponseFormat::JsonSchema { name, schema } => WireResponseFormat::JsonSchema {
@@ -230,86 +268,161 @@ impl<'a> ChatRequest<'a> {
     }
 }
 
-fn role_str(r: Role) -> &'static str {
-    match r {
+/// One chat message on the wire.
+#[derive(Debug, Serialize)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "field order is the JSON key order of each message sent to the provider; \
+              reordering changes the request body on the wire"
+)]
+struct WireMessage<'req> {
+    /// `system`, `user`, `assistant` or `tool`.
+    role: &'req str,
+    /// Message text.
+    content: &'req str,
+}
+
+/// `response_format` on the wire.
+#[derive(Debug, Serialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+enum WireResponseFormat<'req> {
+    /// Strict JSON Schema output.
+    JsonSchema {
+        /// Named schema with `strict: true`.
+        json_schema: WireJsonSchema<'req>,
+    },
+    /// Free text output.
+    Text,
+}
+
+/// `response_format.json_schema` on the wire.
+#[derive(Debug, Serialize)]
+struct WireJsonSchema<'req> {
+    /// Schema name.
+    name: &'req str,
+    /// The JSON Schema itself.
+    schema: &'req serde_json::Value,
+    /// Always `true`: ask the provider to enforce the schema.
+    strict: bool,
+}
+
+/// `/v1/chat/completions` response body.
+#[derive(Debug, Deserialize)]
+struct ChatResponse {
+    /// Candidate completions; only the first is used.
+    choices: Vec<ChatChoice>,
+    /// Token usage, when the provider reports it.
+    #[serde(default)]
+    usage: Option<Usage>,
+}
+
+/// One candidate completion.
+#[derive(Debug, Deserialize)]
+struct ChatChoice {
+    /// The assistant message.
+    message: ChatMessage,
+}
+
+/// Assistant message in a completion.
+#[derive(Debug, Deserialize)]
+struct ChatMessage {
+    /// Message text; `null` or absent maps to empty.
+    #[serde(default)]
+    content: Option<String>,
+}
+
+/// Token usage reported by the provider.
+#[derive(Debug, Default, Deserialize)]
+struct Usage {
+    /// Output tokens.
+    #[serde(default)]
+    completion_tokens: u32,
+    /// Input tokens.
+    #[serde(default)]
+    prompt_tokens: u32,
+}
+
+/// Body of a `/v1/embeddings` request.
+#[derive(Debug, Serialize)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "field order is the JSON key order of the embeddings request sent to the provider; \
+              reordering changes the request body on the wire"
+)]
+struct EmbedRequest<'req> {
+    /// Embedding model name.
+    model: &'req str,
+    /// Texts to embed.
+    input: &'req [String],
+    /// Ollama options block.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    options: Option<EmbedOptions>,
+}
+
+/// Ollama `options` block for embeddings.
+#[derive(Debug, Serialize)]
+struct EmbedOptions {
+    /// Context window size in tokens.
+    num_ctx: u32,
+}
+
+/// `/v1/embeddings` response body.
+#[derive(Debug, Deserialize)]
+struct EmbedResponse {
+    /// One vector per input, in input order.
+    data: Vec<EmbedDatum>,
+    /// Token usage, when the provider reports it.
+    #[serde(default)]
+    usage: Option<Usage>,
+}
+
+/// One embedding vector.
+#[derive(Debug, Deserialize)]
+struct EmbedDatum {
+    /// The vector.
+    embedding: Vec<f32>,
+}
+
+/// Cap the response body included in error messages. A misbehaving
+/// proxy or provider can return an HTML error page that's hundreds
+/// of KB; including it verbatim in `Error::Provider` / `Error::Decode`
+/// holds that much in memory and pollutes operator logs. 1 KiB is
+/// enough to surface the actual error message at the top of the
+/// body without dragging the whole HTML stub along.
+fn cap_for_error(body: &str) -> String {
+    /// Maximum bytes of `body` kept in the message.
+    const CAP: usize = 1024;
+    if body.len() <= CAP {
+        return body.to_owned();
+    }
+    let mut cut = CAP;
+    while cut > 0 && !body.is_char_boundary(cut) {
+        cut = cut.saturating_sub(1);
+    }
+    let head = body.get(..cut).unwrap_or_default();
+    format!("{head}… [+{} bytes]", body.len().saturating_sub(cut))
+}
+
+/// Wire name of a [`Role`].
+fn role_str(role: Role) -> &'static str {
+    match role {
         Role::User => "user",
         Role::Assistant => "assistant",
         Role::Tool => "tool",
     }
 }
 
-#[derive(Debug, Serialize)]
-struct WireMessage<'a> {
-    role: &'a str,
-    content: &'a str,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum WireResponseFormat<'a> {
-    Text,
-    JsonSchema { json_schema: WireJsonSchema<'a> },
-}
-
-#[derive(Debug, Serialize)]
-struct WireJsonSchema<'a> {
-    name: &'a str,
-    schema: &'a serde_json::Value,
-    strict: bool,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatResponse {
-    choices: Vec<ChatChoice>,
-    #[serde(default)]
-    usage: Option<Usage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatChoice {
-    message: ChatMessage,
-}
-
-#[derive(Debug, Deserialize)]
-struct ChatMessage {
-    #[serde(default)]
-    content: Option<String>,
-}
-
-#[derive(Debug, Default, Deserialize)]
-struct Usage {
-    #[serde(default)]
-    prompt_tokens: u32,
-    #[serde(default)]
-    completion_tokens: u32,
-}
-
-#[derive(Debug, Serialize)]
-struct EmbedRequest<'a> {
-    model: &'a str,
-    input: &'a [String],
-    #[serde(skip_serializing_if = "Option::is_none")]
-    options: Option<EmbedOptions>,
-}
-
-#[derive(Debug, Serialize)]
-struct EmbedOptions {
-    num_ctx: u32,
-}
-
-#[derive(Debug, Deserialize)]
-struct EmbedResponse {
-    data: Vec<EmbedDatum>,
-    #[serde(default)]
-    usage: Option<Usage>,
-}
-
-#[derive(Debug, Deserialize)]
-struct EmbedDatum {
-    embedding: Vec<f32>,
-}
-
 #[cfg(test)]
+#[expect(
+    clippy::expect_used,
+    reason = "test setup and calls under test use expect so a broken fixture or an unexpected \
+              error fails the test at that line with a label"
+)]
+#[expect(
+    clippy::default_numeric_fallback,
+    reason = "untyped numbers inside the json! wiremock bodies are JSON values, not Rust \
+              arithmetic; the mock bodies stay as written"
+)]
 mod tests {
     use super::*;
     use wiremock::matchers::{body_partial_json, header, method, path};
@@ -354,7 +467,7 @@ mod tests {
     fn cap_for_error_truncates_long_bodies_with_byte_count() {
         // A proxy returning a 200KB HTML error page would otherwise
         // hold 200KB in Error::Provider and pollute operator logs.
-        let big = "<html>".to_string() + &"x".repeat(200_000) + "</html>";
+        let big = format!("<html>{}</html>", "x".repeat(200_000));
         let out = cap_for_error(&big);
         assert!(out.len() < 1300, "output was {} bytes", out.len());
         assert!(out.starts_with("<html>"));
@@ -363,10 +476,25 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "`std::str::from_utf8` is inside the assertion below, which this lint-only \
+                  change leaves untouched"
+    )]
+    #[expect(
+        clippy::std_instead_of_core,
+        reason = "`std::str::from_utf8` is inside the assertion below, which this lint-only \
+                  change leaves untouched"
+    )]
+    #[expect(
+        clippy::assertions_on_result_states,
+        reason = "the assertion below checks only that the capped output is valid UTF-8; it \
+                  stays unedited in this lint-only change"
+    )]
     fn cap_for_error_respects_utf8_boundaries() {
-        let mut s = "x".repeat(1022);
-        s.push_str("🦀tail"); // emoji at the boundary
-        let out = cap_for_error(&s);
+        let mut body = "x".repeat(1022);
+        body.push_str("\u{1f980}tail"); // emoji at the boundary
+        let out = cap_for_error(&body);
         assert!(std::str::from_utf8(out.as_bytes()).is_ok());
     }
 
@@ -440,6 +568,16 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "`v` is read by the assertions below; renaming it would edit those assertion \
+                  lines, which this lint-only change leaves untouched"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the assertion below indexes the first vector after asserting the length; it \
+                  stays unedited in this lint-only change"
+    )]
     async fn embed_returns_vectors_when_model_configured() {
         let server = MockServer::start().await;
         let provider = OpenAiProvider::new(&server.uri(), None, "ignored")
@@ -467,6 +605,11 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "`v` is read by the assertion below; renaming it would edit that assertion \
+                  line, which this lint-only change leaves untouched"
+    )]
     async fn embed_includes_options_num_ctx_when_configured() {
         // Pointing the embedding tier at Ollama: explicit options.num_ctx
         // keeps the server from silently truncating to its default 2048
@@ -495,6 +638,16 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "reads the only received request right after the assertion that exactly one \
+                  request arrived"
+    )]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "the qualified path is part of the wiremock matcher expectation, which this \
+                  lint-only change leaves untouched"
+    )]
     async fn embed_omits_options_field_when_not_configured() {
         // Hosted OpenAI ignores extra fields, but emitting an empty
         // `options: {}` (or worse, `options: null`) would still hit
@@ -515,7 +668,7 @@ mod tests {
             .mount(&server)
             .await;
 
-        let _ = provider.embed(&["a".into()]).await.expect("ok");
+        let _: Vec<Vec<f32>> = provider.embed(&["a".into()]).await.expect("ok");
 
         let received = server.received_requests().await.expect("requests");
         assert_eq!(received.len(), 1);
@@ -538,6 +691,15 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::panic,
+        reason = "the catch-all arm fails the test and names the unexpected error variant"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "every variant other than Provider is a test failure, so one catch-all arm \
+                  reports them all"
+    )]
     async fn complete_propagates_provider_error_status() {
         let server = MockServer::start().await;
         let provider = OpenAiProvider::new(&server.uri(), None, "x").expect("provider");
