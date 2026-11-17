@@ -92,6 +92,21 @@ Repository-host operations are represented by provider-neutral DTOs and the
 re-exports the common DTOs for compatibility, but new host-neutral review code
 should depend on `ar-forge` types rather than Forgejo-owned DTOs.
 
+Review-thread features are gated on probed host capabilities, not assumed
+([ADR-0026](./ADR-0026-probe-host-capabilities-and-degrade-on-older-forgejo.md)). `ReviewHost::capabilities()` reports `HostCapabilities`
+(multi-line comments, suggestion blocks, thread replies, resolve threads); the
+trait default reports none, GitHub hosts report all four, and the Forgejo
+adapter derives them from `GET /api/v1/version`, cached per client after a
+successful probe: major ≥16 enables multi-line comments and ≥18 the other
+three, while a failed or unparseable probe reports none (a failed probe is
+retried on the next call). `ReviewHost::bot_login()` gives the pipeline
+the bot's own login, cached per host (Forgejo `GET /api/v1/user`, GitHub
+`<app slug>[bot]` from `GET /app`); gateway-built hosts are seeded with the
+startup identity so `AR_BOT_LOGIN` still wins. Pipeline and orchestrator code
+consume only these values. On Forgejo v11–v17 features degrade: suggestions
+render as plain code blocks, and addressed findings are marked by editing the
+original comment instead of replying and resolving.
+
 GitHub support uses GitHub App authentication, not PATs. The `ar-github` client
 foundation mints RS256 app JWTs from an app id and RSA private key, exchanges an
 app JWT for scoped installation access tokens, caches fresh tokens by
@@ -141,6 +156,22 @@ Components receive only the workspace capability they need:
 - Context building and agentic verification use read-only, path-confined access
   under the clone root with symlink escape rejection and output/result caps.
 - Agentic verifier tools are file read and search capabilities, not shell access.
+- Repository-controlled instruction files are read from the PR's base branch,
+  never from the head checkout (ADR-0024). `ar_review::trusted_files` is the
+  single runtime loader: `read_trusted_repo_file` fetches a file through
+  `ReviewHost::get_file_content` at the base branch tip by name, and
+  `load_repo_config_from_base` tries `.auto_review.yaml`, then
+  `.auto_review.yml`, returning the config with its provenance (path and ref)
+  and an optional warning. A missing file, an oversized body, malformed YAML, or
+  a non-404 fetch error falls back to default config and the review proceeds.
+  `run_review_job` fetches the pull request once and passes a `BaseRef` (name
+  and SHA) into workspace preparation and the review; the chat handler uses the
+  same loader. Later ingestion of `AGENTS.md`, `CLAUDE.md`, `REVIEW.md`, or
+  path instructions must use this loader or the base tree.
+- Base-branch repository config overrides operator defaults such as
+  `AR_SEVERITY_FLOOR` once a repository key exists for the same behaviour.
+  Operator environment variables are defaults only and never cap a repository
+  key.
 
 Any future feature that executes repo-controlled code must introduce a
 feature-specific sandbox design, fail-closed configuration, threat-model update,
@@ -166,9 +197,23 @@ configured, and uses DynamoDB review history when
 AgentCore uses DynamoDB learnings when `AGENTCORE_LEARNINGS_DYNAMODB_TABLE` or
 `--learnings-dynamodb-table` is configured.
 
+Learnings are scoped by repository (ADR-0025). Each learning stores a
+`repo` scope, the lowercased `owner/repo` with no provider component, and the
+`origin_pr` it came from. Context building retrieves only learnings in the
+reviewed repository's scope; chat `remember`, review corrections and `forget`
+use the scope of the PR's repository. Mirrored repositories with the same
+lowercased `owner/repo` on different forges share learnings. Opening an older
+SQLite store adds the columns and backfills the scope from the legacy
+"Repository `<owner>/<repo>` only." text prefix; DynamoDB items without a `repo`
+attribute get the same treatment at read time. Rows with no recoverable scope
+are excluded from retrieval, and the gateway logs their count at startup.
+Vector-store rows are not scoped yet: `SqliteVectorStore` is still shared
+across repositories, and keying its rows by the same `RepoScope` is planned
+under ADR-0025 in issue #40.
+
 Repository context draws on the diff, changed paths, tree-sitter symbols,
-embeddings when an embedding tier is configured, and persistent learnings.
-Git-history signals are not used (ADR-0027). The review pipeline depends on the `VectorStore`
+embeddings when an embedding tier is configured, and repository-scoped
+persistent learnings. Git-history signals are not used (ADR-0027). The review pipeline depends on the `VectorStore`
 abstraction; `SqliteVectorStore` is the current persistent default. LanceDB or
 another dedicated vector database should be revisited only when measured scale,
 latency, or filtering requirements justify it.
@@ -239,7 +284,10 @@ obligations.
 ## ADR event stream
 
 Architecture decisions are recorded as ADR events under `docs/ADR-*.md`.
-Accepted or rejected ADRs are immutable except for brief supersession metadata.
-When the architecture changes, use the ADR workflow tools to create or update a
-proposed ADR carrying the intended projection patch. The patch is applied to
-this document only when that ADR is accepted.
+ADRs are append-only: accepted or rejected ADRs are immutable except for brief
+supersession metadata. A changed decision is recorded as a new ADR that
+supersedes the old one, the older record gets only a `Superseded` status and a
+short `Superseded By` section, and this document is updated in the same change.
+Per ADR-0023, enforcement comes from the `.claude/rules/adr-event-stream.md`
+rule, the architecture reviewer agent and human review, not from mechanical
+tooling.

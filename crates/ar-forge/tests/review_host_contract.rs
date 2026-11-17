@@ -127,3 +127,27 @@ async fn review_host_trait_is_implemented_from_common_crate() {
 
     assert!(diff.starts_with("diff --git"));
 }
+
+#[tokio::test]
+async fn default_capabilities_report_nothing_supported() {
+    let host: &dyn ar_forge::ReviewHost = &FakeHost;
+
+    assert_eq!(
+        host.capabilities().await,
+        ar_forge::HostCapabilities {
+            multi_line_comments: false,
+            suggestion_blocks: false,
+            thread_replies: false,
+            resolve_threads: false,
+        }
+    );
+}
+
+#[tokio::test]
+async fn default_bot_login_is_an_error() {
+    let host: &dyn ar_forge::ReviewHost = &FakeHost;
+
+    let error = host.bot_login().await.expect_err("no default login");
+
+    assert!(error.message().contains("bot login"), "{error}");
+}

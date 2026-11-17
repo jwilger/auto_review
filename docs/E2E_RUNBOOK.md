@@ -231,6 +231,38 @@ If any of those don't fire:
    reachable from the Forgejo container, and that the bot's PAT
    has `write:repository`.
 
+### 9a. Inline review-thread reply is picked up by the poller
+
+Forgejo does not reliably fire a webhook for replies inside an inline review
+thread, so the gateway's chat poller finds them. This check needs a review with
+at least one inline finding (K ≥ 1 above). Mentions must use the gateway's
+`AR_BOT_NAME` handle: with the default identity that is `@auto-review`; with
+this runbook's `auto_review_bot` user, restart the gateway from step 7 with
+`AR_BOT_LOGIN=auto_review_bot` added and mention `@auto_review_bot` instead.
+Setting `AR_POLL_INTERVAL_SECS=15` keeps the wait short.
+
+1. In the Forgejo UI, sign in as a non-bot user (for example the admin user from
+   step 2), open one of the bot's inline findings on the PR, and reply in that
+   inline thread with `@auto-review help` (or `@auto_review_bot help`).
+2. Wait one `AR_POLL_INTERVAL_SECS` interval (60 seconds by default). Confirm
+   the bot's help text appears on the PR conversation exactly once and that
+   `auto_review_poll_mentions_dispatched_total` on `/metrics` went up by 1.
+3. Wait a second interval. Confirm the help text is not posted again and the
+   counter has not moved.
+4. Record how Forgejo stored the reply, because the poller handles both shapes
+   but the answer is not yet verified on a live instance:
+
+   ```bash
+   curl -s -u auto_review_bot:botpass1234 \
+     "http://localhost:3000/api/v1/repos/auto_review_bot/e2e-target/pulls/$PR_NUMBER/reviews" \
+     | jq '.[] | {id, state, user: .user.login, comments_count}'
+   ```
+
+   A new review owned by the replying user means Forgejo created a review
+   record for the reply; a higher `comments_count` on the bot's original
+   review means it attached the reply there. Note which one you saw alongside
+   the Forgejo version.
+
 ## 10. Tear down
 
 ```bash

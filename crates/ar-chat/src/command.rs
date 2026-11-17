@@ -22,15 +22,18 @@ pub enum ChatCommand {
     /// as a Forgejo review comment with a `\`\`\`suggestion` block
     /// that the author can apply with one click.
     Autofix,
-    /// `@auto-review docstring` — find functions, methods, and
-    /// classes in the diff that lack docstrings and propose them
-    /// as inline `\`\`\`suggestion` patches. Same posting flow as
-    /// [`Autofix`]; different system prompt.
-    Docstrings,
+    /// `@auto-review docstring` (or `docstrings`, `docs`) — retired.
+    /// CodeRabbit dropped docstring generation on 2026-11-11, which
+    /// suggests the feature has little value, and here it only added
+    /// prompt surface (design doc theme CLEAN, Decision 18). The
+    /// parser keeps the aliases as a tombstone so the command does
+    /// not fall through to free-form intent classification; the
+    /// handler replies with a fixed notice and makes no LLM call.
+    DocstringRetired,
     /// `@auto-review tests` — find newly-added items in the diff
     /// that lack test coverage and post a markdown comment with
     /// scaffolded test cases the author can copy into their test
-    /// suite. Unlike [`Autofix`] / [`Docstrings`], tests usually
+    /// suite. Unlike [`Autofix`], tests usually
     /// live in a separate file, so we post a single issue comment
     /// rather than inline review-comment suggestions.
     TestScaffolds,
@@ -158,7 +161,7 @@ fn classify(rest: &str) -> ChatCommand {
         },
         "re-review" | "rereview" | "review-again" | "review_again" => ChatCommand::ReReview,
         "autofix" | "auto-fix" | "fix" => ChatCommand::Autofix,
-        "docstring" | "docstrings" | "docs" => ChatCommand::Docstrings,
+        "docstring" | "docstrings" | "docs" => ChatCommand::DocstringRetired,
         "tests" | "test" | "unit-tests" | "scaffold-tests" => ChatCommand::TestScaffolds,
         "help" | "?" | "--help" | "-h" => ChatCommand::Help,
         _ => ChatCommand::Freeform(rest.to_string()),
@@ -218,14 +221,16 @@ mod tests {
     }
 
     #[test]
-    fn docstring_aliases_all_route_to_docstrings() {
-        for s in [
-            "@auto_review docstring",
-            "@auto_review docstrings",
-            "@auto_review docs",
-            "@auto_review DOCS",
-        ] {
-            assert_eq!(parse(s), ChatCommand::Docstrings, "input = {s}");
+    fn docstring_aliases_all_route_to_the_retired_tombstone() {
+        for handle in ["@auto-review", "@auto_review"] {
+            for alias in ["docstring", "docstrings", "docs", "DOCS"] {
+                let s = format!("{handle} {alias}");
+                assert_eq!(
+                    parse_chat_command(&s, "auto-review"),
+                    ChatCommand::DocstringRetired,
+                    "input = {s}"
+                );
+            }
         }
     }
 

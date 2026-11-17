@@ -37,14 +37,53 @@ just clippy
 just test
 just deny
 just build
+just shellcheck
+just actionlint
+
+# Checks that `just ci` leaves out:
+just advisories   # cargo deny check advisories; needs network
+just flake-check  # nix flake check; builds the packages
 ```
 
 `just ci` runs rustfmt, clippy (with `-D warnings`), the full
 nextest application test suite, cargo-deny (licenses + bans + sources),
-and a workspace build.
-Advisory checks require network access, so run
-`cargo deny check advisories` separately when bumping a dep. Land no
-commit that fails any required check.
+a workspace build, shellcheck on `scripts/release` and actionlint on
+`.github/workflows/`.
+Advisory checks require network access, so `just advisories` stays out
+of `just ci`; run it when bumping a dep. Land no commit that fails any
+required check.
+
+### Required checks and repository settings
+
+Every pull request to `main` must pass these GitHub Actions checks before
+it can merge:
+
+| Check | What it runs |
+|---|---|
+| Format check, Clippy, Test, Dependency policy, Build | `just fmt`, `just clippy`, `just test`, `just deny`, `just build` |
+| Dependency advisories | `just advisories` (`cargo deny check advisories`); `.github/workflows/advisories.yml` also runs it daily against `main` so new advisories surface without a code change |
+| Shellcheck | `just shellcheck` on `scripts/release` |
+| Actionlint | `just actionlint` on `.github/workflows/` |
+| Nix flake check | `just flake-check`, which runs the Nix packaging, NixOS module and OCI image contract checks |
+| Analyze (rust), Analyze (actions) | CodeQL analysis of the Rust code and the workflows (`.github/workflows/codeql.yml`) |
+
+The `require-pr` ruleset that enforces this lives in
+`.github/rulesets/require-pr.json`. Each check name in that file must match
+a job `name:` in `.github/workflows/`; a required check that no job reports
+blocks every pull request. GitHub does not read the file, so after a change
+to it merges, a repository admin applies it:
+
+```sh
+gh api --method PUT repos/jwilger/auto_review/rulesets/18404081 \
+  --input .github/rulesets/require-pr.json
+```
+
+Workflows pin every action to a full commit SHA with the release tag in a
+trailing `# vX.Y.Z` comment; Renovate (`helpers:pinGitHubActionDigests`)
+opens pull requests that bump both. Pin any new action the same way.
+
+Secret scanning and push protection are repository settings, not checks:
+a repository admin turns them on in Settings -> Code security.
 
 ### Bumping the toolchain or a dep
 
@@ -97,13 +136,13 @@ See `docs/ARCHITECTURE.md` for the current architecture projection,
 `docs/ADR-0016-adr-event-stream-architecture-projection.md` for the ADR process,
 and `docs/CRATES.md` for the crate map.
 
-ADR files are managed as an append-only event stream. Create architecture changes
-as proposed ADRs through the project ADR workflow tools, update proposed ADRs
-through the same typed workflow, and transition them with the accept/reject
-tools. Once accepted or rejected, an ADR body is immutable; later changes require
-a new ADR and may only add brief supersession metadata to the older record. Keep
-`docs/ARCHITECTURE.md` in sync as the current projection rather than rewriting
-historical ADR rationale.
+ADR files are managed as an append-only event stream. Record an architecture
+change as a new `docs/ADR-NNNN-<slug>.md` file. Once accepted or rejected, an ADR
+body is immutable; a changed decision needs a new ADR that supersedes the old
+one, and the older record may only gain brief supersession metadata. Update
+`docs/ARCHITECTURE.md` in the same change as the current projection rather than
+rewriting historical ADR rationale. No tool enforces this; the
+`.claude/rules/adr-event-stream.md` rule and code review do (ADR-0023).
 
 Crate-level navigation is centralized in `docs/CRATES.md`. The summary table:
 
@@ -172,9 +211,12 @@ templates.
      DB stores for storage paths.
 
 Document the new subcommand in `docs/CLI.md`, and in `docs/OPERATIONS.md` if it
-changes operator workflows. The CLI contract test fails when a top-level command
-is missing from `docs/CLI.md`; that test is intentionally limited to the public
-CLI surface and must not expand into checking prose wording.
+changes operator workflows. Nothing checks this automatically; code review
+enforces it.
+The deploy metrics contract test
+(`crates/ar-gateway/tests/deploy_metrics_contract.rs`) fails when the
+Prometheus rules or Grafana dashboard reference a metric not exposed by
+`Metrics::render()`, or a recording rule not defined in the rules file.
 
 For docs-only changes, do not add deterministic tests that assert exact wording
 or required phrases. Use human/operator review for prose. Keep tests for
