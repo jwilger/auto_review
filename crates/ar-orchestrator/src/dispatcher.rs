@@ -1211,7 +1211,17 @@ mod tests {
     fn head_repo_with(files: &[(&str, &str)]) -> HeadRepo {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
+            // Clear the repository-locating variables git exports to hooks, so
+            // this fixture still targets its own tempdir when the suite runs
+            // inside a git hook (for example the pre-push `just ci`).
             let out = std::process::Command::new("git")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
+                .env_remove("GIT_OBJECT_DIRECTORY")
+                .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+                .env_remove("GIT_PREFIX")
                 .env("GIT_CONFIG_GLOBAL", "/dev/null")
                 .env("GIT_CONFIG_NOSYSTEM", "1")
                 .arg("-C")
