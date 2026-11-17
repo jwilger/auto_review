@@ -4,9 +4,9 @@ use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullR
 use ar_index::{LearningsStore, VectorStore};
 use ar_llm::Router as LlmRouter;
 use ar_review::{
-    build_glob_set, build_review_context_with_store, load_repo_config, pr_is_skippable,
-    prepare_workspace_from_clone_url, review_pull_request, GlobSet, PreparedWorkspace, ReviewArgs,
-    ReviewError, VerifyMode, WorkspaceError,
+    build_glob_set, build_review_context_with_store, load_repo_config_from_base, pr_is_skippable,
+    prepare_workspace_from_clone_url, review_pull_request, BaseRef, PreparedWorkspace, RepoConfig,
+    ReviewArgs, ReviewError, VerifyMode, WorkspaceError,
 };
 use async_trait::async_trait;
 use std::sync::Arc;
@@ -81,6 +81,14 @@ pub struct ReviewJob {
     /// forces a fresh review even if this SHA was already reviewed.
     /// Used by the chat handler's `re-review` command.
     pub force: bool,
+}
+
+impl ReviewJob {
+    /// Learnings scope of the reviewed repository: the lowercased
+    /// `owner/repo`, so a mixed-case job still finds its learnings.
+    pub fn repo_scope(&self) -> ar_index::RepoScope {
+        ar_index::RepoScope::new(&self.owner, &self.repo)
+    }
 }
 
 impl From<&PullRequestEvent> for ReviewJob {
@@ -406,9 +414,11 @@ impl JobDispatcher for SpawningDispatcher {
 /// Run one review job to completion.
 ///
 /// 1. Post a "pending" commit status.
-/// 2. Clone the repo at the head SHA and prepare review context.
-/// 3. Call [`review_pull_request`].
-/// 4. Post the final success/error commit status.
+/// 2. Fetch the pull request once to learn its base branch ([`BaseRef`]).
+/// 3. Load `.auto_review.yaml` from the base branch (never the head
+///    checkout), clone the repo at the head SHA and prepare review context.
+/// 4. Call [`review_pull_request`].
+/// 5. Post the final success/error commit status.
 ///
 /// Errors are logged and swallowed; the gateway has already returned 202.
 #[allow(clippy::too_many_arguments)]
@@ -480,6 +490,38 @@ pub async fn run_review_job(
     )
     .await;
 
+    // Fetch the PR once: its base branch is where repository config is
+    // read from, so a PR cannot change how it is reviewed.
+    let base_ref = match forgejo
+        .get_pull_request(&job.owner, &job.repo, job.pr_number)
+        .await
+    {
+        Ok(pr) => BaseRef::from(&pr.base),
+        Err(e) => {
+            tracing::error!(
+                repo = format!("{}/{}", job.owner, job.repo),
+                pr = job.pr_number,
+                error = %e,
+                "failed to fetch pull request; cannot resolve base branch, not reviewing"
+            );
+            observe(ReviewObservation::Started);
+            observe(ReviewObservation::Failed {
+                duration: started_at.elapsed(),
+                error_class: "forgejo",
+            });
+            post_review_status(
+                forgejo,
+                &job,
+                CommitStatusState::Error,
+                truncate_status_description(&format!(
+                    "auto_review failed: could not fetch pull request: {e}"
+                )),
+            )
+            .await;
+            return;
+        }
+    };
+
     // Triage: if every changed file is trivial (lockfile bumps, vendored,
     // generated), skip the LLM call entirely and post a success status.
     // Fetch once for the trivial-file skip check.
@@ -511,7 +553,7 @@ pub async fn run_review_job(
         }
     }
 
-    let prep_outcome = prepare_workspace_context(
+    let prep = match prepare_workspace_context(
         forgejo,
         llm,
         forgejo_base,
@@ -519,59 +561,38 @@ pub async fn run_review_job(
         learnings,
         vector_store,
         &job,
+        &base_ref,
     )
-    .await;
-    let (ignored_paths, guidelines, repo_context, raw_diff, workspace, pr_metadata_check) =
-        match prep_outcome {
-            Ok(WorkspacePrepOutput {
-                skipped_by_config: true,
-                ..
-            }) => {
-                tracing::info!(
-                    repo = format!("{}/{}", job.owner, job.repo),
-                    pr = job.pr_number,
-                    "skipping review: disabled by .auto_review.yaml"
-                );
-                post_review_status(
-                    forgejo,
-                    &job,
-                    CommitStatusState::Success,
-                    "auto_review: disabled by repo config".into(),
-                )
-                .await;
-                observe(ReviewObservation::Skipped {
-                    reason: "disabled_by_config",
-                });
-                return;
-            }
-            Ok(WorkspacePrepOutput {
-                ignored_paths,
-                guidelines,
-                repo_context,
-                raw_diff,
-                workspace,
-                pr_metadata_check,
-                ..
-            }) => (
-                ignored_paths,
-                guidelines,
-                repo_context,
-                raw_diff,
-                workspace,
-                pr_metadata_check,
-            ),
-            Err(e) => {
-                tracing::warn!(error = %e, "workspace/context prep failed; continuing without workspace context");
-                (
-                    GlobSet::empty(),
-                    String::new(),
-                    String::new(),
-                    String::new(),
-                    None,
-                    ar_review::config::PrMetadataCheck::default(),
-                )
-            }
-        };
+    .await
+    {
+        WorkspacePrep::DisabledByConfig => {
+            tracing::info!(
+                repo = format!("{}/{}", job.owner, job.repo),
+                pr = job.pr_number,
+                base = %base_ref.name,
+                "skipping review: disabled by base-branch .auto_review.yaml"
+            );
+            post_review_status(
+                forgejo,
+                &job,
+                CommitStatusState::Success,
+                "auto_review: disabled by repo config".into(),
+            )
+            .await;
+            observe(ReviewObservation::Skipped {
+                reason: "disabled_by_config",
+            });
+            return;
+        }
+        WorkspacePrep::Ready(output) => output,
+    };
+    let WorkspacePrepOutput {
+        config,
+        repo_context,
+        raw_diff,
+        workspace,
+    } = prep;
+    let ignored_paths = build_glob_set(&config.ignored_paths);
 
     // The agentic verifier needs the cloned workspace to inspect.
     // Operators opt in by setting AR_AGENTIC_VERIFIER=1; without it,
@@ -613,11 +634,12 @@ pub async fn run_review_job(
         repo: &job.repo,
         pr_number: job.pr_number,
         head_sha: &job.head_sha,
+        base_ref: &base_ref,
         pr_title: &job.pr_title,
         pr_body: &job.pr_body,
         ignored_paths: &ignored_paths,
         min_severity: severity_floor_from_env(),
-        guidelines: &guidelines,
+        guidelines: &config.guidelines,
         repo_context: &repo_context,
         // Reuse the diff workspace/context prep already fetched. For
         // incremental reviews we override with the compare-diff
@@ -634,7 +656,7 @@ pub async fn run_review_job(
         previous_review_sha: incremental_diff.as_ref().and(last_reviewed_sha.as_deref()),
         verify_mode,
         workspace_path,
-        pr_metadata_check,
+        pr_metadata_check: config.pr_metadata_check.clone(),
     })
     .await;
 
@@ -717,10 +739,17 @@ enum WorkspacePrepError {
     Workspace(#[from] WorkspaceError),
 }
 
+/// Result of [`prepare_workspace_context`].
+enum WorkspacePrep {
+    /// The base-branch config sets `enabled: false`; nothing was cloned.
+    DisabledByConfig,
+    Ready(WorkspacePrepOutput),
+}
+
 struct WorkspacePrepOutput {
-    skipped_by_config: bool,
-    ignored_paths: GlobSet,
-    guidelines: String,
+    /// Repository config read from the base branch through
+    /// [`load_repo_config_from_base`]; defaults when absent or unreadable.
+    config: RepoConfig,
     repo_context: String,
     /// The raw PR diff fetched for triage and
     /// context building. Surfaced back so the review pipeline can
@@ -729,14 +758,19 @@ struct WorkspacePrepOutput {
     /// failed during workspace/context prep (we degrade-but-continue;
     /// the pipeline will refetch and likely also fail consistently).
     raw_diff: String,
-    pr_metadata_check: ar_review::config::PrMetadataCheck,
     /// Held by the orchestrator until the review pipeline finishes
     /// so the agentic verifier (when enabled) can inspect the
-    /// cloned working tree. `None` when workspace prep exited
-    /// without cloning (skipped_by_config doesn't reach this).
+    /// cloned working tree. `None` when cloning the head failed.
     workspace: Option<PreparedWorkspace>,
 }
 
+/// Load the base-branch config and, unless it disables review, clone the
+/// head and build optional RAG context.
+///
+/// The config comes from `base_ref.name` through the trusted loader and is
+/// never read from the head checkout, so a PR cannot disable or narrow its
+/// own review. Clone and context failures degrade to no workspace context
+/// but keep the base-branch config.
 #[allow(clippy::too_many_arguments)]
 async fn prepare_workspace_context(
     host: &dyn ReviewHost,
@@ -746,26 +780,31 @@ async fn prepare_workspace_context(
     learnings: Option<&dyn LearningsStore>,
     vector_store: Option<&dyn VectorStore>,
     job: &ReviewJob,
-) -> Result<WorkspacePrepOutput, WorkspacePrepError> {
-    let clone_url = host
-        .clone_url(&job.owner, &job.repo)
-        .await
-        .map_err(WorkspacePrepError::Host)?;
-    let workspace = prepare_workspace_from_clone_url(&clone_url, &job.head_sha).await?;
-    let config = load_repo_config(workspace.path());
-    let ignored_paths = build_glob_set(&config.ignored_paths);
-    let guidelines = config.guidelines.clone();
+    base_ref: &BaseRef,
+) -> WorkspacePrep {
+    let loaded = load_repo_config_from_base(host, &job.owner, &job.repo, &base_ref.name).await;
+    tracing::debug!(
+        repo = format!("{}/{}", job.owner, job.repo),
+        pr = job.pr_number,
+        provenance = ?loaded.provenance,
+        "loaded repo config"
+    );
+    let config = loaded.config;
     if !config.enabled {
-        return Ok(WorkspacePrepOutput {
-            skipped_by_config: true,
-            ignored_paths,
-            guidelines,
-            pr_metadata_check: config.pr_metadata_check.clone(),
-            repo_context: String::new(),
-            raw_diff: String::new(),
-            workspace: None,
-        });
+        return WorkspacePrep::DisabledByConfig;
     }
+    let workspace = match clone_head_workspace(host, job).await {
+        Ok(workspace) => workspace,
+        Err(e) => {
+            tracing::warn!(error = %e, "workspace prep failed; continuing without workspace context");
+            return WorkspacePrep::Ready(WorkspacePrepOutput {
+                config,
+                repo_context: String::new(),
+                raw_diff: String::new(),
+                workspace: None,
+            });
+        }
+    };
     // Fetch the diff once for the RAG context build. Failure here just means we
     // skip optional context; the review still proceeds.
     let raw_diff = match fetch_context_diff(host, job).await {
@@ -783,13 +822,13 @@ async fn prepare_workspace_context(
     let repo_context = if raw_diff.is_empty() {
         String::new()
     } else {
-        build_review_context_with_store(
+        job_review_context(
             workspace.path(),
             llm,
             &raw_diff,
             learnings,
-            5,
             vector_store,
+            job,
         )
         .await
         .unwrap_or_else(|e| {
@@ -798,15 +837,45 @@ async fn prepare_workspace_context(
         })
     };
 
-    Ok(WorkspacePrepOutput {
-        skipped_by_config: false,
-        ignored_paths,
-        guidelines,
+    WorkspacePrep::Ready(WorkspacePrepOutput {
+        config,
         repo_context,
         raw_diff,
-        pr_metadata_check: config.pr_metadata_check,
         workspace: Some(workspace),
     })
+}
+
+/// Build the RAG context for `job`, retrieving only learnings scoped
+/// to the job's repository.
+async fn job_review_context(
+    workspace_path: &std::path::Path,
+    llm: &LlmRouter,
+    raw_diff: &str,
+    learnings: Option<&dyn LearningsStore>,
+    vector_store: Option<&dyn VectorStore>,
+    job: &ReviewJob,
+) -> Result<String, ar_review::ContextBuildError> {
+    build_review_context_with_store(
+        workspace_path,
+        llm,
+        raw_diff,
+        learnings,
+        &job.repo_scope(),
+        5,
+        vector_store,
+    )
+    .await
+}
+
+async fn clone_head_workspace(
+    host: &dyn ReviewHost,
+    job: &ReviewJob,
+) -> Result<PreparedWorkspace, WorkspacePrepError> {
+    let clone_url = host
+        .clone_url(&job.owner, &job.repo)
+        .await
+        .map_err(WorkspacePrepError::Host)?;
+    Ok(prepare_workspace_from_clone_url(&clone_url, &job.head_sha).await?)
 }
 
 fn review_summary(outcome: &ar_review::ReviewOutcome) -> String {
@@ -1036,6 +1105,19 @@ mod tests {
             }
         }
 
+        fn first_request_text(&self) -> String {
+            let seen = self.seen.lock().unwrap();
+            seen.first()
+                .map(|req| {
+                    req.messages
+                        .iter()
+                        .map(|m| m.content.as_str())
+                        .collect::<Vec<_>>()
+                        .join("\n")
+                })
+                .unwrap_or_default()
+        }
+
         fn last_user_prompt(&self) -> Option<String> {
             let seen = self.seen.lock().unwrap();
             seen.first().and_then(|req| {
@@ -1065,8 +1147,88 @@ mod tests {
         }
     }
 
+    fn test_base_ref() -> BaseRef {
+        BaseRef {
+            name: "trunk".to_string(),
+            sha: "base".to_string(),
+        }
+    }
+
     fn router_with(provider: Arc<CannedProvider>) -> Router {
         Router::new().with(ModelTier::Reasoning, provider)
+    }
+
+    /// Embeds every text to the same direction, so any stored learning
+    /// with that embedding is a nearest match for the diff.
+    struct ConstantEmbedder;
+
+    #[async_trait]
+    impl LlmProvider for ConstantEmbedder {
+        async fn complete(&self, _req: CompleteRequest) -> Result<CompleteResponse, LlmError> {
+            Err(LlmError::Provider {
+                status: 500,
+                body: "embedder only".into(),
+            })
+        }
+
+        async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LlmError> {
+            Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
+        }
+    }
+
+    #[tokio::test]
+    async fn job_review_context_retrieves_only_the_jobs_repository_learnings() {
+        // The job is mixed case and the learning is stored lowercase, so
+        // this also covers the case-insensitive scope match.
+        use ar_index::{InMemoryLearningsStore, LearningSource, RepoScope};
+
+        let store = InMemoryLearningsStore::new();
+        store
+            .add(
+                "Widget forbids unwrap.".into(),
+                LearningSource::Chat,
+                vec![1.0, 0.0],
+                0,
+                &RepoScope::new("acme", "widget"),
+                None,
+            )
+            .await
+            .unwrap();
+        let llm = Router::new().with(ModelTier::Embedding, Arc::new(ConstantEmbedder));
+        let dir = tempfile::tempdir().unwrap();
+        let job_for = |repo: &str| ReviewJob {
+            owner: "Acme".to_string(),
+            repo: repo.to_string(),
+            pr_number: 1,
+            head_sha: "abc".to_string(),
+            pr_title: String::new(),
+            pr_body: String::new(),
+            force: false,
+        };
+
+        let same = job_review_context(
+            dir.path(),
+            &llm,
+            "diff",
+            Some(&store),
+            None,
+            &job_for("Widget"),
+        )
+        .await
+        .unwrap();
+        assert!(same.contains("Widget forbids unwrap."), "{same}");
+
+        let other = job_review_context(
+            dir.path(),
+            &llm,
+            "diff",
+            Some(&store),
+            None,
+            &job_for("Gadget"),
+        )
+        .await
+        .unwrap();
+        assert!(!other.contains("Widget forbids unwrap."), "{other}");
     }
 
     #[tokio::test]
@@ -1092,10 +1254,14 @@ mod tests {
             None,
             None,
             &job,
+            &test_base_ref(),
         )
         .await;
 
-        assert!(result.is_err(), "invalid SHA should stop before git runs");
+        assert!(
+            matches!(&result, WorkspacePrep::Ready(out) if out.workspace.is_none()),
+            "invalid SHA should stop before git runs and leave no workspace"
+        );
         assert_eq!(
             host.clone_url_requests.lock().unwrap().as_slice(),
             &[("alice".to_string(), "widgets".to_string())]
@@ -1110,6 +1276,397 @@ mod tests {
         changed_file_requests: Mutex<Vec<(String, String, u64)>>,
         clone_url_requests: Mutex<Vec<(String, String)>>,
         review_requests: Mutex<Vec<(String, String, u64, ar_forge::CreateReviewRequest)>>,
+        /// Clone URL of a local head repository; `None` serves an
+        /// unreachable URL so workspace prep fails.
+        head_clone_url: Option<String>,
+        /// Base-branch files served by `get_file_content`, keyed by
+        /// `(ref, path)`. Missing keys are `Ok(None)` (404).
+        base_files: std::collections::HashMap<(String, String), String>,
+        /// When set, `get_file_content` fails with this non-404 error.
+        file_error: Option<String>,
+        file_requests: Mutex<Vec<(String, String)>>,
+        pr_fetches: Mutex<usize>,
+        /// When set, `get_pull_request` fails with this error.
+        pr_fetch_error: Option<String>,
+    }
+
+    impl RecordingReviewHost {
+        fn with_head_clone_url(mut self, url: &str) -> Self {
+            self.head_clone_url = Some(url.to_string());
+            self
+        }
+
+        fn with_base_file(mut self, ref_name: &str, path: &str, body: &str) -> Self {
+            self.base_files
+                .insert((ref_name.to_string(), path.to_string()), body.to_string());
+            self
+        }
+    }
+
+    /// A local git repository whose single commit holds `files`, served
+    /// over `file://` so `prepare_workspace_from_clone_url` can clone it.
+    struct HeadRepo {
+        _dir: tempfile::TempDir,
+        url: String,
+        sha: String,
+    }
+
+    fn head_repo_with(files: &[(&str, &str)]) -> HeadRepo {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            // Clear the repository-locating variables git exports to hooks, so
+            // this fixture still targets its own tempdir when the suite runs
+            // inside a git hook (for example the pre-push `just ci`).
+            let out = std::process::Command::new("git")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
+                .env_remove("GIT_OBJECT_DIRECTORY")
+                .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+                .env_remove("GIT_PREFIX")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args([
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "init.defaultBranch=main",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        git(&["init", "-q"]);
+        for (path, body) in files {
+            let full = dir.path().join(path);
+            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
+            std::fs::write(full, body).unwrap();
+        }
+        git(&["add", "-A"]);
+        git(&["commit", "-q", "-m", "head"]);
+        let sha = git(&["rev-parse", "HEAD"]).trim().to_string();
+        let url = format!("file://{}", dir.path().display());
+        HeadRepo {
+            _dir: dir,
+            url,
+            sha,
+        }
+    }
+
+    fn job_at(head_sha: &str) -> ReviewJob {
+        ReviewJob {
+            owner: "alice".to_string(),
+            repo: "widgets".to_string(),
+            pr_number: 42,
+            head_sha: head_sha.to_string(),
+            pr_title: "feat: widgets".to_string(),
+            pr_body: "Adds widgets.".to_string(),
+            force: false,
+        }
+    }
+
+    const HOSTILE_HEAD_CONFIG: &str = "enabled: false\nignored_paths: [\"**\"]\n";
+
+    #[tokio::test]
+    async fn hostile_head_config_does_not_disable_or_narrow_review() {
+        let head = head_repo_with(&[
+            (".auto_review.yaml", HOSTILE_HEAD_CONFIG),
+            ("src/lib.rs", "pub fn context() {}\n"),
+        ]);
+        let host = RecordingReviewHost::default().with_head_clone_url(&head.url);
+        let provider = Arc::new(CannedProvider::new(vec![]));
+        let llm = router_with(provider.clone());
+
+        run_review_job(
+            &host,
+            &llm,
+            "",
+            "",
+            &InMemoryReviewHistory::new(),
+            None,
+            None,
+            None,
+            job_at(&head.sha),
+        )
+        .await;
+
+        assert_eq!(
+            host.review_requests.lock().unwrap().len(),
+            1,
+            "a PR-supplied enabled: false must not disable its own review"
+        );
+        assert_eq!(*host.pr_fetches.lock().unwrap(), 1);
+        let statuses = host.status_requests.lock().unwrap();
+        let last = statuses.last().map(|(_, _, _, s)| s.clone()).unwrap();
+        assert!(
+            matches!(
+                last.state,
+                CommitStatusState::Success | CommitStatusState::Failure
+            ) && last.description != "auto_review: disabled by repo config",
+            "final status comes from the normal review path: {last:?}"
+        );
+        let prompt = provider.last_user_prompt().expect("LLM called");
+        assert!(
+            prompt.contains("src/lib.rs"),
+            "PR-supplied ignored_paths must not hide changed files; prompt:\n{prompt}"
+        );
+    }
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        seen: Mutex<Vec<ReviewObservation>>,
+    }
+
+    impl ReviewObserver for RecordingObserver {
+        fn record(&self, observation: ReviewObservation) {
+            self.seen.lock().unwrap().push(observation);
+        }
+    }
+
+    async fn run_with(
+        host: &RecordingReviewHost,
+        provider: Arc<CannedProvider>,
+        observer: Option<&RecordingObserver>,
+        head_sha: &str,
+    ) {
+        let llm = router_with(provider);
+        run_review_job(
+            host,
+            &llm,
+            "",
+            "",
+            &InMemoryReviewHistory::new(),
+            None,
+            None,
+            observer.map(|o| o as &dyn ReviewObserver),
+            job_at(head_sha),
+        )
+        .await;
+    }
+
+    #[tokio::test]
+    async fn base_branch_enabled_false_skips_review_even_when_head_enables_it() {
+        let head = head_repo_with(&[
+            (".auto_review.yaml", "enabled: true\n"),
+            ("src/lib.rs", "pub fn context() {}\n"),
+        ]);
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url(&head.url)
+            .with_base_file("trunk", ".auto_review.yaml", "enabled: false\n");
+        let observer = RecordingObserver::default();
+
+        run_with(
+            &host,
+            Arc::new(CannedProvider::new(vec![])),
+            Some(&observer),
+            &head.sha,
+        )
+        .await;
+
+        assert!(host.review_requests.lock().unwrap().is_empty());
+        let statuses = host.status_requests.lock().unwrap();
+        let last = statuses.last().map(|(_, _, _, s)| s.clone()).unwrap();
+        assert_eq!(last.state, CommitStatusState::Success);
+        assert_eq!(last.description, "auto_review: disabled by repo config");
+        assert!(observer.seen.lock().unwrap().iter().any(|o| matches!(
+            o,
+            ReviewObservation::Skipped {
+                reason: "disabled_by_config"
+            }
+        )));
+    }
+
+    #[tokio::test]
+    async fn base_branch_enabled_false_skips_review_when_head_has_no_config() {
+        let host = RecordingReviewHost::default().with_base_file(
+            "trunk",
+            ".auto_review.yml",
+            "enabled: false\n",
+        );
+        let observer = RecordingObserver::default();
+
+        run_with(
+            &host,
+            Arc::new(CannedProvider::new(vec![])),
+            Some(&observer),
+            "0123456789abcdef0123456789abcdef01234567",
+        )
+        .await;
+
+        assert!(host.review_requests.lock().unwrap().is_empty());
+        let statuses = host.status_requests.lock().unwrap();
+        let last = statuses.last().map(|(_, _, _, s)| s.clone()).unwrap();
+        assert_eq!(last.state, CommitStatusState::Success);
+        assert_eq!(last.description, "auto_review: disabled by repo config");
+        assert!(observer.seen.lock().unwrap().iter().any(|o| matches!(
+            o,
+            ReviewObservation::Skipped {
+                reason: "disabled_by_config"
+            }
+        )));
+    }
+
+    const BASE_KEYS_CONFIG: &str = "\
+guidelines: BASE-GUIDELINE
+ignored_paths: [\"docs/**\"]
+pr_metadata_check:
+  enabled: true
+  additional_rules: [\"base rule\"]
+override_approvers: [\"base-maintainer\"]
+";
+
+    const HEAD_KEYS_CONFIG: &str = "\
+guidelines: HEAD-GUIDELINE
+ignored_paths: [\"src/**\"]
+pr_metadata_check: false
+override_approvers: [\"pr-author\"]
+";
+
+    #[tokio::test]
+    async fn workspace_prep_takes_every_config_key_from_the_base_branch() {
+        let head = head_repo_with(&[
+            (".auto_review.yaml", HEAD_KEYS_CONFIG),
+            ("src/lib.rs", "pub fn context() {}\n"),
+        ]);
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url(&head.url)
+            .with_base_file("trunk", ".auto_review.yaml", BASE_KEYS_CONFIG);
+        let llm = router_with(Arc::new(CannedProvider::new(vec![])));
+
+        let prep = prepare_workspace_context(
+            &host,
+            &llm,
+            "",
+            "",
+            None,
+            None,
+            &job_at(&head.sha),
+            &test_base_ref(),
+        )
+        .await;
+
+        let WorkspacePrep::Ready(out) = prep else {
+            panic!("base config enables review");
+        };
+        assert!(out.workspace.is_some(), "head was cloned");
+        assert_eq!(out.config.ignored_paths, vec!["docs/**".to_string()]);
+        assert_eq!(out.config.guidelines, "BASE-GUIDELINE");
+        assert!(out.config.pr_metadata_check.enabled);
+        assert_eq!(
+            out.config.pr_metadata_check.additional_rules,
+            vec!["base rule".to_string()]
+        );
+        assert_eq!(
+            out.config.override_approvers,
+            vec!["base-maintainer".to_string()]
+        );
+        assert!(!out.config.is_override_approver("pr-author"));
+    }
+
+    #[tokio::test]
+    async fn review_generation_uses_base_branch_guidelines_and_ignored_paths() {
+        let head = head_repo_with(&[
+            (".auto_review.yaml", HEAD_KEYS_CONFIG),
+            ("src/lib.rs", "pub fn context() {}\n"),
+        ]);
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url(&head.url)
+            .with_base_file("trunk", ".auto_review.yaml", BASE_KEYS_CONFIG);
+        let provider = Arc::new(CannedProvider::new(vec![]));
+
+        run_with(&host, provider.clone(), None, &head.sha).await;
+
+        assert_eq!(host.review_requests.lock().unwrap().len(), 1);
+        let text = provider.first_request_text();
+        assert!(text.contains("BASE-GUIDELINE"), "{text}");
+        assert!(!text.contains("HEAD-GUIDELINE"), "{text}");
+        let prompt = provider.last_user_prompt().expect("LLM called");
+        assert!(
+            prompt.contains("src/lib.rs"),
+            "head ignored_paths [src/**] must not apply; prompt:\n{prompt}"
+        );
+    }
+
+    #[tokio::test]
+    async fn non_404_base_config_fetch_error_still_reviews() {
+        let host = RecordingReviewHost {
+            file_error: Some("API error 500: upstream unavailable".to_string()),
+            ..RecordingReviewHost::default()
+        };
+
+        run_with(
+            &host,
+            Arc::new(CannedProvider::new(vec![])),
+            None,
+            "0123456789abcdef0123456789abcdef01234567",
+        )
+        .await;
+
+        assert_eq!(host.review_requests.lock().unwrap().len(), 1);
+        let statuses = host.status_requests.lock().unwrap();
+        let last = statuses.last().map(|(_, _, _, s)| s.clone()).unwrap();
+        assert_eq!(last.state, CommitStatusState::Success);
+    }
+
+    #[tokio::test]
+    async fn run_review_job_fetches_pull_request_once_and_reads_config_at_its_base_name() {
+        let host = RecordingReviewHost::default();
+
+        run_with(
+            &host,
+            Arc::new(CannedProvider::new(vec![])),
+            None,
+            "0123456789abcdef0123456789abcdef01234567",
+        )
+        .await;
+
+        assert_eq!(*host.pr_fetches.lock().unwrap(), 1);
+        assert_eq!(
+            host.file_requests.lock().unwrap().as_slice(),
+            &[
+                ("trunk".to_string(), ".auto_review.yaml".to_string()),
+                ("trunk".to_string(), ".auto_review.yml".to_string()),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_request_fetch_failure_posts_error_status_and_skips_review() {
+        let host = RecordingReviewHost {
+            pr_fetch_error: Some("API error 502".to_string()),
+            ..RecordingReviewHost::default()
+        };
+        let provider = Arc::new(CannedProvider::new(vec![]));
+        let observer = RecordingObserver::default();
+
+        run_with(
+            &host,
+            provider.clone(),
+            Some(&observer),
+            "0123456789abcdef0123456789abcdef01234567",
+        )
+        .await;
+
+        assert!(host.review_requests.lock().unwrap().is_empty());
+        assert!(provider.seen.lock().unwrap().is_empty(), "no LLM call");
+        assert!(host.file_requests.lock().unwrap().is_empty());
+        let statuses = host.status_requests.lock().unwrap();
+        let last = statuses.last().map(|(_, _, _, s)| s.clone()).unwrap();
+        assert_eq!(last.state, CommitStatusState::Error);
+        assert!(last.description.contains("API error 502"), "{last:?}");
+        assert!(observer.seen.lock().unwrap().iter().any(|o| matches!(
+            o,
+            ReviewObservation::Failed {
+                error_class: "forgejo",
+                ..
+            }
+        )));
     }
 
     #[async_trait]
@@ -1119,7 +1676,30 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push((owner.to_string(), repo.to_string()));
-            Ok(format!("https://example.invalid/{owner}/{repo}.git"))
+            Ok(self
+                .head_clone_url
+                .clone()
+                .unwrap_or_else(|| format!("https://example.invalid/{owner}/{repo}.git")))
+        }
+
+        async fn get_file_content(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            file_path: &str,
+            ref_: &str,
+        ) -> Result<Option<String>, ar_forge::HostError> {
+            self.file_requests
+                .lock()
+                .unwrap()
+                .push((ref_.to_string(), file_path.to_string()));
+            if let Some(message) = &self.file_error {
+                return Err(ar_forge::HostError::new(message.clone()));
+            }
+            Ok(self
+                .base_files
+                .get(&(ref_.to_string(), file_path.to_string()))
+                .cloned())
         }
 
         async fn get_pull_request(
@@ -1128,6 +1708,10 @@ mod tests {
             _repo: &str,
             pr_number: u64,
         ) -> Result<ar_forge::PullRequestSummary, ar_forge::HostError> {
+            *self.pr_fetches.lock().unwrap() += 1;
+            if let Some(message) = &self.pr_fetch_error {
+                return Err(ar_forge::HostError::new(message.clone()));
+            }
             Ok(ar_forge::PullRequestSummary {
                 number: pr_number,
                 title: "title".to_string(),
@@ -1139,7 +1723,7 @@ mod tests {
                     sha: "head".to_string(),
                 },
                 base: ar_forge::PullRequestRefSummary {
-                    ref_name: "main".to_string(),
+                    ref_name: "trunk".to_string(),
                     sha: "base".to_string(),
                 },
             })
@@ -1454,6 +2038,22 @@ mod tests {
         );
     }
 
+    async fn mount_pull_request(server: &MockServer, head_sha: &str) {
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": 7,
+                "title": "title",
+                "body": "body",
+                "draft": false,
+                "state": "open",
+                "head": {"ref": "topic", "sha": head_sha},
+                "base": {"ref": "main", "sha": "cafef00d"}
+            })))
+            .mount(server)
+            .await;
+    }
+
     #[tokio::test]
     async fn run_review_job_passes_previous_sha_to_incremental_review_prompt() {
         let server = MockServer::start().await;
@@ -1469,6 +2069,7 @@ mod tests {
             ))
             .mount(&server)
             .await;
+        mount_pull_request(&server, head_sha).await;
         Mock::given(method("GET"))
             .and(path("/api/v1/repos/o/r/pulls/7/files"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
@@ -1557,6 +2158,7 @@ mod tests {
             ))
             .mount(&server)
             .await;
+        mount_pull_request(&server, head_sha).await;
         Mock::given(method("GET"))
             .and(path("/api/v1/repos/o/r/pulls/7/files"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([

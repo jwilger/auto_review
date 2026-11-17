@@ -1146,6 +1146,31 @@ fn resolve_bot_identity(values: BotIdentityEnvValues<'_>) -> Result<EffectiveBot
     })
 }
 
+/// Resolve the startup bot identity and build the gateway's Forgejo client
+/// seeded with it, so `AR_BOT_LOGIN` (or its default) wins over a
+/// `GET /user` lookup.
+fn startup_bot_identity_and_forgejo_host(
+    identity_env: BotIdentityEnvValues<'_>,
+    forgejo_config: Option<&ForgejoStartupConfig>,
+) -> Result<(EffectiveBotIdentity, Option<Arc<ForgejoClient>>)> {
+    let identity = resolve_bot_identity(identity_env)?;
+    let forgejo = forgejo_config
+        .map(|config| {
+            ForgejoClient::new(&config.base_url, &config.token)
+                .context("forgejo client")
+                .map(|client| Arc::new(client.with_bot_login(identity.login.clone())))
+        })
+        .transpose()?;
+    Ok((identity, forgejo))
+}
+
+/// Build the gateway's long-lived GitHub App host, seeded with the startup
+/// bot login so `GITHUB_BOT_LOGIN` (or the `GET /app` slug already fetched)
+/// is reused instead of looked up again.
+fn github_review_host(client: ar_github::Client, bot_login: &str) -> Arc<ar_github::AppReviewHost> {
+    Arc::new(ar_github::AppReviewHost::new(client).with_bot_login(bot_login))
+}
+
 /// Resolve the GitHub App's comment login (`<slug>[bot]`) and the mention
 /// handle users type. Explicit `GITHUB_BOT_LOGIN` / `GITHUB_BOT_NAME`
 /// override what `GET /app` reports.
@@ -1290,21 +1315,15 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     // every `@` and fire on every PR thread mention, also bad.
     let bot_login_env = env::var("AR_BOT_LOGIN").ok();
     let bot_name_env = env::var("AR_BOT_NAME").ok();
-    let bot_identity = resolve_bot_identity(BotIdentityEnvValues {
-        login: bot_login_env.as_deref(),
-        name: bot_name_env.as_deref(),
-    })?;
+    let (bot_identity, forgejo) = startup_bot_identity_and_forgejo_host(
+        BotIdentityEnvValues {
+            login: bot_login_env.as_deref(),
+            name: bot_name_env.as_deref(),
+        },
+        forgejo_config.as_ref(),
+    )?;
     let bot_login = bot_identity.login;
     let bot_name = bot_identity.name;
-
-    let forgejo = forgejo_config
-        .as_ref()
-        .map(|config| {
-            ForgejoClient::new(&config.base_url, &config.token)
-                .map(Arc::new)
-                .context("forgejo client")
-        })
-        .transpose()?;
 
     let reasoning_provider = Arc::new(
         OpenAiProvider::new(&llm_base, llm_api_key.as_deref(), &reasoning_model)
@@ -1338,7 +1357,8 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         tracing::info!("LLM_EMBEDDING_MODEL not set; RAG disabled");
     }
 
-    // Optional Cheap tier — used by the LLM-driven file triage step.
+    // Optional Cheap tier, used by finding verification, PR metadata checks
+    // and chat commands.
     if let Some(cheap_model) = read_non_empty_env("LLM_CHEAP_MODEL") {
         let cheap_base =
             read_non_empty_env("LLM_CHEAP_BASE_URL").unwrap_or_else(|| llm_base.clone());
@@ -1348,9 +1368,9 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
                 .context("cheap LLM provider")?,
         );
         router = router.with(ModelTier::Cheap, provider);
-        tracing::info!(model = %cheap_model, "cheap tier configured; LLM triage enabled");
+        tracing::info!(model = %cheap_model, "cheap tier configured");
     } else {
-        tracing::info!("LLM_CHEAP_MODEL not set; LLM triage disabled (heuristic only)");
+        tracing::info!("LLM_CHEAP_MODEL not set; cheap tier disabled");
     }
 
     // Optional process-wide cap on simultaneous LLM provider calls.
@@ -1394,6 +1414,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
             )
         }
     };
+    warn_on_unscoped_learnings(learnings.as_ref()).await;
 
     // Shared review history. Both the orchestrator's incremental-
     // review dedup AND the chat poller need to enumerate the PRs
@@ -1588,13 +1609,12 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
                     .context("GITHUB_APP_PRIVATE_KEY must be the GitHub App's PEM private key")?;
             let client = ar_github::Client::with_app_signer(&config.api_url, signer)
                 .context("github client")?;
-            let host = Arc::new(ar_github::AppReviewHost::new(client));
             let login_override = read_non_empty_env("GITHUB_BOT_LOGIN");
             let name_override = read_non_empty_env("GITHUB_BOT_NAME");
             let app = if login_override.is_some() && name_override.is_some() {
                 None
             } else {
-                Some(host.client().get_authenticated_app().await.context(
+                Some(client.get_authenticated_app().await.context(
                     "authenticate as the GitHub App (GET /app); check GITHUB_APP_ID, \
                      GITHUB_APP_PRIVATE_KEY, and GITHUB_API_URL",
                 )?)
@@ -1604,6 +1624,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
                 name_override.as_deref(),
                 app.as_ref(),
             )?;
+            let host = github_review_host(client, &identity.login);
             let host_dyn: Arc<dyn ar_forge::ReviewHost> = host.clone();
             let dispatcher: Arc<dyn ar_orchestrator::JobDispatcher> =
                 Arc::new(with_shared_review_state(SpawningDispatcher::new_with_host(
@@ -1803,6 +1824,26 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     Ok(())
 }
 
+/// Log once at startup how many legacy learnings have no repository.
+/// Those rows predate per-repository scoping and are never retrieved
+/// into reviews, so operators need to know they exist to re-teach or
+/// remove them (`auto-review learnings list --unscoped`). A failure to
+/// count is logged and never stops the gateway.
+async fn warn_on_unscoped_learnings(store: &dyn ar_index::LearningsStore) {
+    match store.list(ar_index::LearningsFilter::Unscoped).await {
+        Ok(unscoped) if unscoped.is_empty() => {}
+        Ok(unscoped) => tracing::warn!(
+            unscoped_learnings = unscoped.len(),
+            "learnings without a repository are excluded from retrieval; \
+             list them with `auto-review learnings list --unscoped`"
+        ),
+        Err(error) => tracing::warn!(
+            error = %error,
+            "could not count learnings without a repository; continuing startup"
+        ),
+    }
+}
+
 /// Shutdown signal handler. Returns when SIGTERM (Unix) or
 /// SIGINT (Ctrl-C, cross-platform) arrives. Used as the
 /// `with_graceful_shutdown` argument on `axum::serve` so:
@@ -1938,8 +1979,37 @@ mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
 
+    /// One captured tracing event: its level and every field rendered
+    /// as a string (the message under `message`).
+    #[derive(Debug, Clone)]
+    struct CapturedEvent {
+        level: tracing::Level,
+        fields: Vec<(String, String)>,
+    }
+
+    impl CapturedEvent {
+        fn field(&self, name: &str) -> Option<&str> {
+            self.fields
+                .iter()
+                .find(|(n, _)| n == name)
+                .map(|(_, v)| v.as_str())
+        }
+    }
+
+    /// Records every event's level and fields; the single capture
+    /// helper for the startup logging tests.
     struct CapturingSubscriber {
-        messages: Arc<Mutex<Vec<String>>>,
+        events: Arc<Mutex<Vec<CapturedEvent>>>,
+    }
+
+    /// Messages of the events captured so far, in order.
+    fn captured_messages(events: &Mutex<Vec<CapturedEvent>>) -> Vec<String> {
+        events
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|event| event.field("message").map(str::to_string))
+            .collect()
     }
 
     impl tracing::Subscriber for CapturingSubscriber {
@@ -1956,11 +2026,12 @@ mod tests {
         fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
 
         fn event(&self, event: &tracing::Event<'_>) {
-            let mut visitor = MessageVisitor::default();
+            let mut visitor = FieldVisitor::default();
             event.record(&mut visitor);
-            if let Some(message) = visitor.message {
-                self.messages.lock().unwrap().push(message);
-            }
+            self.events.lock().unwrap().push(CapturedEvent {
+                level: *event.metadata().level(),
+                fields: visitor.fields,
+            });
         }
 
         fn enter(&self, _span: &tracing::span::Id) {}
@@ -1969,22 +2040,190 @@ mod tests {
     }
 
     #[derive(Default)]
-    struct MessageVisitor {
-        message: Option<String>,
+    struct FieldVisitor {
+        fields: Vec<(String, String)>,
     }
 
-    impl tracing::field::Visit for MessageVisitor {
+    impl tracing::field::Visit for FieldVisitor {
+        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
+        }
+
         fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
-            if field.name() == "message" {
-                self.message = Some(value.to_string());
-            }
+            self.fields
+                .push((field.name().to_string(), value.to_string()));
         }
 
         fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
-            if field.name() == "message" {
-                self.message = Some(format!("{value:?}").trim_matches('"').to_string());
-            }
+            self.fields.push((
+                field.name().to_string(),
+                format!("{value:?}").trim_matches('"').to_string(),
+            ));
         }
+    }
+
+    #[tokio::test]
+    async fn gateway_github_host_is_seeded_with_the_startup_bot_login() {
+        let github = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/app"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "id": 1, "slug": "looked-up" })),
+            )
+            .expect(0)
+            .mount(&github)
+            .await;
+        let client = ar_github::Client::new(&github.uri(), "app-jwt").expect("client");
+        let host = github_review_host(client, "configured[bot]");
+
+        let login = ar_forge::ReviewHost::bot_login(host.as_ref())
+            .await
+            .expect("seeded login");
+
+        assert_eq!(login, "configured[bot]");
+    }
+
+    #[tokio::test]
+    async fn ar_bot_login_wins_over_user_lookup_on_the_gateway_forgejo_host() {
+        let forgejo = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/user"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "id": 7, "login": "token-owner" })),
+            )
+            .expect(0)
+            .mount(&forgejo)
+            .await;
+        let config = ForgejoStartupConfig {
+            webhook_secret: "secret".to_string(),
+            base_url: forgejo.uri(),
+            token: "tok".to_string(),
+        };
+
+        let (identity, host) = startup_bot_identity_and_forgejo_host(
+            BotIdentityEnvValues {
+                login: Some("custom-bot"),
+                name: None,
+            },
+            Some(&config),
+        )
+        .expect("startup");
+        let host = host.expect("forgejo host");
+
+        let login = ar_forge::ReviewHost::bot_login(host.as_ref())
+            .await
+            .expect("seeded login");
+
+        assert_eq!(
+            (identity.login.as_str(), login.as_str()),
+            ("custom-bot", "custom-bot")
+        );
+    }
+
+    /// A learnings store whose only job is to answer
+    /// `list(Unscoped)` with a fixed count, or fail.
+    struct UnscopedCountStore {
+        unscoped: Option<usize>,
+    }
+
+    #[async_trait::async_trait]
+    impl ar_index::LearningsStore for UnscopedCountStore {
+        async fn add(
+            &self,
+            _text: String,
+            _source: ar_index::LearningSource,
+            _embedding: Vec<f32>,
+            _now: i64,
+            _scope: &ar_index::RepoScope,
+            _origin_pr: Option<u64>,
+        ) -> Result<ar_index::LearningRecord, ar_index::LearningsError> {
+            unreachable!("startup must not add learnings")
+        }
+
+        async fn list(
+            &self,
+            filter: ar_index::LearningsFilter,
+        ) -> Result<Vec<ar_index::LearningRecord>, ar_index::LearningsError> {
+            assert_eq!(filter, ar_index::LearningsFilter::Unscoped);
+            let count = self
+                .unscoped
+                .ok_or_else(|| ar_index::LearningsError::Storage("disk on fire".into()))?;
+            Ok((0..count as u64)
+                .map(|id| ar_index::LearningRecord {
+                    id,
+                    text: format!("legacy {id}"),
+                    source: ar_index::LearningSource::Chat,
+                    embedding: vec![0.0; 3],
+                    created_at: 0,
+                    repo: None,
+                    origin_pr: None,
+                })
+                .collect())
+        }
+
+        async fn remove(
+            &self,
+            _id: u64,
+            _scope: Option<&ar_index::RepoScope>,
+        ) -> Result<(), ar_index::LearningsError> {
+            unreachable!("startup must not remove learnings")
+        }
+
+        async fn query_nearest(
+            &self,
+            _query: &[f32],
+            _top_k: usize,
+            _scope: &ar_index::RepoScope,
+        ) -> Result<Vec<ar_index::ScoredLearning>, ar_index::LearningsError> {
+            unreachable!("startup must not query learnings")
+        }
+    }
+
+    async fn capture_unscoped_learnings_log(unscoped: Option<usize>) -> Vec<CapturedEvent> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = CapturingSubscriber {
+            events: Arc::clone(&events),
+        };
+        let _guard = tracing::subscriber::set_default(subscriber);
+        warn_on_unscoped_learnings(&UnscopedCountStore { unscoped }).await;
+        let captured = events.lock().unwrap().clone();
+        captured
+    }
+
+    #[tokio::test]
+    async fn startup_warns_once_with_the_count_of_unscoped_learnings() {
+        let events = capture_unscoped_learnings_log(Some(3)).await;
+        assert_eq!(events.len(), 1, "expected one event, got {events:?}");
+        let event = &events[0];
+        assert_eq!(event.level, tracing::Level::WARN);
+        assert_eq!(event.field("unscoped_learnings"), Some("3"));
+        let message = event.field("message").unwrap_or_default();
+        assert!(
+            message.contains("excluded from retrieval"),
+            "message should say the learnings are excluded, got: {message}"
+        );
+    }
+
+    #[tokio::test]
+    async fn startup_logs_nothing_when_no_learnings_are_unscoped() {
+        let events = capture_unscoped_learnings_log(Some(0)).await;
+        assert!(events.is_empty(), "expected no events, got {events:?}");
+    }
+
+    #[tokio::test]
+    async fn startup_logs_and_continues_when_counting_unscoped_learnings_fails() {
+        let events = capture_unscoped_learnings_log(None).await;
+        assert_eq!(events.len(), 1, "expected one event, got {events:?}");
+        assert!(
+            events[0]
+                .field("error")
+                .is_some_and(|error| error.contains("disk on fire")),
+            "the failure should carry the store error, got {events:?}"
+        );
+        assert!(events[0].field("unscoped_learnings").is_none());
     }
 
     #[test]
@@ -3428,7 +3667,7 @@ mod tests {
     fn explicit_bare_launcher_selection_emits_prominent_warning() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let subscriber = CapturingSubscriber {
-            messages: Arc::clone(&captured),
+            events: Arc::clone(&captured),
         };
 
         tracing::subscriber::with_default(subscriber, || {
@@ -3442,7 +3681,7 @@ mod tests {
             .unwrap();
         });
 
-        let messages = captured.lock().unwrap();
+        let messages = captured_messages(&captured);
         assert!(
             messages
                 .iter()
@@ -3508,7 +3747,7 @@ mod tests {
     fn external_container_isolation_continues_without_bare_warning_or_oci_preparation() {
         let captured = Arc::new(Mutex::new(Vec::new()));
         let subscriber = CapturingSubscriber {
-            messages: Arc::clone(&captured),
+            events: Arc::clone(&captured),
         };
 
         let outcome = tracing::subscriber::with_default(subscriber, || {
@@ -3523,7 +3762,7 @@ mod tests {
         .unwrap();
 
         assert_eq!(outcome, GatewayLaunchOutcome::ContinueInProcess);
-        let messages = captured.lock().unwrap();
+        let messages = captured_messages(&captured);
         assert!(
             messages
                 .iter()

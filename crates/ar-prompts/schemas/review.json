@@ -23,7 +23,7 @@
       "items": {
         "type": "object",
         "additionalProperties": false,
-        "required": ["path", "line_start", "line_end", "severity", "message"],
+        "required": ["path", "line_start", "line_end", "severity", "title", "category", "message"],
         "properties": {
           "path": {
             "type": "string",
@@ -43,6 +43,15 @@
             "type": "string",
             "enum": ["note", "warning", "error"],
             "description": "How serious the issue is."
+          },
+          "title": {
+            "type": "string",
+            "description": "Short headline for the finding, 8 words or fewer."
+          },
+          "category": {
+            "type": "string",
+            "enum": ["correctness", "security", "reliability", "performance", "compatibility", "ci_coverage", "tests", "documentation", "refactor", "naming", "style"],
+            "description": "Exactly one category for the finding. Security issues always use security; missing CI linter or check findings use ci_coverage."
           },
           "message": {
             "type": "string",

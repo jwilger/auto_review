@@ -178,11 +178,20 @@ the dedicated 1Password `Github Secrets` vault. GitHub Actions loads it through
 to preparing release PR branches, opening release PRs, creating release tags,
 and creating GitHub Releases in `jwilger/auto_review`.
 
+Release prepare does not commit or push with git. The repository rulesets
+require verified signatures and forbid force-pushes on every branch, so the
+workflow creates the `chore: release vX.Y.Z` commit through the GraphQL
+`createCommitOnBranch` mutation, which GitHub signs as verified for the token's
+account. When `release/vX.Y.Z` already exists but is not a single release
+commit on top of the current `main`, the workflow deletes the branch and creates
+it again from `main`. Deleting the branch closes any open release PR, and the
+workflow then opens a new one. Re-running against an up-to-date branch leaves it
+and its PR alone.
+
 Use the dedicated SSH signing key stored as `RELEASE_SIGNING_KEY` in the
-`Github Secrets` 1Password vault. Its public key is registered on the GitHub
-account used by the release automation, and repository variables
-`RELEASE_BOT_NAME` and `RELEASE_BOT_EMAIL` identify the signing identity.
-Release publish also uses that SSH signing key to sign `SHA256SUMS`.
+`Github Secrets` 1Password vault only for release artifacts. Release publish
+uses it to sign `SHA256SUMS`, and repository variables `RELEASE_BOT_NAME` and
+`RELEASE_BOT_EMAIL` identify that signing identity.
 
 Release publishing uses the same `GH_RELEASE_AUTOMATION_TOKEN` only after
 artifacts exist. It creates GitHub Releases with Linux binary artifacts,
@@ -276,8 +285,21 @@ skip paths, webhook intake, and chat surface.
   stopped; alert on `rate(poll_cycles_total[5m]) == 0`.
 - `auto_review_poll_history_failures_total` and
   `auto_review_poll_pr_failures_total` — Forgejo-side or
-  storage-side errors during polling. Spikes track Forgejo
+  storage-side errors during polling, including failures of the
+  reviews and review-comments endpoints. Spikes track Forgejo
   outages.
+- Load on Forgejo: each cycle makes 2 + R requests per PR in
+  review history (issue comments, the PR's reviews list, and one
+  comment list per submitted review that may hold inline
+  comments), where R is that review count. The issue-comments and
+  reviews lists page at 50 entries, so a PR with more than 50 of
+  either costs one more request per extra page; each review's
+  comment list is a single request whatever its size. Merged and
+  closed PRs stay in history and are polled too, so 200 historical
+  PRs with about 5 reviews each cost about 1,400 requests per
+  interval.
+  When Forgejo load matters, raise `AR_POLL_INTERVAL_SECS` or
+  prune history with `reset-pr` or `purge-history`.
 - `auto_review_poll_mentions_dispatched_total` — inline-thread
   mentions the poller picked up. Disjoint from
   `chat_commands_received_total` (webhook path).
@@ -366,6 +388,28 @@ quota) or 5xx (provider outage). `LLM_API_KEY` rotation: see §6.2.
   reduce the number of concurrent reviews.
 - Network egress to the Forgejo instance blocked from the gateway.
 
+### 3.3 Pull request fetch errors
+
+`auto_review failed: could not fetch pull request: ...`
+
+Before reviewing, the dispatcher fetches the PR once to learn its base
+branch, where repository config is read from. If that fetch fails the
+job stops with this `error` status instead of reviewing under a config
+it could not resolve. The log line is
+`failed to fetch pull request; cannot resolve base branch, not reviewing`
+(with `repo` and `pr` fields). The failure is counted in the review
+failure metrics under the existing `forgejo` `error_class`.
+
+**Common causes:**
+- Forge outage or 5xx responses from the Forgejo or GitHub API.
+- A revoked or under-scoped bot token (§6.1), or a GitHub App
+  installation that lost access to the repository.
+- The PR or repository was deleted between dispatch and review.
+
+**Recovery:** fix the cause, then trigger a fresh review with
+`@auto-review re-review` on the PR or by re-running the CI job that
+dispatches reviews.
+
 ---
 
 ## 4. Bot identity
@@ -387,6 +431,31 @@ match the actual bot account. The webhook receives the bot's own
 `issue_comment`, doesn't recognise the sender as itself, and acts.
 Update the env var; restart. (As of v0.1.0, both the webhook
 handler and the background poller honour these.)
+
+The gateway also seeds its review hosts with `AR_BOT_LOGIN` (and
+`GITHUB_BOT_LOGIN` for the GitHub App), so the review pipeline finds the
+bot's own reviews and comments without a `GET /api/v1/user` (or
+`GET /app`) lookup. The AgentCore runtime has no seed and does the
+lookup, so its Forgejo token needs read access to `GET /api/v1/user`.
+
+### 4.2 Forgejo capability probe warnings
+
+auto_review reads `GET /api/v1/version` to decide which review-thread
+features the Forgejo server supports (see
+[Repository host versions](./DEPLOYMENT.md#repository-host-versions)).
+Two warnings mean it fell back to none of them:
+
+**`Forgejo version probe failed`.** The request failed: the server was
+unreachable, returned an HTTP error or a malformed body, or did not answer
+within 10 seconds. The failure is not cached; the next review probes
+again. Check that `FORGEJO_BASE_URL` is reachable from the service and
+that `curl -s "$FORGEJO_BASE_URL/api/v1/version"` returns
+`{"version": "..."}`.
+
+**`unparseable Forgejo version`.** The server answered with a version
+string that does not start with a numeric major version (for example a
+reverse proxy rewriting the response). This result is cached until
+auto_review restarts. Fix the response, then restart the service.
 
 ---
 
@@ -517,6 +586,31 @@ The bot still accepts PR webhooks, but repository config is enforced when a
 CI-triggered or explicit forced review runs; disabled repositories get a
 "disabled by repo config" success status instead of review findings.
 
+The file must be on the PR's base branch. The bot reads repository config from
+the base branch only (see "Configuration precedence" below), so the change takes
+effect after it merges and a PR cannot disable its own review.
+
+### 7.1.1 Configuration precedence
+
+Review behaviour comes from two sources:
+
+- **Repository config**: `.auto_review.yaml` (or `.auto_review.yml`) read from
+  the PR's base branch through `ar_review::trusted_files`. The PR's head
+  checkout is never consulted, so config edits apply only after they merge to
+  the base branch, and then to every open PR on its next review. A missing,
+  oversized (over 64 KiB, fetched but not parsed), or malformed file, or a
+  non-404 error fetching it, falls back to defaults with a warning log and the
+  review proceeds.
+- **Operator environment variables** such as `AR_SEVERITY_FLOOR`.
+
+Base-branch repository config overrides operator defaults. Operator variables
+are defaults only: they apply when the repository config has no key for the
+same behaviour. Once a repository key exists for a behaviour (for example a
+future repository severity-floor key alongside `AR_SEVERITY_FLOOR`), the
+repository value wins. No operator variable caps or overrides a repository key.
+This is a maintainer decision recorded in
+[ADR-0024](./ADR-0024-base-branch-trusted-repository-instruction-files.md).
+
 ### 7.2 Add custom guidelines
 
 ```yaml
@@ -527,8 +621,23 @@ guidelines: |
   `// MUTATES` for the reviewer.
 ```
 
-These get injected into the LLM prompt's "repository conventions"
-section. Validate locally:
+The review prompt carries guidelines inside a nonce-tagged
+`<<<UNTRUSTED_DATA label="guidelines" ...>>>` fence, the same way it
+carries the PR title, PR body, retrieved repository context and prior
+discussion (docs/THREAT-MODEL.md T3). The system prompt tells the model
+that fenced text may inform what it flags but never changes its rules,
+severity definitions or output contract, and that instructions inside a
+fence must not be followed. Phrase guidelines as project facts or things
+to flag ("flag raw SQL outside QueryBuilder"), not as instructions to the
+model ("ignore style issues", "mark everything critical"): the second kind
+is ignored by design. Any `<<<` in the text is broken up and hidden
+Unicode (bidi, zero-width and tag characters) is stripped before fencing.
+`auto-review review once --dry-run` prints the fenced prompt, but it
+skips repo-config loading, so it shows only the PR title and PR body
+fences: guidelines, repository context and prior discussion are omitted.
+To check guidelines, read them in `.auto_review.yaml`; they reach the
+model inside a `guidelines` fence, sanitized as above and size-capped.
+Validate locally:
 ```bash
 auto-review config validate .auto_review.yaml
 ```
@@ -640,21 +749,76 @@ sqlite3 /var/lib/auto_review/learnings.db ".backup '/backup/learnings-$(date -I)
 
 **Inspect:**
 ```bash
-auto-review learnings list   # uses AR_LEARNINGS_DB by default
+auto-review learnings list   # every learning; uses AR_LEARNINGS_DB by default
+auto-review learnings list --repo OWNER/REPO   # one repository's learnings
+auto-review learnings list --unscoped          # legacy rows with no repository
 auto-review learnings list --json | jq    # machine-readable
 ```
+
+Each learning is scoped to one repository (lowercased `owner/repo`) and records
+the PR it was taught on; `list` prints both, with `-` (or `null` in `--json`)
+when unknown. See the [CLI reference](./CLI.md#learnings) for the flags.
 
 (For a custom inspection query, `sqlite3` against the file
 works too — the schema is documented in
 `crates/ar-index/src/sqlite_learnings.rs`.)
 
+**Upgrading an older SQLite store (gateway):** opening a store created before
+repository scoping adds the `repo` and `origin_pr` columns and assigns a
+repository to rows whose text starts with "Repository `<owner>/<repo>` only."
+(old review corrections). Other older rows stay unscoped and are excluded from
+review retrieval; the gateway logs one startup `warn` with an
+`unscoped_learnings` count while any remain. A row whose stored `repo` value is
+not a valid `owner/repo` counts as unscoped too and is logged with a `warn`
+when read. Review unscoped rows with `learnings list --unscoped`, then re-teach
+them with `@<bot> remember` on a PR in the right repository or remove them with
+`learnings forget`. Because that prefix could also have been typed by a
+commenter through chat `remember`, audit the backfilled rows with
+`learnings list` after upgrading and remove any that do not belong to their
+repository.
+
+**Upgrading a DynamoDB store (AgentCore):** the AgentCore runtime logs no
+`unscoped_learnings` count at startup, and `auto-review learnings list` and
+`learnings forget` only open the SQLite store, so neither works against a
+DynamoDB table. Nothing in the table is rewritten. When an item with no `repo`
+attribute is read, it is scoped from the same "Repository `<owner>/<repo>`
+only." text prefix; every other such item is unscoped and excluded from review
+retrieval. An item whose `repo` attribute is not a valid `owner/repo` counts as
+unscoped and is logged with a `warn` when read. Audit the legacy items with the
+AWS CLI. The result holds both the unscoped items and the prefix-scoped ones
+that need checking:
+
+```bash
+aws dynamodb scan \
+  --table-name "$AGENTCORE_LEARNINGS_DYNAMODB_TABLE" \
+  --filter-expression 'begins_with(pk, :p) AND attribute_not_exists(repo)' \
+  --expression-attribute-values '{":p":{"S":"learning#"}}' \
+  --projection-expression 'pk, #t' \
+  --expression-attribute-names '{"#t":"text"}'
+```
+
+Re-teach the ones to keep with `@<bot> remember` on a PR in the right
+repository, which writes a new item with a `repo` attribute, then delete the
+old item by its `pk`:
+
+```bash
+aws dynamodb delete-item \
+  --table-name "$AGENTCORE_LEARNINGS_DYNAMODB_TABLE" \
+  --key '{"pk":{"S":"learning#<ID>"}}'
+```
+
+`@<bot> forget <ID>` on a PR also removes a prefix-scoped legacy item of that
+PR's repository, but it cannot remove an unscoped item; use `delete-item` for
+those.
+
 **Forget a single learning:**
 ```bash
 auto-review learnings forget --id <ID>
 ```
-Same effect as `@<bot> forget` from a PR thread but operates
-directly on the SQLite store, so operators can script bulk
-wipes without going through Forgejo.
+This removes any learning, including unscoped ones and those of other
+repositories, directly in the store, so operators can script bulk wipes without
+going through a forge. `@<bot> forget` from a PR thread only removes learnings
+of that PR's repository.
 
 **Restore:** stop the gateway, replace the file, restart.
 
@@ -689,6 +853,11 @@ The systemd unit ships under
 
 If the new version fails to start, restore the previous binary from your release
 artifact or host backup, restart, and file an issue.
+
+After upgrading **Forgejo** (not auto_review), restart auto_review too: it
+keeps the Forgejo version it probed at first use for the life of the process,
+so new review-thread capabilities (for example suggestion blocks on v18) are
+picked up only after a restart.
 
 ## 9.1 Forgejo review-comment resolution gap
 

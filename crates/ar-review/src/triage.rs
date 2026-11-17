@@ -6,8 +6,7 @@
 //! get the full pipeline — partial filtering of the diff inside an
 //! otherwise-meaningful PR isn't worth the complexity yet.
 //!
-//! LLM-driven triage (CodeRabbit's cheap-model classifier) is a Milestone 2
-//! follow-up; the seam is here.
+//! Runtime triage is deterministic only (see ADR-0027).
 
 use ar_forge::ChangedFile;
 

@@ -23,11 +23,10 @@
 //! (LLM failure, malformed JSON, tool error, budget exhausted) keeps
 //! the finding rather than dropping it.
 
+use crate::agent_loop::{run_agent_loop, LoopEnd, Toolbox};
 use crate::error::ReviewError;
-use crate::workspace_tools::{read_file, search, ReadResult, SearchHit, WorkspaceToolError};
-use ar_llm::{CompleteRequest, Message, ModelTier, ResponseFormat, Router};
+use ar_llm::{Message, ModelTier, Router};
 use ar_prompts::{ReviewFinding, ReviewOutput};
-use serde::Deserialize;
 use serde_json::json;
 use std::fmt::Write;
 use std::path::Path;
@@ -35,13 +34,6 @@ use std::path::Path;
 /// Maximum number of tool calls the verifier is allowed to make per
 /// finding before it must emit a verdict.
 const DEFAULT_MAX_TURNS: usize = 5;
-
-/// Cap on the bytes returned to the model from a single `read_file`
-/// call. Tunes how aggressively long files get truncated.
-const READ_FILE_MAX_BYTES: usize = 4_096;
-
-/// Cap on the number of `search` matches returned to the model.
-const SEARCH_MAX_HITS: usize = 64;
 
 const SYSTEM_PROMPT: &str = r#"You are an agentic verifier of code-review findings. You will receive
 one finding at a time, plus the unified diff that produced it. Your job
@@ -69,24 +61,6 @@ Default to keep=true unless your investigation actively contradicts
 the finding. False positives at the verifier hurt review quality less
 than false negatives (dropping real bugs).
 "#;
-
-#[derive(Debug, Deserialize)]
-struct AgentAction {
-    tool: String,
-    #[serde(default)]
-    path: Option<String>,
-    #[serde(default)]
-    pattern: Option<String>,
-    #[serde(default)]
-    start_line: Option<u32>,
-    #[serde(default)]
-    end_line: Option<u32>,
-    #[serde(default)]
-    keep: Option<bool>,
-    // The LLM also emits a `reason` field per the prompt; we accept
-    // it (extra fields are ignored by serde) but don't need it on
-    // our side — the verdict is the only thing the loop cares about.
-}
 
 fn agent_action_schema() -> serde_json::Value {
     json!({
@@ -165,89 +139,36 @@ async fn verify_one(
     diff: &str,
     max_turns: usize,
 ) -> Verdict {
-    let mut messages = vec![Message::user(initial_user_prompt(finding, diff))];
+    let toolbox = Toolbox::new(workspace_path);
+    let outcome = run_agent_loop(
+        router,
+        ModelTier::Cheap,
+        SYSTEM_PROMPT,
+        vec![Message::user(initial_user_prompt(finding, diff))],
+        "AgentAction",
+        agent_action_schema(),
+        &toolbox,
+        max_turns,
+        |action| (action.tool == "verdict").then(|| action.keep.unwrap_or(true)),
+    )
+    .await;
 
-    for _ in 0..max_turns {
-        let req = CompleteRequest {
-            system: Some(SYSTEM_PROMPT.to_string()),
-            messages: messages.clone(),
-            response_format: Some(ResponseFormat::JsonSchema {
-                name: "AgentAction".to_string(),
-                schema: agent_action_schema(),
-            }),
-            // Determinism on the verify path. Repeated runs on the
-            // same finding shouldn't randomly produce different
-            // verdicts — operators read these in order.
-            temperature: Some(0.0),
-            ..Default::default()
-        };
-        let resp = match router.complete(ModelTier::Cheap, req).await {
-            Ok(r) => r,
-            Err(e) => {
-                tracing::warn!(error = %e, "agentic verifier LLM call failed; keeping finding");
-                return Verdict::Keep;
-            }
-        };
-        let action: AgentAction = match serde_json::from_str(&resp.content) {
-            Ok(a) => a,
-            Err(e) => {
-                tracing::warn!(error = %e, "agentic verifier emitted malformed JSON; keeping finding");
-                return Verdict::Keep;
-            }
-        };
-        messages.push(Message::assistant(resp.content));
-
-        match action.tool.as_str() {
-            "verdict" => {
-                let keep = action.keep.unwrap_or(true);
-                return if keep { Verdict::Keep } else { Verdict::Drop };
-            }
-            "read_file" => {
-                let result = action.path.as_deref().map(|p| {
-                    read_file(
-                        workspace_path,
-                        p,
-                        action.start_line,
-                        action.end_line,
-                        READ_FILE_MAX_BYTES,
-                    )
-                });
-                let formatted = format_read_result(action.path.as_deref(), result);
-                messages.push(Message::user(formatted));
-            }
-            "search" => {
-                let result = action
-                    .pattern
-                    .as_deref()
-                    .map(|p| search(workspace_path, p, action.path.as_deref(), SEARCH_MAX_HITS));
-                let formatted =
-                    format_search_result(action.pattern.as_deref(), action.path.as_deref(), result);
-                messages.push(Message::user(formatted));
-            }
-            other => {
-                tracing::warn!(
-                    tool = other,
-                    "agentic verifier issued unknown tool; keeping finding"
-                );
-                return Verdict::Keep;
-            }
+    match outcome.end {
+        LoopEnd::Terminal(true) => Verdict::Keep,
+        LoopEnd::Terminal(false) => Verdict::Drop,
+        LoopEnd::BudgetExhausted => {
+            tracing::info!(
+                path = finding.path,
+                line = finding.line_start,
+                "agentic verifier exhausted turn budget; keeping finding"
+            );
+            Verdict::Keep
+        }
+        LoopEnd::Failed(error) => {
+            tracing::warn!(%error, "agentic verifier failed; keeping finding");
+            Verdict::Keep
         }
     }
-
-    tracing::info!(
-        path = finding.path,
-        line = finding.line_start,
-        "agentic verifier exhausted turn budget; keeping finding"
-    );
-    let _ = action_for_logging(&messages);
-    Verdict::Keep
-}
-
-fn action_for_logging(messages: &[Message]) -> Option<&str> {
-    messages
-        .last()
-        .filter(|m| matches!(m.role, ar_llm::Role::Assistant))
-        .map(|m| m.content.as_str())
 }
 
 fn initial_user_prompt(finding: &ReviewFinding, diff: &str) -> String {
@@ -272,102 +193,13 @@ fn initial_user_prompt(finding: &ReviewFinding, diff: &str) -> String {
     out
 }
 
-fn format_read_result(
-    path: Option<&str>,
-    result: Option<Result<ReadResult, WorkspaceToolError>>,
-) -> String {
-    match (path, result) {
-        (None, _) => "Tool error: read_file requires a 'path' argument.".into(),
-        (Some(p), Some(Ok(r))) => {
-            let mut s = format!(
-                "read_file({p}) [lines {}-{}{}]:\n```\n",
-                r.start_line,
-                r.end_line,
-                if r.truncated { ", truncated" } else { "" }
-            );
-            s.push_str(&r.content);
-            if !s.ends_with('\n') {
-                s.push('\n');
-            }
-            s.push_str("```");
-            s
-        }
-        (Some(p), Some(Err(e))) => format!("read_file({p}) error: {e}"),
-        (Some(p), None) => format!("read_file({p}): unreachable (no path resolution)"),
-    }
-}
-
-fn format_search_result(
-    pattern: Option<&str>,
-    path: Option<&str>,
-    result: Option<Result<Vec<SearchHit>, WorkspaceToolError>>,
-) -> String {
-    let pattern = match pattern {
-        Some(p) => p,
-        None => return "Tool error: search requires a 'pattern' argument.".into(),
-    };
-    let path_label = path.unwrap_or("<workspace>");
-    match result {
-        Some(Ok(hits)) if hits.is_empty() => {
-            format!("search(/{pattern}/, {path_label}): no matches.")
-        }
-        Some(Ok(hits)) => {
-            let mut s = format!(
-                "search(/{pattern}/, {path_label}): {} match(es).\n",
-                hits.len()
-            );
-            for hit in hits {
-                let _ = writeln!(s, "  {}:{}: {}", hit.path, hit.line, hit.line_text);
-            }
-            s
-        }
-        Some(Err(e)) => format!("search(/{pattern}/, {path_label}) error: {e}"),
-        None => "search: pattern resolution failed".into(),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ar_llm::{CompleteResponse, Error as LlmError, LlmProvider};
+    use ar_llm::testing::ScriptedProvider;
     use ar_prompts::ReviewSeverity;
-    use async_trait::async_trait;
     use std::io::Write as _;
-    use std::sync::{Arc, Mutex};
-
-    /// Provider that returns canned responses LIFO from a stack.
-    /// Lets a test script a multi-turn conversation as a list of
-    /// (in order) JSON strings.
-    struct ScriptedProvider {
-        responses: Mutex<Vec<String>>,
-    }
-
-    impl ScriptedProvider {
-        fn new(mut responses: Vec<&str>) -> Self {
-            // Reverse so we can pop() in order.
-            responses.reverse();
-            Self {
-                responses: Mutex::new(responses.into_iter().map(String::from).collect()),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl LlmProvider for ScriptedProvider {
-        async fn complete(&self, _req: CompleteRequest) -> Result<CompleteResponse, LlmError> {
-            let content = self
-                .responses
-                .lock()
-                .unwrap()
-                .pop()
-                .expect("scripted provider ran out of responses");
-            Ok(CompleteResponse {
-                content,
-                input_tokens: 0,
-                output_tokens: 0,
-            })
-        }
-    }
+    use std::sync::Arc;
 
     fn write(dir: &Path, rel: &str, body: &str) {
         let p = dir.join(rel);
@@ -385,6 +217,8 @@ mod tests {
             line_end: None,
             severity: ReviewSeverity::Warning,
             message: msg.into(),
+            title: String::new(),
+            category: ar_prompts::FindingCategory::Correctness,
         }
     }
 
@@ -457,6 +291,22 @@ mod tests {
         .await
         .expect("ok");
         assert_eq!(result.findings.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn kept_finding_keeps_its_title_and_category() {
+        let dir = tempfile::tempdir().unwrap();
+        let provider = Arc::new(ScriptedProvider::new(vec![
+            r#"{"tool":"verdict","keep":true,"reason":"confirmed"}"#,
+        ]));
+        let router = Router::new().with(ModelTier::Cheap, provider);
+        let mut f = finding(1, "real", "a.rs");
+        f.title = "Unchecked index".into();
+        f.category = ar_prompts::FindingCategory::Security;
+        let result = verify_findings_agentic(&router, output(vec![f.clone()]), dir.path(), "diff")
+            .await
+            .expect("ok");
+        assert_eq!(result.findings, vec![f]);
     }
 
     #[tokio::test]
