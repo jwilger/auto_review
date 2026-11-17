@@ -7,6 +7,56 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [1.5.0] - 2026-11-17
+
+### Added
+
+- *(flake)* add sidequest control plane to the dev shell; fix runner Nix builds (#299)
+- *(gateway)* review GitHub repositories from the running gateway (#9)
+- *(forge)* report host capabilities and the bot identity (#193)
+- *(prompts)* add category and title to review findings (#196)
+- *(chat)* retire the docstring command (#198)
+- *(forge)* edit issue and review comments (#201)
+
+### Fixed
+
+- *(codex)* remove Forgejo MCP nix wrapper
+- *(codex)* run Forgejo MCP via quiet flake package (#296)
+- *(review)* remove the clone credential from the workspace git config (#188)
+- *(ci)* create release PR commits through the GitHub API (#205)
+- *(review)* read repo config from the PR base branch (#189)
+- *(prompts)* fence untrusted PR text in review and metadata-check prompts (#191)
+- *(index)* scope learnings and chat forget to the repository (#192)
+- *(gateway)* poll Forgejo inline review-thread replies for mentions (#195)
+
+### Other
+
+- consolidate agentic development config (#297)
+- correct, complete, and de-stale all documentation (#298)
+- migrate from Forgejo Actions to GitHub Actions
+- update gha-workflows references for org rename to slipstream-eng
+- submit pull requests to Trunk merge queue (#5)
+- update repository references after transfer (#4)
+- migrate merge queue from Trunk to Mergify (#8)
+- *(deps)* update flake inputs and all project dependencies (#10)
+- install Nix in release-prepare and cache release builds (#3)
+- add the agent delivery factory (#31)
+- remove Mergify configuration (#33)
+- *(factory)* allow the Workflow tool without a prompt (#32)
+- add AI code review landscape and feature design research (#156)
+- record decisions that made the human-gated backlog items agent-runnable (#159)
+- record LLM defaults and the sandbox GitHub setup in the design report (#162)
+- switch the planned local-Ollama defaults to the qwen3 family (#163)
+- add the decision-model theme to the feature design report (#182)
+- *(factory)* keep the factory implementer's agent memory in the repo (#183)
+- remove CodeRabbit configuration (#184)
+- fix stale references to removed tooling (#185)
+- add security and workflow checks (#186)
+- *(lint)* add the workspace lint policy (#187)
+- *(gateway)* pin Prometheus rules and Grafana dashboard to exposed metrics (#194)
+- *(review)* extract a host-free review core from review_pull_request (#197)
+- remove the unused co-change graph and LLM triage modules (#199)
+
 ## [1.4.0] - 2026-06-26
 
 ### Added
