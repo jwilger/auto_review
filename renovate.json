@@ -3,7 +3,8 @@
   "extends": [
     "config:recommended",
     ":dependencyDashboard",
-    ":semanticCommits"
+    ":semanticCommits",
+    "helpers:pinGitHubActionDigests"
   ],
   "description": "auto_review dependency-update config. Renovate runs on Forgejo via the bot's own webhook surface (operators self-hosting can deploy mend/renovate-runner alongside).",
   "labels": ["dependencies"],

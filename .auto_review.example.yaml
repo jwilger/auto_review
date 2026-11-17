@@ -1,6 +1,11 @@
 # Example .auto_review.yaml.
 # Copy this to .auto_review.yaml at the root of any repo the bot reviews
 # and tune to taste. Anything you omit falls back to defaults.
+#
+# auto_review reads this file from the pull request's BASE branch, never
+# from the PR's head. A PR that changes this file is still reviewed under
+# the base branch's config: changes take effect only after they merge to the
+# base branch, and then apply to open PRs on their next review.
 
 # Master switch. Set to false to skip review for this repo entirely while
 # leaving the webhook in place. The bot will post a "skipped" commit

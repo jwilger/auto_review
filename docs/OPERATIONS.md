@@ -178,11 +178,20 @@ the dedicated 1Password `Github Secrets` vault. GitHub Actions loads it through
 to preparing release PR branches, opening release PRs, creating release tags,
 and creating GitHub Releases in `jwilger/auto_review`.
 
+Release prepare does not commit or push with git. The repository rulesets
+require verified signatures and forbid force-pushes on every branch, so the
+workflow creates the `chore: release vX.Y.Z` commit through the GraphQL
+`createCommitOnBranch` mutation, which GitHub signs as verified for the token's
+account. When `release/vX.Y.Z` already exists but is not a single release
+commit on top of the current `main`, the workflow deletes the branch and creates
+it again from `main`. Deleting the branch closes any open release PR, and the
+workflow then opens a new one. Re-running against an up-to-date branch leaves it
+and its PR alone.
+
 Use the dedicated SSH signing key stored as `RELEASE_SIGNING_KEY` in the
-`Github Secrets` 1Password vault. Its public key is registered on the GitHub
-account used by the release automation, and repository variables
-`RELEASE_BOT_NAME` and `RELEASE_BOT_EMAIL` identify the signing identity.
-Release publish also uses that SSH signing key to sign `SHA256SUMS`.
+`Github Secrets` 1Password vault only for release artifacts. Release publish
+uses it to sign `SHA256SUMS`, and repository variables `RELEASE_BOT_NAME` and
+`RELEASE_BOT_EMAIL` identify that signing identity.
 
 Release publishing uses the same `GH_RELEASE_AUTOMATION_TOKEN` only after
 artifacts exist. It creates GitHub Releases with Linux binary artifacts,
@@ -366,6 +375,28 @@ quota) or 5xx (provider outage). `LLM_API_KEY` rotation: see §6.2.
   reduce the number of concurrent reviews.
 - Network egress to the Forgejo instance blocked from the gateway.
 
+### 3.3 Pull request fetch errors
+
+`auto_review failed: could not fetch pull request: ...`
+
+Before reviewing, the dispatcher fetches the PR once to learn its base
+branch, where repository config is read from. If that fetch fails the
+job stops with this `error` status instead of reviewing under a config
+it could not resolve. The log line is
+`failed to fetch pull request; cannot resolve base branch, not reviewing`
+(with `repo` and `pr` fields). The failure is counted in the review
+failure metrics under the existing `forgejo` `error_class`.
+
+**Common causes:**
+- Forge outage or 5xx responses from the Forgejo or GitHub API.
+- A revoked or under-scoped bot token (§6.1), or a GitHub App
+  installation that lost access to the repository.
+- The PR or repository was deleted between dispatch and review.
+
+**Recovery:** fix the cause, then trigger a fresh review with
+`@auto-review re-review` on the PR or by re-running the CI job that
+dispatches reviews.
+
 ---
 
 ## 4. Bot identity
@@ -504,6 +535,31 @@ enabled: false
 The bot still accepts PR webhooks, but repository config is enforced when a
 CI-triggered or explicit forced review runs; disabled repositories get a
 "disabled by repo config" success status instead of review findings.
+
+The file must be on the PR's base branch. The bot reads repository config from
+the base branch only (see "Configuration precedence" below), so the change takes
+effect after it merges and a PR cannot disable its own review.
+
+### 7.1.1 Configuration precedence
+
+Review behaviour comes from two sources:
+
+- **Repository config**: `.auto_review.yaml` (or `.auto_review.yml`) read from
+  the PR's base branch through `ar_review::trusted_files`. The PR's head
+  checkout is never consulted, so config edits apply only after they merge to
+  the base branch, and then to every open PR on its next review. A missing,
+  oversized (over 64 KiB, fetched but not parsed), or malformed file, or a
+  non-404 error fetching it, falls back to defaults with a warning log and the
+  review proceeds.
+- **Operator environment variables** such as `AR_SEVERITY_FLOOR`.
+
+Base-branch repository config overrides operator defaults. Operator variables
+are defaults only: they apply when the repository config has no key for the
+same behaviour. Once a repository key exists for a behaviour (for example a
+future repository severity-floor key alongside `AR_SEVERITY_FLOOR`), the
+repository value wins. No operator variable caps or overrides a repository key.
+This is a maintainer decision recorded in
+[ADR-0024](./ADR-0024-base-branch-trusted-repository-instruction-files.md).
 
 ### 7.2 Add custom guidelines
 
