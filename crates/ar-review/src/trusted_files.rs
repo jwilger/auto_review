@@ -17,6 +17,27 @@
 use crate::config::{parse_repo_config, RepoConfig};
 use ar_forge::{HostError, ReviewHost};
 
+/// The base branch a pull request targets, as fetched once per review job.
+///
+/// `name` is the branch name trusted files are read at: reading the branch
+/// tip by name means a config change merged to the base applies to open
+/// pull requests on their next review. `sha` is the base tip the host
+/// reported when the pull request was fetched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BaseRef {
+    pub name: String,
+    pub sha: String,
+}
+
+impl From<&ar_forge::PullRequestRefSummary> for BaseRef {
+    fn from(base: &ar_forge::PullRequestRefSummary) -> Self {
+        Self {
+            name: base.ref_name.clone(),
+            sha: base.sha.clone(),
+        }
+    }
+}
+
 /// Largest repository-controlled file body the trusted loader will parse.
 pub const MAX_TRUSTED_FILE_BYTES: usize = 64 * 1024;
 
@@ -404,6 +425,21 @@ mod tests {
         assert!(loaded.config.enabled);
         assert_eq!(loaded.provenance, ConfigProvenance::Default);
         assert!(loaded.warning.is_some());
+    }
+
+    #[test]
+    fn base_ref_comes_from_pull_request_base() {
+        let base = ar_forge::PullRequestRefSummary {
+            ref_name: "release/1.x".into(),
+            sha: "cafef00d".into(),
+        };
+        assert_eq!(
+            BaseRef::from(&base),
+            BaseRef {
+                name: "release/1.x".into(),
+                sha: "cafef00d".into()
+            }
+        );
     }
 
     #[tokio::test]
