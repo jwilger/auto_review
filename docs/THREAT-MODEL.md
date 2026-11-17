@@ -343,14 +343,19 @@ malicious code; learnings poisoning is a strictly weaker capability
 for them. Any commenter can still poison the learnings of the repository
 they comment in; approver gating of `remember` and `forget` is planned
 separately. Repositories with the same lowercased `owner/repo` on different
-forges (mirrors) share learnings by design. The legacy backfill trusts the
+forges (mirrors) share learnings by design. That includes the hostile case:
+an unrelated account that owns the same lowercased `owner/repo` on a second
+forge served by the same gateway can add learnings that reach the first
+repository's reviews (see ADR-0025). The legacy backfill trusts the
 "Repository `<owner>/<repo>` only." text prefix, and before scoping chat
 `remember` stored commenter text under the same source as review corrections,
 so a commenter could have stored that prefix naming another repository; after
 the upgrade such a row is retrieved into that repository's reviews (a narrower
 exposure than before, when it reached every repository). After upgrading,
 operators should audit learnings with `auto-review learnings list` and remove
-suspicious rows with `auto-review learnings forget`. Operators using cloud embedding
+suspicious rows with `auto-review learnings forget`; AgentCore operators with a
+DynamoDB store use the AWS CLI steps in the
+[Operations Guide](./OPERATIONS.md#8-learnings-store) instead. Operators using cloud embedding
 providers should treat embedded snippets like other LLM-bound repository
 content and choose `AR_VECTOR_DB=:memory:` or rotate/delete the SQLite store if
 long-term snippet retention is undesirable.
