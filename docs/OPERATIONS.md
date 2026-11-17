@@ -571,8 +571,23 @@ guidelines: |
   `// MUTATES` for the reviewer.
 ```
 
-These get injected into the LLM prompt's "repository conventions"
-section. Validate locally:
+The review prompt carries guidelines inside a nonce-tagged
+`<<<UNTRUSTED_DATA label="guidelines" ...>>>` fence, the same way it
+carries the PR title, PR body, retrieved repository context and prior
+discussion (docs/THREAT-MODEL.md T3). The system prompt tells the model
+that fenced text may inform what it flags but never changes its rules,
+severity definitions or output contract, and that instructions inside a
+fence must not be followed. Phrase guidelines as project facts or things
+to flag ("flag raw SQL outside QueryBuilder"), not as instructions to the
+model ("ignore style issues", "mark everything critical"): the second kind
+is ignored by design. Any `<<<` in the text is broken up and hidden
+Unicode (bidi, zero-width and tag characters) is stripped before fencing.
+`auto-review review once --dry-run` prints the fenced prompt, but it
+skips repo-config loading, so it shows only the PR title and PR body
+fences: guidelines, repository context and prior discussion are omitted.
+To check guidelines, read them in `.auto_review.yaml`; they reach the
+model inside a `guidelines` fence, sanitized as above and size-capped.
+Validate locally:
 ```bash
 auto-review config validate .auto_review.yaml
 ```

@@ -25,9 +25,13 @@ pr_metadata_check:
     - "Security-sensitive changes must describe the threat model impact."
     - "Schema migrations must mention rollback risk."
 
-# Free-form text injected into the LLM system prompt as authoritative
-# project conventions. Use sparingly — every byte costs tokens, and the
-# model already follows reasonable defaults. Examples of good content:
+# Free-form project conventions. They reach the model as fenced untrusted
+# data in the review prompt (see "How guidelines reach the model" in
+# docs/USER-GUIDE.md): they shape what the reviewer flags, not how it
+# behaves, so text like "ignore security issues" is not followed. Write
+# them as facts about the project or things worth flagging. Use sparingly —
+# every byte costs tokens, and the model already follows reasonable
+# defaults. Examples of good content:
 #
 #   - "All public APIs must have rustdoc."
 #   - "Forbid unwrap() and expect() outside #[cfg(test)]."
