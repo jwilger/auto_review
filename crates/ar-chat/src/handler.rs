@@ -268,6 +268,10 @@ pub struct ChatContext<'a> {
     /// The bot's own Forgejo login. Used to single out auto-review's own
     /// reviews when reconstructing outstanding findings.
     pub bot_login: &'a str,
+    /// Root comment id of the inline review thread the triggering
+    /// comment replied in, when the command came from an inline reply.
+    /// `None` for top-level PR conversation comments.
+    pub reply_to_comment_id: Option<u64>,
 }
 
 impl ChatHandler<'_> {
@@ -1497,6 +1501,7 @@ mod tests {
             issue_number: 42,
             commenter_login: "alice",
             bot_login: "auto-review",
+            reply_to_comment_id: None,
         }
     }
 

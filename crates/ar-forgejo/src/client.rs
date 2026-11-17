@@ -381,26 +381,14 @@ impl Client {
         Ok(resp.id)
     }
 
-    /// List inline review-thread comments on a pull request.
+    /// List the top-level conversation-tab comments on a PR.
     ///
-    /// Used by the chat poller as a fallback for the
-    /// `pull_request_review_comment` webhook, which Forgejo doesn't
-    /// fire reliably for thread replies. Returns every review
-    /// comment on the PR; the caller filters by id cursor to detect
-    /// new ones.
-    ///
-    /// List the inline review-thread comments on a PR. Used by
-    /// `ChatPoller` to scan for `@<bot>` mentions inside review
-    /// threads (which Forgejo's `pull_request_review_comment`
-    /// webhook doesn't fire reliably for; gitea#26023).
-    /// Paginates internally — chatty PR threads with > 50
-    /// comments now return the full set instead of the first
-    /// page only.
-    /// List top-level conversation-tab comments on a PR. Forgejo treats
-    /// PRs as issues for the conversation thread, so this hits the
-    /// issues endpoint — `pulls/{n}/comments` does not exist in Forgejo
-    /// (verified against 15.0.0; returns 404). The chat poller uses this
-    /// to detect new `@<bot>` mentions on the PR.
+    /// Forgejo treats PRs as issues for the conversation thread, so this
+    /// hits `issues/{n}/comments` (`pulls/{n}/comments` does not exist in
+    /// Forgejo; verified against 15.0.0, returns 404). Forgejo filters
+    /// this endpoint to plain comments, so inline review-thread comments
+    /// are never included; list those per review with
+    /// [`Self::list_pull_review_comments`]. Paginates internally.
     pub async fn list_pr_review_comments(
         &self,
         owner: &str,

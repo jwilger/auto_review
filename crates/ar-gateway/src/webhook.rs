@@ -196,6 +196,7 @@ async fn handle_issue_comment(state: &AppState, body: &[u8]) -> Response {
                 issue_number,
                 commenter_login: &commenter_login,
                 bot_login: &bot_login,
+                reply_to_comment_id: None,
             };
             if let Err(e) = handler.handle(ctx, cmd).await {
                 tracing::error!(
