@@ -218,9 +218,11 @@ markers. Each marker carries the data's label and a per-review nonce
 derived from the head SHA and a process-random salt, so a PR author cannot
 predict it. Every run of the `<<<` marker prefix inside fenced text is
 broken up, so a forged close marker, even one with the right nonce, cannot
-end the fence early. The existing per-section byte caps apply inside the
-fence. The system prompt says fenced text can inform what to flag but never
-changes the rules or the JSON output contract. (b) The verifier pass
+end the fence early. Before that, bidi override and isolate, zero-width and
+Unicode tag characters are removed from fenced text and CRLF is normalized
+to LF, so invisible characters cannot hide instructions or a marker prefix.
+The existing per-section byte caps apply inside the fence. The system prompt
+says fenced text can inform what to flag but never changes the rules or the JSON output contract. (b) The verifier pass
 re-checks each finding against actual code lines, dropping
 unsupported claims. (c) The model never speaks to the Forgejo API
 directly: `mapping.rs` translates structured findings to API calls,
@@ -418,7 +420,9 @@ threat-model claims fail CI when a regression slips in:
 - `crates/ar-review/tests/red_team_pipeline.rs` — covers T3
   (prompt-injection ⇒ schema allow-list, and
   `t3_forged_close_marker_with_guessed_nonce_cannot_close_fence_early`:
-  a forged untrusted-data close marker cannot end its fence), T7 (oversized diff
+  a forged untrusted-data close marker cannot end its fence;
+  `t3_hidden_characters_cannot_reassemble_a_close_marker`: zero-width,
+  bidi and tag characters cannot hide a marker prefix), T7 (oversized diff
   cap), T8 (single-file flat-truncation fallback), and T9
   (confused-deputy via Forgejo API: schema rejects unknown
   fields, severity is closed-enum, and normal review events are
@@ -430,7 +434,8 @@ threat-model claims fail CI when a regression slips in:
   opt-out path that suppresses the cheap-tier metadata decision.
 - `crates/ar-prompts/src/fence.rs` and `crates/ar-prompts/src/prompt.rs`
   unit tests — cover T3 fencing: nonce-tagged markers, byte caps inside the
-  fence, marker-prefix neutralization, sanitized marker attributes, every
+  fence, marker-prefix neutralization, removal of bidi, zero-width and tag
+  characters, CRLF normalization, sanitized marker attributes, every
   untrusted review-prompt section fenced, and the system-prompt data rule.
 - `crates/ar-review/tests/red_team_workspace_tools.rs` — covers
   T4 (LLM tool calls escape workspace): symlink escape, chained
