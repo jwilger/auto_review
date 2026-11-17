@@ -18,17 +18,16 @@ pub mod mapping;
 pub mod override_marker;
 pub mod pipeline;
 pub mod rag_context;
+pub mod review_core;
 pub mod triage;
+pub mod trusted_files;
 pub mod verify;
 pub mod workspace;
 pub mod workspace_tools;
 
 pub use agentic_verify::verify_findings_agentic;
 pub use ar_prompts::ReviewSeverity;
-pub use config::{
-    load_repo_config, parse_repo_config, parse_repo_config_strict, RepoConfig,
-    RepoConfigStrictError,
-};
+pub use config::{parse_repo_config, parse_repo_config_strict, RepoConfig, RepoConfigStrictError};
 pub use context_builder::{
     build_review_context, build_review_context_with_store, ContextBuildError,
 };
@@ -42,7 +41,9 @@ pub use llm_triage::{filter_reviewable, triage_files_with_llm};
 pub use mapping::output_to_review_request;
 pub use pipeline::{review_pull_request, ReviewArgs, ReviewOutcome, VerifyMode};
 pub use rag_context::format_repo_context;
+pub use review_core::{run_review_core, ReviewCoreArgs, ReviewDraft};
 pub use triage::{classify, pr_is_skippable, FileClass};
+pub use trusted_files::{load_repo_config_from_base, BaseRef, LoadedRepoConfig};
 pub use verify::verify_findings;
 pub use workspace::{
     build_clone_url, prepare_workspace, prepare_workspace_from_clone_url, PreparedWorkspace,

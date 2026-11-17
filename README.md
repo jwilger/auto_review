@@ -113,7 +113,7 @@ GitHub issue ──(maintainer adds factory:ready)──▶ factory: spec → sl
 
 - **Requests** are GitHub issues. Anyone may open one; the maintainer triages it and, when it is ready for agents, labels it `factory:ready`. The factory only picks up issues the maintainer wrote, and treats everyone else's text as information, not instructions.
 - **Building** happens in the agent delivery factory (`factory/`, `.claude/`): a spec writer turns the issue into acceptance criteria, a builder implements them test-first until `just ci` is green, and four independent reviewers (correctness, security, architecture, operability) check the change before an approver applies `factory/policy.md`.
-- **Merging**: pull requests need the five required CI checks and no human approval. Factory pull requests merge automatically once approved, except those that change the factory or its gates (`.claude/`, `factory/`, `.github/`, `Justfile`, `Cargo.toml` and the toolchain files), which the maintainer reviews and merges.
+- **Merging**: pull requests need the required CI checks listed in `.github/rulesets/require-pr.json` and no human approval. Factory pull requests merge automatically once approved, except those that change the factory or its gates (`.claude/`, `factory/`, `.github/`, `Justfile`, `Cargo.toml` and the toolchain files), which the maintainer reviews and merges.
 - **Waiting on a person**: an issue labelled `status:awaiting-human` carries a short options brief; the maintainer answers it on the issue and runs `/factory approve <issue>` or `/factory rework <issue>`.
 - **Stopping it**: open an issue labelled `factory:halt`.
 

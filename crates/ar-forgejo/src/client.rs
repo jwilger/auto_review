@@ -5,7 +5,9 @@ use crate::types::{
 pub use ar_forge::CreatedReview;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::OnceCell;
 use url::Url;
 
 #[derive(Debug, Error)]
@@ -18,6 +20,8 @@ pub enum Error {
     Api { status: u16, body: String },
     #[error("URL build error: {0}")]
     UrlBuild(#[from] url::ParseError),
+    #[error("request timed out after {0:?}")]
+    Timeout(std::time::Duration),
 }
 
 /// Default Forgejo page size for paginated list endpoints.
@@ -43,6 +47,11 @@ pub struct Client {
     http: reqwest::Client,
     base: Url,
     token: String,
+    /// Server capabilities, probed once and shared by every clone.
+    pub(crate) capabilities: Arc<OnceCell<ar_forge::HostCapabilities>>,
+    /// The bot's own login, resolved once (or seeded) and shared by
+    /// every clone.
+    pub(crate) bot_login: Arc<OnceCell<String>>,
 }
 
 impl Client {
@@ -84,7 +93,17 @@ impl Client {
             http,
             base,
             token: token.to_string(),
+            capabilities: Arc::new(OnceCell::new()),
+            bot_login: Arc::new(OnceCell::new()),
         })
+    }
+
+    /// Seed the bot login resolved elsewhere (the gateway's startup
+    /// identity, so `AR_BOT_LOGIN` wins) so
+    /// [`ar_forge::ReviewHost::bot_login`] never calls `GET /user`.
+    pub fn with_bot_login(mut self, login: impl Into<String>) -> Self {
+        self.bot_login = Arc::new(OnceCell::new_with(Some(login.into())));
+        self
     }
 
     pub fn clone_url(&self, owner: &str, repo: &str) -> Result<String, Error> {
@@ -292,8 +311,13 @@ impl Client {
 
     /// Fetch a file's raw contents from the repo at `ref_` (a branch, tag, or
     /// commit SHA). Returns `Ok(None)` when the file does not exist (404) so
-    /// callers can treat "no config" the same as "default config". Used by the
-    /// chat path to read `.auto_review.yaml` without cloning the repo.
+    /// callers can treat "no config" the same as "default config".
+    ///
+    /// This is the transport for the trusted base-branch loader
+    /// (`ar_review::trusted_files`): both the review dispatcher and the chat
+    /// handler read `.auto_review.yaml` through it at the PR's base branch,
+    /// never from the head checkout. The whole body is read into memory; the
+    /// loader's size cap applies after the read.
     pub async fn get_file_content(
         &self,
         owner: &str,
@@ -301,7 +325,16 @@ impl Client {
         file_path: &str,
         ref_: &str,
     ) -> Result<Option<String>, Error> {
-        let url = self.url(&format!("repos/{owner}/{repo}/raw/{file_path}?ref={ref_}"))?;
+        // Build the path segment-by-segment and the query through
+        // `query_pairs_mut` so branch names such as `feature/a&b` and file
+        // names containing `#` or `?` reach Forgejo intact instead of
+        // splitting into stray query params or a fragment.
+        let mut url = self.url(&format!("repos/{owner}/{repo}/raw/"))?;
+        url.path_segments_mut()
+            .map_err(|()| Error::InvalidBaseUrl("base URL cannot carry path segments".into()))?
+            .pop_if_empty()
+            .extend(file_path.split('/').filter(|s| !s.is_empty()));
+        url.query_pairs_mut().append_pair("ref", ref_);
         let resp = self
             .http
             .get(url)
@@ -381,26 +414,14 @@ impl Client {
         Ok(resp.id)
     }
 
-    /// List inline review-thread comments on a pull request.
+    /// List the top-level conversation-tab comments on a PR.
     ///
-    /// Used by the chat poller as a fallback for the
-    /// `pull_request_review_comment` webhook, which Forgejo doesn't
-    /// fire reliably for thread replies. Returns every review
-    /// comment on the PR; the caller filters by id cursor to detect
-    /// new ones.
-    ///
-    /// List the inline review-thread comments on a PR. Used by
-    /// `ChatPoller` to scan for `@<bot>` mentions inside review
-    /// threads (which Forgejo's `pull_request_review_comment`
-    /// webhook doesn't fire reliably for; gitea#26023).
-    /// Paginates internally — chatty PR threads with > 50
-    /// comments now return the full set instead of the first
-    /// page only.
-    /// List top-level conversation-tab comments on a PR. Forgejo treats
-    /// PRs as issues for the conversation thread, so this hits the
-    /// issues endpoint — `pulls/{n}/comments` does not exist in Forgejo
-    /// (verified against 15.0.0; returns 404). The chat poller uses this
-    /// to detect new `@<bot>` mentions on the PR.
+    /// Forgejo treats PRs as issues for the conversation thread, so this
+    /// hits `issues/{n}/comments` (`pulls/{n}/comments` does not exist in
+    /// Forgejo; verified against 15.0.0, returns 404). Forgejo filters
+    /// this endpoint to plain comments, so inline review-thread comments
+    /// are never included; list those per review with
+    /// [`Self::list_pull_review_comments`]. Paginates internally.
     pub async fn list_pr_review_comments(
         &self,
         owner: &str,
@@ -445,6 +466,12 @@ impl Client {
     }
 
     /// List comments attached to one pull request review.
+    ///
+    /// Forgejo's `pulls/{n}/reviews/{id}/comments` endpoint takes no
+    /// `page`/`limit` parameters and returns the review's whole comment
+    /// list, so this is a single request. Paging it would fetch the same
+    /// full list repeatedly until `PAGINATION_MAX_PAGES` for any review
+    /// with at least `PAGINATION_PAGE_SIZE` comments.
     pub async fn list_pull_review_comments(
         &self,
         owner: &str,
@@ -452,19 +479,10 @@ impl Client {
         n: u64,
         review_id: u64,
     ) -> Result<Vec<crate::types::PrReviewComment>, Error> {
-        let mut all = Vec::new();
-        for page in 1..=PAGINATION_MAX_PAGES {
-            let url = self.url(&format!(
-                "repos/{owner}/{repo}/pulls/{n}/reviews/{review_id}/comments?page={page}&limit={PAGINATION_PAGE_SIZE}"
-            ))?;
-            let chunk: Vec<crate::types::PrReviewComment> = json_get(&self.http, url).await?;
-            let chunk_len = chunk.len();
-            all.extend(chunk);
-            if chunk_len < PAGINATION_PAGE_SIZE as usize {
-                break;
-            }
-        }
-        Ok(all)
+        let url = self.url(&format!(
+            "repos/{owner}/{repo}/pulls/{n}/reviews/{review_id}/comments"
+        ))?;
+        json_get(&self.http, url).await
     }
 
     /// Fetch the Forgejo server's reported version string. Used as a
@@ -477,6 +495,17 @@ impl Client {
         let url = self.url("version")?;
         let resp: VersionResponse = json_get(&self.http, url).await?;
         Ok(resp.version)
+    }
+
+    /// `GET /user`: login of the account the token belongs to.
+    pub async fn get_authenticated_user_login(&self) -> Result<String, Error> {
+        #[derive(serde::Deserialize)]
+        struct UserResponse {
+            login: String,
+        }
+        let url = self.url("user")?;
+        let resp: UserResponse = json_get(&self.http, url).await?;
+        Ok(resp.login)
     }
 }
 
@@ -961,6 +990,41 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn get_file_content_percent_encodes_ref_query_param() {
+        use wiremock::matchers::{query_param, query_param_is_missing};
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/raw/.auto_review.yaml"))
+            .and(query_param("ref", "feature/a&b"))
+            .and(query_param_is_missing("b"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("enabled: true\n"))
+            .mount(&server)
+            .await;
+
+        let contents = client
+            .get_file_content("o", "r", ".auto_review.yaml", "feature/a&b")
+            .await
+            .expect("ok");
+        assert_eq!(contents.as_deref(), Some("enabled: true\n"));
+    }
+
+    #[tokio::test]
+    async fn get_file_content_percent_encodes_path_segments() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/raw/docs/a%23b.md"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("hash in name\n"))
+            .mount(&server)
+            .await;
+
+        let contents = client
+            .get_file_content("o", "r", "docs/a#b.md", "main")
+            .await
+            .expect("ok");
+        assert_eq!(contents.as_deref(), Some("hash in name\n"));
+    }
+
+    #[tokio::test]
     async fn get_file_content_returns_none_on_404() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
@@ -1236,5 +1300,39 @@ mod tests {
             }
             other => panic!("unexpected err: {other:?}"),
         }
+    }
+
+    #[tokio::test]
+    async fn list_pull_review_comments_fetches_an_unpaginated_endpoint_once() {
+        // Forgejo's review-comments endpoint takes no page/limit and
+        // returns the whole list on every request. A client that paged it
+        // would get the same full page back until the page cap, every
+        // poll cycle, for any review with 50 or more comments.
+        let (server, client) = mock_client().await;
+        let comments: Vec<serde_json::Value> = (1..=60)
+            .map(|i| {
+                serde_json::json!({
+                    "id": i,
+                    "body": "nit",
+                    "user": {"login": "bob"},
+                    "path": "src/lib.rs",
+                    "position": i,
+                    "original_position": 0
+                })
+            })
+            .collect();
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7/reviews/3/comments"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(&comments))
+            .expect(1)
+            .mount(&server)
+            .await;
+
+        let got = client
+            .list_pull_review_comments("o", "r", 7, 3)
+            .await
+            .expect("comments");
+        assert_eq!(got.len(), 60);
+        server.verify().await;
     }
 }
