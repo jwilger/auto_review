@@ -282,6 +282,10 @@
               python3
               nodejs_24
               jq
+              # Shell and workflow linters run by `just lint-scripts`
+              # and `just lint-workflows`.
+              shellcheck
+              actionlint
               openssh
               kubernetes-helm
               pkg-config
