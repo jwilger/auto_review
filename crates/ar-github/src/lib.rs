@@ -232,6 +232,18 @@ impl ar_forge::ReviewHost for InstallationReviewHost {
             .map_err(host_error)
     }
 
+    async fn get_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+    ) -> Result<Option<ar_forge::IssueSummary>, ar_forge::HostError> {
+        self.client
+            .get_issue(owner, repo, issue_number, &self.installation_token)
+            .await
+            .map_err(host_error)
+    }
+
     async fn update_pull_request(
         &self,
         owner: &str,
@@ -860,6 +872,60 @@ impl Client {
         .await
     }
 
+    /// Fetch an issue by number with the installation token. GitHub serves
+    /// pull requests on the issues endpoint and marks them with a
+    /// `pull_request` object, which becomes `is_pull_request`. Returns
+    /// `Ok(None)` on 404; every other non-success status is an error whose
+    /// body is capped on a UTF-8 char boundary.
+    pub async fn get_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+        installation_token: &str,
+    ) -> Result<Option<ar_forge::IssueSummary>, Error> {
+        #[derive(Deserialize)]
+        struct RawIssue {
+            number: u64,
+            title: String,
+            #[serde(default)]
+            body: Option<String>,
+            state: String,
+            #[serde(default)]
+            html_url: String,
+            #[serde(default)]
+            pull_request: Option<serde_json::Value>,
+        }
+        let url = self.url(&format!("repos/{owner}/{repo}/issues/{issue_number}"))?;
+        let auth_value = Self::installation_auth_header(installation_token)?;
+        let response = self
+            .http
+            .get(url)
+            .header(AUTHORIZATION, auth_value)
+            .send()
+            .await?;
+        let status = response.status();
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+        let body = response.text().await?;
+        if !status.is_success() {
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body: cap_for_error_on_char_boundary(&body),
+            });
+        }
+        let raw: RawIssue = serde_json::from_str(&body)?;
+        Ok(Some(ar_forge::IssueSummary {
+            number: raw.number,
+            title: raw.title,
+            body: raw.body.unwrap_or_default(),
+            state: raw.state,
+            is_pull_request: raw.pull_request.is_some_and(|value| !value.is_null()),
+            html_url: raw.html_url,
+        }))
+    }
+
     async fn get_with_installation_token<T>(
         &self,
         url: Url,
@@ -1268,4 +1334,18 @@ fn cap_for_error(body: &str) -> String {
     } else {
         format!("{}...[truncated]", &body[..MAX])
     }
+}
+
+/// Like [`cap_for_error`], but cuts on a UTF-8 char boundary so a
+/// multi-byte character straddling the cap cannot panic the slice.
+fn cap_for_error_on_char_boundary(body: &str) -> String {
+    const MAX: usize = 1024;
+    if body.len() <= MAX {
+        return body.to_string();
+    }
+    let mut cut = MAX;
+    while cut > 0 && !body.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    format!("{}...[truncated]", &body[..cut])
 }

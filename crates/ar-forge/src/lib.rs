@@ -137,6 +137,20 @@ pub trait ReviewHost: Send + Sync {
         )))
     }
 
+    /// Fetch an issue (or a pull request, via the shared issues endpoint) by
+    /// number. Returns `Ok(None)` when the host answers 404; any other
+    /// failure is an error. `is_pull_request` tells issues and PRs apart.
+    async fn get_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+    ) -> Result<Option<IssueSummary>, HostError> {
+        Err(HostError::new(format!(
+            "issue lookup not available for {owner}/{repo}#{issue_number}"
+        )))
+    }
+
     async fn update_pull_request(
         &self,
         owner: &str,
@@ -361,6 +375,20 @@ pub struct PrReviewCommentUser {
     pub login: String,
 }
 
+/// Host-neutral issue summary returned by [`ReviewHost::get_issue`].
+/// `is_pull_request` is true when the number names a pull request rather
+/// than a plain issue (both hosts serve PRs on the issues endpoint).
+#[derive(Debug, Clone, Deserialize, Serialize, PartialEq, Eq)]
+pub struct IssueSummary {
+    pub number: u64,
+    pub title: String,
+    #[serde(default, deserialize_with = "empty_string_when_null")]
+    pub body: String,
+    pub state: String,
+    pub is_pull_request: bool,
+    pub html_url: String,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -498,6 +526,141 @@ mod tests {
 
         assert_eq!(summary.body, "");
         assert_eq!(summary.state, "open");
+    }
+
+    #[test]
+    fn issue_summary_treats_null_or_missing_body_as_empty() {
+        let null_body: IssueSummary = serde_json::from_value(serde_json::json!({
+            "number": 12,
+            "title": "bug: thing",
+            "body": null,
+            "state": "open",
+            "is_pull_request": false,
+            "html_url": "https://forge.example/o/r/issues/12"
+        }))
+        .expect("null body");
+        let missing_body: IssueSummary = serde_json::from_value(serde_json::json!({
+            "number": 12,
+            "title": "bug: thing",
+            "state": "open",
+            "is_pull_request": false,
+            "html_url": "https://forge.example/o/r/issues/12"
+        }))
+        .expect("missing body");
+
+        assert_eq!(null_body.body, "");
+        assert_eq!(missing_body, null_body);
+    }
+
+    struct RequiredOnlyHost;
+
+    #[async_trait]
+    impl ReviewHost for RequiredOnlyHost {
+        async fn get_pull_request(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+        ) -> Result<PullRequestSummary, HostError> {
+            Err(HostError::new("unused"))
+        }
+
+        async fn get_pr_diff(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+        ) -> Result<String, HostError> {
+            Err(HostError::new("unused"))
+        }
+
+        async fn get_compare_diff(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _base: &str,
+            _head: &str,
+        ) -> Result<String, HostError> {
+            Err(HostError::new("unused"))
+        }
+
+        async fn list_changed_files(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+        ) -> Result<Vec<ChangedFile>, HostError> {
+            Err(HostError::new("unused"))
+        }
+
+        async fn list_pr_review_comments(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+        ) -> Result<Vec<PrReviewComment>, HostError> {
+            Err(HostError::new("unused"))
+        }
+
+        async fn list_pull_reviews(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+        ) -> Result<Vec<PullReviewSummary>, HostError> {
+            Err(HostError::new("unused"))
+        }
+
+        async fn list_pull_review_comments(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+            _review_id: u64,
+        ) -> Result<Vec<PrReviewComment>, HostError> {
+            Err(HostError::new("unused"))
+        }
+
+        async fn update_pull_request(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+            _title: Option<&str>,
+            _body: Option<&str>,
+        ) -> Result<(), HostError> {
+            Err(HostError::new("unused"))
+        }
+
+        async fn post_commit_status(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _sha: &str,
+            _status: &CommitStatus,
+        ) -> Result<(), HostError> {
+            Err(HostError::new("unused"))
+        }
+
+        async fn create_review(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+            _request: &CreateReviewRequest,
+        ) -> Result<CreatedReview, HostError> {
+            Err(HostError::new("unused"))
+        }
+    }
+
+    #[tokio::test]
+    async fn default_get_issue_returns_host_error_naming_the_issue() {
+        let err = RequiredOnlyHost
+            .get_issue("o", "r", 12)
+            .await
+            .expect_err("default get_issue must fail");
+
+        assert!(err.message().contains("o/r#12"), "{}", err.message());
     }
 
     #[test]
