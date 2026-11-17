@@ -1145,6 +1145,31 @@ fn resolve_bot_identity(values: BotIdentityEnvValues<'_>) -> Result<EffectiveBot
     })
 }
 
+/// Resolve the startup bot identity and build the gateway's Forgejo client
+/// seeded with it, so `AR_BOT_LOGIN` (or its default) wins over a
+/// `GET /user` lookup.
+fn startup_bot_identity_and_forgejo_host(
+    identity_env: BotIdentityEnvValues<'_>,
+    forgejo_config: Option<&ForgejoStartupConfig>,
+) -> Result<(EffectiveBotIdentity, Option<Arc<ForgejoClient>>)> {
+    let identity = resolve_bot_identity(identity_env)?;
+    let forgejo = forgejo_config
+        .map(|config| {
+            ForgejoClient::new(&config.base_url, &config.token)
+                .context("forgejo client")
+                .map(|client| Arc::new(client.with_bot_login(identity.login.clone())))
+        })
+        .transpose()?;
+    Ok((identity, forgejo))
+}
+
+/// Build the gateway's long-lived GitHub App host, seeded with the startup
+/// bot login so `GITHUB_BOT_LOGIN` (or the `GET /app` slug already fetched)
+/// is reused instead of looked up again.
+fn github_review_host(client: ar_github::Client, bot_login: &str) -> Arc<ar_github::AppReviewHost> {
+    Arc::new(ar_github::AppReviewHost::new(client).with_bot_login(bot_login))
+}
+
 /// Resolve the GitHub App's comment login (`<slug>[bot]`) and the mention
 /// handle users type. Explicit `GITHUB_BOT_LOGIN` / `GITHUB_BOT_NAME`
 /// override what `GET /app` reports.
@@ -1289,21 +1314,15 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     // every `@` and fire on every PR thread mention, also bad.
     let bot_login_env = env::var("AR_BOT_LOGIN").ok();
     let bot_name_env = env::var("AR_BOT_NAME").ok();
-    let bot_identity = resolve_bot_identity(BotIdentityEnvValues {
-        login: bot_login_env.as_deref(),
-        name: bot_name_env.as_deref(),
-    })?;
+    let (bot_identity, forgejo) = startup_bot_identity_and_forgejo_host(
+        BotIdentityEnvValues {
+            login: bot_login_env.as_deref(),
+            name: bot_name_env.as_deref(),
+        },
+        forgejo_config.as_ref(),
+    )?;
     let bot_login = bot_identity.login;
     let bot_name = bot_identity.name;
-
-    let forgejo = forgejo_config
-        .as_ref()
-        .map(|config| {
-            ForgejoClient::new(&config.base_url, &config.token)
-                .map(Arc::new)
-                .context("forgejo client")
-        })
-        .transpose()?;
 
     let reasoning_provider = Arc::new(
         OpenAiProvider::new(&llm_base, llm_api_key.as_deref(), &reasoning_model)
@@ -1580,13 +1599,12 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
                     .context("GITHUB_APP_PRIVATE_KEY must be the GitHub App's PEM private key")?;
             let client = ar_github::Client::with_app_signer(&config.api_url, signer)
                 .context("github client")?;
-            let host = Arc::new(ar_github::AppReviewHost::new(client));
             let login_override = read_non_empty_env("GITHUB_BOT_LOGIN");
             let name_override = read_non_empty_env("GITHUB_BOT_NAME");
             let app = if login_override.is_some() && name_override.is_some() {
                 None
             } else {
-                Some(host.client().get_authenticated_app().await.context(
+                Some(client.get_authenticated_app().await.context(
                     "authenticate as the GitHub App (GET /app); check GITHUB_APP_ID, \
                      GITHUB_APP_PRIVATE_KEY, and GITHUB_API_URL",
                 )?)
@@ -1596,6 +1614,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
                 name_override.as_deref(),
                 app.as_ref(),
             )?;
+            let host = github_review_host(client, &identity.login);
             let host_dyn: Arc<dyn ar_forge::ReviewHost> = host.clone();
             let dispatcher: Arc<dyn ar_orchestrator::JobDispatcher> =
                 Arc::new(with_shared_review_state(SpawningDispatcher::new_with_host(
@@ -2032,6 +2051,66 @@ mod tests {
                 format!("{value:?}").trim_matches('"').to_string(),
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn gateway_github_host_is_seeded_with_the_startup_bot_login() {
+        let github = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/app"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "id": 1, "slug": "looked-up" })),
+            )
+            .expect(0)
+            .mount(&github)
+            .await;
+        let client = ar_github::Client::new(&github.uri(), "app-jwt").expect("client");
+        let host = github_review_host(client, "configured[bot]");
+
+        let login = ar_forge::ReviewHost::bot_login(host.as_ref())
+            .await
+            .expect("seeded login");
+
+        assert_eq!(login, "configured[bot]");
+    }
+
+    #[tokio::test]
+    async fn ar_bot_login_wins_over_user_lookup_on_the_gateway_forgejo_host() {
+        let forgejo = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::method("GET"))
+            .and(wiremock::matchers::path("/api/v1/user"))
+            .respond_with(
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "id": 7, "login": "token-owner" })),
+            )
+            .expect(0)
+            .mount(&forgejo)
+            .await;
+        let config = ForgejoStartupConfig {
+            webhook_secret: "secret".to_string(),
+            base_url: forgejo.uri(),
+            token: "tok".to_string(),
+        };
+
+        let (identity, host) = startup_bot_identity_and_forgejo_host(
+            BotIdentityEnvValues {
+                login: Some("custom-bot"),
+                name: None,
+            },
+            Some(&config),
+        )
+        .expect("startup");
+        let host = host.expect("forgejo host");
+
+        let login = ar_forge::ReviewHost::bot_login(host.as_ref())
+            .await
+            .expect("seeded login");
+
+        assert_eq!(
+            (identity.login.as_str(), login.as_str()),
+            ("custom-bot", "custom-bot")
+        );
     }
 
     /// A learnings store whose only job is to answer

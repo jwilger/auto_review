@@ -5,7 +5,9 @@ use crate::types::{
 pub use ar_forge::CreatedReview;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
 use thiserror::Error;
+use tokio::sync::OnceCell;
 use url::Url;
 
 #[derive(Debug, Error)]
@@ -18,6 +20,8 @@ pub enum Error {
     Api { status: u16, body: String },
     #[error("URL build error: {0}")]
     UrlBuild(#[from] url::ParseError),
+    #[error("request timed out after {0:?}")]
+    Timeout(std::time::Duration),
 }
 
 /// Default Forgejo page size for paginated list endpoints.
@@ -43,6 +47,11 @@ pub struct Client {
     http: reqwest::Client,
     base: Url,
     token: String,
+    /// Server capabilities, probed once and shared by every clone.
+    pub(crate) capabilities: Arc<OnceCell<ar_forge::HostCapabilities>>,
+    /// The bot's own login, resolved once (or seeded) and shared by
+    /// every clone.
+    pub(crate) bot_login: Arc<OnceCell<String>>,
 }
 
 impl Client {
@@ -84,7 +93,17 @@ impl Client {
             http,
             base,
             token: token.to_string(),
+            capabilities: Arc::new(OnceCell::new()),
+            bot_login: Arc::new(OnceCell::new()),
         })
+    }
+
+    /// Seed the bot login resolved elsewhere (the gateway's startup
+    /// identity, so `AR_BOT_LOGIN` wins) so
+    /// [`ar_forge::ReviewHost::bot_login`] never calls `GET /user`.
+    pub fn with_bot_login(mut self, login: impl Into<String>) -> Self {
+        self.bot_login = Arc::new(OnceCell::new_with(Some(login.into())));
+        self
     }
 
     pub fn clone_url(&self, owner: &str, repo: &str) -> Result<String, Error> {
@@ -491,6 +510,17 @@ impl Client {
         let url = self.url("version")?;
         let resp: VersionResponse = json_get(&self.http, url).await?;
         Ok(resp.version)
+    }
+
+    /// `GET /user`: login of the account the token belongs to.
+    pub async fn get_authenticated_user_login(&self) -> Result<String, Error> {
+        #[derive(serde::Deserialize)]
+        struct UserResponse {
+            login: String,
+        }
+        let url = self.url("user")?;
+        let resp: UserResponse = json_get(&self.http, url).await?;
+        Ok(resp.login)
     }
 }
 

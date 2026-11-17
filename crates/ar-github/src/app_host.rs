@@ -8,11 +8,12 @@
 //! reuse it until shortly before expiry.
 
 use crate::{
-    host_error, with_clone_credentials, Client, Error, InstallationTokenRequest, Permission,
+    host_error, resolve_bot_login, with_clone_credentials, Client, Error, InstallationTokenRequest,
+    Permission, IDENTITY_TIMEOUT,
 };
 use async_trait::async_trait;
 use std::collections::HashMap;
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, OnceCell};
 
 /// Permissions requested for every review-host installation token. The token
 /// is also restricted to the single repository being reviewed.
@@ -28,6 +29,8 @@ pub fn review_installation_token_request(repo: &str) -> InstallationTokenRequest
 pub struct AppReviewHost {
     client: Client,
     installations: Mutex<HashMap<String, u64>>,
+    bot_login: OnceCell<String>,
+    identity_timeout: std::time::Duration,
 }
 
 impl AppReviewHost {
@@ -37,7 +40,24 @@ impl AppReviewHost {
         Self {
             client,
             installations: Mutex::new(HashMap::new()),
+            bot_login: OnceCell::new(),
+            identity_timeout: IDENTITY_TIMEOUT,
         }
+    }
+
+    /// Seed the bot login resolved elsewhere (the gateway's startup
+    /// identity, which honours `GITHUB_BOT_LOGIN`), so
+    /// [`ar_forge::ReviewHost::bot_login`] never calls `GET /app`.
+    pub fn with_bot_login(mut self, login: impl Into<String>) -> Self {
+        self.bot_login = OnceCell::new_with(Some(login.into()));
+        self
+    }
+
+    /// Override the bound on the `GET /app` identity request
+    /// (default [`IDENTITY_TIMEOUT`]).
+    pub fn with_identity_timeout(mut self, timeout: std::time::Duration) -> Self {
+        self.identity_timeout = timeout;
+        self
     }
 
     pub fn client(&self) -> &Client {
@@ -113,6 +133,17 @@ fn installation_key(owner: &str, repo: &str) -> String {
 
 #[async_trait]
 impl ar_forge::ReviewHost for AppReviewHost {
+    async fn capabilities(&self) -> ar_forge::HostCapabilities {
+        ar_forge::HostCapabilities::all()
+    }
+
+    async fn bot_login(&self) -> Result<String, ar_forge::HostError> {
+        self.bot_login
+            .get_or_try_init(|| resolve_bot_login(&self.client, self.identity_timeout))
+            .await
+            .cloned()
+    }
+
     async fn clone_url(&self, owner: &str, repo: &str) -> Result<String, ar_forge::HostError> {
         let token = self.token(owner, repo).await?;
         let clone_url = self
