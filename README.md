@@ -97,7 +97,7 @@ semantic reviews are dispatched by `POST /reviews/ci` after repository-selected
 CI prerequisites pass. Explicit `@auto-review re-review` can force a review.
 
 The chat handler supports `help`, `remember <text>`, `forget <id>`, `re-review`,
-`autofix`, `docstring`, `tests`, and free-form questions. The `bench` command
+`autofix`, `tests`, and free-form questions. The `bench` command
 replays labelled fixtures for regression tracking and model comparison.
 
 What is not in the runtime: bundled linters, repo-controlled test/build

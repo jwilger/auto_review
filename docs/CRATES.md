@@ -16,7 +16,7 @@ instructions live in [Quickstart](./QUICKSTART.md) and [Deployment](./DEPLOYMENT
 | `ar-index` | Tree-sitter symbols, embeddings, SQLite/in-memory vector stores, co-change graph utilities, and in-memory/SQLite/DynamoDB learnings store. |
 | `ar-prompts` | Prompt templates, JSON schemas, DTOs, and validators for review, triage, and verification LLM calls. |
 | `ar-review` | Review activities: provider-supplied clone URL workspace prep, repo config, RAG context, prompt rendering, self-heal, verification, severity filtering, review mapping. |
-| `ar-chat` | `@<bot>` parser and provider-neutral `ReviewHost` handlers for `help`, `remember`, `forget`, `re-review`, `autofix`, `docstring`, `tests`, and free-form Q&A. |
+| `ar-chat` | `@<bot>` parser and provider-neutral `ReviewHost` handlers for `help`, `remember`, `forget`, `re-review`, `autofix`, `tests`, and free-form Q&A. |
 | `ar-cli` | The `auto-review` binary: gateway and AgentCore entrypoints plus auth, webhook, config, review, bench, ops, history, and learnings commands. |
 
 ## Runtime pipeline
