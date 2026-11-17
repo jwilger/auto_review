@@ -322,6 +322,55 @@ impl Client {
         Ok(Some(body))
     }
 
+    /// Fetch an issue by number. Forgejo serves pull requests on the same
+    /// endpoint and marks them with a non-null `pull_request` object, which
+    /// becomes `is_pull_request`. Returns `Ok(None)` on 404; every other
+    /// non-success status is an error with a capped body.
+    pub async fn get_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        n: u64,
+    ) -> Result<Option<ar_forge::IssueSummary>, Error> {
+        #[derive(Deserialize)]
+        struct RawIssue {
+            number: u64,
+            title: String,
+            #[serde(default)]
+            body: Option<String>,
+            state: String,
+            #[serde(default)]
+            html_url: String,
+            #[serde(default)]
+            pull_request: Option<serde_json::Value>,
+        }
+        let url = self.url(&format!("repos/{owner}/{repo}/issues/{n}"))?;
+        let resp = self.http.get(url).send().await?;
+        let status = resp.status();
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+        let body = resp.text().await?;
+        if !status.is_success() {
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body: cap_for_error(&body),
+            });
+        }
+        let raw: RawIssue = serde_json::from_str(&body).map_err(|e| Error::Api {
+            status: status.as_u16(),
+            body: format!("decode error: {e}: {}", cap_for_error(&body)),
+        })?;
+        Ok(Some(ar_forge::IssueSummary {
+            number: raw.number,
+            title: raw.title,
+            body: raw.body.unwrap_or_default(),
+            state: raw.state,
+            is_pull_request: raw.pull_request.is_some_and(|value| !value.is_null()),
+            html_url: raw.html_url,
+        }))
+    }
+
     /// Fetch the unified diff between two commit SHAs (or branches).
     /// Used for incremental review: when a PR gets new commits, the
     /// orchestrator can ask for `previous_head..current_head` instead

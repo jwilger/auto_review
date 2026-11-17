@@ -123,6 +123,17 @@ impl ar_forge::ReviewHost for Client {
             .map_err(host_error)
     }
 
+    async fn get_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+    ) -> Result<Option<ar_forge::IssueSummary>, ar_forge::HostError> {
+        self.get_issue(owner, repo, issue_number)
+            .await
+            .map_err(host_error)
+    }
+
     async fn update_pull_request(
         &self,
         owner: &str,

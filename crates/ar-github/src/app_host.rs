@@ -230,6 +230,19 @@ impl ar_forge::ReviewHost for AppReviewHost {
             .map_err(host_error)
     }
 
+    async fn get_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+    ) -> Result<Option<ar_forge::IssueSummary>, ar_forge::HostError> {
+        let token = self.token(owner, repo).await?;
+        self.client
+            .get_issue(owner, repo, issue_number, &token)
+            .await
+            .map_err(host_error)
+    }
+
     async fn update_pull_request(
         &self,
         owner: &str,
