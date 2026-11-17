@@ -262,6 +262,36 @@ The chart sets `AR_GATEWAY_EXTERNAL_ISOLATION=container` and wires liveness to
 state directory if you want SQLite learnings, review history, vector snippets,
 and webhook dedup state to survive pod replacement.
 
+## Forgejo version and host capabilities
+
+auto_review works with Forgejo v11 and later, but some review features depend on
+the Forgejo release (ADR-0026). The gateway reads `GET /api/v1/version` once per
+Forgejo client and turns features on by major version. No configuration is
+needed; upgrading Forgejo enables the extra features the next time the gateway
+builds its Forgejo client.
+
+| Host | Multi-line comments | Suggestion blocks | Thread replies | Resolve threads |
+|---|---|---|---|---|
+| GitHub App | yes | yes | yes | yes |
+| Forgejo v18 and later | yes | yes | yes | yes |
+| Forgejo v16 and v17 | yes | no | no | no |
+| Forgejo v11 to v15 | no | no | no | no |
+
+Without a feature, output degrades instead of failing:
+
+- Without suggestion blocks, a suggested change is posted as a plain code block.
+- Without thread replies and resolve, an addressed finding is marked by editing
+  the bot's original comment.
+- Without multi-line comments, a comment is anchored to a single line.
+
+If the version request fails or Forgejo reports a version the gateway cannot
+parse, it logs a warning and uses the bottom row. Check that the bot token can
+read `/api/v1/version` if a v16+ server gets single-line comments only.
+
+The bot's own login comes from `GET /api/v1/user` (Forgejo) or the App slug as
+`<slug>[bot]` (GitHub). Setting `AR_BOT_LOGIN` overrides the probed login for
+hosts the gateway builds.
+
 ## Forgejo Actions semantic-review trigger
 
 `deploy/forgejo-action/action.yml` is a thin gateway client. It does not run the

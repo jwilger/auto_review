@@ -93,6 +93,21 @@ Repository-host operations are represented by provider-neutral DTOs and the
 re-exports the common DTOs for compatibility, but new host-neutral review code
 should depend on `ar-forge` types rather than Forgejo-owned DTOs.
 
+Hosts report what they support instead of the pipeline assuming it
+(ADR-0026). `ReviewHost::capabilities()` returns `HostCapabilities` with
+`multi_line_comments`, `suggestion_blocks`, `thread_replies`, and
+`resolve_threads`; the default is all false. GitHub hosts report all four. The
+Forgejo host reads `GET /api/v1/version` once per client, caches it, and
+enables multi-line comments from major version 16 and the other three from
+major version 18; a failed or unparseable probe gives all false with a
+warning. `ReviewHost::bot_login()` returns the host's own login (Forgejo
+`GET /api/v1/user`, GitHub `<app slug>[bot]` from `GET /app`), cached per
+host; hosts the gateway builds are seeded with the startup identity so
+`AR_BOT_LOGIN` wins. Features degrade on hosts without a capability: a plain
+code block instead of a suggestion, and an edit of the original bot comment
+instead of a thread reply and resolve. Pipeline and orchestrator code sees only
+`HostCapabilities` and the login, never host version strings.
+
 GitHub support uses GitHub App authentication, not PATs. The `ar-github` client
 foundation mints RS256 app JWTs from an app id and RSA private key, exchanges an
 app JWT for scoped installation access tokens, caches fresh tokens by
