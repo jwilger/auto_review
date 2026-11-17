@@ -311,8 +311,13 @@ impl Client {
 
     /// Fetch a file's raw contents from the repo at `ref_` (a branch, tag, or
     /// commit SHA). Returns `Ok(None)` when the file does not exist (404) so
-    /// callers can treat "no config" the same as "default config". Used by the
-    /// chat path to read `.auto_review.yaml` without cloning the repo.
+    /// callers can treat "no config" the same as "default config".
+    ///
+    /// This is the transport for the trusted base-branch loader
+    /// (`ar_review::trusted_files`): both the review dispatcher and the chat
+    /// handler read `.auto_review.yaml` through it at the PR's base branch,
+    /// never from the head checkout. The whole body is read into memory; the
+    /// loader's size cap applies after the read.
     pub async fn get_file_content(
         &self,
         owner: &str,
@@ -320,7 +325,16 @@ impl Client {
         file_path: &str,
         ref_: &str,
     ) -> Result<Option<String>, Error> {
-        let url = self.url(&format!("repos/{owner}/{repo}/raw/{file_path}?ref={ref_}"))?;
+        // Build the path segment-by-segment and the query through
+        // `query_pairs_mut` so branch names such as `feature/a&b` and file
+        // names containing `#` or `?` reach Forgejo intact instead of
+        // splitting into stray query params or a fragment.
+        let mut url = self.url(&format!("repos/{owner}/{repo}/raw/"))?;
+        url.path_segments_mut()
+            .map_err(|()| Error::InvalidBaseUrl("base URL cannot carry path segments".into()))?
+            .pop_if_empty()
+            .extend(file_path.split('/').filter(|s| !s.is_empty()));
+        url.query_pairs_mut().append_pair("ref", ref_);
         let resp = self
             .http
             .get(url)
@@ -988,6 +1002,41 @@ mod tests {
             contents.as_deref(),
             Some("override_approvers:\n  - jwilger\n")
         );
+    }
+
+    #[tokio::test]
+    async fn get_file_content_percent_encodes_ref_query_param() {
+        use wiremock::matchers::{query_param, query_param_is_missing};
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/raw/.auto_review.yaml"))
+            .and(query_param("ref", "feature/a&b"))
+            .and(query_param_is_missing("b"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("enabled: true\n"))
+            .mount(&server)
+            .await;
+
+        let contents = client
+            .get_file_content("o", "r", ".auto_review.yaml", "feature/a&b")
+            .await
+            .expect("ok");
+        assert_eq!(contents.as_deref(), Some("enabled: true\n"));
+    }
+
+    #[tokio::test]
+    async fn get_file_content_percent_encodes_path_segments() {
+        let (server, client) = mock_client().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/raw/docs/a%23b.md"))
+            .respond_with(ResponseTemplate::new(200).set_body_string("hash in name\n"))
+            .mount(&server)
+            .await;
+
+        let contents = client
+            .get_file_content("o", "r", "docs/a#b.md", "main")
+            .await
+            .expect("ok");
+        assert_eq!(contents.as_deref(), Some("hash in name\n"));
     }
 
     #[tokio::test]
