@@ -65,8 +65,12 @@ const sliceBranch = (id) => `factory-slice/${a.item.id}/${id}`
 // Builders keep their memory out of item branches; a build that reports a path
 // under it has not finished, whatever its gate says.
 const memoryPaths = (b) => (b?.paths || []).filter((p) => p.startsWith('.claude/agent-memory/'))
+// Each decision with everything the approver's brief repeats for a
+// needs_human one: the chosen option, the alternatives, why, and the reason.
 const decisionLines = (ds) => ds.map((d) =>
-  `- ${d.question} -> ${d.chosen} (needs_human: ${d.needs_human === true}${d.reason ? `; ${d.reason}` : ''})`).join('\n')
+  `- ${d.question} -> ${d.chosen} (needs_human: ${d.needs_human === true}${d.reason ? `; ${d.reason}` : ''})\n` +
+  `  alternatives: ${(d.alternatives || []).length ? d.alternatives.join('; ') : '(none)'}\n` +
+  `  why: ${d.why || '(not given)'}`).join('\n')
 // Every build starts from, or first merges, current origin/main, so a change
 // is never verified against the main of an older day.
 const freshBase = (branch, base) => base

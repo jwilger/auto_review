@@ -43,18 +43,28 @@ It prints one notice naming the cap and the waiting pull requests and stops,
 so a running loop does not pile up work on an old `main`. Explicit
 `/factory <issue>`, `approve` and `rework` are not capped.
 
-To let the factory land a `needs-review` pull request, approve it on GitHub
-(an approving review on its current head, which stays valid while only clean
-merges of `main` follow it and until you request changes), or add the
-`factory:approved` label. Approvers are the `## Roles` accounts in
-`factory/policy.md` as `main` has it. The next reconcile merges current `main` into the branch with a merge
+To let the factory land a `needs-review` pull request, add the
+`factory:approved` label to it after reviewing its current head. Factory
+agents run as your own account, so you author every factory pull request, and
+GitHub does not let an author approve their own pull request: the label is
+your approval. Only a `## Roles` account in `factory/policy.md` (as `main` has
+it) counts, and the label counts only when you applied it after the branch's
+newest own commit. An approving review works the same way, but only from
+another `## Roles` account that did not author the pull request, and only
+while GitHub keeps it (the ruleset dismisses stale reviews on push, which may
+include the factory's merge of `main`), so prefer the label.
+
+The next reconcile merges current `main` into the branch with a merge
 commit, runs `nix develop .#ci --command just ci`, pushes with
-`nix develop .#ci --command git push`, waits for the required checks on that
-head, and squash-merges pinned to it (`--match-head-commit`). A conflict or a
-red check removes the label, comments on the pull request and requeues the
-item for rework, which needs a fresh approval. The factory removes the
-label before any push other than a clean merge of `main` (rework, requeue or
-resume), so it never sits beside unreviewed commits. The factory never adds `factory:approved` itself.
+`nix develop .#ci --command git push`, waits (bounded) for the required
+checks on that head, and squash-merges pinned to it (`--match-head-commit`).
+A conflict, a red gate or a check the change failed removes the label,
+comments on the pull request and requeues the item for rework, which needs a
+fresh approval; a transient check failure is rerun instead. The factory
+removes the label before any push other than a clean merge of `main`
+(rework, requeue or resume), so it never sits beside unreviewed commits. The
+factory never adds `factory:approved` itself; the merge guard hook blocks
+agents from adding it.
 
 ## Branches and bases
 
@@ -68,7 +78,10 @@ resume), so it never sits beside unreviewed commits. The factory never adds `fac
 - Item branches never carry `.claude/agent-memory/**`; a build or merge whose
   diff contains such a path is sent back for rework.
 - Every push runs as `nix develop .#ci --command git push ...`, so the
-  lefthook pre-push gate has its toolchain. Nothing skips that hook.
+  lefthook pre-push gate has its toolchain. Nothing skips that hook. To
+  audit this, `rg -n 'git push' .claude factory | rg -v 'nix develop .#ci --command'`
+  lists only the deny rules and the push guard in `.claude/settings.json`,
+  which forbid force pushes and pushes to `main` rather than make a push.
 
 ## Checks that guard the factory
 
