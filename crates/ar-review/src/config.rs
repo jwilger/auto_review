@@ -18,9 +18,11 @@ pub struct RepoConfig {
     #[serde(default = "default_true")]
     pub enabled: bool,
 
-    /// Repo-author free-form rules, injected into the LLM system prompt.
-    /// Use this for project-specific conventions ("we never use raw
-    /// SQL", "always prefer immutable types", etc.).
+    /// Repo-author free-form project conventions ("we never use raw
+    /// SQL", "always prefer immutable types", etc.). They reach the
+    /// review prompt inside a `guidelines` untrusted-data fence, so they
+    /// shape what the reviewer flags but cannot override the system
+    /// prompt's rules, severity definitions or output contract.
     #[serde(default)]
     pub guidelines: String,
 
