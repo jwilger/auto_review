@@ -305,6 +305,29 @@ Actions with `deploy/github-action`. For Helm, set `config.githubAppId` and the
 `secrets.secretRef`). App permissions, events, and the workflow snippet are in
 [GitHub repositories](./GITHUB.md).
 
+## Repository host versions
+
+auto_review probes each Forgejo server's version once per client
+(`GET /api/v1/version`) and enables review-thread features the server supports.
+GitHub supports all of them. The gateway uses its startup bot identity
+(`AR_BOT_LOGIN` or `GITHUB_BOT_LOGIN`, or their defaults) to recognise its own
+reviews and comments; the AgentCore runtime looks the login up through
+`GET /api/v1/user` on Forgejo or `GET /app` on GitHub.
+
+| Host | multi-line comments | suggestion blocks | thread replies | resolve threads |
+|---|---|---|---|---|
+| Forgejo ≤15 | no | no | no | no |
+| Forgejo 16, 17 | yes | no | no | no |
+| Forgejo ≥18 | yes | yes | yes | yes |
+| GitHub | yes | yes | yes | yes |
+
+On Forgejo v11–v17, suggested changes appear as plain code blocks, and
+addressed findings are marked by editing the original comment instead of
+replying to and resolving the thread. If the version probe fails or returns an
+unrecognised string, auto_review logs a warning and uses none of the optional
+features; restart the service after upgrading Forgejo to pick up new
+capabilities.
+
 ## Prometheus and Grafana
 
 Prometheus rules ship at `deploy/prometheus/auto_review.rules.yaml`. Install them

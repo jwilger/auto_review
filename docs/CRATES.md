@@ -35,6 +35,26 @@ LLM calls flow through `ar-llm::Router`. Review prompts and schemas come from
 `ar-forge`; Forgejo keeps compatibility DTO re-exports for existing callers
 while host-neutral code migrates to the common crate.
 
+## Host capabilities
+
+`ReviewHost::capabilities()` (in `ar-forge`) reports which optional
+review-thread features the connected host supports, and
+`ReviewHost::bot_login()` returns the bot's own login, cached per host
+(ADR-0026). The trait defaults report no capabilities and an error for the
+login. `ar-forgejo` probes `GET /api/v1/version` once per client
+(`ar_forgejo::capabilities::parse_major_version` reads the leading major
+component) and resolves the login through `GET /api/v1/user`; `ar-github`
+reports every capability and resolves `<app slug>[bot]` through `GET /app`.
+Hosts built by the gateway are seeded with the startup bot identity.
+
+| Host | multi-line comments | suggestion blocks | thread replies | resolve threads |
+|---|---|---|---|---|
+| Forgejo ≤15 | no | no | no | no |
+| Forgejo 16, 17 | yes | no | no | no |
+| Forgejo ≥18 | yes | yes | yes | yes |
+| Forgejo, failed or unparseable version probe | no | no | no | no |
+| GitHub | yes | yes | yes | yes |
+
 ## Test conventions
 
 - Pure helpers get adjacent `#[cfg(test)] mod tests`.
