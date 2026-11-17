@@ -27,8 +27,9 @@ use ar_forge::{CreateReviewRequest, PullRequestSummary, ReviewComment, ReviewEve
 use ar_index::{LearningSource, LearningsStore};
 use ar_llm::{CompleteRequest, Message, ModelTier, ResponseFormat, Router as LlmRouter};
 use ar_orchestrator::{JobDispatcher, ReviewJob};
-use ar_review::config::{parse_repo_config, RepoConfig};
+use ar_review::config::RepoConfig;
 use ar_review::override_marker::{apply_body_section, apply_title_marker};
+use ar_review::trusted_files::load_repo_config_from_base;
 use serde::Deserialize;
 use serde_json::json;
 use std::sync::Arc;
@@ -554,35 +555,17 @@ impl ChatHandler<'_> {
         }
     }
 
-    /// Load the repo config for the chat path by reading `.auto_review.yaml`
-    /// from the PR's base branch over the API (no clone). Falls back to
-    /// defaults when absent or unparsable.
+    /// Load the repo config for the chat path from the PR's base branch over
+    /// the API (no clone), through the trusted loader. Falls back to defaults
+    /// when absent, unreadable, oversized or unparsable.
     async fn load_repo_config_for_chat(
         &self,
         ctx: &ChatContext<'_>,
         pr: &PullRequestSummary,
     ) -> RepoConfig {
-        for name in [".auto_review.yaml", ".auto_review.yml"] {
-            match self
-                .host
-                .get_file_content(ctx.owner, ctx.repo, name, &pr.base.ref_name)
-                .await
-            {
-                Ok(Some(contents)) => match parse_repo_config(&contents) {
-                    Ok(cfg) => return cfg,
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to parse repo config for chat; using defaults");
-                        return RepoConfig::default();
-                    }
-                },
-                Ok(None) => continue,
-                Err(error) => {
-                    tracing::warn!(%error, "failed to fetch repo config for chat; using defaults");
-                    return RepoConfig::default();
-                }
-            }
-        }
-        RepoConfig::default()
+        load_repo_config_from_base(self.host, ctx.owner, ctx.repo, &pr.base.ref_name)
+            .await
+            .config
     }
 
     /// Judge whether `correction` contains a substantive explanation of WHY an
