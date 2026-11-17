@@ -281,6 +281,25 @@ commit h1 2026-11-17T10:00:00Z p0
 review jwilger APPROVED h1 2026-11-17T11:00:00Z
 FAKE_GH_SLEEP=5 FACTORY_MERGE_GUARD_CALL_TIMEOUT=1 expect 2 "fails closed when a gh call hangs" "$merge"
 
+# Every merge in a command is checked on its own, with the pin from its own
+# segment, so one approved merge cannot carry another along.
+fixture
+pr h1 factory/policy.md
+commit h1 2026-11-17T10:00:00Z p0
+review jwilger APPROVED h1 2026-11-17T11:00:00Z
+expect 2 "denies an unpinned merge after an approved one" "$merge ; gh pr merge 9 --squash --admin"
+expect 2 "denies a REST merge after an approved one" "$merge && gh api -X PUT repos/o/r/pulls/9/merge"
+expect 2 "denies a GraphQL merge after an approved one" "$merge ; gh api graphql -f query='mutation { mergePullRequest(input: {pullRequestId: \"x\"}) { clientMutationId } }'"
+expect 2 "reads the pin from the merge's own segment" 'gh pr merge 7 --squash ; echo --match-head-commit h1'
+expect 0 "allows two pinned, approved merges" "$merge ; $merge"
+
+fixture
+pr h1 factory/policy.md
+commit h1 2026-11-17T10:00:00Z p0
+expect 2 "checks a merge run under nix develop" 'nix develop .#ci --command gh pr merge 7 --squash'
+expect 2 "checks a merge run under bash -c" "bash -c 'gh pr merge 7 --squash'"
+expect 2 "checks a merge after a shell keyword" 'if true; then gh pr merge 7 --squash; fi'
+
 fixture
 pr h1 factory/policy.md
 expect 0 "keeps the in-session FACTORY_MERGE_APPROVED override" 'FACTORY_MERGE_APPROVED=7 gh pr merge 7 --squash'
@@ -303,6 +322,21 @@ expect 2 "blocks gh issue create -l factory:approved" 'gh issue create --title x
 expect 2 "blocks a label held in a shell variable" 'gh pr edit 5 --add-label "$label"'
 expect 2 "blocks a GraphQL addLabelsToLabelable mutation" "gh api graphql -f query='mutation { addLabelsToLabelable(input: {labelableId: \"x\", labelIds: [\"y\"]}) { clientMutationId } }'"
 expect 2 "blocks a label write from an --input file" 'gh api repos/o/r/issues/5/labels --input labels.json'
+expect 2 "blocks a label add under nix develop" 'nix develop .#ci --command gh pr edit 5 --add-label factory:approved'
+expect 2 "blocks a label add after a shell keyword" 'if true; then gh pr edit 5 --add-label factory:approved; fi'
+expect 2 "blocks a label add inside a brace group" '{ gh pr edit 5 --add-label factory:approved; }'
+expect 2 "blocks a label add under bash -c" "bash -c 'gh pr edit 5 --add-label factory:approved'"
+expect 2 "blocks a label add under sh -c" 'sh -c "gh pr edit 5 --add-label factory:approved"'
+expect 2 "blocks a label add under bash -lc after another command" "bash -lc 'cd x; gh pr edit 5 --add-label factory:approved'"
+expect 2 "blocks a label add under xargs" 'echo 5 | xargs -n1 gh pr edit --add-label factory:approved'
+expect 2 "blocks an issue PATCH from an --input file" 'gh api -X PATCH repos/o/r/issues/5 --input body.json'
+expect 2 "blocks a label write read from a file" "gh api repos/o/r/issues/5/labels -F 'labels[]=@lbl.txt'"
+expect 2 "blocks a backslash-escaped label" 'gh pr edit 5 --add-label factory\:approved'
+expect 2 "blocks a label split across adjacent quotes" "gh pr edit 5 --add-label 'factory'':approved'"
+expect 2 "blocks an api label write split across adjacent quotes" "gh api repos/o/r/issues/5/labels -f labels[]='factory'\":approved\""
+expect 0 "allows an issue PATCH with readable fields" 'gh api -X PATCH repos/o/r/issues/5 -f title=x'
+expect 0 "allows an issue comment body read from a file" 'gh api repos/o/r/issues/5/comments -F body=@c.md'
+expect 0 "allows other labels after a shell keyword" 'if true; then gh pr edit 5 --add-label needs-rework; fi'
 expect 0 "allows removing factory:approved while adding another label" 'gh pr edit 5 --remove-label factory:approved --add-label needs-rework'
 expect 0 "allows gh pr create with other labels and prose naming factory:approved" 'gh pr create --title t --body "waits for factory:approved" --label factory'
 expect 0 "allows removing factory:approved" 'gh pr edit 5 --remove-label factory:approved'
