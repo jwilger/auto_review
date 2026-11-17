@@ -286,4 +286,32 @@ impl ar_forge::ReviewHost for AppReviewHost {
             .await
             .map_err(host_error)
     }
+
+    async fn edit_issue_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<(), ar_forge::HostError> {
+        let token = self.token(owner, repo).await?;
+        self.client
+            .edit_issue_comment(owner, repo, comment_id, body, &token)
+            .await
+            .map_err(host_error)
+    }
+
+    async fn edit_review_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<(), ar_forge::HostError> {
+        let token = self.token(owner, repo).await?;
+        self.client
+            .edit_review_comment(owner, repo, comment_id, body, &token)
+            .await
+            .map_err(host_error)
+    }
 }

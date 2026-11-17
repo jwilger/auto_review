@@ -260,6 +260,32 @@ impl ar_forge::ReviewHost for InstallationReviewHost {
             .await
             .map_err(host_error)
     }
+
+    async fn edit_issue_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<(), ar_forge::HostError> {
+        self.client
+            .edit_issue_comment(owner, repo, comment_id, body, &self.installation_token)
+            .await
+            .map_err(host_error)
+    }
+
+    async fn edit_review_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<(), ar_forge::HostError> {
+        self.client
+            .edit_review_comment(owner, repo, comment_id, body, &self.installation_token)
+            .await
+            .map_err(host_error)
+    }
 }
 
 fn host_error(error: Error) -> ar_forge::HostError {
@@ -708,6 +734,39 @@ impl Client {
             .post_with_installation_token(url, &CreateIssueComment { body }, installation_token)
             .await?;
         Ok(created.id)
+    }
+
+    /// Replace the body of a top-level issue/PR comment. Callers must
+    /// pass only ids of comments the bot authored (THREAT-MODEL.md T9).
+    pub async fn edit_issue_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+        installation_token: &str,
+    ) -> Result<(), Error> {
+        let url = self.url(&format!(
+            "repos/{owner}/{repo}/issues/comments/{comment_id}"
+        ))?;
+        self.patch_with_installation_token(url, &CreateIssueComment { body }, installation_token)
+            .await
+    }
+
+    /// Replace the body of an inline pull request review comment.
+    /// Callers must pass only ids of comments the bot authored
+    /// (THREAT-MODEL.md T9).
+    pub async fn edit_review_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+        installation_token: &str,
+    ) -> Result<(), Error> {
+        let url = self.url(&format!("repos/{owner}/{repo}/pulls/comments/{comment_id}"))?;
+        self.patch_with_installation_token(url, &CreateIssueComment { body }, installation_token)
+            .await
     }
 
     pub async fn update_pull_request(
