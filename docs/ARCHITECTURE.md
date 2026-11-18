@@ -73,6 +73,7 @@ LLM agent:
 
 ```text
 clone workspace
+  -> pull request diff: local merge base to head (host's diff as fallback)
   -> deterministic triage
   -> context curation
   -> review generation
@@ -113,7 +114,12 @@ app JWT for scoped installation access tokens, caches fresh tokens by
 installation and requested repository/permission scope, and uses installation
 tokens for repository-scoped API calls. The implemented repository reads cover
 GitHub pull request summaries, unified pull request diffs, and changed files for
-PR triage and path guarding. The first write path can create GitHub pull request
+PR triage and path guarding. GitHub refuses the whole-diff media type with
+`406 too_large` for a pull request over 300 files or its line and byte limits;
+the client then assembles the diff from the per-file `patch` fields of
+`pulls/{n}/files`, keeping a header-only entry for files GitHub sends no patch
+for (binary or too large), so callers without a workspace, such as the chat
+commands, still get a diff. The first write path can create GitHub pull request
 reviews, including inline review comments translated from the provider-neutral
 review DTO, and post commit statuses for aggregate pass/fail reporting. GitHub
 top-level pull request comment reads use the Issues comments API because GitHub
@@ -152,7 +158,27 @@ Components receive only the workspace capability they need:
   Git configuration, prompt helpers, templates, hooks, object/index overrides,
   and SSH command overrides. Host adapters supply an already-authenticated
   clone URL through `ReviewHost`; Forgejo keeps its existing token helper while
-  GitHub uses installation-token auth material.
+  GitHub uses installation-token auth material. Given the pull request's base
+  SHA, workspace preparation also fetches a bounded amount of base and head
+  history (in commits and in time) to find the merge base, so the
+  pull-request diff and changed-file list can be computed locally instead of
+  through a host's size-limited diff endpoint. That local diff reads
+  `.gitattributes` from the merge base, never the head checkout, through
+  git's `--attr-source` option, which git older than 2.42 rejects (the review
+  then uses the host's diff; the gateway's startup git probe and
+  `auto-review ops doctor` warn about such a git). `run_review_job` takes the
+  base SHA from the `ReviewJob` when the intake supplied it, otherwise from
+  the pull request it fetched, and full reviews use the local diff and
+  changed-file list for both RAG context and review generation, so neither
+  the host's whole-diff endpoint nor its changed-file list is read. Ignored
+  paths and the diff byte cap still apply before the model sees it. Without a
+  merge base, or without a workspace because the clone failed, the review
+  logs why, with the repository and pull request, counts it in
+  `auto_review_local_diff_fallbacks_total{reason}`, and uses the host's diff
+  as before. Incremental reviews also fetch the previously
+  reviewed commit into the workspace and diff only what was pushed since,
+  locally first, then through the host's compare endpoint, then as a full
+  review when the previous commit is gone.
 - Context building and agentic verification use read-only, path-confined access
   under the clone root with symlink escape rejection and output/result caps.
 - Agentic verifier tools are file read and search capabilities, not shell access.

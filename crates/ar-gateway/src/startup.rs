@@ -1257,10 +1257,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         .await
     {
         Ok(out) if out.status.success() => {
-            tracing::info!(
-                version = %String::from_utf8_lossy(&out.stdout).trim(),
-                "git OK"
-            );
+            log_git_version(&String::from_utf8_lossy(&out.stdout));
         }
         Ok(out) => {
             tracing::warn!(
@@ -2004,10 +2001,52 @@ where
     }
 }
 
+/// Log the startup `git --version` probe's output, warning when the git is
+/// too old for the local pull request diff (`--attr-source`, git 2.42).
+/// Reviews still run, on the host's diff, so the gateway does not bail.
+fn log_git_version(version_output: &str) {
+    let version = version_output.trim();
+    match ar_review::local_diff_git_version_warning(version) {
+        None => tracing::info!(version, "git OK"),
+        Some(warning) => tracing::warn!(version, "{warning}"),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::sync::{Arc, Mutex};
+
+    /// Events logged by [`log_git_version`] for `version_output`.
+    fn capture_git_version_log(version_output: &str) -> Vec<CapturedEvent> {
+        let events = Arc::new(Mutex::new(Vec::new()));
+        let subscriber = CapturingSubscriber {
+            events: Arc::clone(&events),
+        };
+        tracing::subscriber::with_default(subscriber, || log_git_version(version_output));
+        let captured = events.lock().unwrap().clone();
+        captured
+    }
+
+    #[test]
+    fn startup_warns_when_git_is_too_old_for_the_local_diff() {
+        let events = capture_git_version_log("git version 2.39.5\n");
+        assert_eq!(events.len(), 1, "expected one event, got {events:?}");
+        let event = &events[0];
+        assert_eq!(event.level, tracing::Level::WARN, "{event:?}");
+        let message = event.field("message").unwrap_or_default();
+        assert!(message.contains("2.42"), "{message}");
+        assert!(message.contains("host's diff"), "{message}");
+        assert_eq!(event.field("version"), Some("git version 2.39.5"));
+    }
+
+    #[test]
+    fn startup_logs_git_ok_when_git_supports_the_local_diff() {
+        let events = capture_git_version_log("git version 2.47.1\n");
+        assert_eq!(events.len(), 1, "expected one event, got {events:?}");
+        assert_eq!(events[0].level, tracing::Level::INFO, "{events:?}");
+        assert_eq!(events[0].field("message"), Some("git OK"));
+    }
 
     /// One captured tracing event: its level and every field rendered
     /// as a string (the message under `message`).

@@ -5,9 +5,10 @@ use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullR
 use ar_index::{LearningsStore, VectorStore};
 use ar_llm::Router as LlmRouter;
 use ar_review::{
-    build_glob_set, build_review_context_with_store, load_repo_config_from_base, pr_is_skippable,
-    prepare_workspace_from_clone_url, review_pull_request, BaseRef, PreparedWorkspace, RepoConfig,
-    ReviewArgs, ReviewError, VerifyMode, WorkspaceError,
+    build_glob_set, build_review_context_with_store, is_valid_git_sha, load_repo_config_from_base,
+    pr_is_skippable, prepare_workspace_from_clone_url, review_pull_request, BaseRef, LocalDiff,
+    MergeBaseUnavailable, PreparedWorkspace, RepoConfig, ReviewArgs, ReviewError, VerifyMode,
+    WorkspaceError,
 };
 use async_trait::async_trait;
 use core::time::Duration;
@@ -15,6 +16,10 @@ use std::env;
 use std::path::Path;
 use std::time::Instant;
 use tokio::sync::Semaphore;
+
+/// Fallback label for a review whose workspace could not be cloned at all
+/// (clone URL lookup or clone failed), so no local diff could be attempted.
+const CLONE_FAILED_FALLBACK_REASON: &str = "clone_failed";
 
 /// Commit-status context every review status is posted under.
 const STATUS_CONTEXT: &str = "auto_review";
@@ -43,6 +48,14 @@ pub enum ReviewObservation {
         duration: Duration,
         error_class: &'static str,
     },
+    /// A full review could not compute its diff locally (merge base to
+    /// head in the workspace) and used the host's diff instead, which
+    /// GitHub refuses for pull requests over 300 files. `reason` is one of
+    /// `"no_merge_base"`, `"history_cap"`, `"timed_out"`,
+    /// `"fetch_failed"` or `"git_error"`. Fires at most once per review,
+    /// alongside the review's own outcome; a fleet-wide rise points at a
+    /// git downgrade or a stalled forge.
+    LocalDiffFallback { reason: &'static str },
     /// The dispatch had to wait on the concurrency-cap semaphore
     /// before the review could begin. Counts how often the cap is
     /// engaging — sustained increases mean
@@ -91,6 +104,12 @@ pub trait ReviewObserver: Send + Sync {
               ReviewJob by struct literal; #[non_exhaustive] would break those dependents"
 )]
 pub struct ReviewJob {
+    /// Base commit of the pull request, when the intake already has it
+    /// (webhook payload, CI review request). `None` makes the dispatcher
+    /// use the base SHA of the pull request it fetches. The review diff is
+    /// taken from the merge base, so a base that moved on since does not
+    /// change it.
+    pub base_sha: Option<String>,
     /// When true, bypasses the per-PR review-history dedup check and
     /// forces a fresh review even if this SHA was already reviewed.
     /// Used by the chat handler's `re-review` command.
@@ -117,6 +136,7 @@ impl From<&PullRequestEvent> for ReviewJob {
     #[inline]
     fn from(evt: &PullRequestEvent) -> Self {
         Self {
+            base_sha: Some(evt.pull_request.base.sha.clone()),
             force: false,
             head_sha: evt.pull_request.head.sha.clone(),
             owner: evt.repository.owner.login.clone(),
@@ -519,21 +539,31 @@ enum WorkspacePrepError {
 enum WorkspacePrep {
     /// The base-branch config sets `enabled: false`; nothing was cloned.
     DisabledByConfig,
-    /// Review should proceed with this config and context.
-    Ready(WorkspacePrepOutput),
+    /// Review should proceed with this config and context. Boxed because
+    /// the output (config, diff, workspace) dwarfs the data-free variant.
+    Ready(Box<WorkspacePrepOutput>),
 }
 
 /// Config, context and workspace prepared for a review.
 struct WorkspacePrepOutput {
+    /// Files the pull request changes, computed locally alongside
+    /// `raw_diff`. `Some` exactly when `raw_diff` is the local diff, so the
+    /// pipeline uses neither the host's diff nor its file list (and none of
+    /// their size caps apply).
+    changed_files: Option<Vec<ar_forge::ChangedFile>>,
     /// Repository config read from the base branch through
     /// [`load_repo_config_from_base`]; defaults when absent or unreadable.
     config: RepoConfig,
-    /// The raw PR diff fetched for triage and
-    /// context building. Surfaced back so the review pipeline can
-    /// reuse it as `diff_override` instead of refetching the same
-    /// diff a second time. Empty string when the `get_pr_diff` call
-    /// failed during workspace/context prep (we degrade-but-continue;
-    /// the pipeline will refetch and likely also fail consistently).
+    /// Why the local diff was unavailable and the host's diff was used,
+    /// for [`ReviewObservation::LocalDiffFallback`]. `None` when the local
+    /// diff was used, or was never attempted (no workspace, no base SHA).
+    diff_fallback: Option<&'static str>,
+    /// The pull request diff used for context building: computed locally in
+    /// the workspace (merge base to head) when possible, otherwise fetched
+    /// from the host. Surfaced back so the review pipeline can reuse it as
+    /// `diff_override` instead of fetching it again. Empty string when
+    /// neither source supplied it (we degrade-but-continue; the pipeline
+    /// will refetch and likely also fail consistently).
     raw_diff: String,
     /// Rendered RAG context; empty when none could be built.
     repo_context: String,
@@ -595,7 +625,9 @@ pub async fn run_review_job(
             None
         }
     };
-    let mut incremental_diff: Option<String> = None;
+    // The previously reviewed commit when this is an incremental review.
+    // Its diff is computed once the workspace exists.
+    let mut incremental_from: Option<&str> = None;
     if let Some(prev) = last_reviewed_sha.as_ref() {
         if prev == &job.head_sha {
             if job.force {
@@ -622,7 +654,7 @@ pub async fn run_review_job(
                 "force=true: full review (skipping compare-diff incremental path)"
             );
         } else {
-            incremental_diff = fetch_incremental_diff(forgejo, &job, prev).await;
+            incremental_from = Some(prev.as_str());
         }
     }
 
@@ -706,6 +738,7 @@ pub async fn run_review_job(
         vector_store,
         &job,
         &base_ref,
+        incremental_from,
     )
     .await
     {
@@ -728,15 +761,23 @@ pub async fn run_review_job(
             });
             return;
         }
-        WorkspacePrep::Ready(output) => output,
+        WorkspacePrep::Ready(output) => *output,
     };
     let WorkspacePrepOutput {
+        changed_files: local_changed_files,
         config,
         raw_diff,
         repo_context,
+        diff_fallback,
         workspace,
     } = prep;
     let ignored_paths = build_glob_set(&config.ignored_paths);
+    let incremental_diff = match incremental_from {
+        Some(previous_sha) => {
+            incremental_review_diff(forgejo, &job, previous_sha, workspace.as_ref()).await
+        }
+        None => None,
+    };
 
     // The agentic verifier needs the cloned workspace to inspect.
     // Operators opt in by setting AR_AGENTIC_VERIFIER=1; without it,
@@ -769,6 +810,9 @@ pub async fn run_review_job(
     // skip also fired Started. Operator dashboards rely on
     // `started_total ≈ succeeded + failed_*` for sanity checks.
     observe(ReviewObservation::Started);
+    if let Some(reason) = diff_fallback {
+        observe(ReviewObservation::LocalDiffFallback { reason });
+    }
 
     let result = review_pull_request(ReviewArgs {
         host: forgejo,
@@ -784,18 +828,23 @@ pub async fn run_review_job(
         min_severity: severity_floor_from_env(),
         guidelines: &config.guidelines,
         repo_context: &repo_context,
-        // Reuse the diff workspace/context prep already fetched. For
+        // The locally computed file list; the pipeline ignores it for
+        // incremental reviews, which list the incremental diff's files.
+        changed_files_override: local_changed_files.as_deref(),
+        // Reuse the diff workspace/context prep already has. For
         // incremental reviews we override with the compare-diff
-        // (smaller, focused on new commits); otherwise fall back
-        // to the full PR diff already in hand. Passing the empty
-        // raw_diff (workspace prep failed to fetch) as Some("") would
-        // suppress the pipeline's own get_pr_diff retry, so map
-        // empty back to None to preserve the retry semantics.
-        diff_override: incremental_diff.as_deref().or(if raw_diff.is_empty() {
-            None
-        } else {
-            Some(raw_diff.as_str())
-        }),
+        // (smaller, focused on new commits); otherwise use the full PR
+        // diff already in hand. A local diff is passed even when empty
+        // (the pull request changes nothing). An empty host diff means
+        // the fetch failed, and passing it as Some("") would suppress
+        // the pipeline's own get_pr_diff retry, so map it back to None.
+        diff_override: incremental_diff.as_deref().or(
+            if local_changed_files.is_none() && raw_diff.is_empty() {
+                None
+            } else {
+                Some(raw_diff.as_str())
+            },
+        ),
         previous_review_sha: incremental_diff.as_ref().and(last_reviewed_sha.as_deref()),
         verify_mode,
         workspace_path,
@@ -898,6 +947,7 @@ async fn prepare_workspace_context(
     vector_store: Option<&dyn VectorStore>,
     job: &ReviewJob,
     base_ref: &BaseRef,
+    incremental_from: Option<&str>,
 ) -> WorkspacePrep {
     let loaded = load_repo_config_from_base(host, &job.owner, &job.repo, &base_ref.name).await;
     tracing::debug!(
@@ -910,26 +960,40 @@ async fn prepare_workspace_context(
     if !config.enabled {
         return WorkspacePrep::DisabledByConfig;
     }
-    let workspace = match clone_head_workspace(host, job).await {
+    let base_sha = job.base_sha.as_deref().unwrap_or(&base_ref.sha);
+    let workspace = match clone_head_workspace(host, job, base_sha, incremental_from).await {
         Ok(workspace) => workspace,
         Err(err) => {
-            tracing::warn!(error = %err, "workspace prep failed; continuing without workspace context");
-            return WorkspacePrep::Ready(WorkspacePrepOutput {
+            tracing::warn!(
+                repo = format!("{}/{}", job.owner, job.repo),
+                pr = job.pr_number,
+                error = %err,
+                "workspace prep failed; using the host's diff and continuing without workspace \
+                 context"
+            );
+            return WorkspacePrep::Ready(Box::new(WorkspacePrepOutput {
+                changed_files: None,
                 config,
+                diff_fallback: Some(CLONE_FAILED_FALLBACK_REASON),
                 raw_diff: String::new(),
                 repo_context: String::new(),
                 workspace: None,
-            });
+            }));
         }
     };
-    // Fetch the diff once for the RAG context build. Failure here just means we
-    // skip optional context; the review still proceeds.
-    let raw_diff = match fetch_context_diff(host, job).await {
-        Ok(diff) => diff,
-        Err(err) => {
-            tracing::warn!(error = %err, "diff fetch for context failed; continuing");
-            String::new()
-        }
+    // The review diff comes from the workspace (merge base to head), so no
+    // host diff limit applies. Without a local diff, fetch the host's diff
+    // once for the RAG context build; failure there just means we skip
+    // optional context and the review still proceeds.
+    let (raw_diff, changed_files, diff_fallback) = match local_pr_diff(&workspace, job).await {
+        Ok((diff, files)) => (diff, Some(files), None),
+        Err(fallback) => match fetch_context_diff(host, job).await {
+            Ok(diff) => (diff, None, fallback),
+            Err(err) => {
+                tracing::warn!(error = %err, "diff fetch for context failed; continuing");
+                (String::new(), None, fallback)
+            }
+        },
     };
 
     // Build the RAG context (best-effort): walks the workspace,
@@ -954,12 +1018,14 @@ async fn prepare_workspace_context(
         })
     };
 
-    WorkspacePrep::Ready(WorkspacePrepOutput {
+    WorkspacePrep::Ready(Box::new(WorkspacePrepOutput {
+        changed_files,
         config,
+        diff_fallback,
         raw_diff,
         repo_context,
         workspace: Some(workspace),
-    })
+    }))
 }
 
 /// Build the RAG context for `job`, retrieving only learnings scoped
@@ -984,16 +1050,108 @@ async fn job_review_context(
     .await
 }
 
-/// Clone the job's repository at its head SHA.
+/// Clone the job's repository at its head SHA, fetching enough of
+/// `base_sha`'s history to find the pull request's merge base, and of
+/// `incremental_from` (the previously reviewed commit) to diff what was
+/// pushed since.
+///
+/// A `base_sha` that is not a commit SHA still clones the head (for
+/// context and the agentic verifier); the workspace then has no merge
+/// base and the review falls back to the host's diff. An
+/// `incremental_from` that is not a commit SHA is not fetched, so the
+/// incremental diff falls back to the host.
 async fn clone_head_workspace(
     host: &dyn ReviewHost,
     job: &ReviewJob,
+    base_sha: &str,
+    incremental_from: Option<&str>,
 ) -> Result<PreparedWorkspace, WorkspacePrepError> {
     let clone_url = host
         .clone_url(&job.owner, &job.repo)
         .await
         .map_err(WorkspacePrepError::Host)?;
-    Ok(prepare_workspace_from_clone_url(&clone_url, &job.head_sha).await?)
+    let base = Some(base_sha).filter(|sha| is_valid_git_sha(sha));
+    if base.is_none() {
+        tracing::warn!(
+            repo = format!("{}/{}", job.owner, job.repo),
+            pr = job.pr_number,
+            base_sha,
+            "pull request base is not a commit SHA; cloning the head without its merge base"
+        );
+    }
+    let previous = incremental_from.filter(|sha| is_valid_git_sha(sha));
+    Ok(prepare_workspace_from_clone_url(&clone_url, &job.head_sha, base, previous).await?)
+}
+
+/// The pull request's diff and changed files computed in `workspace`,
+/// merge base to head, or `Err` when the workspace cannot supply them. The
+/// reason (no merge base and why, or a git failure) is logged once here with
+/// the job's repository and pull request and returned as a
+/// [`local_diff_fallback_reason`] label; a base that was not a commit SHA
+/// was already logged by [`clone_head_workspace`] and returns `Err(None)`.
+async fn local_pr_diff(
+    workspace: &PreparedWorkspace,
+    job: &ReviewJob,
+) -> Result<(String, Vec<ar_forge::ChangedFile>), Option<&'static str>> {
+    let local = async {
+        Ok::<_, WorkspaceError>((
+            local_diff_text(job, workspace.pr_diff().await?),
+            workspace.pr_changed_files().await?,
+        ))
+    };
+    match local.await {
+        Ok(diff_and_files) => Ok(diff_and_files),
+        Err(WorkspaceError::NoMergeBase(MergeBaseUnavailable::NotRequested)) => Err(None),
+        Err(err) => {
+            tracing::warn!(
+                repo = format!("{}/{}", job.owner, job.repo),
+                pr = job.pr_number,
+                error = %err,
+                "local pull request diff unavailable; using the host's diff"
+            );
+            Err(Some(local_diff_fallback_reason(&err)))
+        }
+    }
+}
+
+/// The text of a diff computed in the job's workspace, after one warning
+/// naming the repository and pull request when git's output was cut at its
+/// read limit (the files after the cut are missing from the review text).
+fn local_diff_text(job: &ReviewJob, diff: LocalDiff) -> String {
+    if diff.truncated {
+        tracing::warn!(
+            repo = format!("{}/{}", job.owner, job.repo),
+            pr = job.pr_number,
+            "local diff cut at its read limit; files after the cut are missing from the review \
+             text, including any listed after ignored paths"
+        );
+    }
+    diff.text
+}
+
+/// Bounded metrics label for why a local diff was unavailable.
+#[expect(
+    clippy::pattern_type_mismatch,
+    reason = "binding the merge-base reason out of a borrowed error needs either default binding \
+              modes or `ref` patterns, and clippy::ref_patterns forbids `ref`"
+)]
+fn local_diff_fallback_reason(err: &WorkspaceError) -> &'static str {
+    match err {
+        WorkspaceError::NoMergeBase(reason) | WorkspaceError::NoIncrementalBase(reason) => {
+            match reason {
+                MergeBaseUnavailable::HistoryCap => "history_cap",
+                MergeBaseUnavailable::TimedOut(_) => "timed_out",
+                MergeBaseUnavailable::Fetch(_) | MergeBaseUnavailable::Deepen(_) => "fetch_failed",
+                MergeBaseUnavailable::NotRequested
+                | MergeBaseUnavailable::NoPullRequestMergeBase
+                | MergeBaseUnavailable::UnrelatedHistories => "no_merge_base",
+            }
+        }
+        WorkspaceError::Git(_)
+        | WorkspaceError::Io(_)
+        | WorkspaceError::InvalidBaseUrl(_)
+        | WorkspaceError::CredentialEncoding => "git_error",
+    }
 }
 
 /// Commit-status description summarising a successful review's findings.
@@ -1035,6 +1193,33 @@ fn review_summary(outcome: &ar_review::ReviewOutcome) -> String {
         return format!("auto_review: {} findings", outcome.findings_count);
     }
     format!("auto_review: {}", parts.join(", "))
+}
+
+/// Diff of the commits pushed since `previous_sha` was reviewed: computed
+/// in `workspace` when it holds the previous commit, so no host diff limit
+/// applies, otherwise fetched from the host's compare endpoint. `None`
+/// (falling back to a full review) when neither can supply it, for example
+/// after a force push removed the previous commit.
+async fn incremental_review_diff(
+    host: &dyn ReviewHost,
+    job: &ReviewJob,
+    previous_sha: &str,
+    workspace: Option<&PreparedWorkspace>,
+) -> Option<String> {
+    if let Some(prepared) = workspace {
+        match prepared.incremental_diff().await {
+            Ok(diff) => return Some(local_diff_text(job, diff)),
+            Err(err) => {
+                tracing::info!(
+                    repo = format!("{}/{}", job.owner, job.repo),
+                    pr = job.pr_number,
+                    error = %err,
+                    "local incremental diff unavailable; trying the host's compare diff"
+                );
+            }
+        }
+    }
+    fetch_incremental_diff(host, job, previous_sha).await
 }
 
 /// Diff between the previously reviewed SHA and the job's head, or
@@ -1240,9 +1425,13 @@ mod tests {
 
     use std::fs;
 
+    use std::io;
+
     use std::process::Command;
 
     use std::sync::Mutex;
+
+    use tracing::subscriber::{set_default, DefaultGuard};
 
     use wiremock::matchers::{method, path};
 
@@ -1265,6 +1454,12 @@ ignored_paths: [\"src/**\"]
 pr_metadata_check: false
 override_approvers: [\"pr-author\"]
 ";
+
+    /// GitHub's answer when a diff is over its size limits.
+    const DIFF_TOO_LARGE: &str = "API error 406: {\"message\":\"Sorry, the diff exceeded the \
+maximum number of files (300). Consider using 'List pull requests files' API or locally cloning \
+the repository instead.\",\"errors\":[{\"resource\":\"PullRequest\",\"field\":\"diff\",\
+\"code\":\"too_large\"}],\"status\":\"406\"}";
 
     struct CannedProvider {
         responses: Mutex<Vec<String>>,
@@ -1318,6 +1513,31 @@ override_approvers: [\"pr-author\"]
         }
     }
 
+    /// Log lines written while a [`tracing`] subscriber built by
+    /// [`captured_logs`] is the thread's default.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl io::Write for CapturedLogs {
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|err| io::Error::other(err.to_string()))?
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+    }
+
     /// Embeds every text to the same direction, so any stored learning
     /// with that embedding is a nearest match for the diff.
     struct ConstantEmbedder;
@@ -1343,6 +1563,8 @@ override_approvers: [\"pr-author\"]
         base_files: HashMap<(String, String), String>,
         changed_file_requests: Mutex<Vec<(String, String, u64)>>,
         clone_url_requests: Mutex<Vec<(String, String)>>,
+        /// When set, `get_compare_diff` fails with this error.
+        compare_error: Option<String>,
         compare_requests: Mutex<Vec<(String, String, String, String)>>,
         /// When set, `get_file_content` fails with this non-404 error.
         file_error: Option<String>,
@@ -1350,6 +1572,10 @@ override_approvers: [\"pr-author\"]
         /// Clone URL of a local head repository; `None` serves an
         /// unreachable URL so workspace prep fails.
         head_clone_url: Option<String>,
+        /// Base SHA `get_pull_request` reports; `None` serves `"base"`.
+        pr_base_sha: Option<String>,
+        /// When set, `get_pr_diff` fails with this error.
+        pr_diff_error: Option<String>,
         pr_diff_requests: Mutex<Vec<(String, String, u64)>>,
         /// When set, `get_pull_request` fails with this error.
         pr_fetch_error: Option<String>,
@@ -1365,8 +1591,23 @@ override_approvers: [\"pr-author\"]
             self
         }
 
+        fn with_compare_error(mut self, message: &str) -> Self {
+            self.compare_error = Some(message.to_owned());
+            self
+        }
+
         fn with_head_clone_url(mut self, url: &str) -> Self {
             self.head_clone_url = Some(url.to_owned());
+            self
+        }
+
+        fn with_pr_base_sha(mut self, sha: &str) -> Self {
+            self.pr_base_sha = Some(sha.to_owned());
+            self
+        }
+
+        fn with_pr_diff_error(mut self, message: &str) -> Self {
+            self.pr_diff_error = Some(message.to_owned());
             self
         }
     }
@@ -1376,6 +1617,17 @@ override_approvers: [\"pr-author\"]
     struct HeadRepo {
         _dir: tempfile::TempDir,
         sha: String,
+        url: String,
+    }
+
+    /// A local repository holding a pull request: `fork` files committed on
+    /// `main`, then a `topic` branch adding `head` files and a later `main`
+    /// commit adding `base_only` files that the pull request does not
+    /// contain. Served over `file://` so the workspace can fetch both tips.
+    struct PrRepo {
+        _dir: tempfile::TempDir,
+        base_sha: String,
+        head_sha: String,
         url: String,
     }
 
@@ -1435,6 +1687,9 @@ override_approvers: [\"pr-author\"]
                 base.to_owned(),
                 head.to_owned(),
             ));
+            if let Some(message) = self.compare_error.as_ref() {
+                return Err(ar_forge::HostError::new(message.clone()));
+            }
             Ok("diff --git a/src/lib.rs b/src/lib.rs\n+new\n".to_owned())
         }
 
@@ -1469,6 +1724,9 @@ override_approvers: [\"pr-author\"]
                 repo.to_owned(),
                 pr_number,
             ));
+            if let Some(message) = self.pr_diff_error.as_ref() {
+                return Err(ar_forge::HostError::new(message.clone()));
+            }
             Ok("diff --git a/src/lib.rs b/src/lib.rs\n+context\n".to_owned())
         }
 
@@ -1496,7 +1754,10 @@ override_approvers: [\"pr-author\"]
                 },
                 base: ar_forge::PullRequestRefSummary {
                     ref_name: "trunk".to_owned(),
-                    sha: "base".to_owned(),
+                    sha: self
+                        .pr_base_sha
+                        .clone()
+                        .unwrap_or_else(|| "base".to_owned()),
                 },
             })
         }
@@ -1519,6 +1780,7 @@ override_approvers: [\"pr-author\"]
                 deletions: 0,
                 changes: 1,
                 patch: None,
+                previous_filename: None,
             }])
         }
 
@@ -1635,6 +1897,7 @@ override_approvers: [\"pr-author\"]
             head_sha: "abc".to_owned(),
             pr_title: String::new(),
             pr_body: String::new(),
+            base_sha: None,
             force: false,
         };
 
@@ -1675,6 +1938,7 @@ override_approvers: [\"pr-author\"]
             head_sha: "not-a-sha".to_owned(),
             pr_title: "title".to_owned(),
             pr_body: String::new(),
+            base_sha: None,
             force: false,
         };
 
@@ -1687,6 +1951,7 @@ override_approvers: [\"pr-author\"]
             None,
             &job,
             &test_base_ref(),
+            None,
         )
         .await;
 
@@ -1748,6 +2013,591 @@ override_approvers: [\"pr-author\"]
         }
     }
 
+    fn pr_repo_with(
+        fork: &[(&str, &str)],
+        head: &[(&str, &str)],
+        base_only: &[(&str, &str)],
+    ) -> PrRepo {
+        pr_repo_with_pushes(fork, &[head], base_only).0
+    }
+
+    /// Like [`pr_repo_with`], with the `topic` branch built from one commit
+    /// per entry of `pushes`. Also returns each push's commit SHA; the last
+    /// is the head.
+    fn pr_repo_with_pushes(
+        fork: &[(&str, &str)],
+        pushes: &[&[(&str, &str)]],
+        base_only: &[(&str, &str)],
+    ) -> (PrRepo, Vec<String>) {
+        let dir = tempfile::tempdir().unwrap();
+        let git = |args: &[&str]| {
+            // Same hook-safe environment as `head_repo_with`.
+            let out = Command::new("git")
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .env_remove("GIT_COMMON_DIR")
+                .env_remove("GIT_OBJECT_DIRECTORY")
+                .env_remove("GIT_ALTERNATE_OBJECT_DIRECTORIES")
+                .env_remove("GIT_PREFIX")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .arg("-C")
+                .arg(dir.path())
+                .args(["-c", "user.name=t", "-c", "user.email=t@example.invalid"])
+                .args([
+                    "-c",
+                    "commit.gpgsign=false",
+                    "-c",
+                    "init.defaultBranch=main",
+                ])
+                .args(args)
+                .output()
+                .unwrap();
+            assert!(out.status.success(), "git {args:?}: {out:?}");
+            String::from_utf8(out.stdout).unwrap()
+        };
+        let commit = |files: &[(&str, &str)], message: &str| {
+            for &(path, body) in files {
+                let full = dir.path().join(path);
+                fs::create_dir_all(full.parent().unwrap()).unwrap();
+                fs::write(full, body).unwrap();
+            }
+            git(&["add", "-A"]);
+            git(&["commit", "-q", "--allow-empty", "-m", message]);
+            git(&["rev-parse", "HEAD"]).trim().to_owned()
+        };
+        git(&["init", "-q"]);
+        commit(fork, "fork point");
+        git(&["checkout", "-q", "-b", "topic"]);
+        let push_shas: Vec<String> = pushes
+            .iter()
+            .map(|files| commit(files, "pull request push"))
+            .collect();
+        let head_sha = push_shas.last().cloned().unwrap();
+        git(&["checkout", "-q", "main"]);
+        let base_sha = commit(base_only, "base moved on");
+        let url = format!("file://{}", dir.path().display());
+        (
+            PrRepo {
+                _dir: dir,
+                base_sha,
+                head_sha,
+                url,
+            },
+            push_shas,
+        )
+    }
+
+    /// Run `job` with `previous_sha` recorded as the last reviewed commit.
+    async fn run_incremental(
+        host: &RecordingReviewHost,
+        provider: Arc<CannedProvider>,
+        previous_sha: &str,
+        job: ReviewJob,
+    ) {
+        let history = InMemoryReviewHistory::new();
+        history
+            .record(
+                &PrKey {
+                    owner: job.owner.clone(),
+                    repo: job.repo.clone(),
+                    pr_number: job.pr_number,
+                },
+                previous_sha,
+            )
+            .await
+            .unwrap();
+        let llm = router_with(provider);
+        run_review_job(host, &llm, "", "", &history, None, None, None, job).await;
+    }
+
+    #[tokio::test]
+    async fn incremental_review_diffs_new_commits_locally_when_the_host_compare_is_too_large() {
+        let (pr, pushes) = pr_repo_with_pushes(
+            &[("src/lib.rs", "pub fn old() {}\n")],
+            &[
+                &[("src/first.rs", "pub fn FIRST_PUSH() {}\n")],
+                &[("src/second.rs", "pub fn SECOND_PUSH() {}\n")],
+            ],
+            &[],
+        );
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url(&pr.url)
+            .with_pr_base_sha(&pr.base_sha)
+            .with_compare_error(DIFF_TOO_LARGE);
+        let provider = Arc::new(CannedProvider::new(vec![]));
+
+        run_incremental(
+            &host,
+            Arc::clone(&provider),
+            &pushes[0],
+            job_at(&pr.head_sha),
+        )
+        .await;
+
+        let prompt = provider.last_user_prompt().expect("LLM called");
+        assert!(prompt.contains("+pub fn SECOND_PUSH() {}"), "{prompt}");
+        assert!(
+            !prompt.contains("FIRST_PUSH"),
+            "an incremental review covers only the commits since the previous review: {prompt}"
+        );
+        assert!(
+            host.compare_requests.lock().unwrap().is_empty(),
+            "the host's compare diff must not be fetched when the local diff succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn pull_request_whose_host_diff_is_too_large_is_reviewed_with_findings() {
+        let too_many_lines = DIFF_TOO_LARGE.replace(
+            "maximum number of files (300)",
+            "maximum number of lines (20000)",
+        );
+        for refusal in [DIFF_TOO_LARGE, too_many_lines.as_str()] {
+            let pr = pr_repo_with(
+                &[("src/lib.rs", "pub fn old() {}\n")],
+                &[("src/lib.rs", "pub fn old() {}\npub fn local_added() {}\n")],
+                &[],
+            );
+            let host = RecordingReviewHost::default()
+                .with_head_clone_url(&pr.url)
+                .with_pr_base_sha(&pr.base_sha)
+                .with_pr_diff_error(refusal)
+                .with_compare_error(refusal);
+            let provider = Arc::new(CannedProvider::new(vec![
+                r#"{"verdicts":[{"finding_index":0,"keep":true,"reasoning":"real"}]}"#,
+                r#"{"summary":"one issue","findings":[{"path":"src/lib.rs","line_start":2,"severity":"warning","message":"LOCAL-FINDING"}]}"#,
+            ]));
+            let reasoning: Arc<CannedProvider> = Arc::clone(&provider);
+            let llm = Router::new()
+                .with(ModelTier::Reasoning, reasoning)
+                .with(ModelTier::Cheap, provider);
+
+            run_review_job(
+                &host,
+                &llm,
+                "",
+                "",
+                &InMemoryReviewHistory::new(),
+                None,
+                None,
+                None,
+                job_at(&pr.head_sha),
+            )
+            .await;
+
+            let reviews = host.review_requests.lock().unwrap();
+            assert_eq!(reviews.len(), 1, "{refusal}");
+            let posted = format!("{:?}", reviews[0].3);
+            assert!(posted.contains("LOCAL-FINDING"), "{posted}");
+            let statuses = host.status_requests.lock().unwrap();
+            let last = statuses.last().map(|entry| entry.3.clone()).unwrap();
+            assert!(
+                matches!(
+                    last.state,
+                    CommitStatusState::Success | CommitStatusState::Failure
+                ),
+                "the final status reports the review, not a failed one: {last:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn incremental_review_falls_back_to_a_full_review_when_the_previous_commit_is_gone() {
+        let (pr, _pushes) = pr_repo_with_pushes(
+            &[("src/lib.rs", "pub fn old() {}\n")],
+            &[
+                &[("src/first.rs", "pub fn FIRST_PUSH() {}\n")],
+                &[("src/second.rs", "pub fn SECOND_PUSH() {}\n")],
+            ],
+            &[],
+        );
+        // A force push removed the reviewed commit: neither the workspace
+        // nor the host's compare endpoint can find it.
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url(&pr.url)
+            .with_pr_base_sha(&pr.base_sha)
+            .with_compare_error("API error 404: Not Found");
+        let provider = Arc::new(CannedProvider::new(vec![]));
+
+        run_incremental(
+            &host,
+            Arc::clone(&provider),
+            "0123456789abcdef0123456789abcdef01234567",
+            job_at(&pr.head_sha),
+        )
+        .await;
+
+        assert_eq!(host.compare_requests.lock().unwrap().len(), 1);
+        let prompt = provider.last_user_prompt().expect("LLM called");
+        assert!(
+            prompt.contains("FIRST_PUSH") && prompt.contains("SECOND_PUSH"),
+            "a full review covers every commit of the pull request: {prompt}"
+        );
+        assert!(
+            host.pr_diff_requests.lock().unwrap().is_empty(),
+            "the full review still uses the local merge-base diff"
+        );
+    }
+
+    /// Capture this thread's log output (tokio tests run on one thread)
+    /// until the returned guard drops.
+    fn captured_logs() -> (CapturedLogs, DefaultGuard) {
+        let logs = CapturedLogs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        (logs, set_default(subscriber))
+    }
+
+    /// With parallel reviews, an operator must be able to tell which review
+    /// fell back to the host's diff and why, from one warning.
+    #[tokio::test]
+    async fn local_diff_fallback_warning_names_the_pull_request_and_the_reason() {
+        let pr = pr_repo_with(
+            &[("src/lib.rs", "pub fn old() {}\n")],
+            &[("src/lib.rs", "pub fn old() {}\npub fn local_added() {}\n")],
+            &[],
+        );
+        // A base commit the repository does not have cannot be fetched.
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url(&pr.url)
+            .with_pr_base_sha("0123456789abcdef0123456789abcdef01234567");
+        let provider = Arc::new(CannedProvider::new(vec![]));
+        let (logs, _guard) = captured_logs();
+
+        run_with(&host, Arc::clone(&provider), None, &pr.head_sha).await;
+
+        let output = logs.contents();
+        let warning = output
+            .lines()
+            .find(|line| line.contains("using the host's diff"))
+            .unwrap_or_else(|| panic!("no fallback warning in:\n{output}"));
+        assert!(
+            warning.contains("WARN")
+                && warning.contains("repo=\"alice/widgets\"")
+                && warning.contains("pr=42")
+                && warning.contains("could not fetch the commit"),
+            "{warning}"
+        );
+    }
+
+    /// Operators alert on fleet-wide fallbacks from a counter, not logs.
+    #[tokio::test]
+    async fn local_diff_fallback_is_observed_with_its_reason() {
+        let pr = pr_repo_with(
+            &[("src/lib.rs", "pub fn old() {}\n")],
+            &[("src/lib.rs", "pub fn old() {}\npub fn local_added() {}\n")],
+            &[],
+        );
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url(&pr.url)
+            .with_pr_base_sha("0123456789abcdef0123456789abcdef01234567");
+        let observer = RecordingObserver::default();
+
+        run_with(
+            &host,
+            Arc::new(CannedProvider::new(vec![])),
+            Some(&observer),
+            &pr.head_sha,
+        )
+        .await;
+
+        let fallbacks: Vec<&'static str> = observer
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|observation| {
+                if let ReviewObservation::LocalDiffFallback { reason } = *observation {
+                    Some(reason)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(fallbacks, vec!["fetch_failed"]);
+    }
+
+    /// A clone that fails (forge refusing it, bad credentials) also leaves
+    /// the review on the host's diff, and a fleet-wide clone failure must
+    /// feed the same fallback counter.
+    #[tokio::test]
+    async fn clone_failure_is_observed_as_a_local_diff_fallback() {
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url("file:///nonexistent/auto-review-fixture.git")
+            .with_pr_base_sha("0123456789abcdef0123456789abcdef01234567");
+        let observer = RecordingObserver::default();
+
+        run_with(
+            &host,
+            Arc::new(CannedProvider::new(vec![])),
+            Some(&observer),
+            "abcdef0123456789abcdef0123456789abcdef01",
+        )
+        .await;
+
+        let fallbacks: Vec<&'static str> = observer
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|observation| {
+                if let ReviewObservation::LocalDiffFallback { reason } = *observation {
+                    Some(reason)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(fallbacks, vec!["clone_failed"]);
+    }
+
+    #[tokio::test]
+    async fn clone_failure_warning_names_the_pull_request() {
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url("file:///nonexistent/auto-review-fixture.git")
+            .with_pr_base_sha("0123456789abcdef0123456789abcdef01234567");
+        let (logs, _guard) = captured_logs();
+
+        run_with(
+            &host,
+            Arc::new(CannedProvider::new(vec![])),
+            None,
+            "abcdef0123456789abcdef0123456789abcdef01",
+        )
+        .await;
+
+        let output = logs.contents();
+        let warning = output
+            .lines()
+            .find(|line| line.contains("workspace prep failed"))
+            .unwrap_or_else(|| panic!("no clone failure warning in:\n{output}"));
+        assert!(
+            warning.contains("WARN")
+                && warning.contains("repo=\"alice/widgets\"")
+                && warning.contains("pr=42"),
+            "{warning}"
+        );
+    }
+
+    /// A local diff cut at its read limit drops files from the review text;
+    /// the operator must be able to tell which review lost them.
+    #[test]
+    fn truncated_local_diff_warning_names_the_pull_request() {
+        let (logs, guard) = captured_logs();
+
+        let text = local_diff_text(
+            &job_at("abcdef0123456789abcdef0123456789abcdef01"),
+            LocalDiff {
+                text: "diff --git a/x b/x\n".into(),
+                truncated: true,
+            },
+        );
+        drop(guard);
+
+        assert_eq!(text, "diff --git a/x b/x\n");
+        let output = logs.contents();
+        let warning = output
+            .lines()
+            .find(|line| line.contains("read limit"))
+            .unwrap_or_else(|| panic!("no truncation warning in:\n{output}"));
+        assert!(
+            warning.contains("WARN")
+                && warning.contains("repo=\"alice/widgets\"")
+                && warning.contains("pr=42"),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn whole_local_diff_logs_nothing() {
+        let (logs, guard) = captured_logs();
+
+        local_diff_text(
+            &job_at("abcdef0123456789abcdef0123456789abcdef01"),
+            LocalDiff {
+                text: String::new(),
+                truncated: false,
+            },
+        );
+        drop(guard);
+
+        assert_eq!(logs.contents(), "");
+    }
+
+    #[test]
+    fn local_diff_fallback_reasons_are_bounded_labels() {
+        let no_base = |reason| WorkspaceError::NoMergeBase(reason);
+        let cases = [
+            (no_base(MergeBaseUnavailable::HistoryCap), "history_cap"),
+            (
+                no_base(MergeBaseUnavailable::TimedOut(Duration::from_secs(1))),
+                "timed_out",
+            ),
+            (
+                no_base(MergeBaseUnavailable::Fetch("gone".into())),
+                "fetch_failed",
+            ),
+            (
+                WorkspaceError::NoIncrementalBase(MergeBaseUnavailable::Deepen("x".into())),
+                "fetch_failed",
+            ),
+            (
+                no_base(MergeBaseUnavailable::UnrelatedHistories),
+                "no_merge_base",
+            ),
+            (WorkspaceError::Git("unknown option".into()), "git_error"),
+        ];
+        for (err, label) in cases {
+            assert_eq!(local_diff_fallback_reason(&err), label, "{err}");
+        }
+    }
+
+    #[tokio::test]
+    async fn full_review_reads_the_local_merge_base_diff_instead_of_the_host_diff() {
+        let pr = pr_repo_with(
+            &[("src/lib.rs", "pub fn old() {}\n")],
+            &[("src/lib.rs", "pub fn old() {}\npub fn local_added() {}\n")],
+            &[],
+        );
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url(&pr.url)
+            .with_pr_base_sha(&pr.base_sha);
+        let provider = Arc::new(CannedProvider::new(vec![]));
+
+        run_with(&host, Arc::clone(&provider), None, &pr.head_sha).await;
+
+        assert!(
+            host.pr_diff_requests.lock().unwrap().is_empty(),
+            "the host's whole-PR diff must not be fetched when the local diff succeeds"
+        );
+        let prompt = provider.last_user_prompt().expect("LLM called");
+        assert!(prompt.contains("+pub fn local_added() {}"), "{prompt}");
+        assert_eq!(host.review_requests.lock().unwrap().len(), 1);
+    }
+
+    #[tokio::test]
+    async fn full_review_takes_its_changed_file_list_from_the_local_diff() {
+        let pr = pr_repo_with(
+            &[("src/lib.rs", "pub fn old() {}\n")],
+            &[
+                ("src/lib.rs", "pub fn old() {}\npub fn local_added() {}\n"),
+                ("src/extra.rs", "pub fn extra() {}\n"),
+            ],
+            &[],
+        );
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url(&pr.url)
+            .with_pr_base_sha(&pr.base_sha);
+
+        run_with(
+            &host,
+            Arc::new(CannedProvider::new(vec![])),
+            None,
+            &pr.head_sha,
+        )
+        .await;
+
+        assert_eq!(
+            host.changed_file_requests.lock().unwrap().len(),
+            1,
+            "only the pre-clone triage reads the host's file list; the review uses the local one"
+        );
+    }
+
+    #[tokio::test]
+    async fn full_review_diffs_against_the_jobs_base_sha_when_it_has_one() {
+        let pr = pr_repo_with(
+            &[("src/lib.rs", "pub fn old() {}\n")],
+            &[("src/lib.rs", "pub fn old() {}\npub fn local_added() {}\n")],
+            &[],
+        );
+        // The fetched pull request reports no usable base SHA, so only the
+        // job's own base SHA can produce the local diff.
+        let host = RecordingReviewHost::default().with_head_clone_url(&pr.url);
+        let llm = router_with(Arc::new(CannedProvider::new(vec![])));
+
+        run_review_job(
+            &host,
+            &llm,
+            "",
+            "",
+            &InMemoryReviewHistory::new(),
+            None,
+            None,
+            None,
+            ReviewJob {
+                base_sha: Some(pr.base_sha.clone()),
+                ..job_at(&pr.head_sha)
+            },
+        )
+        .await;
+
+        assert!(
+            host.pr_diff_requests.lock().unwrap().is_empty(),
+            "the job's base SHA should drive the local diff"
+        );
+    }
+
+    #[tokio::test]
+    async fn local_diff_reaches_the_model_filtered_capped_and_without_binary_content() {
+        // Well past DEFAULT_MAX_DIFF_BYTES (100 000), ending in a marker
+        // line the cap must cut off.
+        let mut huge = "pub const FILLER: &str = \"0123456789abcdef\";\n".repeat(6_000);
+        huge.push_str("pub const HUGE_TAIL_MARKER: u8 = 0;\n");
+        let pr = pr_repo_with(
+            &[("src/lib.rs", "pub fn old() {}\n")],
+            &[
+                ("src/lib.rs", "pub fn old() {}\npub fn local_added() {}\n"),
+                ("docs/guide.md", "IGNORED-DOC-LINE\n"),
+                ("assets/logo.png", "\u{0}PNG-BINARY-PAYLOAD\u{0}\u{1}\u{2}"),
+                ("src/zz_huge.rs", &huge),
+            ],
+            &[("src/base_only.rs", "pub fn BASE_ONLY_CHANGE() {}\n")],
+        );
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url(&pr.url)
+            .with_pr_base_sha(&pr.base_sha)
+            .with_base_file(
+                "trunk",
+                ".auto_review.yaml",
+                "ignored_paths: [\"docs/**\"]\n",
+            );
+        let provider = Arc::new(CannedProvider::new(vec![]));
+
+        run_with(&host, Arc::clone(&provider), None, &pr.head_sha).await;
+
+        assert!(host.pr_diff_requests.lock().unwrap().is_empty());
+        let prompt = provider.last_user_prompt().expect("LLM called");
+        assert!(prompt.contains("+pub fn local_added() {}"), "{prompt}");
+        assert!(
+            prompt.contains("assets/logo.png"),
+            "binary files still count as changed"
+        );
+        assert!(
+            !prompt.contains("PNG-BINARY-PAYLOAD"),
+            "binary content must not reach the model"
+        );
+        assert!(
+            !prompt.contains("docs/guide.md") && !prompt.contains("IGNORED-DOC-LINE"),
+            "base-branch ignored_paths apply to the local diff"
+        );
+        assert!(
+            !prompt.contains("BASE_ONLY_CHANGE"),
+            "the diff starts at the merge base, not the base tip"
+        );
+        assert!(
+            !prompt.contains("HUGE_TAIL_MARKER") && prompt.len() < huge.len(),
+            "cap_diff bounds the local diff; prompt was {} bytes",
+            prompt.len()
+        );
+    }
+
     fn job_at(head_sha: &str) -> ReviewJob {
         ReviewJob {
             owner: "alice".to_owned(),
@@ -1756,6 +2606,7 @@ override_approvers: [\"pr-author\"]
             head_sha: head_sha.to_owned(),
             pr_title: "feat: widgets".to_owned(),
             pr_body: "Adds widgets.".to_owned(),
+            base_sha: None,
             force: false,
         }
     }
@@ -1922,6 +2773,7 @@ override_approvers: [\"pr-author\"]
             None,
             &job_at(&head.sha),
             &test_base_ref(),
+            None,
         )
         .await;
 
@@ -2088,6 +2940,12 @@ override_approvers: [\"pr-author\"]
         assert_eq!(job.pr_body, "details");
     }
 
+    #[test]
+    fn review_job_takes_base_sha_from_event() {
+        let job = ReviewJob::from(&sample_event());
+        assert_eq!(job.base_sha.as_deref(), Some("cafef00d"));
+    }
+
     #[tokio::test]
     async fn recording_dispatcher_captures_dispatched_jobs() {
         let dispatcher = RecordingDispatcher::new();
@@ -2114,6 +2972,7 @@ override_approvers: [\"pr-author\"]
             head_sha: "head-sha".into(),
             pr_title: "fix".into(),
             pr_body: String::new(),
+            base_sha: None,
             force: false,
         };
 
@@ -2144,6 +3003,7 @@ override_approvers: [\"pr-author\"]
             head_sha: "head-sha".into(),
             pr_title: "fix".into(),
             pr_body: String::new(),
+            base_sha: None,
             force: false,
         };
 
@@ -2181,6 +3041,7 @@ override_approvers: [\"pr-author\"]
             head_sha: "head-sha".into(),
             pr_title: "fix".into(),
             pr_body: String::new(),
+            base_sha: None,
             force: false,
         };
 
@@ -2205,6 +3066,7 @@ override_approvers: [\"pr-author\"]
             head_sha: "head-sha".into(),
             pr_title: "fix".into(),
             pr_body: String::new(),
+            base_sha: None,
             force: false,
         };
 
@@ -2316,6 +3178,7 @@ override_approvers: [\"pr-author\"]
                 head_sha: head_sha.into(),
                 pr_title: "title".into(),
                 pr_body: "body".into(),
+                base_sha: None,
                 force: false,
             },
         )
@@ -2416,6 +3279,7 @@ override_approvers: [\"pr-author\"]
                 head_sha: head_sha.into(),
                 pr_title: "title".into(),
                 pr_body: "body".into(),
+                base_sha: None,
                 force: false,
             },
         )
@@ -2471,6 +3335,7 @@ override_approvers: [\"pr-author\"]
                 head_sha: "not-a-sha".to_owned(),
                 pr_title: "title".to_owned(),
                 pr_body: String::new(),
+                base_sha: None,
                 force: false,
             })
             .await;

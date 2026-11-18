@@ -78,6 +78,10 @@
             "integration_id": 15368
           },
           {
+            "context": "Promtool",
+            "integration_id": 15368
+          },
+          {
             "context": "Conflict markers",
             "integration_id": 15368
           },

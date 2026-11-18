@@ -307,6 +307,7 @@ pub async fn handle_ci_review(
             head_sha: req.head_sha,
             pr_title: pr.title,
             pr_body: pr.body,
+            base_sha: Some(pr.base.sha),
             force: req.force,
         })
         .await;
@@ -874,6 +875,7 @@ mod tests {
         assert_eq!(jobs[0].pr_title, "fix: ci-triggered review");
         assert_eq!(jobs[0].pr_body, "review this exact actions head");
         assert!(jobs[0].force);
+        assert_eq!(jobs[0].base_sha.as_deref(), Some("cafef00d"));
     }
 
     #[tokio::test]

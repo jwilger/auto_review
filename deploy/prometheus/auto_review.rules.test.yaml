@@ -1,0 +1,45 @@
+# promtool unit tests for auto_review.rules.yaml, run by `just promtool`:
+#
+#   promtool test rules deploy/prometheus/auto_review.rules.test.yaml
+#
+# Series carry the `job` and `instance` labels every scrape adds, so an
+# expression that aggregates one side of a ratio and not the other (and
+# therefore matches nothing) fails here instead of staying silent in
+# production.
+
+rule_files:
+  - auto_review.rules.yaml
+
+evaluation_interval: 1m
+
+tests:
+  # Most reviews fall back to the host's diff: the alert fires, whatever
+  # mix of reasons the fallbacks carry.
+  - interval: 1m
+    input_series:
+      - series: 'auto_review_reviews_started_total{job="auto_review",instance="gw:8090"}'
+        values: '0+10x120'
+      - series: 'auto_review_local_diff_fallbacks_total{job="auto_review",instance="gw:8090",reason="git_error"}'
+        values: '0+5x120'
+      - series: 'auto_review_local_diff_fallbacks_total{job="auto_review",instance="gw:8090",reason="clone_failed"}'
+        values: '0+3x120'
+      - series: 'auto_review_local_diff_fallbacks_total{job="auto_review",instance="gw:8090",reason="history_cap"}'
+        values: '0+0x120'
+    promql_expr_test:
+      - expr: ALERTS{alertname="AutoReviewLocalDiffFallbacks", alertstate="firing"}
+        eval_time: 100m
+        exp_samples:
+          - labels: 'ALERTS{alertname="AutoReviewLocalDiffFallbacks", alertstate="firing", severity="warning", service="auto_review", job="auto_review", instance="gw:8090"}'
+            value: 1
+
+  # Occasional fallbacks (one review in ten) stay below the threshold.
+  - interval: 1m
+    input_series:
+      - series: 'auto_review_reviews_started_total{job="auto_review",instance="gw:8090"}'
+        values: '0+10x120'
+      - series: 'auto_review_local_diff_fallbacks_total{job="auto_review",instance="gw:8090",reason="history_cap"}'
+        values: '0+1x120'
+    promql_expr_test:
+      - expr: ALERTS{alertname="AutoReviewLocalDiffFallbacks"}
+        eval_time: 100m
+        exp_samples: []

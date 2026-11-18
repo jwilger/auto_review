@@ -185,6 +185,7 @@ dependencies = [
  "ar-index",
  "ar-llm",
  "ar-orchestrator",
+ "ar-review",
  "async-trait",
  "axum",
  "hex",
@@ -221,6 +222,7 @@ dependencies = [
  "thiserror",
  "time",
  "tokio",
+ "tracing",
  "url",
  "wiremock",
 ]
@@ -268,6 +270,7 @@ dependencies = [
  "ar-forge",
  "ar-forgejo",
  "ar-gateway",
+ "ar-github",
  "ar-index",
  "ar-llm",
  "ar-review",
@@ -285,6 +288,7 @@ dependencies = [
  "tokio",
  "tower",
  "tracing",
+ "tracing-subscriber",
  "wiremock",
 ]
 

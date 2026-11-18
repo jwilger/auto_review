@@ -277,6 +277,16 @@ skip paths, webhook intake, and chat surface.
   (incremental dedup), `trivial` (lockfiles / vendored /
   generated), `disabled` (`enabled: false`). Operators
   shouldn't alert on these.
+- `auto_review_local_diff_fallbacks_total{reason}` — full reviews
+  that used the host's diff because the local merge-base diff was
+  unavailable. `reason` is `clone_failed` (the workspace could not
+  be cloned at all), `no_merge_base`, `history_cap`, `timed_out`,
+  `fetch_failed`, `git_error`, or `unknown` (a reason this gateway's
+  metrics map does not know). A fleet-wide rise in `git_error`
+  usually means git older than 2.42 (the gateway logs a startup WARN
+  for it); `clone_failed`, `fetch_failed` and `timed_out` point at
+  the forge or the bot's clone credentials. The `AutoReviewLocalDiffFallbacks` alert fires when more
+  than half of started reviews fall back for 30 minutes.
 
 *Background poller:*
 - `auto_review_poll_cycles_total` — should tick at
@@ -525,7 +535,17 @@ own. If reviews start taking minutes, check:
    per token than on GPU.
 2. Workspace clone size. Monorepos clone slowly. Consider
    `--depth=1` (already set) and shallow-fetch (set by the workspace
-   builder).
+   builder). Finding a pull request's merge base deepens that history
+   in bounded steps (`MERGE_BASE_DEEPEN_STEPS`: 64, 256 and 680 commits,
+   at most `MERGE_BASE_HISTORY_CAP`, 1000 commits) and for at most
+   `MERGE_BASE_FETCH_TIMEOUT` (120 seconds) per commit looked up (the pull
+   request base, and the previously reviewed commit for an incremental
+   review) before the review falls back to the host's diff. The fallback
+   logs `local pull request diff unavailable; using the host's diff` at
+   WARN with `repo`, `pr` and the reason, and counts it in
+   `auto_review_local_diff_fallbacks_total{reason}`. A clone that fails
+   outright logs `workspace prep failed` with `repo`, `pr` and the error
+   and counts as `reason="clone_failed"`.
 3. CI latency. If semantic reviews are CI-triggered, slow deterministic jobs
    delay the trigger before the gateway receives work.
 

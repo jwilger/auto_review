@@ -266,6 +266,33 @@ falls back to defaults with a warning and the review proceeds, so no
 fetch failure turns into a skipped review. The same loader is the
 required path for every later repository-controlled instruction file
 (`AGENTS.md`, `CLAUDE.md`, `REVIEW.md`, path instructions).
+A PR could also add a `.gitattributes` marking its own text files
+`-diff` or `binary`, so a diff shows them as `Binary files ... differ`
+and the model never sees the change. The workspace's local
+pull-request diff (`PreparedWorkspace::pr_diff` and
+`pr_changed_files`) reads attributes from the merge base through git's
+global `--attr-source` option, never from the head checkout, pinned by
+`workspace::tests::pr_diff_ignores_gitattributes_added_by_the_pull_request`.
+The option fails closed: git before 2.42 rejects it (where the
+`GIT_ATTR_SOURCE` variable would be silently ignored), so the local diff
+errors and the review uses the host's diff instead; pinned by
+`workspace::tests::attributes_come_from_a_global_option_older_git_rejects`.
+`docs/DEPLOYMENT.md` requires git 2.42 or newer.
+The incremental diff (`PreparedWorkspace::incremental_diff`) also reads them
+from the pull request's merge base, not the previously reviewed commit, which
+is pull-request content; pinned by
+`workspace::tests::incremental_diff_holds_only_the_commits_after_the_previous_review`.
+A PR could also name a file so that its name forges a diff section: git
+allows a newline in a path, so `src/evil.rs\ndiff --git a/vendor/x b/vendor/x`
+would, written raw into a header, attribute the real patch to `vendor/x`,
+which `filter_diff_paths` then drops when `vendor/**` is ignored. A PR can
+force the GitHub per-file patch fallback that writes those headers (over 300
+files makes the whole-diff endpoint refuse, and a head far enough from its
+fork point leaves the workspace without a merge base), and chat commands
+always use it. `ar-github` writes every file name through `diff_path`, which
+C-quotes a name holding a control character, `"` or `\` the way git does, so
+it stays inside one header line; pinned by `ar-github`
+`tests::diff_from_file_patches_quotes_a_file_name_that_could_start_a_new_section`.
 _Residual risk:_ a maintainer who merges a hostile config change to
 the base branch disables or narrows review for every open PR on its
 next review. That is a base-branch write, outside this threat. The
@@ -301,9 +328,11 @@ _Mitigation:_ Token scoped to the minimum the bot needs
 documents this scoping. The token is loaded from the process
 environment only and is never logged. The orchestrator log redactor
 (`workspace::redact_token`) strips the token from any URL we log.
-The clone remote is removed after checkout, so the workspace
-`.git/config` that the LLM `read_file` tool can reach holds no
-credential-bearing URL.
+The clone remote is removed after checkout and after the bounded
+fetches of the base and previously reviewed commits (whether they
+find a merge base, fail, or are killed by their time budget), so no
+file under the workspace `.git` that the LLM `read_file` tool can
+reach holds the credential-bearing URL.
 _Residual risk:_ a stolen token has the bot's full repo write
 access until rotated. Operators should rotate periodically; the
 `init` flow makes minting a new one cheap.
@@ -437,7 +466,16 @@ misconfiguration probes.
 _Attacker:_ A1.
 _Path:_ PR includes a huge diff/workspace or attackers flood webhook intake.
 _Mitigation:_ Diff is capped (`DEFAULT_MAX_DIFF_BYTES`)
-before reaching the LLM. The orchestrator supports a review concurrency cap.
+before reaching the LLM, and the local workspace diff stops reading git's
+output at `LOCAL_DIFF_MAX_BYTES` (32 MiB), so a pull request adding hundreds of
+MB of text is not buffered in full. The workspace clone stays shallow: the history
+fetched to find the pull request's merge base (and, for incremental reviews,
+the previously reviewed commit) deepens in the fixed steps of
+`MERGE_BASE_DEEPEN_STEPS` and stops at `MERGE_BASE_HISTORY_CAP` (1000 commits
+behind each tip) or after `MERGE_BASE_FETCH_TIMEOUT` (120 seconds, killing the
+running git process), falling back to the host's diff,
+so a huge or unrelated history, or a stalled forge, cannot stall a review. GitHub's per-file patch
+fallback reads at most 30 pages of 100 files. The orchestrator supports a review concurrency cap.
 **In addition**, an
 optional global token-bucket rate limiter on the
 `/webhooks/forgejo` route (`AR_WEBHOOK_RATE_PER_SEC` +
@@ -579,11 +617,31 @@ threat-model claims fail CI when a regression slips in:
   (not the "disabled by repo config" status), and that the changed
   file `src/lib.rs` still reaches the review prompt, so the head
   `ignored_paths: ["**"]` does not narrow the review.
+- `crates/ar-review/src/workspace.rs` test
+  `tests::pr_diff_ignores_gitattributes_added_by_the_pull_request` —
+  covers T3a (PR-supplied `.gitattributes`): the head adds
+  `notes.txt -diff` and edits `notes.txt`; the local pull-request diff
+  still shows the text change because attributes come from the merge
+  base. `tests::attributes_come_from_a_global_option_older_git_rejects`
+  pins that the attribute source is the `--attr-source` option, which
+  git older than 2.42 rejects instead of ignoring.
+- `crates/ar-github/src/lib.rs` test
+  `tests::diff_from_file_patches_quotes_a_file_name_that_could_start_a_new_section`
+  — covers T3a (PR file name forges a diff section in the per-file patch
+  fallback): a name holding a newline and a fake `diff --git` header is
+  C-quoted into one header line.
 - `crates/ar-review/tests/red_team_workspace_tools.rs` — covers
   T4 (LLM tool calls escape workspace): symlink escape, chained
   symlinks, empty paths, pathological regex; and T5 (clone credential
   absent from workspace `.git/config`:
-  `read_file_on_prepared_workspace_git_config_exposes_no_clone_url`).
+  `read_file_on_prepared_workspace_git_config_exposes_no_clone_url`;
+  absent from every `.git` file after the merge-base fetch sequence,
+  whether it succeeds or fails:
+  `merge_base_fetches_leave_no_clone_credential_in_the_git_dir`,
+  `failed_merge_base_lookups_leave_no_clone_credential_in_the_git_dir`,
+  and, for a fetch killed by its time budget, the
+  `timed_out_merge_base_fetch_leaves_no_clone_credential_in_the_git_dir`
+  unit test in `crates/ar-review/src/workspace.rs`).
 - `crates/ar-gateway/src/webhook.rs` HMAC unit tests — cover T2
   (webhook forgery: missing-signature, wrong-secret, malformed
   hex).

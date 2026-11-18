@@ -29,12 +29,16 @@ tempfile = "3"
 # webhook -> dispatcher -> review pipeline path in-process; needs the
 # gateway's router, wiremock-based Forgejo, and HMAC signing.
 ar-gateway = { path = "../ar-gateway" }
+# tests/github_large_pr.rs reviews through the real GitHub review host.
+ar-github = { path = "../ar-github" }
 ar-forgejo = { path = "../ar-forgejo" }
 axum.workspace = true
 hex.workspace = true
 hmac.workspace = true
 sha2.workspace = true
 tower = { workspace = true, features = ["util"] }
+# Captures dispatcher log lines in tests that pin operator-facing warnings.
+tracing-subscriber.workspace = true
 wiremock.workspace = true
 
 [lints]

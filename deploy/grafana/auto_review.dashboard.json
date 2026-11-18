@@ -180,12 +180,25 @@
       "type": "timeseries",
       "title": "Skipped reviews by reason",
       "description": "same_sha = incremental dedup; trivial_files = lockfile/vendored/generated only; disabled_by_config = repo opted out via .auto_review.yaml. Operators shouldn't alert on these.",
-      "gridPos": {"h": 8, "w": 24, "x": 0, "y": 16},
+      "gridPos": {"h": 8, "w": 12, "x": 0, "y": 16},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [
         {"expr": "rate(auto_review_reviews_skipped_same_sha_total[5m])", "legendFormat": "same_sha", "refId": "A"},
         {"expr": "rate(auto_review_reviews_skipped_trivial_total[5m])", "legendFormat": "trivial_files", "refId": "B"},
         {"expr": "rate(auto_review_reviews_skipped_disabled_total[5m])", "legendFormat": "disabled_by_config", "refId": "C"}
+      ],
+      "fieldConfig": {
+        "defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 30, "stacking": {"mode": "normal"}}}
+      }
+    },
+    {
+      "type": "timeseries",
+      "title": "Local diff fallbacks by reason",
+      "description": "Full reviews that used the host's diff because the local merge-base diff was unavailable. GitHub refuses the host diff for pull requests over 300 files. git_error across the fleet usually means git older than 2.42; clone_failed, fetch_failed or timed_out point at the forge or the bot's clone credentials. Drives the AutoReviewLocalDiffFallbacks alert.",
+      "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
+      "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
+      "targets": [
+        {"expr": "sum by (reason) (rate(auto_review_local_diff_fallbacks_total[5m]))", "legendFormat": "{{reason}}", "refId": "A"}
       ],
       "fieldConfig": {
         "defaults": {"unit": "reqps", "custom": {"drawStyle": "line", "fillOpacity": 30, "stacking": {"mode": "normal"}}}

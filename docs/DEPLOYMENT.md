@@ -51,8 +51,8 @@ manager for production.
 
 No official `auto_review` gateway image is published. If your production boundary
 is Docker, Podman, Kubernetes, or a platform that consumes OCI images, build and
-publish an operator-owned image that runs `auto-review gateway`, includes `git`,
-listens on `0.0.0.0:8080`, and stores persistent state under
+publish an operator-owned image that runs `auto-review gateway`, includes `git`
+2.42 or newer (see [Git version](#git-version)), listens on `0.0.0.0:8080`, and stores persistent state under
 `/var/lib/auto_review`. Set `AR_GATEWAY_EXTERNAL_ISOLATION=container` in the
 image or deployment environment so the gateway reports the container boundary
 instead of trying to enter the packaged embedded OCI launcher.
@@ -179,9 +179,25 @@ To install the CLI without enabling the service:
 }
 ```
 
+## Git version
+
+Every deployment runs the `git` found on the gateway's `PATH` to clone the
+pull request and compute its diff. Use git 2.42 or newer. The local
+pull-request diff reads `.gitattributes` from the base branch with git's
+`--attr-source` option, which git 2.42 added, so a pull request cannot hide its
+own changes by marking them binary (THREAT-MODEL T3a). An older git rejects the
+option, and every review then falls back to the host's diff API, which on
+GitHub cannot return a diff for pull requests over 300 files without the
+per-file patch fallback. Debian 12 (git 2.39) and Ubuntu 22.04 (git 2.34) ship
+older versions; install a newer git (for example from backports or Nix) on
+those hosts. Check with `git --version` as the service user. The gateway logs a
+startup WARN, and `auto-review ops doctor` reports its `git` check as WARN,
+when the git it finds is older than 2.42.
+
 ## systemd direct-host service
 
 Use this path when you intentionally run the direct binary on a Linux host.
+The host's `git` must be 2.42 or newer (see [Git version](#git-version)).
 
 ```bash
 # Build and install the binary.

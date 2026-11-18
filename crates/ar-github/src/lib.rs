@@ -876,10 +876,19 @@ impl Client {
 
     /// Fetch a pull request's unified diff.
     ///
+    /// GitHub refuses the diff media type with `406 too_large` for a pull
+    /// request over its diff limits (300 files, or too many lines or
+    /// bytes). The diff is then assembled from the per-file `patch` fields
+    /// of `pulls/{n}/files` (see [`Self::list_changed_files`]); a file
+    /// GitHub sends no patch for (binary, or too large) appears as a
+    /// header-only entry, so it still counts as changed but carries no
+    /// content.
+    ///
     /// # Errors
     ///
     /// Returns an error when the request fails or GitHub answers with a
-    /// non-success status.
+    /// non-success status (other than the `too_large` refusal, when the
+    /// file list is fetched instead and its errors are returned).
     #[inline]
     pub async fn get_pull_request_diff(
         &self,
@@ -889,12 +898,30 @@ impl Client {
         installation_token: &str,
     ) -> Result<String, Error> {
         let url = self.url(&format!("repos/{owner}/{repo}/pulls/{pull_number}"))?;
-        self.get_text_with_installation_token(
-            url,
-            installation_token,
-            HeaderValue::from_static("application/vnd.github.v3.diff"),
-        )
-        .await
+        match self
+            .get_text_with_installation_token(
+                url,
+                installation_token,
+                HeaderValue::from_static("application/vnd.github.v3.diff"),
+            )
+            .await
+        {
+            Err(error) if is_diff_too_large(&error) => {
+                let files = self
+                    .list_changed_files(owner, repo, pull_number, installation_token)
+                    .await?;
+                tracing::info!(
+                    repo = format!("{owner}/{repo}"),
+                    pr = pull_number,
+                    files = files.len(),
+                    without_patch = files.iter().filter(|file| file.patch.is_none()).count(),
+                    "GitHub refused the pull request diff as too large; using per-file patches \
+                     (files without a patch appear as headers only)"
+                );
+                Ok(diff_from_file_patches(&files))
+            }
+            other => other,
+        }
     }
 
     /// Fetch the repository's HTTPS `clone_url`. The REST API host is not
@@ -1707,6 +1734,99 @@ fn cap_for_error(body: &str) -> String {
     format!("{kept}...[truncated]")
 }
 
+/// Assemble a unified diff from `pulls/{n}/files` entries: a
+/// `diff --git` header per file, rename lines for a renamed file, and the
+/// file's hunks when GitHub sent a patch. A file without a patch keeps only
+/// its header, so it still counts as changed without any content.
+///
+/// File names are pull-request text, so each one goes through
+/// [`diff_path`]: a name with a newline cannot start a section of its own.
+fn diff_from_file_patches(files: &[ar_forge::ChangedFile]) -> String {
+    let mut diff = String::new();
+    for file in files {
+        let old_path = file.previous_filename.as_deref().unwrap_or(&file.filename);
+        diff.push_str("diff --git ");
+        diff.push_str(&diff_path("a/", old_path));
+        diff.push(' ');
+        diff.push_str(&diff_path("b/", &file.filename));
+        diff.push('\n');
+        if file.previous_filename.is_some() {
+            diff.push_str("rename from ");
+            diff.push_str(&diff_path("", old_path));
+            diff.push_str("\nrename to ");
+            diff.push_str(&diff_path("", &file.filename));
+            diff.push('\n');
+        }
+        let Some(patch) = file.patch.as_deref().filter(|patch| !patch.is_empty()) else {
+            continue;
+        };
+        if file.status == "added" {
+            diff.push_str("--- /dev/null\n");
+        } else {
+            diff.push_str("--- ");
+            diff.push_str(&diff_path("a/", old_path));
+            diff.push('\n');
+        }
+        if file.status == "removed" {
+            diff.push_str("+++ /dev/null\n");
+        } else {
+            diff.push_str("+++ ");
+            diff.push_str(&diff_path("b/", &file.filename));
+            diff.push('\n');
+        }
+        diff.push_str(patch);
+        if !patch.ends_with('\n') {
+            diff.push('\n');
+        }
+    }
+    diff
+}
+
+/// `prefix` and `path` as git writes them in a diff header: as is, or, when
+/// the path holds a control character, `"` or `\\`, C-quoted inside double
+/// quotes (`"b/new\\nline"`). Non-ASCII text is kept as UTF-8, as with git's
+/// `core.quotePath=false`.
+fn diff_path(prefix: &str, path: &str) -> String {
+    if !path
+        .chars()
+        .any(|ch| ch.is_control() || ch == '"' || ch == '\\')
+    {
+        return format!("{prefix}{path}");
+    }
+    let mut quoted =
+        String::with_capacity(path.len().saturating_add(prefix.len()).saturating_add(2));
+    quoted.push('"');
+    quoted.push_str(prefix);
+    for ch in path.chars() {
+        match ch {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\u{7}' => quoted.push_str("\\a"),
+            '\u{8}' => quoted.push_str("\\b"),
+            '\t' => quoted.push_str("\\t"),
+            '\n' => quoted.push_str("\\n"),
+            '\u{b}' => quoted.push_str("\\v"),
+            '\u{c}' => quoted.push_str("\\f"),
+            '\r' => quoted.push_str("\\r"),
+            control if control.is_control() => {
+                /// Bit offsets of a byte's three octal digits, high first.
+                const OCTAL_SHIFTS: [u32; 3] = [6, 3, 0];
+                let mut utf8: [u8; 4] = [0; 4];
+                for byte in control.encode_utf8(&mut utf8).bytes() {
+                    // `\ooo`: the byte as three octal digits.
+                    quoted.push('\\');
+                    for shift in OCTAL_SHIFTS {
+                        quoted.push(char::from(b'0' | ((byte >> shift) & 7)));
+                    }
+                }
+            }
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
+}
+
 /// The review body with every inline comment appended, for the retry after
 /// GitHub refuses to anchor an inline comment.
 fn fold_inline_comments_into_body(request: &ar_forge::CreateReviewRequest) -> String {
@@ -1732,6 +1852,13 @@ fn fold_inline_comments_into_body(request: &ar_forge::CreateReviewRequest) -> St
 /// keeping its `Display` text as the message.
 fn host_error(error: &Error) -> ar_forge::HostError {
     ar_forge::HostError::new(error.to_string())
+}
+
+/// Whether `error` is GitHub refusing a diff media type because the diff is
+/// over its size limits: `406` with the `too_large` error code, for too
+/// many files, lines or bytes alike.
+fn is_diff_too_large(error: &Error) -> bool {
+    matches!(error, Error::Api { status: 406, body } if body.contains("too_large"))
 }
 
 /// Map GitHub review states onto the provider-neutral vocabulary
@@ -1765,4 +1892,89 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     let mut truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
     truncated.push('\u{2026}');
     truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(filename: &str, status: &str, patch: Option<&str>) -> ar_forge::ChangedFile {
+        ar_forge::ChangedFile {
+            filename: filename.to_owned(),
+            patch: patch.map(str::to_owned),
+            status: status.to_owned(),
+            additions: 0,
+            changes: 0,
+            deletions: 0,
+            previous_filename: None,
+        }
+    }
+
+    #[test]
+    fn diff_from_file_patches_marks_added_and_removed_sides_as_dev_null() {
+        let diff = diff_from_file_patches(&[
+            file("new.rs", "added", Some("@@ -0,0 +1 @@\n+fresh")),
+            file("gone.rs", "removed", Some("@@ -1 +0,0 @@\n-stale")),
+        ]);
+
+        assert_eq!(
+            diff,
+            "diff --git a/new.rs b/new.rs\n--- /dev/null\n+++ b/new.rs\n@@ -0,0 +1 @@\n+fresh\n\
+             diff --git a/gone.rs b/gone.rs\n--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-stale\n"
+        );
+    }
+
+    /// THREAT-MODEL T3/T8: a file name is pull-request text. Git allows a
+    /// newline in a path, so an unescaped name could start a fake
+    /// `diff --git` section and move the real patch under another path
+    /// (for example an ignored `vendor/**` one). Names with control
+    /// characters are C-quoted the way git quotes them.
+    #[test]
+    fn diff_from_file_patches_quotes_a_file_name_that_could_start_a_new_section() {
+        let evil = "src/evil.rs\ndiff --git a/vendor/x b/vendor/x";
+
+        let diff = diff_from_file_patches(&[file(evil, "modified", Some("@@ -1 +1 @@\n-a\n+b"))]);
+
+        assert_eq!(
+            diff,
+            "diff --git \"a/src/evil.rs\\ndiff --git a/vendor/x b/vendor/x\" \
+             \"b/src/evil.rs\\ndiff --git a/vendor/x b/vendor/x\"\n\
+             --- \"a/src/evil.rs\\ndiff --git a/vendor/x b/vendor/x\"\n\
+             +++ \"b/src/evil.rs\\ndiff --git a/vendor/x b/vendor/x\"\n\
+             @@ -1 +1 @@\n-a\n+b\n"
+        );
+    }
+
+    #[test]
+    fn diff_path_c_quotes_like_git_and_leaves_plain_and_unicode_paths_alone() {
+        assert_eq!(diff_path("b/", "src/lib.rs"), "b/src/lib.rs");
+        assert_eq!(diff_path("b/", "docs/\u{fc}ber.md"), "b/docs/\u{fc}ber.md");
+        assert_eq!(
+            diff_path("a/", "tab\there \"q\" back\\slash"),
+            "\"a/tab\\there \\\"q\\\" back\\\\slash\""
+        );
+        assert_eq!(diff_path("", "esc\u{1b}[31m"), "\"esc\\033[31m\"");
+    }
+
+    #[test]
+    fn diff_from_file_patches_keeps_only_the_header_for_a_file_without_a_patch() {
+        let diff = diff_from_file_patches(&[file("logo.png", "added", None)]);
+
+        assert_eq!(diff, "diff --git a/logo.png b/logo.png\n");
+    }
+
+    #[test]
+    fn is_diff_too_large_needs_both_the_406_status_and_the_too_large_code() {
+        let api = |status: u16, body: &str| Error::Api {
+            status,
+            body: body.to_owned(),
+        };
+
+        assert!(is_diff_too_large(&api(
+            406,
+            r#"{"errors":[{"code":"too_large"}]}"#
+        )));
+        assert!(!is_diff_too_large(&api(406, "Not Acceptable")));
+        assert!(!is_diff_too_large(&api(422, "too_large")));
+    }
 }

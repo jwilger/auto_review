@@ -5,6 +5,9 @@ use core::error::Error;
 use wiremock::matchers::{body_json, header, method, path, query_param, query_param_is_missing};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+/// GitHub's 406 body when a pull request's diff is over its size limits.
+const DIFF_TOO_LARGE: &str = r#"{"message":"Sorry, the diff exceeded the maximum number of files (300). Consider using 'List pull requests files' API or locally cloning the repository instead.","errors":[{"resource":"PullRequest","field":"diff","code":"too_large"}],"documentation_url":"https://docs.github.com/rest/pulls/pulls#list-pull-requests-files","status":"406"}"#;
+
 type TestResult = Result<(), Box<dyn Error>>;
 
 #[expect(
@@ -329,6 +332,109 @@ async fn review_host_get_pr_diff_dispatches_through_installation_token() -> Test
     let diff = host.get_pr_diff("owner", "repo", 7).await?;
 
     assert!(diff.contains("+new"));
+    Ok(())
+}
+
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "the test reports setup and request failures through `?` and its checks through the assertions, which stay as written"
+)]
+#[tokio::test]
+async fn review_host_get_pr_diff_assembles_per_file_patches_when_the_diff_is_too_large(
+) -> TestResult {
+    let github = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/pulls/7"))
+        .and(header("accept", "application/vnd.github.v3.diff"))
+        .respond_with(ResponseTemplate::new(406).set_body_string(DIFF_TOO_LARGE))
+        .expect(1)
+        .mount(&github)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/pulls/7/files"))
+        .and(query_param("page", "1"))
+        .and(header("authorization", "Bearer installation-token"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+            {
+                "filename": "src/lib.rs",
+                "status": "modified",
+                "patch": "@@ -1 +1 @@\n-old\n+new"
+            },
+            {
+                "filename": "assets/logo.png",
+                "status": "added"
+            },
+            {
+                "filename": "new_name.txt",
+                "previous_filename": "old_name.txt",
+                "status": "renamed",
+                "patch": "@@ -1 +1 @@\n-before\n+after"
+            }
+        ])))
+        .expect(1)
+        .mount(&github)
+        .await;
+
+    let client = Client::new(&github.uri(), "app-jwt")?;
+    let installation_host = ar_github::InstallationReviewHost::new(client, "installation-token");
+    let host: &dyn ar_forge::ReviewHost = &installation_host;
+
+    let diff = host.get_pr_diff("owner", "repo", 7).await?;
+
+    assert!(
+        diff.contains("diff --git a/src/lib.rs b/src/lib.rs\n")
+            && diff.contains("@@ -1 +1 @@\n-old\n+new\n"),
+        "a file with a patch keeps its hunk: {diff}"
+    );
+    assert!(
+        diff.contains("diff --git a/assets/logo.png b/assets/logo.png\n"),
+        "a file without a patch is still listed as changed: {diff}"
+    );
+    assert!(
+        diff.contains("diff --git a/old_name.txt b/new_name.txt\n") && diff.contains("+after\n"),
+        "a renamed file keeps both paths: {diff}"
+    );
+    Ok(())
+}
+
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "the test reports setup and request failures through `?` and its checks through the assertions, which stay as written"
+)]
+#[tokio::test]
+async fn get_pull_request_diff_keeps_other_errors_without_listing_files() -> TestResult {
+    let github = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/pulls/7"))
+        .respond_with(ResponseTemplate::new(406).set_body_string(r#"{"message":"Not Acceptable"}"#))
+        .expect(1)
+        .mount(&github)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/pulls/7/files"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([])))
+        .expect(0)
+        .mount(&github)
+        .await;
+
+    let client = Client::new(&github.uri(), "app-jwt")?;
+
+    let result = client
+        .get_pull_request_diff("owner", "repo", 7, "installation-token")
+        .await;
+
+    assert!(
+        matches!(&result, Err(error) if error.to_string().starts_with("API error 406")),
+        "{result:?}"
+    );
     Ok(())
 }
 

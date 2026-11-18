@@ -105,6 +105,7 @@ mod tests {
             deletions: 0,
             changes: 0,
             patch: None,
+            previous_filename: None,
         }
     }
 

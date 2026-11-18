@@ -19,6 +19,9 @@
 //!   URL: the clone remote (whose URL carries the bot credential in
 //!   production) is removed after checkout, so the tool returns no
 //!   `[remote "origin"]` section, `url =` entry or `://user@` URL (T5).
+//! - The merge-base fetch sequence (base, previously reviewed commit,
+//!   deepening rounds) run with a credentialed clone URL, succeeding or
+//!   failing: no file under `.git` keeps the credential (T5).
 
 use ar_review::workspace::prepare_workspace_from_clone_url;
 use ar_review::workspace_tools::{read_file, search, WorkspaceToolError};
@@ -221,10 +224,14 @@ async fn read_file_on_prepared_workspace_git_config_exposes_no_clone_url() {
         ],
     );
 
-    let workspace =
-        prepare_workspace_from_clone_url(&format!("file://{}", bare.display()), &head_sha)
-            .await
-            .unwrap();
+    let workspace = prepare_workspace_from_clone_url(
+        &format!("file://{}", bare.display()),
+        &head_sha,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     let seen = match read_file(workspace.path(), ".git/config", None, None, 64 * 1024) {
         Ok(content) => content.content,
@@ -243,4 +250,193 @@ async fn read_file_on_prepared_workspace_git_config_exposes_no_clone_url() {
         !userinfo_url.is_match(&seen),
         "a URL with userinfo leaked into .git/config:\n{seen}"
     );
+}
+
+/// Stands in for the bot credential production puts in the clone URL's
+/// userinfo. `file://` URLs accept userinfo with a `localhost` host, so the
+/// fixture clone stores it in `.git/config` exactly as a credentialed HTTPS
+/// clone does.
+const CREDENTIAL_SENTINEL: &str = "SENTINEL-bot-credential";
+
+/// Commit everything in `dir` with a fixed fixture identity; return the SHA.
+fn fixture_commit(dir: &Path, message: &str) -> String {
+    fixture_git(dir, &["add", "-A"]);
+    fixture_git(
+        dir,
+        &[
+            "-c",
+            "user.name=fixture",
+            "-c",
+            "user.email=fixture@example.invalid",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "--quiet",
+            "-m",
+            message,
+        ],
+    );
+    fixture_git(dir, &["rev-parse", "HEAD"]).trim().to_string()
+}
+
+/// A pull-request-shaped repository whose base branch moved on after the
+/// feature branched, so finding the merge base needs the deepening fetches,
+/// plus an unrelated root commit.
+struct PullRequestRepo {
+    /// Clone URL carrying [`CREDENTIAL_SENTINEL`] in its userinfo.
+    credentialed_url: String,
+    head_sha: String,
+    base_sha: String,
+    /// A feature commit an earlier review covered.
+    reviewed_sha: String,
+    /// A root commit sharing no history with the head.
+    unrelated_sha: String,
+}
+
+fn pull_request_repo(root: &Path) -> PullRequestRepo {
+    let src = root.join("src");
+    let bare = root.join("bare.git");
+    fs::create_dir_all(&src).unwrap();
+    fixture_git(&src, &["init", "--quiet", "--initial-branch=main"]);
+    write(&src, "lib.rs", "pub fn f() {}\n");
+    fixture_commit(&src, "fork point");
+    fixture_git(&src, &["checkout", "--quiet", "-b", "feature"]);
+    write(&src, "lib.rs", "pub fn f() {}\npub fn g() {}\n");
+    let reviewed_sha = fixture_commit(&src, "f1");
+    write(
+        &src,
+        "lib.rs",
+        "pub fn f() {}\npub fn g() {}\npub fn h() {}\n",
+    );
+    let head_sha = fixture_commit(&src, "f2");
+    fixture_git(&src, &["checkout", "--quiet", "main"]);
+    for n in 1..=3 {
+        write(&src, "base.txt", &format!("base v{n}\n"));
+        fixture_commit(&src, &format!("b{n}"));
+    }
+    let base_sha = fixture_git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+    fixture_git(&src, &["checkout", "--quiet", "--orphan", "unrelated"]);
+    write(&src, "lib.rs", "unrelated\n");
+    let unrelated_sha = fixture_commit(&src, "unrelated root");
+    fixture_git(&src, &["checkout", "--quiet", "main"]);
+    fixture_git(
+        root,
+        &[
+            "clone",
+            "--quiet",
+            "--bare",
+            src.to_str().unwrap(),
+            bare.to_str().unwrap(),
+        ],
+    );
+    PullRequestRepo {
+        credentialed_url: format!(
+            "file://oauth2:{CREDENTIAL_SENTINEL}@localhost{}",
+            bare.display()
+        ),
+        head_sha,
+        base_sha,
+        reviewed_sha,
+        unrelated_sha,
+    }
+}
+
+/// Every regular file under `dir`, recursively.
+fn files_under(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut files = Vec::new();
+    let mut pending = vec![dir.to_path_buf()];
+    while let Some(next) = pending.pop() {
+        for entry in fs::read_dir(&next).unwrap() {
+            let entry = entry.unwrap();
+            let file_type = entry.file_type().unwrap();
+            if file_type.is_dir() {
+                pending.push(entry.path());
+            } else if file_type.is_file() {
+                files.push(entry.path());
+            }
+        }
+    }
+    files
+}
+
+/// No file under the workspace's `.git` (config, `FETCH_HEAD`, reflogs,
+/// `shallow`, packed refs, leftover locks) holds the clone credential, and
+/// `read_file(".git/config")` shows no remote URL.
+fn assert_no_clone_credential_in_git_dir(workspace: &Path) {
+    for file in files_under(&workspace.join(".git")) {
+        let bytes = fs::read(&file).unwrap();
+        let leaked = bytes
+            .windows(CREDENTIAL_SENTINEL.len())
+            .any(|window| window == CREDENTIAL_SENTINEL.as_bytes());
+        assert!(
+            !leaked,
+            "clone credential left in {}:\n{}",
+            file.display(),
+            String::from_utf8_lossy(&bytes)
+        );
+    }
+    let seen = match read_file(workspace, ".git/config", None, None, 64 * 1024) {
+        Ok(content) => content.content,
+        Err(err) => err.to_string(),
+    };
+    assert!(
+        !seen.contains("[remote \"origin\"]") && !seen.contains("url ="),
+        "a remote leaked into .git/config:\n{seen}"
+    );
+}
+
+/// The full production fetch sequence (head, base, previously reviewed
+/// commit, deepening rounds) runs with the credentialed URL before the
+/// remote is removed; none of those fetches may leave the credential where
+/// the LLM `read_file` tool can reach it (T5).
+#[tokio::test]
+async fn merge_base_fetches_leave_no_clone_credential_in_the_git_dir() {
+    let fixture = tempfile::tempdir().unwrap();
+    let repo = pull_request_repo(fixture.path());
+
+    let workspace = prepare_workspace_from_clone_url(
+        &repo.credentialed_url,
+        &repo.head_sha,
+        Some(&repo.base_sha),
+        Some(&repo.reviewed_sha),
+    )
+    .await
+    .unwrap();
+
+    // Both merge bases were found, so every fetch in the sequence ran.
+    workspace.pr_diff().await.unwrap();
+    workspace.incremental_diff().await.unwrap();
+    assert_no_clone_credential_in_git_dir(workspace.path());
+}
+
+/// A failed merge-base lookup (unrelated histories after the deepening
+/// rounds, or a previously reviewed commit the host no longer has) still
+/// removes the credentialed remote.
+#[tokio::test]
+async fn failed_merge_base_lookups_leave_no_clone_credential_in_the_git_dir() {
+    let fixture = tempfile::tempdir().unwrap();
+    let repo = pull_request_repo(fixture.path());
+
+    let unrelated = prepare_workspace_from_clone_url(
+        &repo.credentialed_url,
+        &repo.head_sha,
+        Some(&repo.unrelated_sha),
+        None,
+    )
+    .await
+    .unwrap();
+    assert!(unrelated.pr_diff().await.is_err());
+    assert_no_clone_credential_in_git_dir(unrelated.path());
+
+    let force_pushed_away = "0123456789abcdef0123456789abcdef01234567";
+    let missing_previous = prepare_workspace_from_clone_url(
+        &repo.credentialed_url,
+        &repo.head_sha,
+        Some(&repo.base_sha),
+        Some(force_pushed_away),
+    )
+    .await
+    .unwrap();
+    assert!(missing_previous.incremental_diff().await.is_err());
+    assert_no_clone_credential_in_git_dir(missing_previous.path());
 }

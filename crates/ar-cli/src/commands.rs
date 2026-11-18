@@ -97,6 +97,22 @@ struct DoctorReport {
 }
 
 impl DoctorReport {
+    /// Record the `git --version` probe: missing git fails; git too old for
+    /// the local pull request diff (`--attr-source`, git 2.42) warns,
+    /// because reviews still run on the host's diff.
+    fn add_git_probe(&mut self, probe: Result<String>) {
+        match probe {
+            Ok(version) => match ar_review::local_diff_git_version_warning(&version) {
+                None => self.pass("git", format!("{version} (in PATH)")),
+                Some(warning) => self.warn("git", warning),
+            },
+            Err(err) => self.fail(
+                "git",
+                format!("{err} — install git or add it to PATH (every review needs `git clone`)"),
+            ),
+        }
+    }
+
     /// Record the runtime-isolation posture for an `AR_GATEWAY_BARE`
     /// value with no external isolation marker.
     #[cfg(test)]
@@ -402,6 +418,7 @@ impl GitHubAgentcoreSemanticReviewHandler {
                 head_sha: payload.head_sha,
                 pr_title: pr.title,
                 pr_body: pr.body,
+                base_sha: None,
                 force: payload.force.unwrap_or(false),
             })
             .await;
@@ -876,6 +893,7 @@ async fn handle_semantic_review(
             head_sha: payload.head_sha,
             pr_title: pr.title,
             pr_body: pr.body,
+            base_sha: None,
             force: payload.force.unwrap_or(false),
         })
         .await;
@@ -971,6 +989,7 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
         pr_body: pr.body,
         // review-once is a one-shot debug command: force a full
         // review regardless of any review history that might dedup.
+        base_sha: None,
         force: true,
     };
 
@@ -1639,13 +1658,7 @@ pub async fn doctor(args: DoctorArgs) -> Result<()> {
     // Command::new("git"). Catch the missing-git case here so
     // operators see a clear "install git" message instead of
     // chasing an opaque os error.
-    match probe_git(timeout).await {
-        Ok(version) => report.pass("git", format!("{version} (in PATH)")),
-        Err(err) => report.fail(
-            "git",
-            format!("{err} — install git or add it to PATH (every review needs `git clone`)"),
-        ),
-    }
+    report.add_git_probe(probe_git(timeout).await);
 
     report.print();
     if report.has_failures() {
@@ -2665,6 +2678,26 @@ mod tests {
             posture.detail.contains("not verified"),
             "default posture should say embedded OCI prerequisites are not verified: {posture:?}"
         );
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a missing check must fail this test at once with the expect message"
+    )]
+    #[test]
+    fn doctor_report_warns_when_git_is_too_old_for_the_local_diff() {
+        let mut report = DoctorReport::new();
+
+        report.add_git_probe(Ok("git version 2.39.5".to_owned()));
+
+        let git = report
+            .results
+            .iter()
+            .find(|result| result.name == "git")
+            .expect("doctor should include the git check");
+        assert_eq!(git.status, CheckStatus::Warn, "{git:?}");
+        assert!(git.detail.contains("2.42"), "{git:?}");
+        assert!(git.detail.contains("host's diff"), "{git:?}");
     }
 
     #[expect(

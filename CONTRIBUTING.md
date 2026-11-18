@@ -39,6 +39,7 @@ just deny
 just build
 just shellcheck
 just actionlint
+just promtool          # promtool check and unit tests of the Prometheus rules
 just conflict-markers  # no unresolved merge conflict markers in tracked files
 
 # Checks that `just ci` leaves out:
@@ -49,7 +50,10 @@ just flake-check  # nix flake check; builds the packages
 `just ci` runs rustfmt, clippy (with `-D warnings`), the full
 nextest application test suite, cargo-deny (licenses + bans + sources),
 a workspace build, shellcheck on `scripts/release`, actionlint on
-`.github/workflows/` and a conflict-marker scan of tracked files.
+`.github/workflows/`, `promtool check rules` plus the promtool unit tests in
+`deploy/prometheus/auto_review.rules.test.yaml` (which catch an alert
+expression that can never match), and a conflict-marker scan of tracked
+files.
 `just test` runs the suite with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
 `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`
 and `GIT_PREFIX` unset: git exports them to its hooks, and a test fixture that
@@ -70,6 +74,7 @@ it can merge:
 | Dependency advisories | `just advisories` (`cargo deny check advisories`); `.github/workflows/advisories.yml` also runs it daily against `main` so new advisories surface without a code change |
 | Shellcheck | `just shellcheck` on `scripts/release` |
 | Actionlint | `just actionlint` on `.github/workflows/` |
+| Promtool | `just promtool`: `promtool check rules` and the promtool unit tests (`deploy/prometheus/auto_review.rules.test.yaml`) of the Prometheus rules in `deploy/prometheus/auto_review.rules.yaml` |
 | Conflict markers | `just conflict-markers`, which fails on unresolved merge conflict markers in tracked files |
 | Nix flake check | `just flake-check`, which runs the Nix packaging, NixOS module and OCI image contract checks |
 | Analyze (rust), Analyze (actions) | CodeQL analysis of the Rust code and the workflows (`.github/workflows/codeql.yml`) |
