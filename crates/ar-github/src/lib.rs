@@ -879,7 +879,7 @@ impl Client {
     /// GitHub refuses the diff media type with `406 too_large` for a pull
     /// request over its diff limits (300 files, or too many lines or
     /// bytes). The diff is then assembled from the per-file `patch` fields
-    /// of `pulls/{n}/files` (see [`Self::list_pull_request_files`]); a file
+    /// of `pulls/{n}/files` (see [`Self::list_changed_files`]); a file
     /// GitHub sends no patch for (binary, or too large) appears as a
     /// header-only entry, so it still counts as changed but carries no
     /// content.
@@ -908,7 +908,7 @@ impl Client {
         {
             Err(error) if is_diff_too_large(&error) => {
                 let files = self
-                    .list_pull_request_files(owner, repo, pull_number, installation_token)
+                    .list_changed_files(owner, repo, pull_number, installation_token)
                     .await?;
                 Ok(diff_from_file_patches(&files))
             }
@@ -1162,38 +1162,6 @@ impl Client {
                 "repos/{owner}/{repo}/issues/{pull_number}/comments?page={page}&per_page=100"
             ))?;
             let chunk: Vec<ar_forge::PrReviewComment> = self
-                .get_with_installation_token(url, installation_token)
-                .await?;
-            let chunk_len = chunk.len();
-            all.extend(chunk);
-            if chunk_len < 100 {
-                break;
-            }
-        }
-        Ok(all)
-    }
-
-    /// List every file a pull request changes with its `patch` and, for a
-    /// rename, its previous path, up to 30 pages of 100 (GitHub's own cap is
-    /// 3000 files).
-    ///
-    /// # Errors
-    ///
-    /// Returns an error when a request fails, GitHub answers with a
-    /// non-success status, or a page does not decode.
-    async fn list_pull_request_files(
-        &self,
-        owner: &str,
-        repo: &str,
-        pull_number: u64,
-        installation_token: &str,
-    ) -> Result<Vec<PullRequestFile>, Error> {
-        let mut all = Vec::new();
-        for page in 1..=MAX_LIST_PAGES {
-            let url = self.url(&format!(
-                "repos/{owner}/{repo}/pulls/{pull_number}/files?page={page}&per_page=100"
-            ))?;
-            let chunk: Vec<PullRequestFile> = self
                 .get_with_installation_token(url, installation_token)
                 .await?;
             let chunk_len = chunk.len();
@@ -1689,23 +1657,6 @@ struct InstallationTokenCacheKey {
     request: InstallationTokenRequest,
 }
 
-/// The fields of one `pulls/{n}/files` entry that the diff fallback needs.
-#[derive(Debug, Deserialize)]
-struct PullRequestFile {
-    /// Path on the head side.
-    filename: String,
-    /// Unified-diff hunks; absent for binary files and files too large for
-    /// GitHub to diff.
-    #[serde(default)]
-    patch: Option<String>,
-    /// Path on the base side, for a renamed file.
-    #[serde(default)]
-    previous_filename: Option<String>,
-    /// `added`, `removed`, `modified`, `renamed`, `copied`, `changed` or
-    /// `unchanged`.
-    status: String,
-}
-
 /// Build an authenticated HTTPS clone URL for `owner/repo` under `base_url`.
 ///
 /// # Errors
@@ -1779,7 +1730,7 @@ fn cap_for_error(body: &str) -> String {
 /// `diff --git` header per file, rename lines for a renamed file, and the
 /// file's hunks when GitHub sent a patch. A file without a patch keeps only
 /// its header, so it still counts as changed without any content.
-fn diff_from_file_patches(files: &[PullRequestFile]) -> String {
+fn diff_from_file_patches(files: &[ar_forge::ChangedFile]) -> String {
     let mut diff = String::new();
     for file in files {
         let old_path = file.previous_filename.as_deref().unwrap_or(&file.filename);
@@ -1891,12 +1842,15 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
 mod tests {
     use super::*;
 
-    fn file(filename: &str, status: &str, patch: Option<&str>) -> PullRequestFile {
-        PullRequestFile {
+    fn file(filename: &str, status: &str, patch: Option<&str>) -> ar_forge::ChangedFile {
+        ar_forge::ChangedFile {
             filename: filename.to_owned(),
             patch: patch.map(str::to_owned),
-            previous_filename: None,
             status: status.to_owned(),
+            additions: 0,
+            changes: 0,
+            deletions: 0,
+            previous_filename: None,
         }
     }
 
