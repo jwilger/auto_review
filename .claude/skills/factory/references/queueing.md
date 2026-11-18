@@ -39,7 +39,7 @@ Post the resume state whenever an item moves to `queued` or `awaiting-human`, so
 {"from": "build", "criteria": [], "decisions": [], "branch": "factory/<item>", "findings": [], "notes": "", "reason": "", "attempt": 1, "fingerprint": [], "change": null}
 ```
 
-`attempt` counts the requeues after `exhausted` or `gate-failed`, and `fingerprint` is the sorted list of `file: summary` strings of those findings and failing gate summaries, so the next requeue can tell whether anything changed. `change` is the link of an open factory change request whose review findings this rework answers (`references/follow-through.md`), and null otherwise.
+`attempt` counts the runs that ended `exhausted` or `gate-failed`, and `fingerprint` is the sorted list of `file: summary` strings of those findings and failing gate summaries, so the next requeue can tell whether anything changed. `change` is the link of an open factory change request whose review findings this rework answers (`references/follow-through.md`), and null otherwise.
 
 Set `branch` only when `factory/<item>` was pushed. Push the item branch with `nix develop .#ci --command git push origin factory/<item>`, never with force, before posting (when the push adds anything other than a clean merge of main and its change request carries `factory:approved`, remove the label first, as `references/follow-through.md` step 4 says), so a run on another checkout can resume from it. The resumed build merges current `origin/main` into the branch before anything else.
 
@@ -47,19 +47,28 @@ Set `branch` only when `factory/<item>` was pushed. Push the item branch with `n
 
 ## Requeue
 
-1. For `exhausted` and `gate-failed`, run the no-progress check (below) first. When it says a person is needed, stop here and park the item instead.
+1. For `gate-failed`, run the no-progress check (below) first. When it says a person is needed, stop here and park the item instead. An `exhausted` item is never requeued; it follows "Not converging" (below).
 2. Push the item branch when one exists, with `nix develop .#ci --command git push origin factory/<item>`. When its change request carries `factory:approved` and the push adds anything other than a clean merge of main, remove the label before pushing (`references/follow-through.md` step 4).
 3. Post its resume state, with the reason, any findings, the next `attempt` and the new `fingerprint`, when its criteria are known. Without criteria, return the item to station `spec` instead of station `build` in the next step, so the next pick restarts spec.
 4. Transition it to `queued` at station `build`, unassigned, with a one-line comment giving the reason.
 5. Record the run in `factory/metrics.jsonl` with `outcome: "requeued"`.
 
-The next pick resumes it from build with a fresh set of review rounds. Nothing caps how often an item that still makes progress requeues; the halt switch and people watching `factory/metrics.jsonl` bound the spend.
+The next pick resumes it from build. Nothing caps how often an item that still makes progress requeues; the halt switch and people watching `factory/metrics.jsonl` bound the spend.
 
 ## No-progress check
 
-Requeues have no cap while an item makes progress, but an item that cannot move without a person would otherwise hold the slot forever. Before requeueing after `exhausted` or `gate-failed`, compare the new findings and gate summaries with the previous resume state. The item needs a person when either holds:
+Requeues have no cap while an item makes progress, but an item that cannot move without a person would otherwise hold the slot forever. Before requeueing after `gate-failed`, compare the new findings and gate summaries with the previous resume state. The item needs a person when either holds:
 
 - **No progress.** The new fingerprint matches the previous one, so the same findings or the same failing gate recur, and the build's commits since that resume state changed nothing that addressed them.
 - **Flagged for a person.** A finding has `needs_human: true`, or the result does, with a reason: a product or design decision with no recommendable option, a conflicting requirement, missing access, or an instruction that cannot be met without changing policy.
 
 When either holds, do not requeue. Escalate with `10kr-work-tracking`, moving the item to `awaiting-human` with an options brief in the contracts format: what keeps failing, the recurring or flagged findings, what the attempts tried, and two or three options with a recommendation. Post its resume state, so `approve` or `rework` continues it from build. Record the run in metrics with `outcome: "escalated"`. Otherwise requeue as above; a changed fingerprint counts as progress.
+
+## Not converging
+
+A run has no fixed number of review rounds: it keeps building and reviewing for as long as each round leaves strictly less to fix than the round before it, counting blocking findings first, then should-fix findings, then all findings (`factory-deliver.js`). It ends `exhausted` only when a round does not converge, or when a finding has `needs_human: true`, so a person is needed either way:
+
+1. Push the item branch when one exists, as in "Requeue" step 2.
+2. Escalate with `10kr-work-tracking`, moving the item to `awaiting-human` at station `build` with an options brief in the contracts format: the result's `reason` (the counts of the last two rounds), the findings that did not go away or that need a person, what the rounds changed, and two or three options with a recommendation (for example: `rework` with notes that settle a disputed finding, narrowing the criteria, or dropping the item).
+3. Post its resume state with the result's findings, the next `attempt` and the new `fingerprint`, so `rework` or `approve` continues it from build. That rework's first round must leave less to fix than these findings, or it stops again.
+4. Record the run in `factory/metrics.jsonl` with `outcome: "escalated"`.

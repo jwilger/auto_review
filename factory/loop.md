@@ -31,9 +31,19 @@ Every class but `factory` runs in `dark` mode, so an approved change
 auto-merges once CI is green. The approve station sends a change to a person
 (`needs-review`) only for a `factory`-class change, a spec decision marked
 `needs_human` (a product, policy or security choice with no clearly
-recommendable option), or review that used every allowed round. Other spec
+recommendable option). Other spec
 decisions, such as an ADR number or reply wording, are listed in the pull
 request body's `## Decisions` section and do not hold the merge.
+
+## How long review goes on
+
+Review has no round limit. A run builds, reviews and reworks for as long as
+each review round leaves strictly less to fix than the one before it
+(blocking findings first, then should-fix, then all findings). When a round
+does not converge, or a reviewer flags a finding only a person can resolve,
+the item goes to `awaiting-human` with a brief; `/factory rework <issue>`
+continues it, and its first round must improve on the findings it resumes
+with.
 
 ## Pull requests waiting for a person
 

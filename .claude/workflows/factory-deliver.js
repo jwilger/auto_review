@@ -4,12 +4,11 @@ export const meta = {
   phases: [{ title: 'Spec' }, { title: 'Slice' }, { title: 'Build' }, { title: 'Review' }, { title: 'Approve' }],
 }
 
-// args: {item: {id, title, body, images?: [path]}, check, visual?, evidenceDir?, rounds, slice: bool, lenses: [..],
+// args: {item: {id, title, body, images?: [path]}, check, visual?, evidenceDir?, slice: bool, lenses: [..],
 //        models: {spec, slice, build, review, approve}, efforts: {...},
 //        holdout: {enabled: bool, threshold?: number, score?: number},
 //        resume?: {from: 'build'|'approve', criteria: [..], decisions?: [..], round?, branch?, findings?: [..], notes?, paths?, evidence?, history?: [..]}}
-// rounds is the total number of review rounds, so rounds: 2 means one build, one review,
-// at most one rework, and a second review.
+// There is no round limit: rounds continue while review converges (see toFix below).
 // Every return value has {stage, outcome, history}; generate.md lists the outcomes.
 const VERDICT = (pair, extra, required = []) => ({
   type: 'object',
@@ -127,7 +126,7 @@ const approveStation = async (branch, criteria, round, paths = [], evidence = nu
   // ESCALATE means "human review required": the change request still opens, a person approves it, and reconcile then merges it.
   const approve = await station(`Decide whether the factory may auto-merge ${branch} for ${a.item.id} under factory/policy.md ` +
     `(APPROVE), or whether a human must review and approve it before the factory merges it (ESCALATE).\n` +
-    `Criteria:\n${bullets(criteria)}\nReview rounds used: ${round} of ${a.rounds}.${score}\n` +
+    `Criteria:\n${bullets(criteria)}\nReview rounds used: ${round}.${score}\n` +
     `Spec decisions:\n${decisions.length ? decisionLines(decisions) : '- (none)'}\n` +
     `Changed paths:\n${paths.length ? bullets(paths) : '- (not reported)'}` +
     (evidence ? `\nVisual evidence: ${evidence}` : ''), {
@@ -160,7 +159,7 @@ const approveStation = async (branch, criteria, round, paths = [], evidence = nu
 
 // Resume at approve after the orchestrator has run the holdout judge.
 if (a.resume?.from === 'approve') {
-  return await approveStation(a.resume.branch, a.resume.criteria, a.resume.round ?? a.rounds, a.resume.paths, a.resume.evidence)
+  return await approveStation(a.resume.branch, a.resume.criteria, a.resume.round ?? 1, a.resume.paths, a.resume.evidence)
 }
 
 let criteria = a.resume?.criteria
@@ -207,9 +206,32 @@ const buildSlice = (s, findings, round, branch, notes, base, render = true) => s
     ...opt('build'), agentType: 'factory-implementer', isolation: 'worktree', label: `build:${s.id} r${round}`, schema: BUILD,
   })
 
+// Review has no round limit: the run keeps building and reviewing for as long
+// as each round converges, that is, leaves strictly less to fix than the round
+// before it. Rounds compare by blocking findings first, then should-fix, then
+// all findings; a severity that is neither should-fix nor nit counts as
+// blocking, so an unknown label cannot hide a finding. Comparing those counts
+// in order is well-founded, so the loop always ends. A resumed run measures its
+// first round against the findings it resumed with.
+const toFix = (fs) => {
+  const s = [0, 0, fs.length]
+  for (const f of fs) {
+    const severity = String(f.severity ?? '').trim().toLowerCase()
+    if (severity === 'should-fix') s[1]++
+    else if (severity !== 'nit') s[0]++
+  }
+  return s
+}
+const fewer = (now, before) => {
+  for (let i = 0; i < now.length; i++) if (now[i] !== before[i]) return now[i] < before[i]
+  return false
+}
+const describe = (s) => `${s[0]} blocking, ${s[1]} should-fix, ${s[2]} total`
+
 let findings = a.resume?.findings || []
+let previous = findings.length ? toFix(findings) : null
 let build = null
-for (let round = 1; round <= a.rounds; round++) {
+for (let round = 1; ; round++) {
   phase('Build')
   if (round === 1 && slices.length > 1) {
     // Independent slices build in parallel worktrees. Dependent ones build in order, each
@@ -260,8 +282,22 @@ for (let round = 1; round <= a.rounds; round++) {
     }
     return await approveStation(build.branch, criteria, round, build.paths, build.evidence)
   }
-  log(`round ${round}: ${findings.length} findings`)
+  // Another round cannot settle a finding only a person can resolve, and a
+  // round that does not converge means more rounds will not either, so both
+  // stop the run and the orchestrator asks a person.
+  const forPerson = findings.filter((f) => f.needs_human)
+  if (forPerson.length) {
+    log(`round ${round}: ${forPerson.length} findings need a person`)
+    return done('review', 'exhausted', { criteria, round, branch: build.branch, findings, needs_human: true,
+      needs_human_reason: forPerson.map((f) => f.reason || f.summary).join('; '),
+      reason: `round ${round} has findings only a person can resolve` })
+  }
+  const now = toFix(findings)
+  if (previous && !fewer(now, previous)) {
+    log(`round ${round}: not converging (${describe(now)}; before: ${describe(previous)})`)
+    return done('review', 'exhausted', { criteria, round, branch: build.branch, findings,
+      reason: `review stopped converging in round ${round}: ${describe(now)}, against ${describe(previous)} before it` })
+  }
+  log(`round ${round}: converging (${describe(now)}${previous ? `; before: ${describe(previous)}` : ''})`)
+  previous = now
 }
-// The orchestrator requeues an exhausted item at build with these findings, and
-// the next pick starts a fresh set of rounds.
-return done('review', 'exhausted', { criteria, branch: build.branch, findings })
