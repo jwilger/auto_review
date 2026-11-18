@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [1.5.1] - 2026-11-18
+
+### Fixed
+
+- *(factory)* auto-merge by default, cap PRs awaiting a human, and merge on approval (#226)
+
+### Other
+
+- *(lint)* opt ar-forge into the workspace lint policy (#229)
+- *(lint)* opt ar-prompts into the workspace lint policy (#231)
+- *(lint)* opt ar-agentcore into the workspace lint policy (#233)
+- replace Renovate and .npmrc leftovers with Dependabot (#228)
+- *(lint)* opt ar-llm into the workspace lint policy (#236)
+- *(lint)* opt ar-forgejo into the workspace lint policy (#239)
+
 ## [1.5.0] - 2026-11-17
 
 ### Added
