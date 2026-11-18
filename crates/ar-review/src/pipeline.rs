@@ -4,7 +4,7 @@ use crate::host::ReviewHost;
 use crate::ignored::{diff_changed_paths, filter_changed_files, filter_diff_paths};
 use crate::mapping::output_to_review_request;
 use crate::review_core::{run_review_core, ReviewCoreArgs};
-use ar_forge::{PrReviewComment, ReviewEvent};
+use ar_forge::{ChangedFile, PrReviewComment, ReviewEvent};
 use ar_llm::{CompleteRequest, Message, ModelTier, ResponseFormat, Router as LlmRouter};
 use ar_prompts::{
     fence_nonce, fence_untrusted, process_nonce_salt, ReviewSeverity, PR_BODY_MAX_BYTES,
@@ -539,10 +539,16 @@ pub struct ReviewArgs<'a> {
     /// Empty string when the index hasn't been built or returned no
     /// matches.
     pub repo_context: &'a str,
-    /// Pre-fetched diff to use instead of `forgejo.get_pr_diff`.
-    /// `Some` for incremental reviews where the orchestrator already
-    /// fetched a `compare_diff(previous_sha..head_sha)`. `None` for
-    /// normal full reviews.
+    /// Changed-file list to use instead of `host.list_changed_files`.
+    /// `Some` when the orchestrator computed the full pull request diff
+    /// locally in the workspace, so no host file-count cap applies.
+    /// Ignored for incremental reviews, whose list comes from the
+    /// incremental diff itself.
+    pub changed_files_override: Option<&'a [ChangedFile]>,
+    /// Pre-fetched diff to use instead of `host.get_pr_diff`: the
+    /// incremental `previous_sha..head_sha` diff, or the full pull
+    /// request diff the orchestrator computed locally in the workspace.
+    /// `None` fetches the host's diff.
     pub diff_override: Option<&'a str>,
     pub previous_review_sha: Option<&'a str>,
     /// Verifier strategy. `Agentic` requires `workspace_path` to be
@@ -618,11 +624,18 @@ pub async fn review_pull_request(args: ReviewArgs<'_>) -> Result<ReviewOutcome, 
         if args.diff_override.is_some() && args.previous_review_sha.is_some() {
             diff_changed_paths(&pruned)
         } else {
-            let raw_files = args
-                .host
-                .list_changed_files(args.owner, args.repo, args.pr_number)
-                .await?;
-            let files = filter_changed_files(&raw_files, args.ignored_paths);
+            let fetched;
+            let raw_files = match args.changed_files_override {
+                Some(files) => files,
+                None => {
+                    fetched = args
+                        .host
+                        .list_changed_files(args.owner, args.repo, args.pr_number)
+                        .await?;
+                    fetched.as_slice()
+                }
+            };
+            let files = filter_changed_files(raw_files, args.ignored_paths);
             files.iter().map(|f| f.filename.clone()).collect()
         };
 
@@ -1043,6 +1056,7 @@ mod tests {
             ignored_paths: &ignored_paths,
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -1185,6 +1199,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -1269,6 +1284,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -1348,6 +1364,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -1407,6 +1424,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -1497,6 +1515,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -1594,6 +1613,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -1706,6 +1726,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -1813,6 +1834,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -1911,6 +1933,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -2010,6 +2033,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -2109,6 +2133,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -2207,6 +2232,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -2309,6 +2335,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -2407,6 +2434,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -2511,6 +2539,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -2596,6 +2625,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -2828,6 +2858,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -2910,6 +2941,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -3012,6 +3044,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -3113,6 +3146,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -3230,6 +3264,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "Run the bespoke release checklist",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -3332,6 +3367,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "CI gates observed: .forgejo/workflows/ci.yml runs cargo test but does not run cargo clippy.",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -3407,6 +3443,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "CI gates observed: .forgejo/workflows/ci.yml runs cargo test but does not run cargo clippy.\nProject memory: maintainers explicitly declined adding cargo clippy to the .forgejo/workflows/ci.yml gate.",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -3470,6 +3507,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: Some(
                 "diff --git a/src/lib.rs b/src/lib.rs\n@@ -1 +1,2 @@\n pub fn old() {}\n+pub fn added() {}\n",
             ),
@@ -3563,6 +3601,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -3666,6 +3705,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -3738,6 +3778,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: Some(
                 "diff --git a/src/new.rs b/src/new.rs\n@@ -0,0 +1 @@\n+pub fn added() {}\n",
             ),
@@ -3792,6 +3833,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -3852,6 +3894,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -3907,6 +3950,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -4086,6 +4130,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -4262,6 +4307,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,
@@ -4403,6 +4449,7 @@ mod tests {
             ignored_paths: &GlobSet::empty(),
             guidelines: "",
             repo_context: "",
+            changed_files_override: None,
             diff_override: None,
             previous_review_sha: None,
             verify_mode: VerifyMode::Simple,

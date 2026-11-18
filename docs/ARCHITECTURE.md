@@ -157,7 +157,13 @@ Components receive only the workspace capability they need:
   history to find the merge base, so the pull-request diff and changed-file
   list can be computed locally instead of through a host's size-limited diff
   endpoint. That local diff reads `.gitattributes` from the merge base, never
-  the head checkout.
+  the head checkout. `run_review_job` takes the base SHA from the `ReviewJob`
+  when the intake supplied it, otherwise from the pull request it fetched, and
+  full reviews use the local diff and changed-file list for both RAG context
+  and review generation, so neither the host's whole-diff endpoint nor its
+  changed-file list is read. Ignored paths and the diff byte cap still apply
+  before the model sees it. Without a merge base the review uses the host's
+  diff as before.
 - Context building and agentic verification use read-only, path-confined access
   under the clone root with symlink escape rejection and output/result caps.
 - Agentic verifier tools are file read and search capabilities, not shell access.

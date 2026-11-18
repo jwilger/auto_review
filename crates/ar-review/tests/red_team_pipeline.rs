@@ -401,6 +401,7 @@ async fn out_of_enum_finding_category_is_rejected_and_never_posted() {
         ignored_paths: &ignored_paths,
         guidelines: "",
         repo_context: "",
+        changed_files_override: None,
         diff_override: None,
         previous_review_sha: None,
         verify_mode: ar_review::VerifyMode::Simple,

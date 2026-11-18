@@ -8,7 +8,7 @@ instructions live in [Quickstart](./QUICKSTART.md) and [Deployment](./DEPLOYMENT
 |---|---|
 | `ar-agentcore` | AWS Bedrock AgentCore-compatible HTTP runtime surface, including `/ping` health handling, provider-neutral `/invocations` payload parsing, handler-backed serving, in-memory and DynamoDB invocation idempotency, semantic-review dispatch, and stale-head rejection. |
 | `ar-gateway` | HTTP server, Forgejo HMAC and GitHub `X-Hub-Signature-256` verification, Forgejo and GitHub App webhook intake, provider-routed CI-triggered dispatch, Forgejo chat poller, health/readiness/info/metrics routes. |
-| `ar-orchestrator` | `JobDispatcher`, production `SpawningDispatcher`, in-memory/SQLite/DynamoDB review history, one pull-request fetch per job to resolve the base branch that repo config is read from, provider-neutral context diff, incremental compare-diff, changed-file triage, and status calls, and per-PR lifecycle observations for metrics. |
+| `ar-orchestrator` | `JobDispatcher`, production `SpawningDispatcher`, in-memory/SQLite/DynamoDB review history, one pull-request fetch per job to resolve the base branch that repo config is read from, review diff and changed-file list computed locally in the workspace from the merge base (host diff as fallback), incremental compare-diff, changed-file triage, and status calls, and per-PR lifecycle observations for metrics. |
 | `ar-forge` | Provider-neutral repository-host DTOs, host error type, `HostCapabilities`, and `ReviewHost` trait for clone URLs, PR summaries, diffs, reviews, issue comments, repo config reads, issue lookups (`get_issue` returning `IssueSummary`, `None` on 404, with an `is_pull_request` marker telling PRs from issues), PR metadata, statuses, host capabilities, and the bot login, shared by Forgejo and GitHub adapters. See [Host capabilities](#host-capabilities) for the per-version matrix. Comment editing goes through `edit_issue_comment` and `edit_review_comment`, whose default implementations return a `HostError`. |
 | `ar-forgejo` | Forgejo REST client, webhook DTOs, review/comment/status/webhook APIs, Basic-auth bootstrap client, server-version capability probe and bot-login lookup (see [Host capabilities](#host-capabilities)). `edit_issue_comment` and `edit_review_comment` both `PATCH issues/comments/{id}` (Forgejo v11+ edits inline code comments there too); a `204 No Content` reply means the comment was not edited and is an error. |
 | `ar-github` | GitHub App REST client foundation, including app JWT minting, installation-token exchange/cache, `ReviewHost` wrapper, clone URL auth material, PR summary reads, PR and compare-diff reads, changed-file reads, top-level PR comment reads/posts, pull-review and review-comment reads, PR metadata updates, repo config file reads, issue fetches (`None` on 404, PRs marked), pull request review posting, commit-status posting, `X-Hub-Signature-256` webhook signature verification, typed issue-comment and review-comment webhook payloads, and the long-lived `AppReviewHost` that signs fresh app JWTs, resolves per-repository installations, and mints repository-scoped installation tokens for the gateway. Both hosts report every capability and resolve the `<app slug>[bot]` login (see [Host capabilities](#host-capabilities)). Both `ReviewHost` implementations edit comments with `edit_issue_comment` (`PATCH issues/comments/{id}`) and `edit_review_comment` (`PATCH pulls/comments/{id}`). |
@@ -104,6 +104,29 @@ line counts, and `patch` `None`; no host file-count cap applies. Both read
 cannot mark its own text changes as binary (THREAT-MODEL T3a). Without a merge
 base both return `WorkspaceError::Git`. The caller still applies
 `filter_diff_paths` and `cap_diff` to what reaches the model.
+`ar_review::is_valid_git_sha` is the same hex check, exported so callers can
+decide before cloning whether a base SHA is usable.
+
+## `ar-orchestrator` review diff source
+
+`ReviewJob::base_sha` carries the pull request's base commit when the intake
+has it: `ReviewJob::from(&PullRequestEvent)` and the gateway's `/reviews/ci`
+endpoint fill it; chat `re-review`, the poller, the CLI and AgentCore leave it
+`None`. `run_review_job` uses it, or else the base SHA of the pull request it
+fetches, to prepare the workspace with
+`prepare_workspace_from_clone_url_with_base` (a non-hex base clones the head
+without a merge base). With a merge base, the full review's diff and
+changed-file list come from `PreparedWorkspace::pr_diff()` and
+`pr_changed_files()`: the RAG context and `review_pull_request` both use that
+diff (`ReviewArgs::diff_override`) and file list
+(`ReviewArgs::changed_files_override`), and `ReviewHost::get_pr_diff` and the
+pipeline's `list_changed_files` are not called. The pre-clone trivial-files
+triage still reads the host's changed-file list. Without a merge base, or when
+the local git commands fail, the review fetches the host's diff and file list
+as before. Incremental reviews still diff `previous_sha..head` through
+`ReviewHost::get_compare_diff`. `auto-review review-once` reviews through
+`run_review_job` and gets the same behaviour; its `--dry-run` prompt stays on
+the Forgejo API diff.
 
 ## Host capabilities
 

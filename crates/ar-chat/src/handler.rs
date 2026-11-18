@@ -593,6 +593,7 @@ impl ChatHandler<'_> {
             pr_body: pr.body,
             // force=true bypasses the per-PR review-history dedup so
             // the user gets a fresh review even at the same SHA.
+            base_sha: None,
             force: true,
         };
         dispatcher.dispatch(job).await;

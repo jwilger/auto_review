@@ -308,6 +308,7 @@ impl InvocationHandler for SemanticReviewHandler {
                 head_sha: payload.head_sha,
                 pr_title: pr.title,
                 pr_body: pr.body,
+                base_sha: None,
                 force: payload.force.unwrap_or(false),
             })
             .await;

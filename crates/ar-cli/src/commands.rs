@@ -402,6 +402,7 @@ impl GitHubAgentcoreSemanticReviewHandler {
                 head_sha: payload.head_sha,
                 pr_title: pr.title,
                 pr_body: pr.body,
+                base_sha: None,
                 force: payload.force.unwrap_or(false),
             })
             .await;
@@ -876,6 +877,7 @@ async fn handle_semantic_review(
             head_sha: payload.head_sha,
             pr_title: pr.title,
             pr_body: pr.body,
+            base_sha: None,
             force: payload.force.unwrap_or(false),
         })
         .await;
@@ -971,6 +973,7 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
         pr_body: pr.body,
         // review-once is a one-shot debug command: force a full
         // review regardless of any review history that might dedup.
+        base_sha: None,
         force: true,
     };
 

@@ -426,7 +426,7 @@ async fn is_shallow(path: &Path) -> bool {
 /// SHAs, full SHA-1 = 40 chars, and SHA-256 = 64 chars). Used by
 /// `prepare_workspace` to reject argv-injection attempts before
 /// the value reaches git.
-fn is_valid_git_sha(s: &str) -> bool {
+pub fn is_valid_git_sha(s: &str) -> bool {
     let len = s.len();
     (7..=64).contains(&len) && s.chars().all(|c| c.is_ascii_hexdigit())
 }
