@@ -30,6 +30,10 @@ pub struct OpenAiProvider {
     embedding_model: Option<String>,
     /// HTTP client carrying the JSON and optional bearer-auth headers.
     http: reqwest::Client,
+    /// When true, `/v1/chat/completions` bodies never carry
+    /// `temperature`, whatever the caller set. `OpenAI` reasoning
+    /// models reject any non-default temperature.
+    omit_temperature: bool,
 }
 
 impl OpenAiProvider {
@@ -85,6 +89,7 @@ impl OpenAiProvider {
             embed_num_ctx: None,
             embedding_model: None,
             http,
+            omit_temperature: false,
         })
     }
 
@@ -115,13 +120,29 @@ impl OpenAiProvider {
         self.embedding_model = Some(model.into());
         self
     }
+
+    /// Stop sending `temperature` on `/v1/chat/completions` requests,
+    /// whatever [`CompleteRequest::temperature`] holds. `OpenAI`
+    /// reasoning models (gpt-5.x, gpt-6.x, o-series) accept only the
+    /// default temperature and reject requests that set one. Off by
+    /// default so Ollama and gpt-4.x keep deterministic output.
+    /// Embedding requests are unaffected.
+    #[inline]
+    #[must_use = "the builder returns the configured provider; dropping it discards the setting"]
+    pub const fn with_omit_temperature(mut self, omit: bool) -> Self {
+        self.omit_temperature = omit;
+        self
+    }
 }
 
 #[async_trait]
 impl LlmProvider for OpenAiProvider {
     #[inline]
     async fn complete(&self, req: CompleteRequest) -> Result<CompleteResponse, Error> {
-        let body = ChatRequest::from_request(&self.chat_model, &req);
+        let mut body = ChatRequest::from_request(&self.chat_model, &req);
+        if self.omit_temperature {
+            body.temperature = None;
+        }
         let url = self.url("chat/completions")?;
         let resp = self.http.post(url).json(&body).send().await?;
         let status = resp.status();
@@ -724,5 +745,59 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
+    }
+
+    /// Send one `temperature: Some(0.0)` completion through `provider`
+    /// and return the JSON body the mock server captured.
+    async fn captured_chat_body(
+        server: &MockServer,
+        provider: &OpenAiProvider,
+    ) -> serde_json::Value {
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "ok"}}]
+            })))
+            .mount(server)
+            .await;
+        provider
+            .complete(CompleteRequest {
+                messages: vec![Message::user("x")],
+                temperature: Some(0.0),
+                ..Default::default()
+            })
+            .await
+            .expect("ok");
+        let requests = server
+            .received_requests()
+            .await
+            .expect("request recording enabled");
+        let request = requests.first().expect("one request");
+        serde_json::from_slice(&request.body).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn complete_omits_temperature_when_configured() {
+        let server = MockServer::start().await;
+        let provider = OpenAiProvider::new(&server.uri(), None, "gpt-5.1")
+            .expect("provider")
+            .with_omit_temperature(true);
+        let body = captured_chat_body(&server, &provider).await;
+        assert!(
+            body.get("temperature").is_none(),
+            "temperature must be omitted: {body}"
+        );
+    }
+
+    #[tokio::test]
+    async fn complete_sends_caller_temperature_by_default() {
+        let server = MockServer::start().await;
+        let provider = OpenAiProvider::new(&server.uri(), None, "qwen2.5").expect("provider");
+        let body = captured_chat_body(&server, &provider).await;
+        assert_eq!(
+            body.get("temperature"),
+            Some(&serde_json::json!(0.0)),
+            "{body}"
+        );
     }
 }
