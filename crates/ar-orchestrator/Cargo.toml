@@ -36,3 +36,6 @@ hmac.workspace = true
 sha2.workspace = true
 tower = { workspace = true, features = ["util"] }
 wiremock.workspace = true
+
+[lints]
+workspace = true
