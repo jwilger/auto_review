@@ -465,9 +465,16 @@ async fn locate_merge_base(
             .await
             .map_err(|err| MergeBaseUnavailable::Deepen(err.to_string()))?;
     }
-    merge_base_of(path, head_sha, base_sha)
-        .await
-        .ok_or(MergeBaseUnavailable::HistoryCap)
+    if let Some(merge_base) = merge_base_of(path, head_sha, base_sha).await {
+        return Ok(merge_base);
+    }
+    // The last step may have fetched the complete history: then the steps
+    // did not run out, the histories are unrelated.
+    if is_shallow(path).await {
+        Err(MergeBaseUnavailable::HistoryCap)
+    } else {
+        Err(MergeBaseUnavailable::UnrelatedHistories)
+    }
 }
 
 /// `git merge-base <base> <head>`, or `None` when git finds none in the
@@ -1672,6 +1679,60 @@ line three of the renamed file\nline four of the renamed file\n";
         let long = shallow_clone("long").await;
         let enough = locate_merge_base(&long, &repo.head_sha, &repo.base_sha, &[1, 1, 1]).await;
         assert_eq!(enough, Ok(repo.fork_point.clone()));
+    }
+
+    /// Histories the last deepening step fetches completely, without a
+    /// common ancestor, are unrelated: the steps did not run out early.
+    #[tokio::test]
+    async fn locate_merge_base_reports_unrelated_histories_the_last_step_completed() {
+        let fixture = TempDir::new().unwrap();
+        let src = fixture.path().join("src");
+        let bare = fixture.path().join("bare.git");
+        fs::create_dir_all(&src).unwrap();
+        fixture_git(&src, &["init", "--quiet", "--initial-branch=main"]).await;
+        fs::write(src.join("README.md"), "head v1\n").unwrap();
+        fixture_commit(&src, "head root").await;
+        fs::write(src.join("README.md"), "head v2\n").unwrap();
+        let head_sha = fixture_commit(&src, "head tip").await;
+        fixture_git(&src, &["checkout", "--quiet", "--orphan", "unrelated"]).await;
+        fs::write(src.join("README.md"), "unrelated v1\n").unwrap();
+        fixture_commit(&src, "unrelated root").await;
+        fs::write(src.join("README.md"), "unrelated v2\n").unwrap();
+        let base_sha = fixture_commit(&src, "unrelated tip").await;
+        fixture_git(
+            fixture.path(),
+            &[
+                "clone",
+                "--quiet",
+                "--bare",
+                src.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        )
+        .await;
+        let clone = fixture.path().join("clone");
+        git(&[
+            OsStr::new("clone"),
+            OsStr::new("--quiet"),
+            OsStr::new("--no-checkout"),
+            OsStr::new("--depth=1"),
+            OsStr::new(&format!("file://{}", bare.display())),
+            clone.as_os_str(),
+        ])
+        .await
+        .unwrap();
+        fixture_git(
+            &clone,
+            &["fetch", "--quiet", "--depth=1", "origin", &head_sha],
+        )
+        .await;
+
+        // Each side is two commits deep. One deepening step of two commits
+        // goes past both roots, so the clone is complete afterwards (a step
+        // of one reaches the roots but leaves them marked shallow).
+        let found = locate_merge_base(&clone, &head_sha, &base_sha, &[2]).await;
+
+        assert_eq!(found, Err(MergeBaseUnavailable::UnrelatedHistories));
     }
 
     /// A stalled forge must not hold a review in `pending` forever: the
