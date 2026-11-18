@@ -23,6 +23,11 @@ config:
   llmReasoningModel: "qwen2.5-coder:32b"
   llmEmbeddingModel: ""     # optional; enables RAG
   llmCheapModel: ""         # optional; enables the verifier, PR-metadata checks and chat-assist commands
+  # LLM_OMIT_TEMPERATURE (boolean, default false). Set "true" for OpenAI
+  # reasoning models (gpt-5.x, gpt-6.x, o-series), which reject any
+  # non-default temperature and fail every review otherwise. Leave blank
+  # for Ollama and gpt-4.x so they keep deterministic temperature 0.0.
+  llmOmitTemperature: ""
   # Paths to the SQLite databases. NOTE: these need a persistent
   # volume mounted at /data for the data to survive pod restarts
   # — the chart's default `ephemeralStorage:` block only covers

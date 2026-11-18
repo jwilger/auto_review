@@ -371,6 +371,13 @@ something the schema validator + self-heal couldn't repair.
 **Cloud profile:** check the provider dashboard for 4xx (auth /
 quota) or 5xx (provider outage). `LLM_API_KEY` rotation: see §6.2.
 
+A 400 from OpenAI that mentions `temperature` means the configured
+model is a reasoning model (`gpt-5.x`, `gpt-6.x`, `o`-series), which
+accepts only the default temperature. Set `LLM_OMIT_TEMPERATURE=true`
+(boolean, default `false`) and restart; every tier then stops sending
+`temperature`. Leave it unset for Ollama and `gpt-4.x`, which keep the
+deterministic `temperature: 0.0`.
+
 **Local profile (Ollama / vLLM):**
 1. `curl -s ${LLM_BASE_URL}/v1/models | jq '.data[].id'` —
    confirm the configured `LLM_REASONING_MODEL` is loaded.

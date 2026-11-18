@@ -61,6 +61,10 @@ spec:
             - name: LLM_CHEAP_MODEL
               value: {{ .Values.config.llmCheapModel | quote }}
             {{- end }}
+            {{- if .Values.config.llmOmitTemperature }}
+            - name: LLM_OMIT_TEMPERATURE
+              value: {{ .Values.config.llmOmitTemperature | quote }}
+            {{- end }}
             {{- if .Values.config.learningsDb }}
             - name: AR_LEARNINGS_DB
               value: {{ .Values.config.learningsDb | quote }}
