@@ -7,7 +7,8 @@ use ar_llm::Router as LlmRouter;
 use ar_review::{
     build_glob_set, build_review_context_with_store, is_valid_git_sha, load_repo_config_from_base,
     pr_is_skippable, prepare_workspace_from_clone_url, review_pull_request, BaseRef,
-    PreparedWorkspace, RepoConfig, ReviewArgs, ReviewError, VerifyMode, WorkspaceError,
+    MergeBaseUnavailable, PreparedWorkspace, RepoConfig, ReviewArgs, ReviewError, VerifyMode,
+    WorkspaceError,
 };
 use async_trait::async_trait;
 use core::time::Duration;
@@ -957,7 +958,7 @@ async fn prepare_workspace_context(
     // host diff limit applies. Without a local diff, fetch the host's diff
     // once for the RAG context build; failure there just means we skip
     // optional context and the review still proceeds.
-    let (raw_diff, changed_files) = match local_pr_diff(&workspace).await {
+    let (raw_diff, changed_files) = match local_pr_diff(&workspace, job).await {
         Some((diff, files)) => (diff, Some(files)),
         None => match fetch_context_diff(host, job).await {
             Ok(diff) => (diff, None),
@@ -1055,13 +1056,14 @@ async fn clone_head_workspace(
 }
 
 /// The pull request's diff and changed files computed in `workspace`,
-/// merge base to head, or `None` when the workspace cannot supply them
-/// (no merge base, which the workspace already logged, or a git failure,
-/// logged here).
+/// merge base to head, or `None` when the workspace cannot supply them. The
+/// reason (no merge base and why, or a git failure) is logged once here with
+/// the job's repository and pull request; a base that was not a commit SHA
+/// was already logged by [`clone_head_workspace`].
 async fn local_pr_diff(
     workspace: &PreparedWorkspace,
+    job: &ReviewJob,
 ) -> Option<(String, Vec<ar_forge::ChangedFile>)> {
-    workspace.merge_base()?;
     let local = async {
         Ok::<_, WorkspaceError>((
             workspace.pr_diff().await?,
@@ -1070,8 +1072,14 @@ async fn local_pr_diff(
     };
     match local.await {
         Ok(diff_and_files) => Some(diff_and_files),
+        Err(WorkspaceError::NoMergeBase(MergeBaseUnavailable::NotRequested)) => None,
         Err(err) => {
-            tracing::warn!(error = %err, "local pull request diff failed; using the host's diff");
+            tracing::warn!(
+                repo = format!("{}/{}", job.owner, job.repo),
+                pr = job.pr_number,
+                error = %err,
+                "local pull request diff unavailable; using the host's diff"
+            );
             None
         }
     }
@@ -1348,9 +1356,13 @@ mod tests {
 
     use std::fs;
 
+    use std::io;
+
     use std::process::Command;
 
     use std::sync::Mutex;
+
+    use tracing::subscriber::{set_default, DefaultGuard};
 
     use wiremock::matchers::{method, path};
 
@@ -1434,6 +1446,31 @@ the repository instead.\",\"errors\":[{\"resource\":\"PullRequest\",\"field\":\"
 
     /// Embeds every text to the same direction, so any stored learning
     /// with that embedding is a nearest match for the diff.
+    /// Log lines written while a [`tracing`] subscriber built by
+    /// [`captured_logs`] is the thread's default.
+    #[derive(Clone, Default)]
+    struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+    impl CapturedLogs {
+        fn contents(&self) -> String {
+            String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+        }
+    }
+
+    impl io::Write for CapturedLogs {
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0
+                .lock()
+                .map_err(|err| io::Error::other(err.to_string()))?
+                .extend_from_slice(buf);
+            Ok(buf.len())
+        }
+    }
+
     struct ConstantEmbedder;
 
     #[async_trait]
@@ -2132,6 +2169,51 @@ the repository instead.\",\"errors\":[{\"resource\":\"PullRequest\",\"field\":\"
         assert!(
             host.pr_diff_requests.lock().unwrap().is_empty(),
             "the full review still uses the local merge-base diff"
+        );
+    }
+
+    /// Capture this thread's log output (tokio tests run on one thread)
+    /// until the returned guard drops.
+    fn captured_logs() -> (CapturedLogs, DefaultGuard) {
+        let logs = CapturedLogs::default();
+        let writer = logs.clone();
+        let subscriber = tracing_subscriber::fmt()
+            .with_writer(move || writer.clone())
+            .with_ansi(false)
+            .without_time()
+            .finish();
+        (logs, set_default(subscriber))
+    }
+
+    /// With parallel reviews, an operator must be able to tell which review
+    /// fell back to the host's diff and why, from one warning.
+    #[tokio::test]
+    async fn local_diff_fallback_warning_names_the_pull_request_and_the_reason() {
+        let pr = pr_repo_with(
+            &[("src/lib.rs", "pub fn old() {}\n")],
+            &[("src/lib.rs", "pub fn old() {}\npub fn local_added() {}\n")],
+            &[],
+        );
+        // A base commit the repository does not have cannot be fetched.
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url(&pr.url)
+            .with_pr_base_sha("0123456789abcdef0123456789abcdef01234567");
+        let provider = Arc::new(CannedProvider::new(vec![]));
+        let (logs, _guard) = captured_logs();
+
+        run_with(&host, Arc::clone(&provider), None, &pr.head_sha).await;
+
+        let output = logs.contents();
+        let warning = output
+            .lines()
+            .find(|line| line.contains("using the host's diff"))
+            .unwrap_or_else(|| panic!("no fallback warning in:\n{output}"));
+        assert!(
+            warning.contains("WARN")
+                && warning.contains("repo=\"alice/widgets\"")
+                && warning.contains("pr=42")
+                && warning.contains("could not fetch the commit"),
+            "{warning}"
         );
     }
 

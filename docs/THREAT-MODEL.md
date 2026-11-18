@@ -457,8 +457,9 @@ before reaching the LLM. The workspace clone stays shallow: the history
 fetched to find the pull request's merge base (and, for incremental reviews,
 the previously reviewed commit) deepens in the fixed steps of
 `MERGE_BASE_DEEPEN_STEPS` and stops at `MERGE_BASE_HISTORY_CAP` (1000 commits
-behind each tip), falling back to the host's diff,
-so a huge or unrelated history cannot stall a review. GitHub's per-file patch
+behind each tip) or after `MERGE_BASE_FETCH_TIMEOUT` (120 seconds, killing the
+running git process), falling back to the host's diff,
+so a huge or unrelated history, or a stalled forge, cannot stall a review. GitHub's per-file patch
 fallback reads at most 30 pages of 100 files. The orchestrator supports a review concurrency cap.
 **In addition**, an
 optional global token-bucket rate limiter on the

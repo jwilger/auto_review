@@ -37,6 +37,8 @@ hex.workspace = true
 hmac.workspace = true
 sha2.workspace = true
 tower = { workspace = true, features = ["util"] }
+# Captures dispatcher log lines in tests that pin operator-facing warnings.
+tracing-subscriber.workspace = true
 wiremock.workspace = true
 
 [lints]

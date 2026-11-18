@@ -7,7 +7,7 @@
 
 use crate::error::ReviewError;
 use ar_forge::ChangedFile;
-use std::{collections::HashMap, env, ffi::OsStr, path::Path};
+use std::{collections::HashMap, env, ffi::OsStr, path::Path, time::Duration};
 use tempfile::TempDir;
 use tokio::process::Command;
 use url::Url;
@@ -22,6 +22,44 @@ pub enum WorkspaceError {
     Git(String),
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
+    /// The pull request diff needs a merge base the workspace does not have.
+    #[error("no merge base: {0}")]
+    NoMergeBase(MergeBaseUnavailable),
+    /// The incremental diff needs the previously reviewed commit's merge
+    /// base with the head, which the workspace does not have.
+    #[error("no incremental base: {0}")]
+    NoIncrementalBase(MergeBaseUnavailable),
+}
+
+/// Why a workspace has no merge base to diff from. Workspace preparation
+/// logs nothing about it (it knows no repository or pull request); callers
+/// get the reason from the diff error and log it with their own context.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum MergeBaseUnavailable {
+    /// The workspace was prepared without that commit's SHA.
+    #[error("the workspace was prepared without that commit")]
+    NotRequested,
+    /// The previously reviewed commit is only looked up once the pull
+    /// request's own merge base is known.
+    #[error("the pull request itself has no merge base")]
+    NoPullRequestMergeBase,
+    /// Fetching the commit failed, for example because a force push removed
+    /// it from the host.
+    #[error("could not fetch the commit: {0}")]
+    Fetch(String),
+    /// A deepening fetch failed.
+    #[error("could not deepen the history: {0}")]
+    Deepen(String),
+    /// The complete history holds no common ancestor.
+    #[error("the commits share no history")]
+    UnrelatedHistories,
+    /// The deepening steps ran out before a common ancestor appeared.
+    #[error("none within the bounded history fetch")]
+    HistoryCap,
+    /// The fetches took longer than their time budget; the running git
+    /// process is killed.
+    #[error("the history fetch took longer than {0:?}")]
+    TimedOut(Duration),
 }
 
 impl From<WorkspaceError> for ReviewError {
@@ -35,8 +73,8 @@ impl From<WorkspaceError> for ReviewError {
 pub struct PreparedWorkspace {
     dir: TempDir,
     head_sha: String,
-    incremental_base: Option<String>,
-    merge_base: Option<String>,
+    incremental_base: Result<String, MergeBaseUnavailable>,
+    merge_base: Result<String, MergeBaseUnavailable>,
 }
 
 impl PreparedWorkspace {
@@ -48,7 +86,7 @@ impl PreparedWorkspace {
     /// the workspace was prepared with a base SHA and the merge base was
     /// found within the bounded history fetch.
     pub fn merge_base(&self) -> Option<&str> {
-        self.merge_base.as_deref()
+        self.merge_base.as_deref().ok()
     }
 
     /// Unified diff of the pull request from its merge base to its head:
@@ -59,8 +97,9 @@ impl PreparedWorkspace {
     /// `Binary files ... differ` line, never with its content. External
     /// diff drivers and textconv filters are disabled.
     ///
-    /// Errors when the workspace has no merge base (prepared without a
-    /// base SHA, or the bounded history fetch found none).
+    /// Errors with [`WorkspaceError::NoMergeBase`] and its reason when the
+    /// workspace has no merge base (prepared without a base SHA, or the
+    /// bounded history fetch found none).
     pub async fn pr_diff(&self) -> Result<String, WorkspaceError> {
         let merge_base = self.require_merge_base()?;
         self.diff_to_head(merge_base, merge_base).await
@@ -73,18 +112,18 @@ impl PreparedWorkspace {
     /// Attributes still come from the pull request's merge base, because
     /// the previously reviewed commit is pull-request content.
     ///
-    /// Errors when the workspace was not prepared through
-    /// [`prepare_workspace_from_clone_url`] with a previous SHA, or the previous
-    /// commit or either merge base could not be found within the bounded
-    /// history fetch (for example after a force push removed it).
+    /// Errors with [`WorkspaceError::NoMergeBase`] or
+    /// [`WorkspaceError::NoIncrementalBase`] and the reason when the
+    /// workspace was not prepared through [`prepare_workspace_from_clone_url`]
+    /// with a previous SHA, or the previous commit or either merge base could
+    /// not be found within the bounded history fetch (for example after a
+    /// force push removed it).
     pub async fn incremental_diff(&self) -> Result<String, WorkspaceError> {
         let merge_base = self.require_merge_base()?;
-        let incremental_base = self.incremental_base.as_deref().ok_or_else(|| {
-            WorkspaceError::Git(
-                "no incremental base: the previously reviewed commit is not in the workspace"
-                    .into(),
-            )
-        })?;
+        let incremental_base = self
+            .incremental_base
+            .as_deref()
+            .map_err(|reason| WorkspaceError::NoIncrementalBase(reason.clone()))?;
         self.diff_to_head(incremental_base, merge_base).await
     }
 
@@ -180,11 +219,9 @@ impl PreparedWorkspace {
     }
 
     fn require_merge_base(&self) -> Result<&str, WorkspaceError> {
-        self.merge_base().ok_or_else(|| {
-            WorkspaceError::Git(
-                "no merge base: the workspace cannot compute the pull request diff".into(),
-            )
-        })
+        self.merge_base
+            .as_deref()
+            .map_err(|reason| WorkspaceError::NoMergeBase(reason.clone()))
     }
 }
 
@@ -244,7 +281,8 @@ pub async fn prepare_workspace(
 /// fetched once the pull request's merge base was found.
 ///
 /// Every SHA is validated before git runs. History is fetched in the
-/// bounded steps of [`MERGE_BASE_DEEPEN_STEPS`]. When a commit cannot be fetched
+/// bounded steps of [`MERGE_BASE_DEEPEN_STEPS`] within
+/// [`MERGE_BASE_FETCH_TIMEOUT`] per commit. When a commit cannot be fetched
 /// or no merge base appears within those bounds, the workspace is still
 /// returned and the matching diff method errors with the reason, so callers
 /// keep the checkout for context and fall back to the host's diff.
@@ -271,6 +309,13 @@ pub const MERGE_BASE_HISTORY_CAP: u32 = 1000;
 /// common case (a recent fork point) cheap; the steps sum to
 /// [`MERGE_BASE_HISTORY_CAP`].
 pub const MERGE_BASE_DEEPEN_STEPS: &[u32] = &[64, 256, 680];
+
+/// The longest a review spends fetching history to find one merge base (the
+/// pull request's, and again the previously reviewed commit's for an
+/// incremental review). On expiry the running git process is killed and the
+/// review falls back to the host's diff, so a stalled forge or a slow
+/// monorepo fetch cannot hold a review in `pending`.
+pub const MERGE_BASE_FETCH_TIMEOUT: Duration = Duration::from_secs(120);
 
 async fn clone_workspace(
     clone_url: &str,
@@ -318,17 +363,32 @@ async fn clone_workspace(
     git_in(&path, &["checkout", head_sha]).await?;
     let merge_base = match base_sha {
         Some(base_sha) => {
-            locate_merge_base(&path, head_sha, base_sha, MERGE_BASE_DEEPEN_STEPS).await
+            locate_merge_base_within(
+                &path,
+                head_sha,
+                base_sha,
+                MERGE_BASE_DEEPEN_STEPS,
+                MERGE_BASE_FETCH_TIMEOUT,
+            )
+            .await
         }
-        None => None,
+        None => Err(MergeBaseUnavailable::NotRequested),
     };
     // Only with the pull request's merge base: it is the trusted attribute
     // source an incremental diff needs.
     let incremental_base = match (merge_base.as_ref(), previous_sha) {
-        (Some(_), Some(previous_sha)) => {
-            locate_merge_base(&path, head_sha, previous_sha, MERGE_BASE_DEEPEN_STEPS).await
+        (_, None) => Err(MergeBaseUnavailable::NotRequested),
+        (Err(_), Some(_)) => Err(MergeBaseUnavailable::NoPullRequestMergeBase),
+        (Ok(_), Some(previous_sha)) => {
+            locate_merge_base_within(
+                &path,
+                head_sha,
+                previous_sha,
+                MERGE_BASE_DEEPEN_STEPS,
+                MERGE_BASE_FETCH_TIMEOUT,
+            )
+            .await
         }
-        _ => None,
     };
     // The clone URL carries the bot credential in its userinfo and `git
     // clone` stores it as `remote.origin.url` in `.git/config`, which the
@@ -345,44 +405,56 @@ async fn clone_workspace(
     })
 }
 
-/// Fetch `base_sha` into the shallow clone at `path` and deepen both tips,
-/// one entry of `deepen_steps` at a time, until git finds their merge base.
+/// [`locate_merge_base`] bounded by `budget`: on expiry the in-flight git
+/// process is killed (`kill_on_drop`) and the lookup reports
+/// [`MergeBaseUnavailable::TimedOut`].
+async fn locate_merge_base_within(
+    path: &Path,
+    head_sha: &str,
+    base_sha: &str,
+    deepen_steps: &[u32],
+    budget: Duration,
+) -> Result<String, MergeBaseUnavailable> {
+    tokio::time::timeout(
+        budget,
+        locate_merge_base(path, head_sha, base_sha, deepen_steps),
+    )
+    .await
+    .unwrap_or(Err(MergeBaseUnavailable::TimedOut(budget)))
+}
+
+/// Fetch `base_sha` (the pull request base, or a previously reviewed
+/// commit) into the shallow clone at `path` and deepen both tips, one entry
+/// of `deepen_steps` at a time, until git finds their merge base.
 ///
-/// Returns `None` when the base cannot be fetched, a deepening fetch fails,
-/// the history is complete without a common ancestor, or the steps run out.
-/// Each failure is logged; none fails workspace preparation.
+/// Errors with the reason when the commit cannot be fetched, a deepening
+/// fetch fails, the history is complete without a common ancestor, or the
+/// steps run out. None of these fails workspace preparation, and none is
+/// logged here: the caller logs the reason with its repository context.
 async fn locate_merge_base(
     path: &Path,
     head_sha: &str,
     base_sha: &str,
     deepen_steps: &[u32],
-) -> Option<String> {
-    if let Err(err) = git_in(path, &["fetch", "--depth=1", "origin", base_sha]).await {
-        tracing::warn!(error = %err, "could not fetch the pull request base commit");
-        return None;
-    }
+) -> Result<String, MergeBaseUnavailable> {
+    git_in(path, &["fetch", "--depth=1", "origin", base_sha])
+        .await
+        .map_err(|err| MergeBaseUnavailable::Fetch(err.to_string()))?;
     for step in deepen_steps {
         if let Some(merge_base) = merge_base_of(path, head_sha, base_sha).await {
-            return Some(merge_base);
+            return Ok(merge_base);
         }
         if !is_shallow(path).await {
-            tracing::warn!("base and head share no history; no merge base");
-            return None;
+            return Err(MergeBaseUnavailable::UnrelatedHistories);
         }
         let deepen = format!("--deepen={step}");
-        if let Err(err) = git_in(path, &["fetch", &deepen, "origin", head_sha, base_sha]).await {
-            tracing::warn!(error = %err, "could not deepen history to find the merge base");
-            return None;
-        }
+        git_in(path, &["fetch", &deepen, "origin", head_sha, base_sha])
+            .await
+            .map_err(|err| MergeBaseUnavailable::Deepen(err.to_string()))?;
     }
-    let merge_base = merge_base_of(path, head_sha, base_sha).await;
-    if merge_base.is_none() {
-        tracing::warn!(
-            steps = ?deepen_steps,
-            "no merge base within the bounded history fetch"
-        );
-    }
-    merge_base
+    merge_base_of(path, head_sha, base_sha)
+        .await
+        .ok_or(MergeBaseUnavailable::HistoryCap)
 }
 
 /// `git merge-base <base> <head>`, or `None` when git finds none in the
@@ -522,6 +594,8 @@ async fn git_stdout_in<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<Vec<u8
 fn hermetic_git_command() -> Command {
     let mut command = Command::new("git");
     command
+        // A git call abandoned by a timeout must not keep running.
+        .kill_on_drop(true)
         .env("GIT_CONFIG_NOSYSTEM", "true")
         .env("GIT_CONFIG_GLOBAL", "/dev/null")
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -1431,10 +1505,44 @@ line three of the renamed file\nline four of the renamed file\n";
         // step of one commit cannot reach it, three can.
         let short = shallow_clone("short").await;
         let out_of_budget = locate_merge_base(&short, &repo.head_sha, &repo.base_sha, &[1]).await;
-        assert_eq!(out_of_budget, None);
+        assert_eq!(out_of_budget, Err(MergeBaseUnavailable::HistoryCap));
         let long = shallow_clone("long").await;
         let enough = locate_merge_base(&long, &repo.head_sha, &repo.base_sha, &[1, 1, 1]).await;
-        assert_eq!(enough, Some(repo.fork_point.clone()));
+        assert_eq!(enough, Ok(repo.fork_point.clone()));
+    }
+
+    /// A stalled forge must not hold a review in `pending` forever: the
+    /// history fetches stop at their time budget and the review falls back
+    /// to the host's diff.
+    #[tokio::test]
+    async fn locate_merge_base_gives_up_when_the_fetch_time_budget_runs_out() {
+        let fixture = TempDir::new().unwrap();
+        let repo = diverged_repo(fixture.path()).await;
+        let clone = fixture.path().join("clone");
+        git(&[
+            OsStr::new("clone"),
+            OsStr::new("--quiet"),
+            OsStr::new("--no-checkout"),
+            OsStr::new("--depth=1"),
+            OsStr::new(&repo.clone_url),
+            clone.as_os_str(),
+        ])
+        .await
+        .unwrap();
+
+        let timed_out = locate_merge_base_within(
+            &clone,
+            &repo.head_sha,
+            &repo.base_sha,
+            MERGE_BASE_DEEPEN_STEPS,
+            std::time::Duration::ZERO,
+        )
+        .await;
+
+        assert_eq!(
+            timed_out,
+            Err(MergeBaseUnavailable::TimedOut(std::time::Duration::ZERO))
+        );
     }
 
     #[tokio::test]
@@ -1473,6 +1581,46 @@ line three of the renamed file\nline four of the renamed file\n";
             "head side\n"
         );
         assert_eq!(fixture_git(workspace.path(), &["remote"]).await, "");
+    }
+
+    /// The workspace logs nothing about a missing merge base (it knows no
+    /// repository or pull request); the diff error carries the reason so
+    /// the dispatcher can log it once with that context.
+    #[tokio::test]
+    async fn pr_diff_error_names_why_there_is_no_merge_base() {
+        let fixture = TempDir::new().unwrap();
+        let src = fixture.path().join("src");
+        let bare = fixture.path().join("bare.git");
+        fs::create_dir_all(&src).unwrap();
+        fixture_git(&src, &["init", "--quiet", "--initial-branch=main"]).await;
+        fs::write(src.join("README.md"), "head side\n").unwrap();
+        let head_sha = fixture_commit(&src, "head").await;
+        fixture_git(&src, &["checkout", "--quiet", "--orphan", "unrelated"]).await;
+        fs::write(src.join("README.md"), "unrelated side\n").unwrap();
+        let base_sha = fixture_commit(&src, "unrelated").await;
+        fixture_git(
+            fixture.path(),
+            &[
+                "clone",
+                "--quiet",
+                "--bare",
+                src.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        )
+        .await;
+        let clone_url = format!("file://{}", bare.display());
+        let workspace =
+            prepare_workspace_from_clone_url(&clone_url, &head_sha, Some(&base_sha), None)
+                .await
+                .unwrap();
+
+        let err = workspace.pr_diff().await.expect_err("no merge base");
+
+        assert_eq!(
+            err.to_string(),
+            "no merge base: the commits share no history"
+        );
     }
 
     #[test]

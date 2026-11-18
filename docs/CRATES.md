@@ -86,10 +86,15 @@ previous_sha)` clones the head. With `Some(base_sha)` it then, before the
 credential-bearing `origin` remote is removed, fetches the base commit and
 deepens both tips in the bounded steps of `MERGE_BASE_DEEPEN_STEPS` (64, 256
 and 680 commits, together `MERGE_BASE_HISTORY_CAP`, 1000 commits) until
-`git merge-base` finds a common ancestor. Both
-SHAs are validated as hex before git runs. A base that cannot be fetched, or no
-merge base within the bound, still returns the workspace, with
-`PreparedWorkspace::merge_base()` `None`.
+`git merge-base` finds a common ancestor, within `MERGE_BASE_FETCH_TIMEOUT`
+(120 seconds); on expiry the running git process is killed. Both SHAs are
+validated as hex before git runs. A base that cannot be fetched, no merge base
+within the bound, or a timeout still returns the workspace, with
+`PreparedWorkspace::merge_base()` `None`. Workspace preparation logs nothing
+about it: the diff methods return the reason as a `MergeBaseUnavailable`
+(`NotRequested`, `NoPullRequestMergeBase`, `Fetch`, `Deepen`,
+`UnrelatedHistories`, `HistoryCap`, `TimedOut`) for the caller to log with its
+repository and pull request.
 
 With a merge base, `PreparedWorkspace::pr_diff()` returns the unified diff from
 the merge base to the head, the comparison GitHub and Forgejo show for a pull
@@ -104,8 +109,10 @@ line counts, renamed and copied files with their old path in
 `previous_filename` (the field GitHub and Forgejo also return from their
 changed-files APIs), and `patch` `None`; no host file-count cap applies. Both read
 `.gitattributes` from the merge base, not the head checkout, so a pull request
-cannot mark its own text changes as binary (THREAT-MODEL T3a). Without a merge
-base both return `WorkspaceError::Git`. The caller still applies
+cannot mark its own text changes as binary (THREAT-MODEL T3a); they pass git's
+`--attr-source` option, so git older than 2.42 fails instead of reading the
+head's attributes. Without a merge base both return
+`WorkspaceError::NoMergeBase` with the reason. The caller still applies
 `filter_diff_paths` and `cap_diff` to what reaches the model.
 `ar_review::is_valid_git_sha` is the same hex check, exported so callers can
 decide before cloning whether a base SHA is usable.
@@ -115,9 +122,9 @@ the commit an earlier review covered, with the same validation and bounded
 deepening. `PreparedWorkspace::incremental_diff()` then returns the diff from
 the merge base of that commit and the head to the head, the host's
 `previous...head` comparison, with attributes still read from the pull
-request's merge base. It returns `WorkspaceError::Git` when the previous
-commit could not be fetched (for example after a force push) or no merge base
-was found.
+request's merge base. It returns `WorkspaceError::NoIncrementalBase` with the
+reason when the previous commit could not be fetched (for example after a
+force push) or no merge base was found.
 
 ## `ar-orchestrator` review diff source
 
@@ -135,12 +142,14 @@ diff (`ReviewArgs::diff_override`) and file list
 pipeline's `list_changed_files` are not called. The pre-clone trivial-files
 triage still reads the host's changed-file list. Without a merge base, or when
 the local git commands fail, the review fetches the host's diff and file list
-as before. Incremental reviews also pass the previously reviewed commit to
+as before, after one warning that names the repository, the pull request and
+the reason. Incremental reviews also pass the previously reviewed commit to
 `prepare_workspace_from_clone_url` and take their diff from
 `PreparedWorkspace::incremental_diff()`, so the host's compare endpoint and its
 size limit are not used. Without a workspace, or when the previous commit is
-not in it, they fall back to `ReviewHost::get_compare_diff`, and when that fails
-too, to a full review as before. The same-SHA, trivial-files and
+not in it, they log the reason at info level (a force push removing the
+reviewed commit is expected) and fall back to `ReviewHost::get_compare_diff`,
+and when that fails too, to a full review as before. The same-SHA, trivial-files and
 disabled-by-config skips still run before the clone. `auto-review review-once`
 reviews through `run_review_job` and gets the same behaviour; its `--dry-run`
 prompt stays on the Forgejo API diff, which has no file limit. The chat

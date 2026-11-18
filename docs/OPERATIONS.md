@@ -527,7 +527,12 @@ own. If reviews start taking minutes, check:
    `--depth=1` (already set) and shallow-fetch (set by the workspace
    builder). Finding a pull request's merge base deepens that history
    in bounded steps (`MERGE_BASE_DEEPEN_STEPS`: 64, 256 and 680 commits,
-   at most `MERGE_BASE_HISTORY_CAP`, 1000 commits) before the review falls back to the host's diff.
+   at most `MERGE_BASE_HISTORY_CAP`, 1000 commits) and for at most
+   `MERGE_BASE_FETCH_TIMEOUT` (120 seconds) per commit looked up (the pull
+   request base, and the previously reviewed commit for an incremental
+   review) before the review falls back to the host's diff. The fallback
+   logs `local pull request diff unavailable; using the host's diff` at
+   WARN with `repo`, `pr` and the reason.
 3. CI latency. If semantic reviews are CI-triggered, slow deterministic jobs
    delay the trigger before the gateway receives work.
 
