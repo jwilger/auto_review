@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [1.5.2] - 2026-11-18
+
+### Fixed
+
+- *(factory)* keep reviewing while each round converges instead of stopping after two (#261)
+
+### Other
+
+- *(lint)* opt ar-orchestrator into the workspace lint policy (#250)
+- *(codeql)* keep CodeQL off integration-test code (#253)
+- *(lint)* opt ar-github into the workspace lint policy (#249)
+- *(lint)* opt ar-index into the workspace lint policy (#256)
+- *(lint)* opt ar-cli into the workspace lint policy (#258)
+
 ## [1.5.1] - 2026-11-18
 
 ### Fixed
