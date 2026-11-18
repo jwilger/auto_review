@@ -79,6 +79,32 @@ treated as a low-value category. Serialized findings always include both
 fields. The review event and severity floor are derived from `severity` only;
 `category` does not change them.
 
+## `ar-review` local pull-request diff
+
+`prepare_workspace_from_clone_url_with_base(clone_url, head_sha, base_sha)`
+clones the head like `prepare_workspace_from_clone_url`, then, before the
+credential-bearing `origin` remote is removed, fetches the base commit and
+deepens both tips in the bounded steps of `MERGE_BASE_DEEPEN_STEPS` (64, 256,
+1024 and 4096 commits) until `git merge-base` finds a common ancestor. Both
+SHAs are validated as hex before git runs. A base that cannot be fetched, or no
+merge base within the bound, still returns the workspace, with
+`PreparedWorkspace::merge_base()` `None`.
+
+With a merge base, `PreparedWorkspace::pr_diff()` returns the unified diff from
+the merge base to the head, the comparison GitHub and Forgejo show for a pull
+request, so inline-comment line numbers match. It does not depend on a host's
+whole-diff endpoint or its 300-file limit. Binary files appear as
+`Binary files ... differ` lines without their content, renames as renames, and
+external diff drivers and textconv filters are disabled.
+`PreparedWorkspace::pr_changed_files()` returns the same comparison as
+`ar_forge::ChangedFile` values in the host's status vocabulary (`added`,
+`modified`, `removed`, `renamed`, `copied`, `changed`), binary files with zero
+line counts, and `patch` `None`; no host file-count cap applies. Both read
+`.gitattributes` from the merge base, not the head checkout, so a pull request
+cannot mark its own text changes as binary (THREAT-MODEL T3a). Without a merge
+base both return `WorkspaceError::Git`. The caller still applies
+`filter_diff_paths` and `cap_diff` to what reaches the model.
+
 ## Host capabilities
 
 `ReviewHost::capabilities()` (in `ar-forge`) reports which optional

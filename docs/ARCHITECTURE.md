@@ -152,7 +152,12 @@ Components receive only the workspace capability they need:
   Git configuration, prompt helpers, templates, hooks, object/index overrides,
   and SSH command overrides. Host adapters supply an already-authenticated
   clone URL through `ReviewHost`; Forgejo keeps its existing token helper while
-  GitHub uses installation-token auth material.
+  GitHub uses installation-token auth material. Given the pull request's base
+  SHA, workspace preparation also fetches a bounded amount of base and head
+  history to find the merge base, so the pull-request diff and changed-file
+  list can be computed locally instead of through a host's size-limited diff
+  endpoint. That local diff reads `.gitattributes` from the merge base, never
+  the head checkout.
 - Context building and agentic verification use read-only, path-confined access
   under the clone root with symlink escape rejection and output/result caps.
 - Agentic verifier tools are file read and search capabilities, not shell access.

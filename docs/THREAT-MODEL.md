@@ -266,6 +266,13 @@ falls back to defaults with a warning and the review proceeds, so no
 fetch failure turns into a skipped review. The same loader is the
 required path for every later repository-controlled instruction file
 (`AGENTS.md`, `CLAUDE.md`, `REVIEW.md`, path instructions).
+A PR could also add a `.gitattributes` marking its own text files
+`-diff` or `binary`, so a diff shows them as `Binary files ... differ`
+and the model never sees the change. The workspace's local
+pull-request diff (`PreparedWorkspace::pr_diff` and
+`pr_changed_files`) reads attributes from the merge base through
+`GIT_ATTR_SOURCE`, never from the head checkout, pinned by
+`workspace::tests::pr_diff_ignores_gitattributes_added_by_the_pull_request`.
 _Residual risk:_ a maintainer who merges a hostile config change to
 the base branch disables or narrows review for every open PR on its
 next review. That is a base-branch write, outside this threat. The
@@ -579,6 +586,12 @@ threat-model claims fail CI when a regression slips in:
   (not the "disabled by repo config" status), and that the changed
   file `src/lib.rs` still reaches the review prompt, so the head
   `ignored_paths: ["**"]` does not narrow the review.
+- `crates/ar-review/src/workspace.rs` test
+  `tests::pr_diff_ignores_gitattributes_added_by_the_pull_request` —
+  covers T3a (PR-supplied `.gitattributes`): the head adds
+  `notes.txt -diff` and edits `notes.txt`; the local pull-request diff
+  still shows the text change because attributes come from the merge
+  base.
 - `crates/ar-review/tests/red_team_workspace_tools.rs` — covers
   T4 (LLM tool calls escape workspace): symlink escape, chained
   symlinks, empty paths, pathological regex; and T5 (clone credential

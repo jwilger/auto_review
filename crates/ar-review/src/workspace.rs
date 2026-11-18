@@ -6,6 +6,7 @@
 //! returned [`PreparedWorkspace`] auto-deletes its tempdir when dropped.
 
 use crate::error::ReviewError;
+use ar_forge::ChangedFile;
 use std::{env, ffi::OsStr, path::Path};
 use tempfile::TempDir;
 use tokio::process::Command;
@@ -33,11 +34,119 @@ impl From<WorkspaceError> for ReviewError {
 #[derive(Debug)]
 pub struct PreparedWorkspace {
     dir: TempDir,
+    head_sha: String,
+    merge_base: Option<String>,
 }
 
 impl PreparedWorkspace {
     pub fn path(&self) -> &Path {
         self.dir.path()
+    }
+
+    /// The merge base of the pull request's base and head commits, when
+    /// the workspace was prepared with a base SHA and the merge base was
+    /// found within the bounded history fetch.
+    pub fn merge_base(&self) -> Option<&str> {
+        self.merge_base.as_deref()
+    }
+
+    /// Unified diff of the pull request from its merge base to its head:
+    /// the same comparison GitHub and Forgejo show for a pull request, so
+    /// new-side line numbers match the host's inline-comment positions.
+    ///
+    /// Git's own binary detection applies: a binary file appears as a
+    /// `Binary files ... differ` line, never with its content. External
+    /// diff drivers and textconv filters are disabled.
+    ///
+    /// Errors when the workspace has no merge base (prepared without a
+    /// base SHA, or the bounded history fetch found none).
+    pub async fn pr_diff(&self) -> Result<String, WorkspaceError> {
+        let merge_base = self.require_merge_base()?;
+        let stdout = git_stdout_in(
+            self.path(),
+            &[
+                "diff",
+                "--no-color",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--find-renames",
+                "--src-prefix=a/",
+                "--dst-prefix=b/",
+                merge_base,
+                &self.head_sha,
+            ],
+            &attributes_from(merge_base),
+        )
+        .await?;
+        Ok(String::from_utf8_lossy(&stdout).into_owned())
+    }
+
+    /// Files the pull request changes, merge base to head, in the host's
+    /// vocabulary (`added`, `modified`, `removed`, `renamed`, `copied`,
+    /// `changed`). Computed locally, so no host file-count cap applies.
+    ///
+    /// Binary files are listed with zero additions and deletions; renamed
+    /// and copied files carry their new path. `patch` is always `None`: the
+    /// hunks come from [`Self::pr_diff`].
+    pub async fn pr_changed_files(&self) -> Result<Vec<ChangedFile>, WorkspaceError> {
+        let merge_base = self.require_merge_base()?;
+        let attributes = attributes_from(merge_base);
+        let name_status = git_stdout_in(
+            self.path(),
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--find-renames",
+                "--name-status",
+                "-z",
+                merge_base,
+                &self.head_sha,
+            ],
+            &attributes,
+        )
+        .await?;
+        let numstat = git_stdout_in(
+            self.path(),
+            &[
+                "diff",
+                "--no-ext-diff",
+                "--no-textconv",
+                "--find-renames",
+                "--numstat",
+                "-z",
+                merge_base,
+                &self.head_sha,
+            ],
+            &attributes,
+        )
+        .await?;
+        let counts = parse_numstat_z(&numstat);
+        Ok(parse_name_status_z(&name_status)
+            .into_iter()
+            .map(|(status, filename)| {
+                let (additions, deletions) = counts
+                    .iter()
+                    .find(|(path, _)| *path == filename)
+                    .map_or((0, 0), |(_, lines)| *lines);
+                ChangedFile {
+                    additions,
+                    changes: additions.saturating_add(deletions),
+                    deletions,
+                    filename,
+                    patch: None,
+                    status: status.to_owned(),
+                }
+            })
+            .collect())
+    }
+
+    fn require_merge_base(&self) -> Result<&str, WorkspaceError> {
+        self.merge_base().ok_or_else(|| {
+            WorkspaceError::Git(
+                "no merge base: the workspace cannot compute the pull request diff".into(),
+            )
+        })
     }
 }
 
@@ -94,6 +203,39 @@ pub async fn prepare_workspace_from_clone_url(
     clone_url: &str,
     head_sha: &str,
 ) -> Result<PreparedWorkspace, WorkspaceError> {
+    clone_workspace(clone_url, head_sha, None).await
+}
+
+/// Clone an already-authenticated repository URL at `head_sha` and also
+/// fetch enough of `base_sha`'s history to find the pull request's merge
+/// base, so [`PreparedWorkspace::pr_diff`] can compute the diff the host
+/// shows for the pull request without the host's whole-diff endpoint.
+///
+/// Both SHAs are validated before git runs. The base history is fetched
+/// before the credential-bearing `origin` remote is removed, deepening in
+/// the bounded steps of [`MERGE_BASE_DEEPEN_STEPS`]. When the base cannot be
+/// fetched or no merge base appears within that bound, the workspace is
+/// still returned with [`PreparedWorkspace::merge_base`] `None`, so callers
+/// keep the checkout for context and fall back to the host's diff.
+pub async fn prepare_workspace_from_clone_url_with_base(
+    clone_url: &str,
+    head_sha: &str,
+    base_sha: &str,
+) -> Result<PreparedWorkspace, WorkspaceError> {
+    clone_workspace(clone_url, head_sha, Some(base_sha)).await
+}
+
+/// How many more commits each deepening round fetches behind the head and
+/// base while looking for their merge base. The sum bounds the history a
+/// review fetches, so a pull request against a huge-history repository (or
+/// unrelated histories) cannot stall the clone.
+pub const MERGE_BASE_DEEPEN_STEPS: &[u32] = &[64, 256, 1024, 4096];
+
+async fn clone_workspace(
+    clone_url: &str,
+    head_sha: &str,
+    base_sha: Option<&str>,
+) -> Result<PreparedWorkspace, WorkspaceError> {
     // Defence in depth: head_sha is interpolated into git argv
     // (`git fetch origin <sha>`, `git checkout <sha>`) and git
     // accepts intermingled `--option`-style args after positional
@@ -109,6 +251,11 @@ pub async fn prepare_workspace_from_clone_url(
             "refusing to clone: head_sha {head_sha:?} is not a hex commit SHA"
         )));
     }
+    if let Some(base_sha) = base_sha.filter(|sha| !is_valid_git_sha(sha)) {
+        return Err(WorkspaceError::Git(format!(
+            "refusing to clone: base_sha {base_sha:?} is not a hex commit SHA"
+        )));
+    }
     let dir = TempDir::new()?;
     let path = dir.path().to_owned();
 
@@ -122,6 +269,12 @@ pub async fn prepare_workspace_from_clone_url(
     .await?;
     git_in(&path, &["fetch", "--depth=1", "origin", head_sha]).await?;
     git_in(&path, &["checkout", head_sha]).await?;
+    let merge_base = match base_sha {
+        Some(base_sha) => {
+            locate_merge_base(&path, head_sha, base_sha, MERGE_BASE_DEEPEN_STEPS).await
+        }
+        None => None,
+    };
     // The clone URL carries the bot credential in its userinfo and `git
     // clone` stores it as `remote.origin.url` in `.git/config`, which the
     // LLM-driven `read_file` tool can reach. Drop the remote now that the
@@ -129,7 +282,144 @@ pub async fn prepare_workspace_from_clone_url(
     // that still holds the credential escapes (fail closed).
     git_in(&path, &["remote", "remove", "origin"]).await?;
 
-    Ok(PreparedWorkspace { dir })
+    Ok(PreparedWorkspace {
+        dir,
+        head_sha: head_sha.to_owned(),
+        merge_base,
+    })
+}
+
+/// Fetch `base_sha` into the shallow clone at `path` and deepen both tips,
+/// one entry of `deepen_steps` at a time, until git finds their merge base.
+///
+/// Returns `None` when the base cannot be fetched, a deepening fetch fails,
+/// the history is complete without a common ancestor, or the steps run out.
+/// Each failure is logged; none fails workspace preparation.
+async fn locate_merge_base(
+    path: &Path,
+    head_sha: &str,
+    base_sha: &str,
+    deepen_steps: &[u32],
+) -> Option<String> {
+    if let Err(err) = git_in(path, &["fetch", "--depth=1", "origin", base_sha]).await {
+        tracing::warn!(error = %err, "could not fetch the pull request base commit");
+        return None;
+    }
+    for step in deepen_steps {
+        if let Some(merge_base) = merge_base_of(path, head_sha, base_sha).await {
+            return Some(merge_base);
+        }
+        if !is_shallow(path).await {
+            tracing::warn!("base and head share no history; no merge base");
+            return None;
+        }
+        let deepen = format!("--deepen={step}");
+        if let Err(err) = git_in(path, &["fetch", &deepen, "origin", head_sha, base_sha]).await {
+            tracing::warn!(error = %err, "could not deepen history to find the merge base");
+            return None;
+        }
+    }
+    let merge_base = merge_base_of(path, head_sha, base_sha).await;
+    if merge_base.is_none() {
+        tracing::warn!(
+            steps = ?deepen_steps,
+            "no merge base within the bounded history fetch"
+        );
+    }
+    merge_base
+}
+
+/// `git merge-base <base> <head>`, or `None` when git finds none in the
+/// history fetched so far.
+async fn merge_base_of(path: &Path, head_sha: &str, base_sha: &str) -> Option<String> {
+    let stdout = git_stdout_in(path, &["merge-base", base_sha, head_sha], &[])
+        .await
+        .ok()?;
+    let merge_base = String::from_utf8_lossy(&stdout).trim().to_owned();
+    is_valid_git_sha(&merge_base).then_some(merge_base)
+}
+
+/// NUL-separated fields of git's `-z` output, minus the terminator after
+/// the last record. Empty fields inside a record are kept: `--numstat -z`
+/// uses one to introduce a rename's two paths.
+fn z_fields(stdout: &[u8]) -> impl Iterator<Item = String> + '_ {
+    stdout
+        .strip_suffix(b"\0")
+        .unwrap_or(stdout)
+        .split(|byte| *byte == 0)
+        .map(|field| String::from_utf8_lossy(field).into_owned())
+}
+
+/// Parse `git diff --name-status -z` into `(host status, path)` pairs.
+/// Renames and copies carry two paths; the new path is kept.
+fn parse_name_status_z(stdout: &[u8]) -> Vec<(&'static str, String)> {
+    let mut fields = z_fields(stdout);
+    let mut files = Vec::new();
+    while let Some(code) = fields.next() {
+        let two_paths = code.starts_with('R') || code.starts_with('C');
+        let path = if two_paths {
+            fields.next();
+            fields.next()
+        } else {
+            fields.next()
+        };
+        let Some(path) = path else { break };
+        files.push((host_status(&code), path));
+    }
+    files
+}
+
+/// Map a git status letter to the host's changed-file status vocabulary
+/// (GitHub's `pulls/{n}/files`), which triage and path filtering expect.
+fn host_status(code: &str) -> &'static str {
+    match code.chars().next() {
+        Some('A') => "added",
+        Some('D') => "removed",
+        Some('R') => "renamed",
+        Some('C') => "copied",
+        Some('T') => "changed",
+        _ => "modified",
+    }
+}
+
+/// Parse `git diff --numstat -z` into `(path, (additions, deletions))`.
+/// Binary files report `-` for both counts and become zero. Renames and
+/// copies end the counts field with an empty path and carry the old and
+/// new paths as the next two fields; the new path is kept.
+fn parse_numstat_z(stdout: &[u8]) -> Vec<(String, (u32, u32))> {
+    let mut fields = z_fields(stdout);
+    let mut files = Vec::new();
+    while let Some(record) = fields.next() {
+        let mut parts = record.splitn(3, '\t');
+        let additions = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        let deletions = parts.next().and_then(|n| n.parse().ok()).unwrap_or(0);
+        let path = match parts.next() {
+            Some(path) if !path.is_empty() => Some(path.to_owned()),
+            _ => {
+                fields.next();
+                fields.next()
+            }
+        };
+        let Some(path) = path else { break };
+        files.push((path, (additions, deletions)));
+    }
+    files
+}
+
+/// Environment that makes git read `.gitattributes` from `tree` instead of
+/// the head checkout. Without it a pull request could add `path -diff` and
+/// show its own text changes as `Binary files ... differ`, hiding them from
+/// review. The merge base is on the base branch, which the pull request
+/// cannot change (the same trust rule as ADR-0024's base-branch config).
+fn attributes_from(tree: &str) -> [(&'static str, &str); 1] {
+    [("GIT_ATTR_SOURCE", tree)]
+}
+
+/// Whether the clone at `path` still has a shallow history boundary.
+async fn is_shallow(path: &Path) -> bool {
+    git_stdout_in(path, &["rev-parse", "--is-shallow-repository"], &[])
+        .await
+        .map_or(true, |stdout| stdout.trim_ascii() != b"false")
 }
 
 /// Recognise a git SHA: 7–64 hex characters (covers abbreviated
@@ -151,17 +441,28 @@ async fn git<S: AsRef<OsStr>>(args: &[S]) -> Result<(), WorkspaceError> {
 }
 
 async fn git_in(dir: &Path, args: &[&str]) -> Result<(), WorkspaceError> {
+    git_stdout_in(dir, args, &[]).await.map(drop)
+}
+
+/// Run hermetic git in `dir` with extra environment `envs` and return its
+/// stdout.
+async fn git_stdout_in(
+    dir: &Path,
+    args: &[&str],
+    envs: &[(&str, &str)],
+) -> Result<Vec<u8>, WorkspaceError> {
     let output = hermetic_git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
+        .envs(envs.iter().copied())
         .output()
         .await?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).to_string();
         return Err(WorkspaceError::Git(redact_token(&stderr)));
     }
-    Ok(())
+    Ok(output.stdout)
 }
 
 fn hermetic_git_command() -> Command {
@@ -620,6 +921,381 @@ mod tests {
         assert_eq!(
             fs::read_to_string(workspace.path().join("README.md")).unwrap(),
             "hello from fixture\n"
+        );
+    }
+
+    /// Commit everything staged in `dir` with a fixed fixture identity.
+    async fn fixture_commit(dir: &Path, message: &str) -> String {
+        fixture_git(dir, &["add", "-A"]).await;
+        fixture_git(
+            dir,
+            &[
+                "-c",
+                "user.name=fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "-c",
+                "commit.gpgsign=false",
+                "commit",
+                "--quiet",
+                "-m",
+                message,
+            ],
+        )
+        .await;
+        fixture_git(dir, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string()
+    }
+
+    /// SHAs of a pull-request-shaped fixture repository.
+    struct DivergedRepo {
+        clone_url: String,
+        head_sha: String,
+        base_sha: String,
+        fork_point: String,
+    }
+
+    /// Text long enough for git's rename detection to pair the old and
+    /// new paths.
+    const RENAMED_BODY: &str = "line one of the renamed file\nline two of the renamed file\n\
+line three of the renamed file\nline four of the renamed file\n";
+
+    /// Bytes git classifies as binary (NUL bytes) with a recognisable
+    /// marker that must never appear in a diff.
+    const BINARY_BODY: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR-BINARY-MARKER\0\0";
+
+    /// Build a bare repository shaped like a pull request whose base
+    /// branch moved on after the feature branched:
+    ///
+    /// ```text
+    /// fork_point -- f1 -- f2 -- f3   (feature, head_sha)
+    ///            \
+    ///             b1 -- b2 -- b3     (main, base_sha)
+    /// ```
+    ///
+    /// The feature edits `README.md`, adds a binary `logo.png`, renames
+    /// `old_name.txt` to `new_name.txt`, and adds a `.gitattributes` that
+    /// marks `notes.txt` (which it also edits) as binary. Main edits
+    /// `base_only.txt` after the fork point.
+    async fn diverged_repo(root: &Path) -> DivergedRepo {
+        let src = root.join("src");
+        let bare = root.join("bare.git");
+        fs::create_dir_all(&src).unwrap();
+        fixture_git(&src, &["init", "--quiet", "--initial-branch=main"]).await;
+        fs::write(src.join("README.md"), "hello\n").unwrap();
+        fs::write(src.join("old_name.txt"), RENAMED_BODY).unwrap();
+        fs::write(src.join("notes.txt"), "original notes\n").unwrap();
+        fs::write(src.join("base_only.txt"), "base v0\n").unwrap();
+        let fork_point = fixture_commit(&src, "fork point").await;
+
+        fixture_git(&src, &["checkout", "--quiet", "-b", "feature"]).await;
+        fs::write(src.join("README.md"), "hello\nfeature line\n").unwrap();
+        fixture_commit(&src, "f1").await;
+        fs::write(src.join("logo.png"), BINARY_BODY).unwrap();
+        fixture_git(&src, &["mv", "old_name.txt", "new_name.txt"]).await;
+        fixture_commit(&src, "f2").await;
+        fs::write(src.join(".gitattributes"), "notes.txt -diff\n").unwrap();
+        fs::write(
+            src.join("notes.txt"),
+            "original notes\nhidden feature change\n",
+        )
+        .unwrap();
+        let head_sha = fixture_commit(&src, "f3").await;
+
+        fixture_git(&src, &["checkout", "--quiet", "main"]).await;
+        for n in 1..=3 {
+            fs::write(src.join("base_only.txt"), format!("base v{n}\n")).unwrap();
+            fixture_commit(&src, &format!("b{n}")).await;
+        }
+        let base_sha = fixture_git(&src, &["rev-parse", "HEAD"])
+            .await
+            .trim()
+            .to_string();
+
+        fixture_git(
+            root,
+            &[
+                "clone",
+                "--quiet",
+                "--bare",
+                src.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        )
+        .await;
+        DivergedRepo {
+            clone_url: format!("file://{}", bare.display()),
+            head_sha,
+            base_sha,
+            fork_point,
+        }
+    }
+
+    #[tokio::test]
+    async fn prepare_workspace_with_base_finds_the_merge_base_beyond_the_shallow_clone() {
+        let fixture = TempDir::new().unwrap();
+        let repo = diverged_repo(fixture.path()).await;
+
+        let workspace = prepare_workspace_from_clone_url_with_base(
+            &repo.clone_url,
+            &repo.head_sha,
+            &repo.base_sha,
+        )
+        .await
+        .unwrap();
+
+        assert_eq!(workspace.merge_base(), Some(repo.fork_point.as_str()));
+    }
+
+    /// Prepare a workspace for the [`diverged_repo`] fixture.
+    async fn diverged_workspace(root: &Path) -> PreparedWorkspace {
+        let repo = diverged_repo(root).await;
+        prepare_workspace_from_clone_url_with_base(&repo.clone_url, &repo.head_sha, &repo.base_sha)
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn pr_diff_compares_head_with_the_merge_base_not_the_base_tip() {
+        let fixture = TempDir::new().unwrap();
+        let workspace = diverged_workspace(fixture.path()).await;
+
+        let diff = workspace.pr_diff().await.unwrap();
+
+        assert!(
+            diff.contains("diff --git a/README.md b/README.md") && diff.contains("+feature line"),
+            "diff must hold the feature's change, got:\n{diff}"
+        );
+        assert!(
+            !diff.contains("base_only.txt"),
+            "base-branch commits after the fork point must not appear, got:\n{diff}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_diff_names_binary_files_without_their_content() {
+        let fixture = TempDir::new().unwrap();
+        let workspace = diverged_workspace(fixture.path()).await;
+
+        let diff = workspace.pr_diff().await.unwrap();
+
+        assert!(
+            diff.contains("Binary files /dev/null and b/logo.png differ"),
+            "binary file must be listed as changed, got:\n{diff}"
+        );
+        assert!(
+            !diff.contains("BINARY-MARKER"),
+            "binary content must never reach the diff, got:\n{diff}"
+        );
+    }
+
+    #[tokio::test]
+    async fn pr_diff_reports_renames_as_renames() {
+        let fixture = TempDir::new().unwrap();
+        let workspace = diverged_workspace(fixture.path()).await;
+
+        let diff = workspace.pr_diff().await.unwrap();
+
+        assert!(
+            diff.contains("diff --git a/old_name.txt b/new_name.txt")
+                && diff.contains("rename from old_name.txt")
+                && diff.contains("rename to new_name.txt"),
+            "rename must be detected, got:\n{diff}"
+        );
+    }
+
+    /// A pull request must not hide its own changes from review by adding
+    /// a `.gitattributes` that marks a text file `-diff` (THREAT-MODEL T3a):
+    /// attributes come from the merge base, never the head.
+    #[tokio::test]
+    async fn pr_diff_ignores_gitattributes_added_by_the_pull_request() {
+        let fixture = TempDir::new().unwrap();
+        let workspace = diverged_workspace(fixture.path()).await;
+
+        let diff = workspace.pr_diff().await.unwrap();
+
+        assert!(
+            diff.contains("+hidden feature change"),
+            "head-side .gitattributes must not hide a text change, got:\n{diff}"
+        );
+    }
+
+    fn changed(filename: &str, status: &str, additions: u32, deletions: u32) -> ChangedFile {
+        ChangedFile {
+            additions,
+            changes: additions + deletions,
+            deletions,
+            filename: filename.to_owned(),
+            patch: None,
+            status: status.to_owned(),
+        }
+    }
+
+    #[tokio::test]
+    async fn pr_changed_files_lists_every_file_the_pull_request_changes() {
+        let fixture = TempDir::new().unwrap();
+        let workspace = diverged_workspace(fixture.path()).await;
+
+        let mut files = workspace.pr_changed_files().await.unwrap();
+        files.sort_by(|a, b| a.filename.cmp(&b.filename));
+
+        assert_eq!(
+            files,
+            vec![
+                changed(".gitattributes", "added", 1, 0),
+                changed("README.md", "modified", 1, 0),
+                changed("logo.png", "added", 0, 0),
+                changed("new_name.txt", "renamed", 0, 0),
+                changed("notes.txt", "modified", 1, 0),
+            ]
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_workspace_with_base_rejects_non_sha_base_before_invoking_git() {
+        let err = prepare_workspace_from_clone_url_with_base(
+            "https://oauth2:tok@forgejo.example.com/alice/widgets.git",
+            "deadbeef",
+            "--upload-pack=evil",
+        )
+        .await
+        .expect_err("must reject");
+
+        assert!(
+            err.to_string()
+                .contains("base_sha \"--upload-pack=evil\" is not a hex commit SHA"),
+            "unexpected error: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn locate_merge_base_gives_up_when_the_deepen_budget_runs_out() {
+        let fixture = TempDir::new().unwrap();
+        let repo = diverged_repo(fixture.path()).await;
+        let shallow_clone = |name: &'static str| {
+            let clone = fixture.path().join(name);
+            let repo = &repo;
+            async move {
+                git(&[
+                    OsStr::new("clone"),
+                    OsStr::new("--quiet"),
+                    OsStr::new("--no-checkout"),
+                    OsStr::new("--depth=1"),
+                    OsStr::new(&repo.clone_url),
+                    clone.as_os_str(),
+                ])
+                .await
+                .unwrap();
+                fixture_git(
+                    &clone,
+                    &["fetch", "--quiet", "--depth=1", "origin", &repo.head_sha],
+                )
+                .await;
+                clone
+            }
+        };
+
+        // The fork point is three commits behind each tip: one deepening
+        // step of one commit cannot reach it, three can.
+        let short = shallow_clone("short").await;
+        let out_of_budget = locate_merge_base(&short, &repo.head_sha, &repo.base_sha, &[1]).await;
+        assert_eq!(out_of_budget, None);
+        let long = shallow_clone("long").await;
+        let enough = locate_merge_base(&long, &repo.head_sha, &repo.base_sha, &[1, 1, 1]).await;
+        assert_eq!(enough, Some(repo.fork_point.clone()));
+    }
+
+    #[tokio::test]
+    async fn prepare_workspace_with_unrelated_base_keeps_the_workspace_without_a_merge_base() {
+        let fixture = TempDir::new().unwrap();
+        let src = fixture.path().join("src");
+        let bare = fixture.path().join("bare.git");
+        fs::create_dir_all(&src).unwrap();
+        fixture_git(&src, &["init", "--quiet", "--initial-branch=main"]).await;
+        fs::write(src.join("README.md"), "head side\n").unwrap();
+        let head_sha = fixture_commit(&src, "head").await;
+        fixture_git(&src, &["checkout", "--quiet", "--orphan", "unrelated"]).await;
+        fs::write(src.join("README.md"), "unrelated side\n").unwrap();
+        let base_sha = fixture_commit(&src, "unrelated").await;
+        fixture_git(
+            fixture.path(),
+            &[
+                "clone",
+                "--quiet",
+                "--bare",
+                src.to_str().unwrap(),
+                bare.to_str().unwrap(),
+            ],
+        )
+        .await;
+        let clone_url = format!("file://{}", bare.display());
+
+        let workspace =
+            prepare_workspace_from_clone_url_with_base(&clone_url, &head_sha, &base_sha)
+                .await
+                .unwrap();
+
+        assert_eq!(workspace.merge_base(), None);
+        assert_eq!(
+            fs::read_to_string(workspace.path().join("README.md")).unwrap(),
+            "head side\n"
+        );
+        assert_eq!(fixture_git(workspace.path(), &["remote"]).await, "");
+    }
+
+    #[test]
+    fn parse_name_status_z_maps_git_codes_to_host_statuses() {
+        let stdout = b"A\0new.rs\0D\0gone.rs\0M\0kept.rs\0R087\0old.rs\0moved.rs\0\
+C100\0src.rs\0copy.rs\0T\0link\0";
+
+        assert_eq!(
+            parse_name_status_z(stdout),
+            vec![
+                ("added", "new.rs".to_owned()),
+                ("removed", "gone.rs".to_owned()),
+                ("modified", "kept.rs".to_owned()),
+                ("renamed", "moved.rs".to_owned()),
+                ("copied", "copy.rs".to_owned()),
+                ("changed", "link".to_owned()),
+            ]
+        );
+    }
+
+    #[test]
+    fn parse_numstat_z_reads_counts_binary_files_and_renames() {
+        let stdout = b"3\t1\tsrc/lib.rs\0-\t-\tlogo.png\x000\t2\t\0old.rs\0moved.rs\0";
+
+        assert_eq!(
+            parse_numstat_z(stdout),
+            vec![
+                ("src/lib.rs".to_owned(), (3, 1)),
+                ("logo.png".to_owned(), (0, 0)),
+                ("moved.rs".to_owned(), (0, 2)),
+            ]
+        );
+    }
+
+    #[test]
+    fn parsers_return_nothing_for_an_empty_diff() {
+        assert!(parse_name_status_z(b"").is_empty());
+        assert!(parse_numstat_z(b"").is_empty());
+    }
+
+    #[tokio::test]
+    async fn pr_diff_without_a_merge_base_is_an_error() {
+        let fixture = TempDir::new().unwrap();
+        let (clone_url, head_sha) = bare_repo_with_one_commit(fixture.path()).await;
+        let workspace = prepare_workspace_from_clone_url(&clone_url, &head_sha)
+            .await
+            .unwrap();
+
+        let err = workspace.pr_diff().await.expect_err("no merge base");
+
+        assert!(
+            err.to_string().contains("no merge base"),
+            "unexpected error: {err}"
         );
     }
 

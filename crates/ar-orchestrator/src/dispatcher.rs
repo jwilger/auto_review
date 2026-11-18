@@ -519,8 +519,9 @@ enum WorkspacePrepError {
 enum WorkspacePrep {
     /// The base-branch config sets `enabled: false`; nothing was cloned.
     DisabledByConfig,
-    /// Review should proceed with this config and context.
-    Ready(WorkspacePrepOutput),
+    /// Review should proceed with this config and context. Boxed because
+    /// the output (config, diff, workspace) dwarfs the data-free variant.
+    Ready(Box<WorkspacePrepOutput>),
 }
 
 /// Config, context and workspace prepared for a review.
@@ -728,7 +729,7 @@ pub async fn run_review_job(
             });
             return;
         }
-        WorkspacePrep::Ready(output) => output,
+        WorkspacePrep::Ready(output) => *output,
     };
     let WorkspacePrepOutput {
         config,
@@ -914,12 +915,12 @@ async fn prepare_workspace_context(
         Ok(workspace) => workspace,
         Err(err) => {
             tracing::warn!(error = %err, "workspace prep failed; continuing without workspace context");
-            return WorkspacePrep::Ready(WorkspacePrepOutput {
+            return WorkspacePrep::Ready(Box::new(WorkspacePrepOutput {
                 config,
                 raw_diff: String::new(),
                 repo_context: String::new(),
                 workspace: None,
-            });
+            }));
         }
     };
     // Fetch the diff once for the RAG context build. Failure here just means we
@@ -954,12 +955,12 @@ async fn prepare_workspace_context(
         })
     };
 
-    WorkspacePrep::Ready(WorkspacePrepOutput {
+    WorkspacePrep::Ready(Box::new(WorkspacePrepOutput {
         config,
         raw_diff,
         repo_context,
         workspace: Some(workspace),
-    })
+    }))
 }
 
 /// Build the RAG context for `job`, retrieving only learnings scoped
