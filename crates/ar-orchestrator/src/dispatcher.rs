@@ -1685,6 +1685,7 @@ the repository instead.\",\"errors\":[{\"resource\":\"PullRequest\",\"field\":\"
                 deletions: 0,
                 changes: 1,
                 patch: None,
+                previous_filename: None,
             }])
         }
 

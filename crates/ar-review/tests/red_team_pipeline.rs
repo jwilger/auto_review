@@ -280,6 +280,7 @@ impl ar_review::ReviewHost for RecordingHost {
             deletions: 1,
             changes: 2,
             patch: None,
+            previous_filename: None,
         }])
     }
 

@@ -118,7 +118,8 @@ impl PreparedWorkspace {
     /// `changed`). Computed locally, so no host file-count cap applies.
     ///
     /// Binary files are listed with zero additions and deletions; renamed
-    /// and copied files carry their new path. `patch` is always `None`: the
+    /// and copied files carry their new path as `filename` and their old
+    /// path as `previous_filename`. `patch` is always `None`: the
     /// hunks come from [`Self::pr_diff`].
     pub async fn pr_changed_files(&self) -> Result<Vec<ChangedFile>, WorkspaceError> {
         let merge_base = self.require_merge_base()?;
@@ -156,7 +157,7 @@ impl PreparedWorkspace {
         let counts = parse_numstat_z(&numstat);
         Ok(parse_name_status_z(&name_status)
             .into_iter()
-            .map(|(status, filename)| {
+            .map(|(status, filename, previous_filename)| {
                 let (additions, deletions) = counts
                     .iter()
                     .find(|(path, _)| *path == filename)
@@ -167,6 +168,7 @@ impl PreparedWorkspace {
                     deletions,
                     filename,
                     patch: None,
+                    previous_filename,
                     status: status.to_owned(),
                 }
             })
@@ -423,21 +425,17 @@ fn z_fields(stdout: &[u8]) -> impl Iterator<Item = String> + '_ {
         .map(|field| String::from_utf8_lossy(field).into_owned())
 }
 
-/// Parse `git diff --name-status -z` into `(host status, path)` pairs.
-/// Renames and copies carry two paths; the new path is kept.
-fn parse_name_status_z(stdout: &[u8]) -> Vec<(&'static str, String)> {
+/// Parse `git diff --name-status -z` into `(host status, path, previous
+/// path)` triples. Renames and copies carry two paths: the new path, plus
+/// the old one as the previous path.
+fn parse_name_status_z(stdout: &[u8]) -> Vec<(&'static str, String, Option<String>)> {
     let mut fields = z_fields(stdout);
     let mut files = Vec::new();
     while let Some(code) = fields.next() {
         let two_paths = code.starts_with('R') || code.starts_with('C');
-        let path = if two_paths {
-            fields.next();
-            fields.next()
-        } else {
-            fields.next()
-        };
-        let Some(path) = path else { break };
-        files.push((host_status(&code), path));
+        let previous = if two_paths { fields.next() } else { None };
+        let Some(path) = fields.next() else { break };
+        files.push((host_status(&code), path, previous));
     }
     files
 }
@@ -1293,6 +1291,7 @@ line three of the renamed file\nline four of the renamed file\n";
             deletions,
             filename: filename.to_owned(),
             patch: None,
+            previous_filename: None,
             status: status.to_owned(),
         }
     }
@@ -1311,7 +1310,10 @@ line three of the renamed file\nline four of the renamed file\n";
                 changed(".gitattributes", "added", 1, 0),
                 changed("README.md", "modified", 1, 0),
                 changed("logo.png", "added", 0, 0),
-                changed("new_name.txt", "renamed", 1, 0),
+                ChangedFile {
+                    previous_filename: Some("old_name.txt".to_owned()),
+                    ..changed("new_name.txt", "renamed", 1, 0)
+                },
                 changed("notes.txt", "modified", 1, 0),
             ]
         );
@@ -1468,12 +1470,12 @@ C100\0src.rs\0copy.rs\0T\0link\0";
         assert_eq!(
             parse_name_status_z(stdout),
             vec![
-                ("added", "new.rs".to_owned()),
-                ("removed", "gone.rs".to_owned()),
-                ("modified", "kept.rs".to_owned()),
-                ("renamed", "moved.rs".to_owned()),
-                ("copied", "copy.rs".to_owned()),
-                ("changed", "link".to_owned()),
+                ("added", "new.rs".to_owned(), None),
+                ("removed", "gone.rs".to_owned(), None),
+                ("modified", "kept.rs".to_owned(), None),
+                ("renamed", "moved.rs".to_owned(), Some("old.rs".to_owned())),
+                ("copied", "copy.rs".to_owned(), Some("src.rs".to_owned())),
+                ("changed", "link".to_owned(), None),
             ]
         );
     }

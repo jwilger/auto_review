@@ -316,6 +316,9 @@ pub struct ChangedFile {
     pub filename: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub patch: Option<String>,
+    /// Base-side path of a renamed or copied file; `None` otherwise.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub previous_filename: Option<String>,
     pub status: String,
 }
 

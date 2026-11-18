@@ -100,7 +100,9 @@ external diff drivers and textconv filters are disabled.
 `PreparedWorkspace::pr_changed_files()` returns the same comparison as
 `ar_forge::ChangedFile` values in the host's status vocabulary (`added`,
 `modified`, `removed`, `renamed`, `copied`, `changed`), binary files with zero
-line counts, and `patch` `None`; no host file-count cap applies. Both read
+line counts, renamed and copied files with their old path in
+`previous_filename` (the field GitHub and Forgejo also return from their
+changed-files APIs), and `patch` `None`; no host file-count cap applies. Both read
 `.gitattributes` from the merge base, not the head checkout, so a pull request
 cannot mark its own text changes as binary (THREAT-MODEL T3a). Without a merge
 base both return `WorkspaceError::Git`. The caller still applies
