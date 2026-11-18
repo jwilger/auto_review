@@ -2,7 +2,7 @@
 //! teach the reviewer about repo-specific conventions, false-positive
 //! patterns, project-specific gotchas, etc.
 //!
-//! Modeled after CodeRabbit's per-repo memory: at review time, the
+//! Modeled after `CodeRabbit`'s per-repo memory: at review time, the
 //! pipeline retrieves the top-K learnings whose embeddings match the
 //! diff, and injects them into the LLM prompt as supplementary
 //! context.
@@ -13,7 +13,9 @@
 
 use crate::repo_scope::RepoScope;
 use async_trait::async_trait;
+use core::cmp::Ordering;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -26,11 +28,28 @@ pub enum LearningSource {
     Inferred,
 }
 
+/// One stored learning: its text, embedding and provenance.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "ar-chat (red-team tests), ar-cli (commands), ar-gateway (startup) and ar-review \
+              (rag_context tests) build LearningRecord with a struct literal; #[non_exhaustive] \
+              would break that construction"
+)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "field order is the serialized key order of a learning record and follows the \
+              learnings table columns (id, text, source, embedding, created_at, repo, origin_pr); \
+              reordering would change that serialization"
+)]
 pub struct LearningRecord {
+    /// Store-assigned identifier, unique within one store.
     pub id: u64,
+    /// The learning text injected into review prompts.
     pub text: String,
+    /// How the learning was taught.
     pub source: LearningSource,
+    /// Embedding of `text`, compared against review queries.
     pub embedding: Vec<f32>,
     /// Unix timestamp seconds.
     pub created_at: i64,
@@ -44,6 +63,11 @@ pub struct LearningRecord {
 
 /// Which learnings [`LearningsStore::list`] returns.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "re-exported at the crate root as ar_index::LearningsFilter, where the module name \
+              does not appear; ar-chat, ar-cli and ar-gateway use it under that name"
+)]
 pub enum LearningsFilter {
     /// Every learning, scoped or not.
     All,
@@ -54,6 +78,14 @@ pub enum LearningsFilter {
 }
 
 impl LearningsFilter {
+    /// Whether `record` passes this filter.
+    #[inline]
+    #[must_use = "matching has no side effects; the verdict is the only result"]
+    #[expect(
+        clippy::pattern_type_mismatch,
+        reason = "borrowing the scope out of &LearningsFilter needs either default binding \
+                  modes or `ref` patterns, and clippy::ref_patterns forbids `ref`"
+    )]
     pub fn matches(&self, record: &LearningRecord) -> bool {
         match self {
             Self::All => true,
@@ -63,48 +95,26 @@ impl LearningsFilter {
     }
 }
 
-/// Whether `remove(id, scope)` may delete `record`. `None` is the
-/// operator path and may delete anything; a repository scope may only
-/// delete its own learnings.
-pub(crate) fn removable_in_scope(record: &LearningRecord, scope: Option<&RepoScope>) -> bool {
-    match scope {
-        None => true,
-        Some(scope) => record.repo.as_ref() == Some(scope),
-    }
-}
-
-/// Rank `records` scoped to `scope` by cosine similarity to `query`
-/// and keep the best `top_k`. Unscoped records never match.
-pub(crate) fn rank_in_scope(
-    records: impl IntoIterator<Item = LearningRecord>,
-    query: &[f32],
-    top_k: usize,
-    scope: &RepoScope,
-) -> Vec<ScoredLearning> {
-    let mut scored: Vec<ScoredLearning> = records
-        .into_iter()
-        .filter(|r| r.repo.as_ref() == Some(scope))
-        .map(|learning| ScoredLearning {
-            score: cosine_similarity(query, &learning.embedding),
-            learning,
-        })
-        .collect();
-    scored.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-    });
-    scored.truncate(top_k);
-    scored
-}
-
+/// A learning with its similarity to a query embedding.
 #[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "ar-review (rag_context tests) builds ScoredLearning with a struct literal; \
+              #[non_exhaustive] would break that construction"
+)]
 pub struct ScoredLearning {
+    /// The matched learning.
     pub learning: LearningRecord,
+    /// Cosine similarity between the query and `learning.embedding`.
     pub score: f32,
 }
 
 #[derive(Debug, thiserror::Error)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "re-exported at the crate root as ar_index::LearningsError, where the module name \
+              does not appear; ar-chat and ar-gateway match on it under that name"
+)]
 pub enum LearningsError {
     #[error("learning {0} not found")]
     NotFound(u64),
@@ -113,6 +123,12 @@ pub enum LearningsError {
 }
 
 #[async_trait]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "re-exported at the crate root as ar_index::LearningsStore, where the module name \
+              does not appear; ar-chat, ar-cli, ar-gateway, ar-orchestrator and ar-review use \
+              it under that name"
+)]
 pub trait LearningsStore: Send + Sync {
     async fn add(
         &self,
@@ -126,12 +142,6 @@ pub trait LearningsStore: Send + Sync {
 
     async fn list(&self, filter: LearningsFilter) -> Result<Vec<LearningRecord>, LearningsError>;
 
-    /// Remove learning `id`. With `Some(scope)` the learning must belong
-    /// to that repository, otherwise the call fails with
-    /// [`LearningsError::NotFound`] and nothing is removed. `None` is
-    /// the operator CLI path and removes any learning by id.
-    async fn remove(&self, id: u64, scope: Option<&RepoScope>) -> Result<(), LearningsError>;
-
     /// The `top_k` learnings of `scope` most similar to `query`.
     /// Learnings of other repositories and unscoped learnings are never
     /// returned.
@@ -141,45 +151,72 @@ pub trait LearningsStore: Send + Sync {
         top_k: usize,
         scope: &RepoScope,
     ) -> Result<Vec<ScoredLearning>, LearningsError>;
+
+    /// Remove learning `id`. With `Some(scope)` the learning must belong
+    /// to that repository, otherwise the call fails with
+    /// [`LearningsError::NotFound`] and nothing is removed. `None` is
+    /// the operator CLI path and removes any learning by id.
+    async fn remove(&self, id: u64, scope: Option<&RepoScope>) -> Result<(), LearningsError>;
 }
 
+/// Process-local learnings store; contents are lost on restart.
 pub struct InMemoryLearningsStore {
-    inner: tokio::sync::Mutex<InMemoryState>,
+    /// Records and id counter, behind one lock so ids stay unique.
+    inner: Mutex<InMemoryState>,
 }
 
+/// Mutable state of [`InMemoryLearningsStore`].
 struct InMemoryState {
+    /// Id handed to the next added learning.
     next_id: u64,
+    /// Every stored learning, in insertion order.
     records: Vec<LearningRecord>,
 }
 
 impl Default for InMemoryLearningsStore {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl InMemoryLearningsStore {
-    pub fn new() -> Self {
+    /// Seed a store with existing records, including legacy unscoped
+    /// ones. New ids continue after the highest seeded id.
+    #[inline]
+    #[must_use = "building a store has no side effects; the store is the only result"]
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "ids are store-assigned counters far below u64::MAX, so the next id after the \
+                  highest seeded id cannot overflow"
+    )]
+    pub fn from_records(records: Vec<LearningRecord>) -> Self {
+        let next_id = records.iter().map(|record| record.id).max().unwrap_or(0) + 1;
         Self {
-            inner: tokio::sync::Mutex::new(InMemoryState {
-                next_id: 1,
-                records: Vec::new(),
-            }),
+            inner: Mutex::new(InMemoryState { next_id, records }),
         }
     }
 
-    /// Seed a store with existing records, including legacy unscoped
-    /// ones. New ids continue after the highest seeded id.
-    pub fn from_records(records: Vec<LearningRecord>) -> Self {
-        let next_id = records.iter().map(|r| r.id).max().unwrap_or(0) + 1;
+    /// An empty store whose first learning gets id 1.
+    #[inline]
+    #[must_use = "building a store has no side effects; the store is the only result"]
+    pub fn new() -> Self {
         Self {
-            inner: tokio::sync::Mutex::new(InMemoryState { next_id, records }),
+            inner: Mutex::new(InMemoryState {
+                next_id: 1,
+                records: Vec::new(),
+            }),
         }
     }
 }
 
 #[async_trait]
 impl LearningsStore for InMemoryLearningsStore {
+    #[inline]
+    #[expect(
+        clippy::arithmetic_side_effects,
+        reason = "ids are a per-process counter starting at 1 that cannot reach u64::MAX"
+    )]
     async fn add(
         &self,
         text: String,
@@ -205,6 +242,7 @@ impl LearningsStore for InMemoryLearningsStore {
         Ok(record)
     }
 
+    #[inline]
     async fn list(&self, filter: LearningsFilter) -> Result<Vec<LearningRecord>, LearningsError> {
         Ok(self
             .inner
@@ -212,24 +250,12 @@ impl LearningsStore for InMemoryLearningsStore {
             .await
             .records
             .iter()
-            .filter(|r| filter.matches(r))
+            .filter(|record| filter.matches(record))
             .cloned()
             .collect())
     }
 
-    async fn remove(&self, id: u64, scope: Option<&RepoScope>) -> Result<(), LearningsError> {
-        let mut state = self.inner.lock().await;
-        let Some(index) = state
-            .records
-            .iter()
-            .position(|r| r.id == id && removable_in_scope(r, scope))
-        else {
-            return Err(LearningsError::NotFound(id));
-        };
-        state.records.remove(index);
-        Ok(())
-    }
-
+    #[inline]
     async fn query_nearest(
         &self,
         query: &[f32],
@@ -239,19 +265,90 @@ impl LearningsStore for InMemoryLearningsStore {
         let records = self.inner.lock().await.records.clone();
         Ok(rank_in_scope(records, query, top_k, scope))
     }
+
+    #[inline]
+    async fn remove(&self, id: u64, scope: Option<&RepoScope>) -> Result<(), LearningsError> {
+        let mut state = self.inner.lock().await;
+        let Some(index) = state
+            .records
+            .iter()
+            .position(|record| record.id == id && removable_in_scope(record, scope))
+        else {
+            return Err(LearningsError::NotFound(id));
+        };
+        state.records.remove(index);
+        Ok(())
+    }
 }
 
-pub(crate) fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
+/// Cosine similarity of two equal-length vectors; 0.0 when the lengths
+/// differ, either is empty, or either has zero magnitude.
+#[expect(
+    clippy::pub_with_shorthand,
+    reason = "pub(crate) is the spelling rustfmt and the Rust reference use; the restriction \
+              group also enables the opposite pub_without_shorthand, so one spelling must carry \
+              an expectation"
+)]
+#[expect(
+    clippy::float_arithmetic,
+    reason = "cosine similarity over f32 embeddings is inherently float arithmetic"
+)]
+pub(crate) fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() || left.is_empty() {
         return 0.0;
     }
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let dot: f32 = left.iter().zip(right.iter()).map(|(x, y)| x * y).sum();
+    let norm_a = left.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b = right.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm_a == 0.0 || norm_b == 0.0 {
         return 0.0;
     }
     dot / (norm_a * norm_b)
+}
+
+/// Rank `records` scoped to `scope` by cosine similarity to `query`
+/// and keep the best `top_k`. Unscoped records never match.
+#[expect(
+    clippy::pub_with_shorthand,
+    reason = "pub(crate) is the spelling rustfmt and the Rust reference use; the restriction \
+              group also enables the opposite pub_without_shorthand, so one spelling must carry \
+              an expectation"
+)]
+pub(crate) fn rank_in_scope(
+    records: impl IntoIterator<Item = LearningRecord>,
+    query: &[f32],
+    top_k: usize,
+    scope: &RepoScope,
+) -> Vec<ScoredLearning> {
+    let mut scored: Vec<ScoredLearning> = records
+        .into_iter()
+        .filter(|record| record.repo.as_ref() == Some(scope))
+        .map(|learning| ScoredLearning {
+            score: cosine_similarity(query, &learning.embedding),
+            learning,
+        })
+        .collect();
+    scored.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(Ordering::Equal)
+    });
+    scored.truncate(top_k);
+    scored
+}
+
+/// Whether `remove(id, scope)` may delete `record`. `None` is the
+/// operator path and may delete anything; a repository scope may only
+/// delete its own learnings.
+#[expect(
+    clippy::pub_with_shorthand,
+    reason = "pub(crate) is the spelling rustfmt and the Rust reference use; the restriction \
+              group also enables the opposite pub_without_shorthand, so one spelling must carry \
+              an expectation"
+)]
+pub(crate) fn removable_in_scope(record: &LearningRecord, scope: Option<&RepoScope>) -> bool {
+    scope.is_none_or(|repo| record.repo.as_ref() == Some(repo))
 }
 
 #[cfg(test)]
@@ -276,9 +373,13 @@ mod tests {
 
     /// One learning in each of two scopes plus one unscoped legacy row,
     /// all with the same embedding.
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn two_scopes_and_legacy() -> (InMemoryLearningsStore, LearningRecord, LearningRecord) {
         let store = InMemoryLearningsStore::from_records(vec![legacy(1, "legacy")]);
-        let a = store
+        let in_a = store
             .add(
                 "from a".into(),
                 LearningSource::Chat,
@@ -289,7 +390,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let b = store
+        let in_b = store
             .add(
                 "from b".into(),
                 LearningSource::Chat,
@@ -300,10 +401,18 @@ mod tests {
             )
             .await
             .unwrap();
-        (store, a, b)
+        (store, in_a, in_b)
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn query_nearest_excludes_other_scopes_and_unscoped_records() {
         let (store, a, _) = two_scopes_and_legacy().await;
         let r = store
@@ -317,6 +426,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn scoped_remove_only_deletes_records_of_that_scope() {
         let (store, a, b) = two_scopes_and_legacy().await;
         let scope_b = RepoScope::new("acme", "b");
@@ -335,6 +456,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn list_filters_by_scope() {
         let (store, a, b) = two_scopes_and_legacy().await;
         assert_eq!(a.repo, Some(RepoScope::new("acme", "a")));
@@ -352,6 +481,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn add_then_list_returns_inserted_record() {
         let store = InMemoryLearningsStore::new();
         let r = store
@@ -359,7 +500,7 @@ mod tests {
                 "Forbid unwrap() outside tests.".into(),
                 LearningSource::Guideline,
                 vec![0.1, 0.2, 0.3],
-                1700000000,
+                1_700_000_000,
                 &scope(),
                 Some(7),
             )
@@ -373,6 +514,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn ids_are_monotonic() {
         let store = InMemoryLearningsStore::new();
         let r1 = store
@@ -401,6 +546,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn remove_drops_the_matching_record() {
         let store = InMemoryLearningsStore::new();
         let r = store
@@ -419,6 +576,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
     async fn remove_returns_not_found_for_unknown_id() {
         let store = InMemoryLearningsStore::new();
         let err = store.remove(999, None).await.expect_err("err");
@@ -426,6 +587,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn query_nearest_returns_top_k_by_similarity() {
         let store = InMemoryLearningsStore::new();
         store
@@ -469,6 +642,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn query_nearest_only_returns_learnings_of_the_requested_scope() {
         let store = InMemoryLearningsStore::new();
         let scope_a = RepoScope::new("acme", "a");
@@ -501,6 +682,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn query_against_empty_store_returns_empty_vec() {
         let store = InMemoryLearningsStore::new();
         let r = store.query_nearest(&[1.0, 0.0], 5, &scope()).await.unwrap();

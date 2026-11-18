@@ -1,15 +1,22 @@
 //! Pluggable vector store. The pipeline only knows the trait;
-//! production swaps in a LanceDB backing, tests swap in
+//! production swaps in a `LanceDB` backing, tests swap in
 //! [`InMemoryVectorStore`] (cosine similarity, no persistence).
 //!
-//! Decoupling now means LanceDB integration lands as one new file
+//! Decoupling now means `LanceDB` integration lands as one new file
 //! later without touching the review pipeline.
 
 use crate::embed::EmbeddedSymbol;
 use async_trait::async_trait;
+use core::cmp::Ordering;
 use std::collections::HashMap;
+use tokio::sync::Mutex;
 
 #[derive(Debug, thiserror::Error)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "re-exported at the crate root as ar_index::VectorStoreError, where the module name \
+              does not appear; ar-review imports it under that name"
+)]
 pub enum VectorStoreError {
     #[error("storage error: {0}")]
     Storage(String),
@@ -17,10 +24,14 @@ pub enum VectorStoreError {
 
 #[async_trait]
 pub trait VectorStore: Send + Sync {
-    /// Insert one or more pre-embedded symbols. Re-inserting an
-    /// existing symbol (same path + name + line_start) replaces the
-    /// previous record.
-    async fn upsert(&self, symbols: &[EmbeddedSymbol]) -> Result<(), VectorStoreError>;
+    /// Look up rows whose `(path, name, line_start)` matches one of
+    /// `keys`. Returned map is keyed by the same tuple. Callers use
+    /// this to skip embedding work for symbols whose stored content
+    /// matches the current snippet.
+    async fn fetch_by_keys(
+        &self,
+        keys: &[(String, String, u32)],
+    ) -> Result<HashMap<(String, String, u32), EmbeddedSymbol>, VectorStoreError>;
 
     /// Return the `top_k` symbols whose embeddings are most similar
     /// to `query`, descending by similarity score (1.0 = identical
@@ -31,90 +42,74 @@ pub trait VectorStore: Send + Sync {
         top_k: usize,
     ) -> Result<Vec<ScoredSymbol>, VectorStoreError>;
 
-    /// Look up rows whose `(path, name, line_start)` matches one of
-    /// `keys`. Returned map is keyed by the same tuple. Callers use
-    /// this to skip embedding work for symbols whose stored content
-    /// matches the current snippet.
-    async fn fetch_by_keys(
-        &self,
-        keys: &[(String, String, u32)],
-    ) -> Result<HashMap<(String, String, u32), EmbeddedSymbol>, VectorStoreError>;
+    /// Insert one or more pre-embedded symbols. Re-inserting an
+    /// existing symbol (same path + name + `line_start`) replaces the
+    /// previous record.
+    async fn upsert(&self, symbols: &[EmbeddedSymbol]) -> Result<(), VectorStoreError>;
 }
 
+/// A stored symbol with its similarity to a query embedding.
 #[derive(Debug, Clone, PartialEq)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "ar-review (context_builder, rag_context) builds ScoredSymbol with a struct \
+              literal; #[non_exhaustive] would break that construction"
+)]
 pub struct ScoredSymbol {
-    pub symbol: EmbeddedSymbol,
+    /// Cosine similarity between the query and `symbol.embedding`.
     pub score: f32,
+    /// The matched symbol, including its stored embedding.
+    pub symbol: EmbeddedSymbol,
 }
 
 /// Pure-Rust, no-persistence vector store. Replaces records on
-/// duplicate keys (path + symbol name + line_start). Cosine-
+/// duplicate keys (path + symbol name + `line_start`). Cosine-
 /// similarity search over the full set on every query — fine for the
-/// thousands of symbols a typical repo produces; LanceDB takes over
+/// thousands of symbols a typical repo produces; `LanceDB` takes over
 /// when scale demands it.
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "re-exported at the crate root as ar_index::InMemoryVectorStore, where the module \
+              name does not appear; ar-gateway and ar-review use it under that name"
+)]
 pub struct InMemoryVectorStore {
-    inner: tokio::sync::Mutex<Vec<EmbeddedSymbol>>,
+    /// Every stored symbol, at most one per `(path, name, line_start)` key.
+    inner: Mutex<Vec<EmbeddedSymbol>>,
 }
 
 impl Default for InMemoryVectorStore {
+    #[inline]
     fn default() -> Self {
         Self::new()
     }
 }
 
 impl InMemoryVectorStore {
-    pub fn new() -> Self {
-        Self {
-            inner: tokio::sync::Mutex::new(Vec::new()),
-        }
+    /// Whether the store holds no symbols.
+    #[inline]
+    pub async fn is_empty(&self) -> bool {
+        self.inner.lock().await.is_empty()
     }
 
+    /// Number of stored symbols.
+    #[inline]
     pub async fn len(&self) -> usize {
         self.inner.lock().await.len()
     }
 
-    pub async fn is_empty(&self) -> bool {
-        self.inner.lock().await.is_empty()
+    /// An empty store.
+    #[inline]
+    #[must_use = "building a store has no side effects; the store is the only result"]
+    pub fn new() -> Self {
+        Self {
+            inner: Mutex::new(Vec::new()),
+        }
     }
 }
 
 #[async_trait]
 impl VectorStore for InMemoryVectorStore {
-    async fn upsert(&self, symbols: &[EmbeddedSymbol]) -> Result<(), VectorStoreError> {
-        let mut guard = self.inner.lock().await;
-        for sym in symbols {
-            let key = symbol_key(sym);
-            if let Some(existing) = guard.iter_mut().find(|s| symbol_key(s) == key) {
-                *existing = sym.clone();
-            } else {
-                guard.push(sym.clone());
-            }
-        }
-        Ok(())
-    }
-
-    async fn query_nearest(
-        &self,
-        query: &[f32],
-        top_k: usize,
-    ) -> Result<Vec<ScoredSymbol>, VectorStoreError> {
-        let guard = self.inner.lock().await;
-        let mut scored: Vec<ScoredSymbol> = guard
-            .iter()
-            .map(|s| ScoredSymbol {
-                symbol: s.clone(),
-                score: cosine_similarity(query, &s.embedding),
-            })
-            .collect();
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        scored.truncate(top_k);
-        Ok(scored)
-    }
-
+    #[inline]
     async fn fetch_by_keys(
         &self,
         keys: &[(String, String, u32)],
@@ -129,23 +124,68 @@ impl VectorStore for InMemoryVectorStore {
         }
         Ok(out)
     }
+
+    #[inline]
+    async fn query_nearest(
+        &self,
+        query: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<ScoredSymbol>, VectorStoreError> {
+        let guard = self.inner.lock().await;
+        let mut scored: Vec<ScoredSymbol> = guard
+            .iter()
+            .map(|stored| ScoredSymbol {
+                symbol: stored.clone(),
+                score: cosine_similarity(query, &stored.embedding),
+            })
+            .collect();
+        scored.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(Ordering::Equal)
+        });
+        scored.truncate(top_k);
+        Ok(scored)
+    }
+
+    #[inline]
+    async fn upsert(&self, symbols: &[EmbeddedSymbol]) -> Result<(), VectorStoreError> {
+        let mut guard = self.inner.lock().await;
+        for sym in symbols {
+            let key = symbol_key(sym);
+            if let Some(existing) = guard.iter_mut().find(|stored| symbol_key(stored) == key) {
+                *existing = sym.clone();
+            } else {
+                guard.push(sym.clone());
+            }
+        }
+        Ok(())
+    }
 }
 
-fn symbol_key(s: &EmbeddedSymbol) -> (String, String, u32) {
+/// Identity of a stored symbol: `(path, name, line_start)`.
+fn symbol_key(symbol: &EmbeddedSymbol) -> (String, String, u32) {
     (
-        s.indexed.path.clone(),
-        s.indexed.symbol.name.clone(),
-        s.indexed.symbol.line_start,
+        symbol.indexed.path.clone(),
+        symbol.indexed.symbol.name.clone(),
+        symbol.indexed.symbol.line_start,
     )
 }
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
+/// Cosine similarity of two equal-length vectors; 0.0 when the lengths
+/// differ, either is empty, or either has zero magnitude.
+#[expect(
+    clippy::float_arithmetic,
+    reason = "cosine similarity over f32 embeddings is inherently float arithmetic"
+)]
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() || left.is_empty() {
         return 0.0;
     }
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let dot: f32 = left.iter().zip(right.iter()).map(|(x, y)| x * y).sum();
+    let norm_a = left.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b = right.iter().map(|x| x * x).sum::<f32>().sqrt();
     if norm_a == 0.0 || norm_b == 0.0 {
         return 0.0;
     }
@@ -157,6 +197,7 @@ mod tests {
     use super::*;
     use crate::symbols::{Symbol, SymbolKind};
     use crate::walker::IndexedSymbol;
+    use core::slice;
 
     fn esym(path: &str, name: &str, line_start: u32, embedding: Vec<f32>) -> EmbeddedSymbol {
         EmbeddedSymbol {
@@ -175,6 +216,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn empty_store_returns_no_matches() {
         let store = InMemoryVectorStore::new();
         let r = store.query_nearest(&[1.0, 0.0], 5).await.unwrap();
@@ -183,6 +236,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn upsert_then_query_returns_ranked_results() {
         let store = InMemoryVectorStore::new();
         let east = esym("a.rs", "east", 1, vec![1.0, 0.0]);
@@ -212,12 +277,24 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn upsert_replaces_on_same_key() {
         let store = InMemoryVectorStore::new();
         let v1 = esym("a.rs", "x", 1, vec![1.0, 0.0]);
         store.upsert(&[v1]).await.unwrap();
         let v2 = esym("a.rs", "x", 1, vec![0.0, 1.0]);
-        store.upsert(std::slice::from_ref(&v2)).await.unwrap();
+        store.upsert(slice::from_ref(&v2)).await.unwrap();
         assert_eq!(store.len().await, 1);
         let r = store.query_nearest(&[0.0, 1.0], 1).await.unwrap();
         assert!(r[0].score > 0.99);
@@ -225,6 +302,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::shadow_unrelated,
+        reason = "`r` is rebound to each query result in turn and read by the assertions after it; renaming would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn cosine_handles_zero_vectors_and_mismatched_lengths() {
         let store = InMemoryVectorStore::new();
         store
@@ -239,6 +332,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::get_unwrap,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn in_memory_fetch_by_keys_returns_only_matches() {
         let store = InMemoryVectorStore::new();
         store
@@ -256,11 +357,28 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got.len(), 1);
-        let key = ("a.rs".to_string(), "foo".to_string(), 1u32);
+        let key: (String, String, u32) = ("a.rs".to_owned(), "foo".to_owned(), 1);
         assert_eq!(got.get(&key).unwrap().embedding, vec![1.0]);
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_sign_loss,
+        reason = "test fixture values (small loop indices, ids and byte lengths) are far inside the target type's range, so the cast is exact"
+    )]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "the loop bounds are small literals that take the default integer type; the fixture casts each index explicitly where it needs u32"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn top_k_caps_results() {
         let store = InMemoryVectorStore::new();
         for i in 0..10 {

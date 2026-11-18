@@ -3,33 +3,87 @@
 //! Walks a parsed source file and emits one [`Symbol`] per top-level
 //! definition (functions, structs, enums, traits, impl blocks, etc.).
 //! Used by Milestone 2 RAG indexing as the first step before embedding
-//! and storing in LanceDB.
+//! and storing in `LanceDB`.
 //!
 //! Currently Rust-only. Other languages (Python, TypeScript, Go) will
 //! land as separate modules as their grammars get wired in.
 
 use serde::{Deserialize, Serialize};
 use std::sync::OnceLock;
-use tree_sitter::{Node, Parser, Query, QueryCursor, StreamingIterator};
+use tree_sitter::{Language, Node, Parser, Query, QueryCursor, StreamingIterator as _};
+
+/// Tree-sitter query capturing Go definitions and their names.
+const GO_QUERY_SOURCE: &str = "
+(function_declaration name: (identifier) @name)              @function
+(method_declaration   name: (field_identifier) @name)        @function
+(type_declaration (type_spec name: (type_identifier) @name)) @struct
+(const_declaration (const_spec name: (identifier) @name))    @constant
+(var_declaration   (var_spec   name: (identifier) @name))    @static
+";
+
+/// Tree-sitter query capturing Python definitions and their names.
+const PYTHON_QUERY_SOURCE: &str = "
+(function_definition  name: (identifier) @name)         @function
+(class_definition     name: (identifier) @name)         @struct
+(decorated_definition (function_definition name: (identifier) @name)) @function
+(decorated_definition (class_definition    name: (identifier) @name)) @struct
+";
+
+/// Tree-sitter query capturing Rust definitions and their names.
+const RUST_QUERY_SOURCE: &str = "
+(function_item       name: (identifier) @name)             @function
+(struct_item         name: (type_identifier) @name)        @struct
+(enum_item           name: (type_identifier) @name)        @enum
+(trait_item          name: (type_identifier) @name)        @trait
+(impl_item           type: (type_identifier) @name)        @impl
+(mod_item            name: (identifier) @name)             @module
+(type_item           name: (type_identifier) @name)        @type_alias
+(const_item          name: (identifier) @name)             @constant
+(static_item         name: (identifier) @name)             @static
+(macro_definition    name: (identifier) @name)             @macro
+";
+
+/// Tree-sitter query capturing TypeScript/TSX definitions and their names.
+const TS_QUERY_SOURCE: &str = "
+(function_declaration  name: (identifier) @name)            @function
+(class_declaration     name: (type_identifier) @name)       @struct
+(interface_declaration name: (type_identifier) @name)       @trait
+(enum_declaration      name: (identifier) @name)            @enum
+(type_alias_declaration name: (type_identifier) @name)      @type_alias
+(method_definition     name: (property_identifier) @name)   @function
+";
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum SymbolKind {
-    Function,
-    Struct,
-    Enum,
-    Trait,
-    Impl,
-    Module,
-    TypeAlias,
     Constant,
-    Static,
+    Enum,
+    Function,
+    Impl,
     Macro,
+    Module,
+    Static,
+    Struct,
+    Trait,
+    TypeAlias,
 }
 
+/// One extracted definition: its kind, name and line range.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "ar-review (rag_context tests) builds Symbol with a struct literal; \
+              #[non_exhaustive] would break that construction"
+)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "field order is the serialized key order, flattened into IndexedSymbol and \
+              EmbeddedSymbol; reordering would change that serialization"
+)]
 pub struct Symbol {
+    /// What kind of definition this is.
     pub kind: SymbolKind,
+    /// The defined identifier as written in the source.
     pub name: String,
     /// 1-based start line in the source file.
     pub line_start: u32,
@@ -47,129 +101,74 @@ pub enum ExtractError {
     Query(String),
 }
 
-const RUST_QUERY_SOURCE: &str = r#"
-(function_item       name: (identifier) @name)             @function
-(struct_item         name: (type_identifier) @name)        @struct
-(enum_item           name: (type_identifier) @name)        @enum
-(trait_item          name: (type_identifier) @name)        @trait
-(impl_item           type: (type_identifier) @name)        @impl
-(mod_item            name: (identifier) @name)             @module
-(type_item           name: (type_identifier) @name)        @type_alias
-(const_item          name: (identifier) @name)             @constant
-(static_item         name: (identifier) @name)             @static
-(macro_definition    name: (identifier) @name)             @macro
-"#;
-
-fn rust_query() -> Result<&'static Query, ExtractError> {
-    static QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
-    let entry = QUERY.get_or_init(|| {
-        let lang: tree_sitter::Language = tree_sitter_rust::LANGUAGE.into();
-        Query::new(&lang, RUST_QUERY_SOURCE).map_err(|e| e.to_string())
-    });
-    entry.as_ref().map_err(|e| ExtractError::Query(e.clone()))
-}
-
-const PYTHON_QUERY_SOURCE: &str = r#"
-(function_definition  name: (identifier) @name)         @function
-(class_definition     name: (identifier) @name)         @struct
-(decorated_definition (function_definition name: (identifier) @name)) @function
-(decorated_definition (class_definition    name: (identifier) @name)) @struct
-"#;
-
-fn python_query() -> Result<&'static Query, ExtractError> {
-    static QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
-    let entry = QUERY.get_or_init(|| {
-        let lang: tree_sitter::Language = tree_sitter_python::LANGUAGE.into();
-        Query::new(&lang, PYTHON_QUERY_SOURCE).map_err(|e| e.to_string())
-    });
-    entry.as_ref().map_err(|e| ExtractError::Query(e.clone()))
-}
-
-/// Extract top-level symbols from a Python source file. `class` defs map
-/// to [`SymbolKind::Struct`] for cross-language uniformity (the
-/// downstream embedder doesn't care about Python-vs-Rust nomenclature).
-pub fn extract_python_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
-    extract_with(source, tree_sitter_python::LANGUAGE.into(), python_query()?)
-}
-
-const TS_QUERY_SOURCE: &str = r#"
-(function_declaration  name: (identifier) @name)            @function
-(class_declaration     name: (type_identifier) @name)       @struct
-(interface_declaration name: (type_identifier) @name)       @trait
-(enum_declaration      name: (identifier) @name)            @enum
-(type_alias_declaration name: (type_identifier) @name)      @type_alias
-(method_definition     name: (property_identifier) @name)   @function
-"#;
-
-fn ts_query() -> Result<&'static Query, ExtractError> {
-    static QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
-    let entry = QUERY.get_or_init(|| {
-        let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
-        Query::new(&lang, TS_QUERY_SOURCE).map_err(|e| e.to_string())
-    });
-    entry.as_ref().map_err(|e| ExtractError::Query(e.clone()))
-}
-
-fn tsx_query() -> Result<&'static Query, ExtractError> {
-    static QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
-    let entry = QUERY.get_or_init(|| {
-        let lang: tree_sitter::Language = tree_sitter_typescript::LANGUAGE_TSX.into();
-        Query::new(&lang, TS_QUERY_SOURCE).map_err(|e| e.to_string())
-    });
-    entry.as_ref().map_err(|e| ExtractError::Query(e.clone()))
-}
-
-/// Extract top-level symbols from a TypeScript (`.ts`) source file.
-/// Interfaces map to [`SymbolKind::Trait`] for cross-language uniformity
-/// (they're the closest analog to Rust's trait concept).
-pub fn extract_typescript_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
-    extract_with(
-        source,
-        tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
-        ts_query()?,
-    )
-}
-
-/// Extract top-level symbols from a TSX (`.tsx`) source file. Same
-/// semantics as [`extract_typescript_symbols`] but with the TSX
-/// grammar so JSX expressions parse correctly.
-pub fn extract_tsx_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
-    extract_with(
-        source,
-        tree_sitter_typescript::LANGUAGE_TSX.into(),
-        tsx_query()?,
-    )
-}
-
-const GO_QUERY_SOURCE: &str = r#"
-(function_declaration name: (identifier) @name)              @function
-(method_declaration   name: (field_identifier) @name)        @function
-(type_declaration (type_spec name: (type_identifier) @name)) @struct
-(const_declaration (const_spec name: (identifier) @name))    @constant
-(var_declaration   (var_spec   name: (identifier) @name))    @static
-"#;
-
-fn go_query() -> Result<&'static Query, ExtractError> {
-    static QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
-    let entry = QUERY.get_or_init(|| {
-        let lang: tree_sitter::Language = tree_sitter_go::LANGUAGE.into();
-        Query::new(&lang, GO_QUERY_SOURCE).map_err(|e| e.to_string())
-    });
-    entry.as_ref().map_err(|e| ExtractError::Query(e.clone()))
-}
-
 /// Extract top-level symbols from a Go source file. Method definitions
 /// map to [`SymbolKind::Function`]; `type` declarations (whether
 /// struct, interface, or alias) all map to [`SymbolKind::Struct`] for
 /// cross-language uniformity. `const` decls are Constants, `var` decls
 /// are Statics.
+///
+/// # Errors
+///
+/// Returns an [`ExtractError`] when the grammar, parse or query fails.
+#[inline]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "re-exported at the crate root as ar_index::extract_go_symbols, the name alongside \
+              its sibling per-language extractors; renaming one would break that family"
+)]
 pub fn extract_go_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
-    extract_with(source, tree_sitter_go::LANGUAGE.into(), go_query()?)
+    extract_with(source, &tree_sitter_go::LANGUAGE.into(), go_query()?)
+}
+
+/// Extract top-level symbols from a Python source file. `class` defs map
+/// to [`SymbolKind::Struct`] for cross-language uniformity (the
+/// downstream embedder doesn't care about Python-vs-Rust nomenclature).
+///
+/// # Errors
+///
+/// Returns an [`ExtractError`] when the grammar, parse or query fails.
+#[inline]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "re-exported at the crate root as ar_index::extract_python_symbols, the name \
+              alongside its sibling per-language extractors; renaming one would break that family"
+)]
+pub fn extract_python_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
+    extract_with(
+        source,
+        &tree_sitter_python::LANGUAGE.into(),
+        python_query()?,
+    )
+}
+
+/// Extract top-level symbols from a Rust source file.
+///
+/// # Errors
+///
+/// Returns an [`ExtractError`] when the grammar, parse or query fails.
+#[inline]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "re-exported at the crate root as ar_index::extract_rust_symbols, the name alongside \
+              its sibling per-language extractors; renaming one would break that family"
+)]
+pub fn extract_rust_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
+    extract_with(source, &tree_sitter_rust::LANGUAGE.into(), rust_query()?)
 }
 
 /// Pick the right extractor for a path's extension and run it.
 /// Returns `Ok(vec![])` for paths in unsupported languages so a
 /// repo-wide walk doesn't fail on the first JSON file it hits.
+///
+/// # Errors
+///
+/// Returns an [`ExtractError`] when the chosen extractor fails.
+#[inline]
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "the path is lowercased into `lower` first, so these suffix checks already match \
+              extensions case-insensitively"
+)]
 pub fn extract_symbols_for_path(path: &str, source: &str) -> Result<Vec<Symbol>, ExtractError> {
     let lower = path.to_ascii_lowercase();
     if lower.ends_with(".rs") {
@@ -193,14 +192,75 @@ pub fn extract_symbols_for_path(path: &str, source: &str) -> Result<Vec<Symbol>,
     }
 }
 
-fn extract_with(
-    source: &str,
-    lang: tree_sitter::Language,
-    query: &Query,
-) -> Result<Vec<Symbol>, ExtractError> {
+/// Extract top-level symbols from a TSX (`.tsx`) source file. Same
+/// semantics as [`extract_typescript_symbols`] but with the TSX
+/// grammar so JSX expressions parse correctly.
+///
+/// # Errors
+///
+/// Returns an [`ExtractError`] when the grammar, parse or query fails.
+#[inline]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "re-exported at the crate root as ar_index::extract_tsx_symbols, the name alongside \
+              its sibling per-language extractors; renaming one would break that family"
+)]
+pub fn extract_tsx_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
+    extract_with(
+        source,
+        &tree_sitter_typescript::LANGUAGE_TSX.into(),
+        tsx_query()?,
+    )
+}
+
+/// Extract top-level symbols from a TypeScript (`.ts`) source file.
+/// Interfaces map to [`SymbolKind::Trait`] for cross-language uniformity
+/// (they're the closest analog to Rust's trait concept).
+///
+/// # Errors
+///
+/// Returns an [`ExtractError`] when the grammar, parse or query fails.
+#[inline]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "re-exported at the crate root as ar_index::extract_typescript_symbols, the name \
+              alongside its sibling per-language extractors; renaming one would break that family"
+)]
+pub fn extract_typescript_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
+    extract_with(
+        source,
+        &tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into(),
+        ts_query()?,
+    )
+}
+
+/// Parse `source` with `lang` and turn every `query` match that has both
+/// a `@name` capture and a kind capture into a [`Symbol`].
+#[expect(
+    clippy::map_err_ignore,
+    reason = "ExtractError::Language carries no payload and its Display text is fixed; the \
+              grammar version mismatch detail is dropped to keep that error variant unchanged"
+)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "tree-sitter capture indices always index the capture_names of the query that \
+              produced them"
+)]
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "tree-sitter capture indices are u32 that widen losslessly to usize, and row numbers \
+              of a parsed source file stay far below u32::MAX lines"
+)]
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "a tree-sitter row is a 0-based line index of an in-memory source, so row + 1 cannot \
+              overflow usize"
+)]
+fn extract_with(source: &str, lang: &Language, query: &Query) -> Result<Vec<Symbol>, ExtractError> {
     let mut parser = Parser::new();
     parser
-        .set_language(&lang)
+        .set_language(lang)
         .map_err(|_| ExtractError::Language)?;
     let tree = parser.parse(source, None).ok_or(ExtractError::Parse)?;
     let root = tree.root_node();
@@ -209,28 +269,30 @@ fn extract_with(
     let capture_names = query.capture_names();
 
     let mut out = Vec::new();
-    while let Some(m) = matches.next() {
+    while let Some(query_match) = matches.next() {
         let mut kind: Option<SymbolKind> = None;
         let mut name: Option<String> = None;
         let mut node_for_range: Option<Node> = None;
-        for cap in m.captures() {
+        for cap in query_match.captures() {
             let cap_name = capture_names[cap.index as usize];
             if cap_name == "name" {
                 name = Some(
                     cap.node
                         .utf8_text(source.as_bytes())
                         .unwrap_or_default()
-                        .to_string(),
+                        .to_owned(),
                 );
-            } else if let Some(k) = kind_from_capture(cap_name) {
-                kind = Some(k);
+                continue;
+            }
+            if let Some(found) = kind_from_capture(cap_name) {
+                kind = Some(found);
                 node_for_range = Some(cap.node);
             }
         }
-        if let (Some(kind), Some(name), Some(node)) = (kind, name, node_for_range) {
+        if let (Some(found_kind), Some(found_name), Some(node)) = (kind, name, node_for_range) {
             out.push(Symbol {
-                kind,
-                name,
+                kind: found_kind,
+                name: found_name,
                 line_start: (node.start_position().row + 1) as u32,
                 line_end: (node.end_position().row + 1) as u32,
             });
@@ -239,11 +301,20 @@ fn extract_with(
     Ok(out)
 }
 
-/// Extract top-level symbols from a Rust source file.
-pub fn extract_rust_symbols(source: &str) -> Result<Vec<Symbol>, ExtractError> {
-    extract_with(source, tree_sitter_rust::LANGUAGE.into(), rust_query()?)
+/// Lazily compiled [`GO_QUERY_SOURCE`], shared by every Go extraction.
+fn go_query() -> Result<&'static Query, ExtractError> {
+    static QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
+    let entry = QUERY.get_or_init(|| {
+        let lang: Language = tree_sitter_go::LANGUAGE.into();
+        Query::new(&lang, GO_QUERY_SOURCE).map_err(|error| error.to_string())
+    });
+    entry
+        .as_ref()
+        .map_err(|message| ExtractError::Query(message.clone()))
 }
 
+/// Symbol kind named by a query capture, or `None` for captures (such as
+/// `@name`) that do not name a kind.
 fn kind_from_capture(cap_name: &str) -> Option<SymbolKind> {
     Some(match cap_name {
         "function" => SymbolKind::Function,
@@ -260,23 +331,79 @@ fn kind_from_capture(cap_name: &str) -> Option<SymbolKind> {
     })
 }
 
+/// Lazily compiled [`PYTHON_QUERY_SOURCE`], shared by every Python extraction.
+fn python_query() -> Result<&'static Query, ExtractError> {
+    static QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
+    let entry = QUERY.get_or_init(|| {
+        let lang: Language = tree_sitter_python::LANGUAGE.into();
+        Query::new(&lang, PYTHON_QUERY_SOURCE).map_err(|error| error.to_string())
+    });
+    entry
+        .as_ref()
+        .map_err(|message| ExtractError::Query(message.clone()))
+}
+
+/// Lazily compiled [`RUST_QUERY_SOURCE`], shared by every Rust extraction.
+fn rust_query() -> Result<&'static Query, ExtractError> {
+    static QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
+    let entry = QUERY.get_or_init(|| {
+        let lang: Language = tree_sitter_rust::LANGUAGE.into();
+        Query::new(&lang, RUST_QUERY_SOURCE).map_err(|error| error.to_string())
+    });
+    entry
+        .as_ref()
+        .map_err(|message| ExtractError::Query(message.clone()))
+}
+
+/// [`TS_QUERY_SOURCE`] compiled for the TypeScript grammar.
+fn ts_query() -> Result<&'static Query, ExtractError> {
+    static QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
+    let entry = QUERY.get_or_init(|| {
+        let lang: Language = tree_sitter_typescript::LANGUAGE_TYPESCRIPT.into();
+        Query::new(&lang, TS_QUERY_SOURCE).map_err(|error| error.to_string())
+    });
+    entry
+        .as_ref()
+        .map_err(|message| ExtractError::Query(message.clone()))
+}
+
+/// [`TS_QUERY_SOURCE`] compiled for the TSX grammar.
+fn tsx_query() -> Result<&'static Query, ExtractError> {
+    static QUERY: OnceLock<Result<Query, String>> = OnceLock::new();
+    let entry = QUERY.get_or_init(|| {
+        let lang: Language = tree_sitter_typescript::LANGUAGE_TSX.into();
+        Query::new(&lang, TS_QUERY_SOURCE).map_err(|error| error.to_string())
+    });
+    entry
+        .as_ref()
+        .map_err(|message| ExtractError::Query(message.clone()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     fn names(symbols: &[Symbol]) -> Vec<&str> {
-        symbols.iter().map(|s| s.name.as_str()).collect()
+        symbols.iter().map(|symbol| symbol.name.as_str()).collect()
     }
 
     fn kinds(symbols: &[Symbol], name: &str) -> Vec<SymbolKind> {
         symbols
             .iter()
-            .filter(|s| s.name == name)
-            .map(|s| s.kind)
+            .filter(|symbol| symbol.name == name)
+            .map(|symbol| symbol.kind)
             .collect()
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn extracts_function_struct_and_enum() {
         let src = "\
 pub fn add(a: i32, b: i32) -> i32 { a + b }
@@ -301,6 +428,14 @@ pub enum Direction {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn extracts_traits_and_impls() {
         let src = "\
 pub trait Greet { fn hello(&self) -> String; }
@@ -319,6 +454,14 @@ impl Greet for Greeter {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn line_ranges_are_one_based_and_inclusive() {
         let src = "\
 fn one() {}
@@ -336,6 +479,14 @@ fn two() {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn extracts_constants_and_statics() {
         let src = "\
 pub const MAX: u32 = 100;
@@ -347,6 +498,14 @@ pub static GREETING: &str = \"hi\";
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn extracts_modules_and_type_aliases() {
         let src = "\
 pub mod nested {
@@ -363,12 +522,32 @@ pub type UserId = u64;
     }
 
     #[test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn empty_source_yields_zero_symbols() {
         let s = extract_rust_symbols("").expect("ok");
         assert!(s.is_empty());
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn extracts_python_functions_and_classes() {
         let src = "\
 def add(a, b):
@@ -395,6 +574,14 @@ class Config:
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn python_decorated_functions_count() {
         let src = "\
 @property
@@ -412,6 +599,14 @@ def helper():
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn extracts_typescript_function_class_interface_enum() {
         let src = "\
 export function add(a: number, b: number): number {
@@ -448,6 +643,14 @@ export type UserId = string;
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn extracts_tsx_with_jsx_expressions() {
         let src = "\
 import * as React from 'react';
@@ -469,6 +672,14 @@ export class App extends React.Component {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn extracts_go_functions_methods_types() {
         let src = "\
 package main
@@ -504,12 +715,32 @@ var DefaultName = \"world\"
     }
 
     #[test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn go_empty_source_yields_zero_symbols() {
         let s = extract_go_symbols("").expect("ok");
         assert!(s.is_empty());
     }
 
     #[test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     fn extract_symbols_for_path_dispatches_by_extension() {
         let rust = "fn x() {}";
         let py = "def x(): pass";
@@ -523,12 +754,12 @@ var DefaultName = \"world\"
         assert!(!extract_symbols_for_path("foo.py", py).unwrap().is_empty());
         assert!(!extract_symbols_for_path("a.ts", ts).unwrap().is_empty());
         // .tsx parses JSX
-        let _ = extract_symbols_for_path("a.tsx", tsx).unwrap();
+        let _: Vec<Symbol> = extract_symbols_for_path("a.tsx", tsx).unwrap();
         // .js/.jsx/.mjs/.cjs route to TypeScript grammar (TS is a JS superset)
-        let _ = extract_symbols_for_path("a.js", ts).unwrap();
-        let _ = extract_symbols_for_path("a.jsx", ts).unwrap();
-        let _ = extract_symbols_for_path("a.mjs", ts).unwrap();
-        let _ = extract_symbols_for_path("a.cjs", ts).unwrap();
+        let _: Vec<Symbol> = extract_symbols_for_path("a.js", ts).unwrap();
+        let _: Vec<Symbol> = extract_symbols_for_path("a.jsx", ts).unwrap();
+        let _: Vec<Symbol> = extract_symbols_for_path("a.mjs", ts).unwrap();
+        let _: Vec<Symbol> = extract_symbols_for_path("a.cjs", ts).unwrap();
         // Unknown extension → empty, not error
         assert!(extract_symbols_for_path("data.json", unknown)
             .unwrap()
@@ -537,29 +768,69 @@ var DefaultName = \"world\"
     }
 
     #[test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     fn extract_symbols_for_path_is_case_insensitive_on_extension() {
         let rust = "fn x() {}";
         assert!(!extract_symbols_for_path("Foo.RS", rust).unwrap().is_empty());
     }
 
     #[test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn typescript_empty_source_yields_zero_symbols() {
         let s = extract_typescript_symbols("").expect("ok");
         assert!(s.is_empty());
     }
 
     #[test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn python_empty_source_yields_zero_symbols() {
         let s = extract_python_symbols("").expect("ok");
         assert!(s.is_empty());
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn malformed_source_does_not_panic() {
         // tree-sitter is error-tolerant — it parses what it can.
         let s = extract_rust_symbols("fn broken( {").expect("ok");
         // Whatever it returns, the call must not panic. We accept any
         // (potentially empty) result here.
-        let _ = s;
+        let _: Vec<Symbol> = s;
     }
 }

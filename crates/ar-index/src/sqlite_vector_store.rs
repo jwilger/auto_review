@@ -4,7 +4,7 @@
 //! Mirrors the [`SqliteLearningsStore`](crate::SqliteLearningsStore)
 //! pattern: BLOB-encoded f32 vectors, full-table-scan cosine
 //! similarity. Sufficient for tens-of-thousands of symbols (the
-//! scale a single Forgejo instance's repos accumulate); LanceDB
+//! scale a single Forgejo instance's repos accumulate); `LanceDB`
 //! drops in behind the same trait when ANN search becomes worth
 //! the protoc + Arrow build-dep weight.
 
@@ -13,12 +13,16 @@ use crate::symbols::{Symbol, SymbolKind};
 use crate::vector_store::{ScoredSymbol, VectorStore, VectorStoreError};
 use crate::walker::IndexedSymbol;
 use async_trait::async_trait;
-use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions};
-use sqlx::{Pool, Row, Sqlite};
+use core::cmp::Ordering;
+use core::str::FromStr as _;
+use sqlx::sqlite::{SqliteConnectOptions, SqlitePoolOptions, SqliteRow};
+use sqlx::{Pool, Row as _, Sqlite};
+use std::collections::HashMap;
 use std::path::Path;
-use std::str::FromStr;
 
-const SCHEMA: &str = r#"
+/// Idempotent DDL for the `vector_symbols` table, keyed by
+/// `(path, name, line_start)`.
+const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS vector_symbols (
     path        TEXT NOT NULL,
     name        TEXT NOT NULL,
@@ -29,141 +33,102 @@ CREATE TABLE IF NOT EXISTS vector_symbols (
     embedding   BLOB NOT NULL,
     PRIMARY KEY (path, name, line_start)
 );
-"#;
+";
 
+/// [`VectorStore`] persisted in a SQLite database.
 pub struct SqliteVectorStore {
+    /// Connection pool over the database holding `vector_symbols`.
     pool: Pool<Sqlite>,
 }
 
 impl SqliteVectorStore {
+    /// Open a fresh in-memory database. For tests and for callers
+    /// that want SQLite-shaped semantics without persistence.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VectorStoreError::Storage`] when the database cannot be
+    /// opened or the schema cannot be applied.
+    #[inline]
+    pub async fn in_memory() -> Result<Self, VectorStoreError> {
+        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
+            .map_err(|error| VectorStoreError::Storage(error.to_string()))?;
+        let pool = SqlitePoolOptions::new()
+            .max_connections(1)
+            .connect_with(opts)
+            .await
+            .map_err(|error| VectorStoreError::Storage(error.to_string()))?;
+        sqlx::query(SCHEMA)
+            .execute(&pool)
+            .await
+            .map_err(|error| VectorStoreError::Storage(error.to_string()))?;
+        Ok(Self { pool })
+    }
+
+    /// Whether the store holds no symbols.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VectorStoreError::Storage`] when the count query fails.
+    #[inline]
+    pub async fn is_empty(&self) -> Result<bool, VectorStoreError> {
+        Ok(self.len().await? == 0)
+    }
+
+    /// Number of stored symbols.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VectorStoreError::Storage`] when the count query fails.
+    #[inline]
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "COUNT(*) is never negative and a row count of an on-disk table fits usize"
+    )]
+    pub async fn len(&self) -> Result<usize, VectorStoreError> {
+        let row = sqlx::query("SELECT COUNT(*) AS n FROM vector_symbols")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|error| VectorStoreError::Storage(error.to_string()))?;
+        let n: i64 = row.get("n");
+        Ok(n as usize)
+    }
+
     /// Open or create a database at `path`. Schema is applied
     /// idempotently on first connect.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`VectorStoreError::Storage`] when the database cannot be
+    /// opened or created, or the schema cannot be applied.
+    #[inline]
     pub async fn open(path: &Path) -> Result<Self, VectorStoreError> {
         let opts = SqliteConnectOptions::from_str(&format!("sqlite://{}", path.to_string_lossy()))
-            .map_err(|e| VectorStoreError::Storage(e.to_string()))?
+            .map_err(|error| VectorStoreError::Storage(error.to_string()))?
             .create_if_missing(true);
         let pool = SqlitePoolOptions::new()
             .max_connections(4)
             .connect_with(opts)
             .await
-            .map_err(|e| VectorStoreError::Storage(e.to_string()))?;
+            .map_err(|error| VectorStoreError::Storage(error.to_string()))?;
         sqlx::query(SCHEMA)
             .execute(&pool)
             .await
-            .map_err(|e| VectorStoreError::Storage(e.to_string()))?;
+            .map_err(|error| VectorStoreError::Storage(error.to_string()))?;
         Ok(Self { pool })
-    }
-
-    /// Open a fresh in-memory database. For tests and for callers
-    /// that want SQLite-shaped semantics without persistence.
-    pub async fn in_memory() -> Result<Self, VectorStoreError> {
-        let opts = SqliteConnectOptions::from_str("sqlite::memory:")
-            .map_err(|e| VectorStoreError::Storage(e.to_string()))?;
-        let pool = SqlitePoolOptions::new()
-            .max_connections(1)
-            .connect_with(opts)
-            .await
-            .map_err(|e| VectorStoreError::Storage(e.to_string()))?;
-        sqlx::query(SCHEMA)
-            .execute(&pool)
-            .await
-            .map_err(|e| VectorStoreError::Storage(e.to_string()))?;
-        Ok(Self { pool })
-    }
-
-    pub async fn len(&self) -> Result<usize, VectorStoreError> {
-        let row = sqlx::query("SELECT COUNT(*) AS n FROM vector_symbols")
-            .fetch_one(&self.pool)
-            .await
-            .map_err(|e| VectorStoreError::Storage(e.to_string()))?;
-        let n: i64 = row.get("n");
-        Ok(n as usize)
-    }
-
-    pub async fn is_empty(&self) -> Result<bool, VectorStoreError> {
-        Ok(self.len().await? == 0)
     }
 }
 
 #[async_trait]
 impl VectorStore for SqliteVectorStore {
-    async fn upsert(&self, symbols: &[EmbeddedSymbol]) -> Result<(), VectorStoreError> {
-        if symbols.is_empty() {
-            return Ok(());
-        }
-        let mut tx = self
-            .pool
-            .begin()
-            .await
-            .map_err(|e| VectorStoreError::Storage(e.to_string()))?;
-        for sym in symbols {
-            let bytes = vec_f32_to_bytes(&sym.embedding);
-            let kind_str = symbol_kind_to_str(sym.indexed.symbol.kind);
-            sqlx::query(
-                r#"
-                INSERT INTO vector_symbols
-                    (path, name, kind, line_start, line_end, content, embedding)
-                VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(path, name, line_start) DO UPDATE SET
-                    kind       = excluded.kind,
-                    line_end   = excluded.line_end,
-                    content    = excluded.content,
-                    embedding  = excluded.embedding
-                "#,
-            )
-            .bind(&sym.indexed.path)
-            .bind(&sym.indexed.symbol.name)
-            .bind(kind_str)
-            .bind(sym.indexed.symbol.line_start as i64)
-            .bind(sym.indexed.symbol.line_end as i64)
-            .bind(&sym.content)
-            .bind(&bytes)
-            .execute(&mut *tx)
-            .await
-            .map_err(|e| VectorStoreError::Storage(e.to_string()))?;
-        }
-        tx.commit()
-            .await
-            .map_err(|e| VectorStoreError::Storage(e.to_string()))?;
-        Ok(())
-    }
-
-    async fn query_nearest(
-        &self,
-        query: &[f32],
-        top_k: usize,
-    ) -> Result<Vec<ScoredSymbol>, VectorStoreError> {
-        if top_k == 0 {
-            return Ok(Vec::new());
-        }
-        let rows = sqlx::query(
-            "SELECT path, name, kind, line_start, line_end, content, embedding FROM vector_symbols",
-        )
-        .fetch_all(&self.pool)
-        .await
-        .map_err(|e| VectorStoreError::Storage(e.to_string()))?;
-
-        let mut scored: Vec<ScoredSymbol> = Vec::with_capacity(rows.len());
-        for row in rows {
-            let symbol = row_to_embedded(row)?;
-            let score = cosine_similarity(query, &symbol.embedding);
-            scored.push(ScoredSymbol { symbol, score });
-        }
-        scored.sort_by(|a, b| {
-            b.score
-                .partial_cmp(&a.score)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
-        scored.truncate(top_k);
-        Ok(scored)
-    }
-
+    #[inline]
     async fn fetch_by_keys(
         &self,
         keys: &[(String, String, u32)],
-    ) -> Result<std::collections::HashMap<(String, String, u32), EmbeddedSymbol>, VectorStoreError>
-    {
-        let mut out = std::collections::HashMap::new();
+    ) -> Result<HashMap<(String, String, u32), EmbeddedSymbol>, VectorStoreError> {
+        let mut out = HashMap::new();
         if keys.is_empty() {
             return Ok(out);
         }
@@ -180,16 +145,16 @@ impl VectorStore for SqliteVectorStore {
             sql.push_str(&clauses.join(" OR "));
             // The statement is assembled solely from static fragments and
             // `?` placeholders; every caller-supplied value is bound below.
-            let mut q = sqlx::query(sqlx::AssertSqlSafe(sql));
-            for (path, name, line_start) in chunk {
-                q = q.bind(path).bind(name).bind(*line_start as i64);
+            let mut statement = sqlx::query(sqlx::AssertSqlSafe(sql));
+            for key in chunk {
+                statement = statement.bind(&key.0).bind(&key.1).bind(i64::from(key.2));
             }
-            let rows = q
+            let rows = statement
                 .fetch_all(&self.pool)
                 .await
-                .map_err(|e| VectorStoreError::Storage(e.to_string()))?;
+                .map_err(|error| VectorStoreError::Storage(error.to_string()))?;
             for row in rows {
-                let symbol = row_to_embedded(row)?;
+                let symbol = row_to_embedded(&row)?;
                 let key = (
                     symbol.indexed.path.clone(),
                     symbol.indexed.symbol.name.clone(),
@@ -200,9 +165,126 @@ impl VectorStore for SqliteVectorStore {
         }
         Ok(out)
     }
+
+    #[inline]
+    async fn query_nearest(
+        &self,
+        query: &[f32],
+        top_k: usize,
+    ) -> Result<Vec<ScoredSymbol>, VectorStoreError> {
+        if top_k == 0 {
+            return Ok(Vec::new());
+        }
+        let rows = sqlx::query(
+            "SELECT path, name, kind, line_start, line_end, content, embedding FROM vector_symbols",
+        )
+        .fetch_all(&self.pool)
+        .await
+        .map_err(|error| VectorStoreError::Storage(error.to_string()))?;
+
+        let mut scored: Vec<ScoredSymbol> = Vec::with_capacity(rows.len());
+        for row in rows {
+            let symbol = row_to_embedded(&row)?;
+            let score = cosine_similarity(query, &symbol.embedding);
+            scored.push(ScoredSymbol { score, symbol });
+        }
+        scored.sort_by(|left, right| {
+            right
+                .score
+                .partial_cmp(&left.score)
+                .unwrap_or(Ordering::Equal)
+        });
+        scored.truncate(top_k);
+        Ok(scored)
+    }
+
+    #[inline]
+    async fn upsert(&self, symbols: &[EmbeddedSymbol]) -> Result<(), VectorStoreError> {
+        if symbols.is_empty() {
+            return Ok(());
+        }
+        let mut tx = self
+            .pool
+            .begin()
+            .await
+            .map_err(|error| VectorStoreError::Storage(error.to_string()))?;
+        for sym in symbols {
+            let bytes = vec_f32_to_bytes(&sym.embedding);
+            let kind_str = symbol_kind_to_str(sym.indexed.symbol.kind);
+            sqlx::query(
+                "
+                INSERT INTO vector_symbols
+                    (path, name, kind, line_start, line_end, content, embedding)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(path, name, line_start) DO UPDATE SET
+                    kind       = excluded.kind,
+                    line_end   = excluded.line_end,
+                    content    = excluded.content,
+                    embedding  = excluded.embedding
+                ",
+            )
+            .bind(&sym.indexed.path)
+            .bind(&sym.indexed.symbol.name)
+            .bind(kind_str)
+            .bind(i64::from(sym.indexed.symbol.line_start))
+            .bind(i64::from(sym.indexed.symbol.line_end))
+            .bind(&sym.content)
+            .bind(&bytes)
+            .execute(&mut *tx)
+            .await
+            .map_err(|error| VectorStoreError::Storage(error.to_string()))?;
+        }
+        tx.commit()
+            .await
+            .map_err(|error| VectorStoreError::Storage(error.to_string()))?;
+        Ok(())
+    }
 }
 
-fn row_to_embedded(row: sqlx::sqlite::SqliteRow) -> Result<EmbeddedSymbol, VectorStoreError> {
+/// Decode a little-endian f32 BLOB written by [`vec_f32_to_bytes`].
+/// Trailing bytes that do not fill a whole f32 are ignored.
+#[expect(
+    clippy::little_endian_bytes,
+    reason = "the embedding BLOB format is little-endian f32 by design; reading it any other way \
+              would misdecode every stored vector"
+)]
+fn bytes_to_vec_f32(bytes: &[u8]) -> Vec<f32> {
+    bytes
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .map(|chunk| f32::from_le_bytes(*chunk))
+        .collect()
+}
+
+/// Cosine similarity of two equal-length vectors; 0.0 when the lengths
+/// differ, either is empty, or either has zero magnitude.
+#[expect(
+    clippy::float_arithmetic,
+    reason = "cosine similarity over f32 embeddings is inherently float arithmetic"
+)]
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() || left.is_empty() {
+        return 0.0;
+    }
+    let dot: f32 = left.iter().zip(right.iter()).map(|(x, y)| x * y).sum();
+    let norm_a = left.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b = right.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        return 0.0;
+    }
+    dot / (norm_a * norm_b)
+}
+
+/// Rebuild an [`EmbeddedSymbol`] from a `vector_symbols` row.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::cast_sign_loss,
+    reason = "line_start and line_end were written from u32 line numbers by upsert, so the \
+              stored i64 values convert back to u32 losslessly"
+)]
+fn row_to_embedded(row: &SqliteRow) -> Result<EmbeddedSymbol, VectorStoreError> {
     let path: String = row.get("path");
     let name: String = row.get("name");
     let kind_str: String = row.get("kind");
@@ -226,23 +308,9 @@ fn row_to_embedded(row: sqlx::sqlite::SqliteRow) -> Result<EmbeddedSymbol, Vecto
     })
 }
 
-fn symbol_kind_to_str(k: SymbolKind) -> &'static str {
-    match k {
-        SymbolKind::Function => "function",
-        SymbolKind::Struct => "struct",
-        SymbolKind::Enum => "enum",
-        SymbolKind::Trait => "trait",
-        SymbolKind::Impl => "impl",
-        SymbolKind::Module => "module",
-        SymbolKind::TypeAlias => "type_alias",
-        SymbolKind::Constant => "constant",
-        SymbolKind::Static => "static",
-        SymbolKind::Macro => "macro",
-    }
-}
-
-fn symbol_kind_from_str(s: &str) -> Result<SymbolKind, VectorStoreError> {
-    match s {
+/// Parse the `kind` column written by [`symbol_kind_to_str`].
+fn symbol_kind_from_str(stored: &str) -> Result<SymbolKind, VectorStoreError> {
+    match stored {
         "function" => Ok(SymbolKind::Function),
         "struct" => Ok(SymbolKind::Struct),
         "enum" => Ok(SymbolKind::Enum),
@@ -259,39 +327,45 @@ fn symbol_kind_from_str(s: &str) -> Result<SymbolKind, VectorStoreError> {
     }
 }
 
-fn vec_f32_to_bytes(v: &[f32]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(v.len() * 4);
-    for f in v {
-        out.extend_from_slice(&f.to_le_bytes());
+/// Stable `kind` column value for each [`SymbolKind`].
+fn symbol_kind_to_str(kind: SymbolKind) -> &'static str {
+    match kind {
+        SymbolKind::Function => "function",
+        SymbolKind::Struct => "struct",
+        SymbolKind::Enum => "enum",
+        SymbolKind::Trait => "trait",
+        SymbolKind::Impl => "impl",
+        SymbolKind::Module => "module",
+        SymbolKind::TypeAlias => "type_alias",
+        SymbolKind::Constant => "constant",
+        SymbolKind::Static => "static",
+        SymbolKind::Macro => "macro",
+    }
+}
+
+/// Encode an embedding as a little-endian f32 BLOB.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "the input slice already occupies len * 4 bytes in memory, so the byte count cannot \
+              overflow usize"
+)]
+#[expect(
+    clippy::little_endian_bytes,
+    reason = "the embedding BLOB format is little-endian f32 by design; writing it any other way \
+              would make stored vectors unreadable"
+)]
+fn vec_f32_to_bytes(values: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(values.len() * 4);
+    for value in values {
+        out.extend_from_slice(&value.to_le_bytes());
     }
     out
-}
-
-fn bytes_to_vec_f32(bytes: &[u8]) -> Vec<f32> {
-    bytes
-        .as_chunks::<4>()
-        .0
-        .iter()
-        .map(|c| f32::from_le_bytes(*c))
-        .collect()
-}
-
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
-        return 0.0;
-    }
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if norm_a == 0.0 || norm_b == 0.0 {
-        return 0.0;
-    }
-    dot / (norm_a * norm_b)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use core::f32::consts::PI;
 
     fn esym(path: &str, name: &str, line_start: u32, embedding: Vec<f32>) -> EmbeddedSymbol {
         EmbeddedSymbol {
@@ -310,6 +384,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn empty_store_query_returns_no_matches() {
         let store = SqliteVectorStore::in_memory().await.expect("open");
         assert_eq!(store.len().await.unwrap(), 0);
@@ -318,6 +408,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn upsert_then_query_returns_results_ranked_by_similarity() {
         let store = SqliteVectorStore::in_memory().await.expect("open");
         store
@@ -341,6 +447,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn upsert_replaces_record_with_same_primary_key() {
         let store = SqliteVectorStore::in_memory().await.expect("open");
         let v1 = esym("a.rs", "x", 1, vec![1.0, 0.0]);
@@ -360,6 +482,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn upsert_with_empty_slice_is_noop_and_does_not_error() {
         let store = SqliteVectorStore::in_memory().await.expect("open");
         store.upsert(&[]).await.unwrap();
@@ -367,6 +497,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn top_k_caps_results() {
         let store = SqliteVectorStore::in_memory().await.expect("open");
         for i in 0..10 {
@@ -380,6 +522,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn top_k_zero_returns_empty_without_db_round_trip() {
         let store = SqliteVectorStore::in_memory().await.expect("open");
         store
@@ -391,9 +549,25 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn embedding_roundtrip_preserves_floats() {
         let store = SqliteVectorStore::in_memory().await.expect("open");
-        let original = vec![0.1f32, -0.2, std::f32::consts::PI, -1e6, 0.0];
+        let original: Vec<f32> = vec![0.1, -0.2, PI, -1e6, 0.0];
         store
             .upsert(&[esym("a.rs", "v", 1, original.clone())])
             .await
@@ -403,6 +577,26 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::shadow_unrelated,
+        reason = "`r` is rebound to each query result in turn and read by the assertions after it; renaming would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn cosine_handles_zero_vectors_and_mismatched_lengths() {
         let store = SqliteVectorStore::in_memory().await.expect("open");
         store
@@ -417,6 +611,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn open_creates_file_when_missing() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("vectors.sqlite");
@@ -434,6 +644,23 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::as_conversions,
+        clippy::cast_possible_truncation,
+        reason = "test fixture values (small loop indices, ids and byte lengths) are far inside the target type's range, so the cast is exact"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn each_symbol_kind_roundtrips_through_storage() {
         // Catches drift: if a new SymbolKind variant is added but
         // the *_to_str / *_from_str pair is forgotten, this test
@@ -452,24 +679,32 @@ mod tests {
             SymbolKind::Macro,
         ];
         for (i, kind) in kinds.iter().enumerate() {
-            let mut s = esym("a.rs", &format!("s{i}"), (i as u32) + 1, vec![1.0, 0.0]);
-            s.indexed.symbol.kind = *kind;
-            store.upsert(&[s]).await.unwrap();
+            let mut symbol = esym("a.rs", &format!("s{i}"), (i as u32) + 1, vec![1.0, 0.0]);
+            symbol.indexed.symbol.kind = *kind;
+            store.upsert(&[symbol]).await.unwrap();
         }
         let r = store.query_nearest(&[1.0, 0.0], 100).await.unwrap();
         assert_eq!(r.len(), kinds.len());
         // Verify each kind round-tripped through the DB intact.
         let mut got: Vec<SymbolKind> = r
             .into_iter()
-            .map(|s| s.symbol.indexed.symbol.kind)
+            .map(|scored| scored.symbol.indexed.symbol.kind)
             .collect();
-        got.sort_by_key(|k| symbol_kind_to_str(*k));
+        got.sort_by_key(|kind| symbol_kind_to_str(*kind));
         let mut expected: Vec<SymbolKind> = kinds.to_vec();
-        expected.sort_by_key(|k| symbol_kind_to_str(*k));
+        expected.sort_by_key(|kind| symbol_kind_to_str(*kind));
         assert_eq!(got, expected);
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn fetch_by_keys_returns_only_matching_keys() {
         let store = SqliteVectorStore::in_memory().await.expect("open");
         store
@@ -487,12 +722,20 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(got.len(), 1);
-        let key = ("a.rs".to_string(), "foo".to_string(), 1u32);
+        let key: (String, String, u32) = ("a.rs".to_owned(), "foo".to_owned(), 1);
         let cached = got.get(&key).expect("foo present");
         assert_eq!(cached.embedding, vec![1.0]);
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn distinct_paths_with_same_symbol_name_coexist() {
         // Two files defining `helper` at line 1 should produce
         // two rows; primary key includes path.

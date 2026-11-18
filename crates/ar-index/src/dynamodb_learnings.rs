@@ -1,18 +1,21 @@
-//! DynamoDB-backed [`LearningsStore`] for AgentCore cold-start survival.
+//! DynamoDB-backed [`LearningsStore`] for `AgentCore` cold-start survival.
 
 use crate::learnings::{
     rank_in_scope, removable_in_scope, LearningRecord, LearningSource, LearningsError,
     LearningsFilter, LearningsStore, ScoredLearning,
 };
 use crate::repo_scope::{parse_legacy_correction_repo, RepoScope};
+use alloc::sync::Arc;
 use async_trait::async_trait;
 use aws_sdk_dynamodb::types::{AttributeValue, ReturnValue};
 use std::collections::HashMap;
-use std::sync::Arc;
 
 #[async_trait]
 pub trait DynamoDbLearningsClient: Send + Sync {
     async fn allocate_id(&self, table_name: &str) -> Result<u64, LearningsError>;
+
+    async fn list_learnings(&self, table_name: &str)
+        -> Result<Vec<LearningRecord>, LearningsError>;
 
     async fn put_learning(
         &self,
@@ -21,25 +24,21 @@ pub trait DynamoDbLearningsClient: Send + Sync {
         record: &LearningRecord,
     ) -> Result<(), LearningsError>;
 
-    async fn list_learnings(&self, table_name: &str)
-        -> Result<Vec<LearningRecord>, LearningsError>;
-
     async fn remove_learning(&self, table_name: &str, pk: &str) -> Result<bool, LearningsError>;
 }
 
+/// [`LearningsStore`] kept in one `DynamoDB` table behind a
+/// [`DynamoDbLearningsClient`].
 pub struct DynamoDbLearningsStore {
+    /// Table access, swappable for a fake in tests.
     client: Arc<dyn DynamoDbLearningsClient>,
+    /// Name of the table holding the learnings and the id counter.
     table_name: String,
 }
 
 impl DynamoDbLearningsStore {
-    pub fn new(client: aws_sdk_dynamodb::Client, table_name: impl Into<String>) -> Self {
-        Self::from_parts(
-            Arc::new(AwsDynamoDbLearningsClient::new(client)),
-            table_name,
-        )
-    }
-
+    /// Store over an explicit client, such as a test fake.
+    #[inline]
     pub fn from_parts(
         client: Arc<dyn DynamoDbLearningsClient>,
         table_name: impl Into<String>,
@@ -49,10 +48,20 @@ impl DynamoDbLearningsStore {
             table_name: table_name.into(),
         }
     }
+
+    /// Store over the AWS SDK client for `table_name`.
+    #[inline]
+    pub fn new(client: aws_sdk_dynamodb::Client, table_name: impl Into<String>) -> Self {
+        Self::from_parts(
+            Arc::new(AwsDynamoDbLearningsClient::new(client)),
+            table_name,
+        )
+    }
 }
 
 #[async_trait]
 impl LearningsStore for DynamoDbLearningsStore {
+    #[inline]
     async fn add(
         &self,
         text: String,
@@ -78,12 +87,25 @@ impl LearningsStore for DynamoDbLearningsStore {
         Ok(record)
     }
 
+    #[inline]
     async fn list(&self, filter: LearningsFilter) -> Result<Vec<LearningRecord>, LearningsError> {
         let mut records = self.client.list_learnings(&self.table_name).await?;
-        records.retain(|r| filter.matches(r));
+        records.retain(|record| filter.matches(record));
         Ok(records)
     }
 
+    #[inline]
+    async fn query_nearest(
+        &self,
+        query: &[f32],
+        top_k: usize,
+        scope: &RepoScope,
+    ) -> Result<Vec<ScoredLearning>, LearningsError> {
+        let records = self.client.list_learnings(&self.table_name).await?;
+        Ok(rank_in_scope(records, query, top_k, scope))
+    }
+
+    #[inline]
     async fn remove(&self, id: u64, scope: Option<&RepoScope>) -> Result<(), LearningsError> {
         if scope.is_some() {
             // A legacy item's scope comes from its text, which a
@@ -94,7 +116,7 @@ impl LearningsStore for DynamoDbLearningsStore {
                 .list_learnings(&self.table_name)
                 .await?
                 .iter()
-                .any(|r| r.id == id && removable_in_scope(r, scope));
+                .any(|record| record.id == id && removable_in_scope(record, scope));
             if !owned {
                 return Err(LearningsError::NotFound(id));
             }
@@ -108,23 +130,18 @@ impl LearningsStore for DynamoDbLearningsStore {
         }
         Ok(())
     }
-
-    async fn query_nearest(
-        &self,
-        query: &[f32],
-        top_k: usize,
-        scope: &RepoScope,
-    ) -> Result<Vec<ScoredLearning>, LearningsError> {
-        let records = self.client.list_learnings(&self.table_name).await?;
-        Ok(rank_in_scope(records, query, top_k, scope))
-    }
 }
 
+/// [`DynamoDbLearningsClient`] backed by the AWS SDK.
 pub struct AwsDynamoDbLearningsClient {
+    /// AWS SDK `DynamoDB` client.
     client: aws_sdk_dynamodb::Client,
 }
 
 impl AwsDynamoDbLearningsClient {
+    /// Wrap an AWS SDK `DynamoDB` client.
+    #[inline]
+    #[must_use = "wrapping the client has no side effects; the wrapper is the only result"]
     pub fn new(client: aws_sdk_dynamodb::Client) -> Self {
         Self { client }
     }
@@ -132,14 +149,15 @@ impl AwsDynamoDbLearningsClient {
 
 #[async_trait]
 impl DynamoDbLearningsClient for AwsDynamoDbLearningsClient {
+    #[inline]
     async fn allocate_id(&self, table_name: &str) -> Result<u64, LearningsError> {
         let response = self
             .client
             .update_item()
             .table_name(table_name)
-            .key("pk", AttributeValue::S("__counter".to_string()))
+            .key("pk", AttributeValue::S("__counter".to_owned()))
             .update_expression("ADD next_id :one")
-            .expression_attribute_values(":one", AttributeValue::N("1".to_string()))
+            .expression_attribute_values(":one", AttributeValue::N("1".to_owned()))
             .return_values(ReturnValue::UpdatedNew)
             .send()
             .await
@@ -147,10 +165,39 @@ impl DynamoDbLearningsClient for AwsDynamoDbLearningsClient {
         let attributes = response
             .attributes
             .as_ref()
-            .ok_or_else(|| LearningsError::Storage("missing next_id".to_string()))?;
+            .ok_or_else(|| LearningsError::Storage("missing next_id".to_owned()))?;
         attr_u64(attributes, "next_id")
     }
 
+    #[inline]
+    async fn list_learnings(
+        &self,
+        table_name: &str,
+    ) -> Result<Vec<LearningRecord>, LearningsError> {
+        let response = self
+            .client
+            .scan()
+            .table_name(table_name)
+            .filter_expression("begins_with(pk, :learning_prefix)")
+            .expression_attribute_values(
+                ":learning_prefix",
+                AttributeValue::S("learning#".to_owned()),
+            )
+            .send()
+            .await
+            .map_err(|error| {
+                LearningsError::Storage(format!("scan DynamoDB learnings: {error}"))
+            })?;
+        let Some(items) = response.items else {
+            return Ok(Vec::new());
+        };
+        items
+            .iter()
+            .map(item_to_learning)
+            .collect::<Result<Vec<_>, _>>()
+    }
+
+    #[inline]
     async fn put_learning(
         &self,
         table_name: &str,
@@ -167,39 +214,13 @@ impl DynamoDbLearningsClient for AwsDynamoDbLearningsClient {
         Ok(())
     }
 
-    async fn list_learnings(
-        &self,
-        table_name: &str,
-    ) -> Result<Vec<LearningRecord>, LearningsError> {
-        let response = self
-            .client
-            .scan()
-            .table_name(table_name)
-            .filter_expression("begins_with(pk, :learning_prefix)")
-            .expression_attribute_values(
-                ":learning_prefix",
-                AttributeValue::S("learning#".to_string()),
-            )
-            .send()
-            .await
-            .map_err(|error| {
-                LearningsError::Storage(format!("scan DynamoDB learnings: {error}"))
-            })?;
-        let Some(items) = response.items else {
-            return Ok(Vec::new());
-        };
-        items
-            .iter()
-            .map(item_to_learning)
-            .collect::<Result<Vec<_>, _>>()
-    }
-
+    #[inline]
     async fn remove_learning(&self, table_name: &str, pk: &str) -> Result<bool, LearningsError> {
         let response = self
             .client
             .delete_item()
             .table_name(table_name)
-            .key("pk", AttributeValue::S(pk.to_string()))
+            .key("pk", AttributeValue::S(pk.to_owned()))
             .return_values(ReturnValue::AllOld)
             .send()
             .await
@@ -213,70 +234,74 @@ impl DynamoDbLearningsClient for AwsDynamoDbLearningsClient {
     }
 }
 
+/// Partition key of learning `id`.
 fn learning_pk(id: u64) -> String {
     format!("learning#{id}")
 }
 
+/// String attribute `name`, or `None` when absent or not a string.
 fn attr_string(item: &HashMap<String, AttributeValue>, name: &str) -> Option<String> {
-    match item.get(name) {
-        Some(AttributeValue::S(value)) => Some(value.clone()),
-        _ => None,
-    }
+    item.get(name)
+        .and_then(|attribute| attribute.as_s().ok())
+        .cloned()
 }
 
+/// Number attribute `name` parsed as `u64`.
 fn attr_u64(item: &HashMap<String, AttributeValue>, name: &str) -> Result<u64, LearningsError> {
-    match item.get(name) {
-        Some(AttributeValue::N(value)) => value
+    match item.get(name).map(AttributeValue::as_n) {
+        Some(Ok(value)) => value
             .parse::<u64>()
             .map_err(|error| LearningsError::Storage(format!("invalid {name}: {error}"))),
         _ => Err(LearningsError::Storage(format!("missing {name}"))),
     }
 }
 
+/// Number attribute `name` parsed as `i64`.
 fn attr_i64(item: &HashMap<String, AttributeValue>, name: &str) -> Result<i64, LearningsError> {
-    match item.get(name) {
-        Some(AttributeValue::N(value)) => value
+    match item.get(name).map(AttributeValue::as_n) {
+        Some(Ok(value)) => value
             .parse::<i64>()
             .map_err(|error| LearningsError::Storage(format!("invalid {name}: {error}"))),
         _ => Err(LearningsError::Storage(format!("missing {name}"))),
     }
 }
 
+/// Binary attribute `name` as raw bytes.
 fn attr_blob(
     item: &HashMap<String, AttributeValue>,
     name: &str,
 ) -> Result<Vec<u8>, LearningsError> {
-    match item.get(name) {
-        Some(AttributeValue::B(value)) => Ok(value.clone().into_inner()),
+    match item.get(name).map(AttributeValue::as_b) {
+        Some(Ok(value)) => Ok(value.clone().into_inner()),
         _ => Err(LearningsError::Storage(format!("missing {name}"))),
     }
 }
 
-/// DynamoDB attribute map for `record`. `repo` is the lowercased
+/// `DynamoDB` attribute map for `record`. `repo` is the lowercased
 /// `owner/repo` string; `origin_pr` is omitted when unknown.
 fn learning_to_item(pk: &str, record: &LearningRecord) -> HashMap<String, AttributeValue> {
     let mut item = HashMap::from([
-        ("pk".to_string(), AttributeValue::S(pk.to_string())),
-        ("id".to_string(), AttributeValue::N(record.id.to_string())),
-        ("text".to_string(), AttributeValue::S(record.text.clone())),
+        ("pk".to_owned(), AttributeValue::S(pk.to_owned())),
+        ("id".to_owned(), AttributeValue::N(record.id.to_string())),
+        ("text".to_owned(), AttributeValue::S(record.text.clone())),
         (
-            "source".to_string(),
-            AttributeValue::S(source_to_str(record.source).to_string()),
+            "source".to_owned(),
+            AttributeValue::S(source_to_str(record.source).to_owned()),
         ),
         (
-            "embedding".to_string(),
+            "embedding".to_owned(),
             AttributeValue::B(vec_f32_to_blob(&record.embedding).into()),
         ),
         (
-            "created_at".to_string(),
+            "created_at".to_owned(),
             AttributeValue::N(record.created_at.to_string()),
         ),
     ]);
-    if let Some(repo) = &record.repo {
-        item.insert("repo".to_string(), AttributeValue::S(repo.to_string()));
+    if let Some(repo) = record.repo.as_ref() {
+        item.insert("repo".to_owned(), AttributeValue::S(repo.to_string()));
     }
     if let Some(pr) = record.origin_pr {
-        item.insert("origin_pr".to_string(), AttributeValue::N(pr.to_string()));
+        item.insert("origin_pr".to_owned(), AttributeValue::N(pr.to_string()));
     }
     item
 }
@@ -289,10 +314,10 @@ fn item_to_learning(
     item: &HashMap<String, AttributeValue>,
 ) -> Result<LearningRecord, LearningsError> {
     let source = attr_string(item, "source")
-        .ok_or_else(|| LearningsError::Storage("missing source".to_string()))
+        .ok_or_else(|| LearningsError::Storage("missing source".to_owned()))
         .and_then(|source| source_from_str(&source))?;
     let text = attr_string(item, "text")
-        .ok_or_else(|| LearningsError::Storage("missing text".to_string()))?;
+        .ok_or_else(|| LearningsError::Storage("missing text".to_owned()))?;
     let repo = match attr_string(item, "repo") {
         // An unparseable `repo` makes the item unscoped rather than
         // failing the read, so one bad item cannot break every query;
@@ -325,6 +350,7 @@ fn item_to_learning(
     })
 }
 
+/// Stable `source` attribute value for each [`LearningSource`].
 fn source_to_str(source: LearningSource) -> &'static str {
     match source {
         LearningSource::Chat => "chat",
@@ -333,6 +359,7 @@ fn source_to_str(source: LearningSource) -> &'static str {
     }
 }
 
+/// Parse the `source` attribute written by [`source_to_str`].
 fn source_from_str(source: &str) -> Result<LearningSource, LearningsError> {
     match source {
         "chat" => Ok(LearningSource::Chat),
@@ -344,6 +371,17 @@ fn source_from_str(source: &str) -> Result<LearningSource, LearningsError> {
     }
 }
 
+/// Encode an embedding as a little-endian f32 binary attribute.
+#[expect(
+    clippy::arithmetic_side_effects,
+    reason = "the input slice already occupies len * 4 bytes in memory, so the byte count cannot \
+              overflow usize"
+)]
+#[expect(
+    clippy::little_endian_bytes,
+    reason = "stored embedding attributes are little-endian f32, the same format as the SQLite \
+              store; writing them any other way would make existing items unreadable"
+)]
 fn vec_f32_to_blob(values: &[f32]) -> Vec<u8> {
     let mut out = Vec::with_capacity(values.len() * 4);
     for value in values {
@@ -352,6 +390,14 @@ fn vec_f32_to_blob(values: &[f32]) -> Vec<u8> {
     out
 }
 
+/// Decode a little-endian f32 binary attribute written by
+/// [`vec_f32_to_blob`]. Trailing bytes that do not fill a whole f32 are
+/// ignored.
+#[expect(
+    clippy::little_endian_bytes,
+    reason = "stored embedding attributes are little-endian f32; reading them any other way \
+              would misdecode existing items"
+)]
 fn blob_to_vec_f32(bytes: &[u8]) -> Vec<f32> {
     bytes
         .as_chunks::<4>()
@@ -371,11 +417,15 @@ mod tests {
     /// items can be seeded directly.
     #[derive(Default)]
     struct ItemClient {
-        next_id: Mutex<u64>,
         items: Mutex<Vec<HashMap<String, AttributeValue>>>,
+        next_id: Mutex<u64>,
     }
 
     impl ItemClient {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+        )]
         fn seed_legacy(&self, id: u64, text: &str) {
             let mut item = learning_to_item(
                 &learning_pk(id),
@@ -398,12 +448,40 @@ mod tests {
 
     #[async_trait]
     impl DynamoDbLearningsClient for ItemClient {
+        #[expect(
+            clippy::arithmetic_side_effects,
+            reason = "the test double's id counter starts small and is bumped a handful of times, so it cannot overflow"
+        )]
+        #[expect(
+            clippy::unwrap_used,
+            reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+        )]
         async fn allocate_id(&self, _table_name: &str) -> Result<u64, LearningsError> {
             let mut next = self.next_id.lock().unwrap();
             *next += 1;
             Ok(*next)
         }
 
+        #[expect(
+            clippy::unwrap_used,
+            reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+        )]
+        async fn list_learnings(
+            &self,
+            _table_name: &str,
+        ) -> Result<Vec<LearningRecord>, LearningsError> {
+            self.items
+                .lock()
+                .unwrap()
+                .iter()
+                .map(item_to_learning)
+                .collect()
+        }
+
+        #[expect(
+            clippy::unwrap_used,
+            reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+        )]
         async fn put_learning(
             &self,
             _table_name: &str,
@@ -417,18 +495,10 @@ mod tests {
             Ok(())
         }
 
-        async fn list_learnings(
-            &self,
-            _table_name: &str,
-        ) -> Result<Vec<LearningRecord>, LearningsError> {
-            self.items
-                .lock()
-                .unwrap()
-                .iter()
-                .map(item_to_learning)
-                .collect()
-        }
-
+        #[expect(
+            clippy::unwrap_used,
+            reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+        )]
         async fn remove_learning(
             &self,
             _table_name: &str,
@@ -443,16 +513,21 @@ mod tests {
 
     fn store() -> (Arc<ItemClient>, DynamoDbLearningsStore) {
         let client = Arc::new(ItemClient::default());
-        let store = DynamoDbLearningsStore::from_parts(client.clone(), "learnings");
+        let store =
+            DynamoDbLearningsStore::from_parts(Arc::<ItemClient>::clone(&client), "learnings");
         (client, store)
     }
 
     /// One learning in each of two scopes plus one unscoped legacy item
     /// (id 1), all with the same embedding.
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn two_scopes_and_legacy() -> (DynamoDbLearningsStore, LearningRecord, LearningRecord) {
         let (client, store) = store();
         client.seed_legacy(1, "Prefer Result over panics.");
-        let a = store
+        let in_a = store
             .add(
                 "from a".into(),
                 LearningSource::Chat,
@@ -463,7 +538,7 @@ mod tests {
             )
             .await
             .unwrap();
-        let b = store
+        let in_b = store
             .add(
                 "from b".into(),
                 LearningSource::Chat,
@@ -474,10 +549,22 @@ mod tests {
             )
             .await
             .unwrap();
-        (store, a, b)
+        (store, in_a, in_b)
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::semicolon_outside_block,
+        reason = "the restriction group also enables the contradicting semicolon_inside_block, so this guard-scoping block keeps its original statement-inside form"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn new_items_carry_repo_and_origin_pr_attributes() {
         let (client, store) = store();
         let scope = RepoScope::new("Acme", "Widget");
@@ -513,6 +600,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn legacy_item_with_correction_prefix_is_scoped_at_read_time() {
         let (client, store) = store();
         client.seed_legacy(
@@ -532,6 +627,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn legacy_item_without_prefix_is_unscoped_and_never_retrieved() {
         let (client, store) = store();
         client.seed_legacy(5, "Prefer Result over panics.");
@@ -545,12 +652,28 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn item_with_unparseable_repo_is_unscoped_and_does_not_fail_queries() {
         let (client, store) = store();
         client.seed_legacy(5, "hand edited");
         client.items.lock().unwrap()[0].insert(
-            "repo".to_string(),
-            AttributeValue::S("not-a-scope".to_string()),
+            "repo".to_owned(),
+            AttributeValue::S("not-a-scope".to_owned()),
         );
         let hits = store
             .query_nearest(&[1.0, 0.0], 5, &RepoScope::new("acme", "widget"))
@@ -562,6 +685,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn query_nearest_excludes_other_scopes_and_unscoped_records() {
         let (store, a, _) = two_scopes_and_legacy().await;
         let r = store
@@ -575,6 +706,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed store, lock or setup call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn scoped_remove_only_deletes_records_of_that_scope() {
         let (store, a, b) = two_scopes_and_legacy().await;
         let scope_b = RepoScope::new("acme", "b");
@@ -592,6 +735,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings such as `r`, `s`, `a` and `b` are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed store, lock or setup call should fail this test at that line; unwrap reports the error"
+    )]
     async fn list_filters_by_scope() {
         let (store, _, b) = two_scopes_and_legacy().await;
         assert_eq!(
