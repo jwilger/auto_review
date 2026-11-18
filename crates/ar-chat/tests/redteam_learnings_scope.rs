@@ -10,7 +10,7 @@
 use ar_chat::{ChatCommand, ChatContext, ChatHandler};
 use ar_forgejo::Client as ForgejoClient;
 use ar_index::{
-    InMemoryLearningsStore, LearningRecord, LearningSource, LearningsFilter, LearningsStore,
+    InMemoryLearningsStore, LearningRecord, LearningSource, LearningsFilter, LearningsStore as _,
     RepoScope,
 };
 use ar_llm::Router;
@@ -29,6 +29,10 @@ fn ctx_in(owner: &'static str, repo: &'static str) -> ChatContext<'static> {
 }
 
 /// Expect exactly one comment on `owner/repo` PR 7 with `body`.
+#[expect(
+    clippy::default_numeric_fallback,
+    reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+)]
 async fn expect_reply(server: &MockServer, owner: &str, repo: &str, body: &str) {
     Mock::given(method("POST"))
         .and(path(format!(
@@ -41,6 +45,10 @@ async fn expect_reply(server: &MockServer, owner: &str, repo: &str, body: &str) 
         .await;
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "a failed setup, request or decode step should fail this test at the named step; the asserted values stay as written"
+)]
 async fn forget(
     learnings: &InMemoryLearningsStore,
     server: &MockServer,
@@ -61,6 +69,10 @@ async fn forget(
         .expect("forget replies instead of erroring");
 }
 
+#[expect(
+    clippy::expect_used,
+    reason = "a failed setup, request or decode step should fail this test at the named step; the asserted values stay as written"
+)]
 async fn repo_a_learning(learnings: &InMemoryLearningsStore) -> LearningRecord {
     learnings
         .add(
@@ -76,6 +88,14 @@ async fn repo_a_learning(learnings: &InMemoryLearningsStore) -> LearningRecord {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed setup, request or decode step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn forget_from_another_repository_leaves_the_learning_in_place() {
     let learnings = InMemoryLearningsStore::new();
     let learning = repo_a_learning(&learnings).await;
@@ -90,6 +110,18 @@ async fn forget_from_another_repository_leaves_the_learning_in_place() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::assert_is_empty,
+    reason = "the emptiness assertion stays as written"
+)]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed setup, request or decode step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn forget_from_the_same_repository_removes_the_learning() {
     let learnings = InMemoryLearningsStore::new();
     let learning = repo_a_learning(&learnings).await;
@@ -107,6 +139,14 @@ async fn forget_from_the_same_repository_removes_the_learning() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed setup, request or decode step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn unscoped_legacy_learning_cannot_be_forgotten_from_chat() {
     let legacy = LearningRecord {
         id: 5,
@@ -134,6 +174,10 @@ async fn unscoped_legacy_learning_cannot_be_forgotten_from_chat() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn missing_id_gets_the_same_reply_as_another_repositorys_id() {
     let learnings = InMemoryLearningsStore::new();
     let server = MockServer::start().await;

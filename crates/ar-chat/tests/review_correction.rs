@@ -1,14 +1,16 @@
+extern crate alloc;
+
+use alloc::sync::Arc;
 use ar_chat::{parse_chat_command, ChatCommand, ChatContext, ChatHandler};
 use ar_forgejo::Client as ForgejoClient;
 use ar_index::{
-    InMemoryLearningsStore, LearningSource, LearningsFilter, LearningsStore, RepoScope,
+    InMemoryLearningsStore, LearningSource, LearningsFilter, LearningsStore as _, RepoScope,
 };
 use ar_llm::{
     CompleteRequest, CompleteResponse, Error as LlmError, LlmProvider, ModelTier, ResponseFormat,
     Router,
 };
 use async_trait::async_trait;
-use std::sync::Arc;
 use wiremock::matchers::{body_partial_json, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -18,13 +20,20 @@ struct ConstantEmbedder;
 /// name: `directed_intent` (what does the user want?) and `override_reason`
 /// (did they explain why?). Anything else returns a generic freeform reply.
 struct ScriptedCheapProvider {
-    intent: &'static str,
-    has_explanation: bool,
+    /// Reason returned to `override_reason`.
     explanation: &'static str,
+    /// Whether `override_reason` reports an explanation.
+    has_explanation: bool,
+    /// Intent returned to `directed_intent`.
+    intent: &'static str,
 }
 
 #[async_trait]
 impl LlmProvider for ConstantEmbedder {
+    #[expect(
+        clippy::unimplemented,
+        reason = "the tests never ask this fake for this capability; reaching it is a test failure"
+    )]
     async fn complete(&self, _: CompleteRequest) -> Result<CompleteResponse, LlmError> {
         unimplemented!()
     }
@@ -37,17 +46,20 @@ impl LlmProvider for ConstantEmbedder {
 #[async_trait]
 impl LlmProvider for ScriptedCheapProvider {
     async fn complete(&self, req: CompleteRequest) -> Result<CompleteResponse, LlmError> {
-        let schema_name = match &req.response_format {
-            Some(ResponseFormat::JsonSchema { name, .. }) => name.as_str(),
-            _ => "",
+        let schema_name = match req.response_format {
+            Some(ResponseFormat::JsonSchema {
+                name,
+                schema: _schema,
+            }) => name,
+            Some(ResponseFormat::Text) | None => String::new(),
         };
-        let content = match schema_name {
+        let content = match schema_name.as_str() {
             "directed_intent" => format!(r#"{{"intent":"{}"}}"#, self.intent),
             "override_reason" => format!(
                 r#"{{"has_explanation":{},"explanation":"{}"}}"#,
                 self.has_explanation, self.explanation
             ),
-            _ => "generic freeform reply".to_string(),
+            _ => "generic freeform reply".to_owned(),
         };
         Ok(CompleteResponse {
             content,
@@ -56,6 +68,10 @@ impl LlmProvider for ScriptedCheapProvider {
         })
     }
 
+    #[expect(
+        clippy::unimplemented,
+        reason = "the tests never ask this fake for this capability; reaching it is a test failure"
+    )]
     async fn embed(&self, _: &[String]) -> Result<Vec<Vec<f32>>, LlmError> {
         unimplemented!()
     }
@@ -87,6 +103,10 @@ fn ctx() -> ChatContext<'static> {
 
 /// Mount the standard open-PR GET. `title`/`body` let override tests assert the
 /// marker is stamped onto them.
+#[expect(
+    clippy::default_numeric_fallback,
+    reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+)]
 async fn mount_open_pr(server: &MockServer, title: &str, body: &str) {
     Mock::given(method("GET"))
         .and(path("/api/v1/repos/alice/widgets/pulls/42"))
@@ -103,8 +123,12 @@ async fn mount_open_pr(server: &MockServer, title: &str, body: &str) {
         .await;
 }
 
-/// Mount the bot's latest review as REQUEST_CHANGES (the "blocked" state) with
+/// Mount the bot's latest review as `REQUEST_CHANGES` (the "blocked" state) with
 /// the given inline finding comments.
+#[expect(
+    clippy::default_numeric_fallback,
+    reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+)]
 async fn mount_blocking_bot_review(server: &MockServer, comments: serde_json::Value) {
     Mock::given(method("GET"))
         .and(path("/api/v1/repos/alice/widgets/pulls/42/reviews"))
@@ -123,6 +147,10 @@ async fn mount_blocking_bot_review(server: &MockServer, comments: serde_json::Va
 }
 
 #[test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 fn forgejo_quote_of_metadata_failure_with_user_correction_routes_to_review_correction() {
     assert_eq!(
         parse_chat_command(quoted_metadata_failure_correction(), "auto-review"),
@@ -133,6 +161,22 @@ fn forgejo_quote_of_metadata_failure_with_user_correction_routes_to_review_corre
 }
 
 #[tokio::test]
+#[expect(
+    clippy::default_numeric_fallback,
+    reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+)]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed setup, request or decode step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "an out-of-bounds index fails this test just as a failed assertion would; the indexed assertions stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn directed_approval_with_nothing_outstanding_approves_and_stores_learning() {
     let server = MockServer::start().await;
     let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
@@ -198,15 +242,27 @@ async fn directed_approval_with_nothing_outstanding_approves_and_stores_learning
     let received = server.received_requests().await.expect("requests");
     let approvals = received
         .iter()
-        .filter(|r| {
-            r.method.as_str() == "POST"
-                && r.url.path() == "/api/v1/repos/alice/widgets/pulls/42/reviews"
+        .filter(|request| {
+            request.method.as_str() == "POST"
+                && request.url.path() == "/api/v1/repos/alice/widgets/pulls/42/reviews"
         })
         .count();
     assert_eq!(approvals, 1, "must approve when nothing is outstanding");
 }
 
 #[tokio::test]
+#[expect(
+    clippy::default_numeric_fallback,
+    reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+)]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed setup, request or decode step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn metadata_override_by_authorized_user_with_reason_approves_and_stamps_marker() {
     let server = MockServer::start().await;
     let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
@@ -264,16 +320,16 @@ async fn metadata_override_by_authorized_user_with_reason_approves_and_stamps_ma
     let received = server.received_requests().await.expect("requests");
     let approvals = received
         .iter()
-        .filter(|r| {
-            r.method.as_str() == "POST"
-                && r.url.path() == "/api/v1/repos/alice/widgets/pulls/42/reviews"
+        .filter(|request| {
+            request.method.as_str() == "POST"
+                && request.url.path() == "/api/v1/repos/alice/widgets/pulls/42/reviews"
         })
         .count();
     assert_eq!(approvals, 1, "authorized override with reason must approve");
 
     let patch = received
         .iter()
-        .find(|r| r.method.as_str() == "PATCH")
+        .find(|request| request.method.as_str() == "PATCH")
         .expect("must stamp the override marker via PATCH");
     let patch_body: serde_json::Value =
         serde_json::from_slice(&patch.body).expect("patch body json");
@@ -296,6 +352,18 @@ async fn metadata_override_by_authorized_user_with_reason_approves_and_stamps_ma
 }
 
 #[tokio::test]
+#[expect(
+    clippy::default_numeric_fallback,
+    reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+)]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed setup, request or decode step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn override_by_unauthorized_user_declines_without_approving() {
     let server = MockServer::start().await;
     let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
@@ -335,23 +403,35 @@ async fn override_by_unauthorized_user_declines_without_approving() {
     let received = server.received_requests().await.expect("requests");
     let approvals = received
         .iter()
-        .filter(|r| {
-            r.method.as_str() == "POST"
-                && r.url.path() == "/api/v1/repos/alice/widgets/pulls/42/reviews"
+        .filter(|request| {
+            request.method.as_str() == "POST"
+                && request.url.path() == "/api/v1/repos/alice/widgets/pulls/42/reviews"
         })
         .count();
     assert_eq!(approvals, 0, "unauthorized user must not get an approval");
     let declines = received
         .iter()
-        .filter(|r| {
-            r.method.as_str() == "POST"
-                && r.url.path() == "/api/v1/repos/alice/widgets/issues/42/comments"
+        .filter(|request| {
+            request.method.as_str() == "POST"
+                && request.url.path() == "/api/v1/repos/alice/widgets/issues/42/comments"
         })
         .count();
     assert_eq!(declines, 1, "must post a decline comment");
 }
 
 #[tokio::test]
+#[expect(
+    clippy::default_numeric_fallback,
+    reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+)]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed setup, request or decode step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn authorized_override_without_a_reason_asks_for_why_and_does_not_approve() {
     let server = MockServer::start().await;
     let forgejo = ForgejoClient::new(&server.uri(), "tok").expect("client");
@@ -369,7 +449,7 @@ async fn authorized_override_without_a_reason_asks_for_why_and_does_not_approve(
     mount_blocking_bot_review(
         &server,
         serde_json::json!([
-            {"id": 1, "body": "🔴 **Error:** possible panic on empty input", "user": {"login": "auto-review"}}
+            {"id": 1, "body": "\u{1f534} **Error:** possible panic on empty input", "user": {"login": "auto-review"}}
         ]),
     )
     .await;
@@ -403,17 +483,17 @@ async fn authorized_override_without_a_reason_asks_for_why_and_does_not_approve(
     let received = server.received_requests().await.expect("requests");
     let approvals = received
         .iter()
-        .filter(|r| {
-            r.method.as_str() == "POST"
-                && r.url.path() == "/api/v1/repos/alice/widgets/pulls/42/reviews"
+        .filter(|request| {
+            request.method.as_str() == "POST"
+                && request.url.path() == "/api/v1/repos/alice/widgets/pulls/42/reviews"
         })
         .count();
     assert_eq!(approvals, 0, "must not approve without a stated reason");
     let asks = received
         .iter()
-        .filter(|r| {
-            r.method.as_str() == "POST"
-                && r.url.path() == "/api/v1/repos/alice/widgets/issues/42/comments"
+        .filter(|request| {
+            request.method.as_str() == "POST"
+                && request.url.path() == "/api/v1/repos/alice/widgets/issues/42/comments"
         })
         .count();
     assert_eq!(asks, 1, "must ask the user for a reason");
