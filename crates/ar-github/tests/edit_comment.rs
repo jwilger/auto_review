@@ -4,8 +4,9 @@
 //! `issues/comments/{id}` and inline review comments through
 //! `pulls/comments/{id}`.
 
-use ar_forge::ReviewHost;
+use ar_forge::ReviewHost as _;
 use ar_github::{AppReviewHost, Client, GitHubAppJwt, InstallationReviewHost};
+use core::error::Error;
 use serde_json::json;
 use wiremock::matchers::{body_json, header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -13,24 +14,30 @@ use wiremock::{Mock, MockServer, ResponseTemplate};
 const ISSUE_PATH: &str = "/repos/o/r/issues/comments/41";
 const REVIEW_PATH: &str = "/repos/o/r/pulls/comments/52";
 
-fn test_private_key() -> &'static str {
+type TestResult<T = ()> = Result<T, Box<dyn Error>>;
+
+/// The test RSA key, read from the PEM block embedded in `app_jwt.rs`.
+fn test_private_key() -> TestResult<String> {
+    const BEGIN: &str = "-----BEGIN PRIVATE KEY-----";
+    const END: &str = "-----END PRIVATE KEY-----";
     let source = include_str!("app_jwt.rs");
-    let start = source
-        .find("-----BEGIN PRIVATE KEY-----")
-        .expect("key start");
-    let end = source.find("-----END PRIVATE KEY-----").expect("key end")
-        + "-----END PRIVATE KEY-----".len();
-    &source[start..end]
+    let (_, after_begin) = source.split_once(BEGIN).ok_or("key start")?;
+    let (key_body, _) = after_begin.split_once(END).ok_or("key end")?;
+    Ok(format!("{BEGIN}{key_body}{END}"))
 }
 
-fn installation_host(github: &MockServer) -> InstallationReviewHost {
-    let client = Client::new(&github.uri(), "app-jwt").expect("client");
-    InstallationReviewHost::new(client, "installation-token")
+fn installation_host(github: &MockServer) -> TestResult<InstallationReviewHost> {
+    let client = Client::new(&github.uri(), "app-jwt")?;
+    Ok(InstallationReviewHost::new(client, "installation-token"))
 }
 
 /// Mock the installation lookup and token exchange the same way the
 /// existing `AppReviewHost` tests do, then build the host.
-async fn app_host(github: &MockServer) -> AppReviewHost {
+#[expect(
+    clippy::default_numeric_fallback,
+    reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked GitHub payload; type suffixes would edit the fixture without changing the bytes sent"
+)]
+async fn app_host(github: &MockServer) -> TestResult<AppReviewHost> {
     Mock::given(method("GET"))
         .and(path("/repos/o/r/installation"))
         .respond_with(ResponseTemplate::new(200).set_body_json(json!({"id": 42})))
@@ -44,10 +51,17 @@ async fn app_host(github: &MockServer) -> AppReviewHost {
         })))
         .mount(github)
         .await;
-    let signer = GitHubAppJwt::from_rsa_pem(12345, test_private_key().as_bytes()).expect("signer");
-    AppReviewHost::new(Client::with_app_signer(&github.uri(), signer).expect("client"))
+    let signer = GitHubAppJwt::from_rsa_pem(12345, test_private_key()?.as_bytes())?;
+    Ok(AppReviewHost::new(Client::with_app_signer(
+        &github.uri(),
+        signer,
+    )?))
 }
 
+#[expect(
+    clippy::default_numeric_fallback,
+    reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked GitHub payload; type suffixes would edit the fixture without changing the bytes sent"
+)]
 async fn mount_edit(github: &MockServer, route: &str, token: &str, body: &str) {
     Mock::given(method("PATCH"))
         .and(path(route))
@@ -79,98 +93,134 @@ fn assert_capped(err: &ar_forge::HostError, status: u16) {
     );
 }
 
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 #[tokio::test]
-async fn installation_host_edit_issue_comment_patches_issues_comments() {
+async fn installation_host_edit_issue_comment_patches_issues_comments() -> TestResult {
     let github = MockServer::start().await;
     mount_edit(&github, ISSUE_PATH, "installation-token", "summary v2").await;
-    let host = installation_host(&github);
+    let host = installation_host(&github)?;
 
-    host.edit_issue_comment("o", "r", 41, "summary v2")
-        .await
-        .expect("edited");
+    host.edit_issue_comment("o", "r", 41, "summary v2").await?;
+    Ok(())
 }
 
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 #[tokio::test]
-async fn installation_host_edit_review_comment_patches_pulls_comments() {
+async fn installation_host_edit_review_comment_patches_pulls_comments() -> TestResult {
     let github = MockServer::start().await;
     mount_edit(&github, REVIEW_PATH, "installation-token", "addressed").await;
-    let host = installation_host(&github);
+    let host = installation_host(&github)?;
 
-    host.edit_review_comment("o", "r", 52, "addressed")
-        .await
-        .expect("edited");
+    host.edit_review_comment("o", "r", 52, "addressed").await?;
+    Ok(())
 }
 
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 #[tokio::test]
-async fn installation_host_edit_issue_comment_caps_error_body() {
+async fn installation_host_edit_issue_comment_caps_error_body() -> TestResult {
     let github = MockServer::start().await;
     mount_long_error(&github, ISSUE_PATH, 403).await;
-    let host = installation_host(&github);
+    let host = installation_host(&github)?;
 
     let err = host
         .edit_issue_comment("o", "r", 41, "x")
         .await
-        .expect_err("403");
+        .err()
+        .ok_or("403")?;
     assert_capped(&err, 403);
+    Ok(())
 }
 
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 #[tokio::test]
-async fn installation_host_edit_review_comment_caps_error_body() {
+async fn installation_host_edit_review_comment_caps_error_body() -> TestResult {
     let github = MockServer::start().await;
     mount_long_error(&github, REVIEW_PATH, 422).await;
-    let host = installation_host(&github);
+    let host = installation_host(&github)?;
 
     let err = host
         .edit_review_comment("o", "r", 52, "x")
         .await
-        .expect_err("422");
+        .err()
+        .ok_or("422")?;
     assert_capped(&err, 422);
+    Ok(())
 }
 
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 #[tokio::test]
-async fn app_host_edit_issue_comment_patches_issues_comments() {
+async fn app_host_edit_issue_comment_patches_issues_comments() -> TestResult {
     let github = MockServer::start().await;
     mount_edit(&github, ISSUE_PATH, "ghs_installation", "summary v2").await;
-    let host = app_host(&github).await;
+    let host = app_host(&github).await?;
 
-    host.edit_issue_comment("o", "r", 41, "summary v2")
-        .await
-        .expect("edited");
+    host.edit_issue_comment("o", "r", 41, "summary v2").await?;
+    Ok(())
 }
 
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 #[tokio::test]
-async fn app_host_edit_review_comment_patches_pulls_comments() {
+async fn app_host_edit_review_comment_patches_pulls_comments() -> TestResult {
     let github = MockServer::start().await;
     mount_edit(&github, REVIEW_PATH, "ghs_installation", "addressed").await;
-    let host = app_host(&github).await;
+    let host = app_host(&github).await?;
 
-    host.edit_review_comment("o", "r", 52, "addressed")
-        .await
-        .expect("edited");
+    host.edit_review_comment("o", "r", 52, "addressed").await?;
+    Ok(())
 }
 
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 #[tokio::test]
-async fn app_host_edit_issue_comment_caps_error_body() {
+async fn app_host_edit_issue_comment_caps_error_body() -> TestResult {
     let github = MockServer::start().await;
     mount_long_error(&github, ISSUE_PATH, 404).await;
-    let host = app_host(&github).await;
+    let host = app_host(&github).await?;
 
     let err = host
         .edit_issue_comment("o", "r", 41, "x")
         .await
-        .expect_err("404");
+        .err()
+        .ok_or("404")?;
     assert_capped(&err, 404);
+    Ok(())
 }
 
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 #[tokio::test]
-async fn app_host_edit_review_comment_caps_error_body() {
+async fn app_host_edit_review_comment_caps_error_body() -> TestResult {
     let github = MockServer::start().await;
     mount_long_error(&github, REVIEW_PATH, 403).await;
-    let host = app_host(&github).await;
+    let host = app_host(&github).await?;
 
     let err = host
         .edit_review_comment("o", "r", 52, "x")
         .await
-        .expect_err("403");
+        .err()
+        .ok_or("403")?;
     assert_capped(&err, 403);
+    Ok(())
 }
