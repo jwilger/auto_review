@@ -3,6 +3,14 @@ use ar_prompts::{ReviewFinding, ReviewOutput, ReviewSeverity};
 use ar_review::output_to_review_request;
 
 #[test]
+#[expect(
+    clippy::assert_is_empty,
+    reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 fn clean_review_output_posts_approval() {
     let output = ReviewOutput {
         summary: "lgtm".into(),
@@ -19,6 +27,14 @@ fn clean_review_output_posts_approval() {
 }
 
 #[test]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 fn duplicate_severity_and_message_across_locations_posts_one_inline_comment() {
     let duplicate_message = "same actionable feedback";
     let output = ReviewOutput {

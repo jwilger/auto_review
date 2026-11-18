@@ -18,43 +18,81 @@
 //! window. The caps are conservative defaults; the agentic verifier
 //! takes them as parameters so future callers can tune.
 
+use crate::diff::char_boundary_prefix;
 use regex::Regex;
 use std::fs;
-use std::path::{Path, PathBuf};
+use std::io;
+use std::path::{Component, Path, PathBuf};
 
+/// Cap on directory-tree recursion depth. A malicious PR could
+/// commit `a/b/c/.../z/` nested thousands of levels deep (most
+/// filesystems allow it even though POSIX `PATH_MAX` = 4096
+/// usually prevents the path string from being usable). Each
+/// `walk_dir` frame uses a few hundred bytes of stack, so an
+/// unbounded recursion eventually overflows the default 8 MiB
+/// stack. 64 covers any reasonable repo and matches what
+/// `find -maxdepth` operators typically use.
+const WALK_MAX_DEPTH: usize = 64;
+
+/// Hard cap on the bytes `scan_file` will pull into memory per
+/// file. Files committed to a PR are attacker-controllable;
+/// without this, a malicious 1+ GiB committed text file would
+/// OOM the gateway during the agentic verifier's search pass.
+/// 1 MiB matches the indexer's per-file limit and easily covers
+/// any source file the verifier would meaningfully grep.
+const SCAN_FILE_MAX_BYTES: u64 = 1024 * 1024;
+
+/// Why a workspace tool call failed.
 #[derive(Debug, thiserror::Error)]
 pub enum WorkspaceToolError {
-    #[error("path escapes workspace root: {0}")]
-    PathEscape(String),
-    #[error("path not found: {0}")]
-    NotFound(String),
+    /// The search pattern is not a valid regex.
     #[error("invalid regex: {0}")]
     BadRegex(String),
+    /// Reading the workspace failed for a reason other than "not found".
     #[error("io: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
+    /// The target does not exist, is not a regular file, or is over the
+    /// read cap.
+    #[error("path not found: {0}")]
+    NotFound(String),
+    /// The target resolves outside the workspace root.
+    #[error("path escapes workspace root: {0}")]
+    PathEscape(String),
 }
 
 /// Result of a [`read_file`] call. `truncated` is set when we
 /// surrendered a tail because the requested range exceeded
 /// `max_bytes`.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ReadResult {
+    pub content: String,
+    pub end_line: u32,
     pub path: String,
     pub start_line: u32,
-    pub end_line: u32,
-    pub content: String,
     pub truncated: bool,
+}
+
+/// Single match record from [`search`].
+#[derive(Debug, Clone)]
+#[non_exhaustive]
+pub struct SearchHit {
+    pub line: u32,
+    pub line_text: String,
+    pub path: String,
 }
 
 /// Read a workspace-relative file. When `start_line` and `end_line`
 /// are both `Some`, only that 1-indexed inclusive range is returned;
 /// when both are `None`, the whole file (subject to `max_bytes`).
 ///
-/// Errors:
+/// # Errors
+///
 /// - [`WorkspaceToolError::PathEscape`] if `rel_path` resolves outside
 ///   `workspace_root` (covers `..` traversal and absolute paths).
 /// - [`WorkspaceToolError::NotFound`] if the resolved path doesn't
 ///   exist or isn't a regular file.
+#[inline]
 pub fn read_file(
     workspace_root: &Path,
     rel_path: &str,
@@ -74,21 +112,23 @@ pub fn read_file(
             )));
         }
     }
-    let raw = fs::read_to_string(&resolved).map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
+    let raw = fs::read_to_string(&resolved).map_err(|err| {
+        if err.kind() == io::ErrorKind::NotFound {
             WorkspaceToolError::NotFound(rel_path.into())
         } else {
-            WorkspaceToolError::Io(e)
+            WorkspaceToolError::Io(err)
         }
     })?;
-    let total_lines = raw.lines().count() as u32;
+    let total_lines = line_number(raw.lines().count());
     let (start, end) = match (start_line, end_line) {
-        (Some(s), Some(e)) if s >= 1 && e >= s => (s, e.min(total_lines.max(1))),
+        (Some(first), Some(last)) if first >= 1 && last >= first => {
+            (first, last.min(total_lines.max(1)))
+        }
         _ => (1, total_lines.max(1)),
     };
     let mut content = String::new();
     for (idx, line) in raw.lines().enumerate() {
-        let line_no = idx as u32 + 1;
+        let line_no = line_number(idx).saturating_add(1);
         if line_no < start {
             continue;
         }
@@ -99,7 +139,8 @@ pub fn read_file(
         content.push('\n');
     }
     let truncated = if content.len() > max_bytes {
-        content.truncate_to_char_boundary(max_bytes);
+        let keep = char_boundary_prefix(&content, max_bytes).len();
+        content.truncate(keep);
         true
     } else {
         false
@@ -113,14 +154,6 @@ pub fn read_file(
     })
 }
 
-/// Single match record from [`search`].
-#[derive(Debug, Clone)]
-pub struct SearchHit {
-    pub path: String,
-    pub line: u32,
-    pub line_text: String,
-}
-
 /// Search the workspace for lines matching `pattern`. When
 /// `rel_path` is `Some`, only that file is searched; when `None`,
 /// the recursive walk skips heavy directories (`.git`, `target`,
@@ -129,6 +162,15 @@ pub struct SearchHit {
 ///
 /// Output is capped at `max_hits` (excess matches are silently
 /// discarded — the caller can fall back to a more specific search).
+///
+/// # Errors
+///
+/// - [`WorkspaceToolError::BadRegex`] if `pattern` does not compile.
+/// - [`WorkspaceToolError::PathEscape`] if `rel_path` resolves outside
+///   `workspace_root`.
+/// - [`WorkspaceToolError::NotFound`] if `rel_path` names nothing, or
+///   something that is neither a file nor a directory.
+#[inline]
 pub fn search(
     workspace_root: &Path,
     pattern: &str,
@@ -136,10 +178,10 @@ pub fn search(
     max_hits: usize,
 ) -> Result<Vec<SearchHit>, WorkspaceToolError> {
     let regex = Regex::new(pattern)
-        .map_err(|e| WorkspaceToolError::BadRegex(format!("/{pattern}/: {e}")))?;
+        .map_err(|err| WorkspaceToolError::BadRegex(format!("/{pattern}/: {err}")))?;
 
     let target = match rel_path {
-        Some(p) => Some(resolve_inside(workspace_root, p)?),
+        Some(rel) => Some(resolve_inside(workspace_root, rel)?),
         None => None,
     };
 
@@ -147,40 +189,39 @@ pub fn search(
 
     if let Some(path) = target {
         if path.is_file() {
-            scan_file(workspace_root, &path, &regex, &mut hits, max_hits)?;
+            scan_file(workspace_root, &path, &regex, &mut hits, max_hits);
         } else if path.is_dir() {
-            walk_dir(workspace_root, &path, &regex, &mut hits, max_hits)?;
+            walk_dir(workspace_root, &path, &regex, &mut hits, max_hits);
         } else {
             return Err(WorkspaceToolError::NotFound(
-                rel_path.unwrap_or("").to_string(),
+                rel_path.unwrap_or("").to_owned(),
             ));
         }
     } else {
-        walk_dir(workspace_root, workspace_root, &regex, &mut hits, max_hits)?;
+        walk_dir(workspace_root, workspace_root, &regex, &mut hits, max_hits);
     }
     Ok(hits)
 }
 
-/// Cap on directory-tree recursion depth. A malicious PR could
-/// commit `a/b/c/.../z/` nested thousands of levels deep (most
-/// filesystems allow it even though POSIX PATH_MAX = 4096
-/// usually prevents the path string from being usable). Each
-/// `walk_dir` frame uses a few hundred bytes of stack, so an
-/// unbounded recursion eventually overflows the default 8 MiB
-/// stack. 64 covers any reasonable repo and matches what
-/// `find -maxdepth` operators typically use.
-const WALK_MAX_DEPTH: usize = 64;
+/// 1-based line numbers are `u32` in tool results; a count that does not
+/// fit saturates (files are capped at [`SCAN_FILE_MAX_BYTES`], far below).
+fn line_number(count: usize) -> u32 {
+    u32::try_from(count).unwrap_or(u32::MAX)
+}
 
+/// Search every file under `dir`, starting at depth zero.
 fn walk_dir(
     workspace_root: &Path,
     dir: &Path,
     regex: &Regex,
     hits: &mut Vec<SearchHit>,
     max_hits: usize,
-) -> Result<(), WorkspaceToolError> {
-    walk_dir_at_depth(workspace_root, dir, regex, hits, max_hits, 0)
+) {
+    walk_dir_at_depth(workspace_root, dir, regex, hits, max_hits, 0);
 }
 
+/// Recursive step of [`walk_dir`]: skips heavy directories and symlinks
+/// and stops at [`WALK_MAX_DEPTH`] or once `max_hits` is reached.
 fn walk_dir_at_depth(
     workspace_root: &Path,
     dir: &Path,
@@ -188,22 +229,21 @@ fn walk_dir_at_depth(
     hits: &mut Vec<SearchHit>,
     max_hits: usize,
     depth: usize,
-) -> Result<(), WorkspaceToolError> {
+) {
     if hits.len() >= max_hits || depth >= WALK_MAX_DEPTH {
-        return Ok(());
+        return;
     }
-    let entries = match fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return Ok(()), // Skip unreadable directories silently.
+    let Ok(entries) = fs::read_dir(dir) else {
+        return; // Skip unreadable directories silently.
     };
     for entry in entries.flatten() {
         if hits.len() >= max_hits {
-            return Ok(());
+            return;
         }
         let path = entry.path();
         let name = path
             .file_name()
-            .and_then(|s| s.to_str())
+            .and_then(|os_name| os_name.to_str())
             .unwrap_or_default();
         if is_skipped_dirname(name) {
             continue;
@@ -214,51 +254,58 @@ fn walk_dir_at_depth(
         // workspace_root via the canonicalize path. The agentic
         // verifier reads source code, not symlinked content, so
         // dropping them is safe.
-        let file_type = match entry.file_type() {
-            Ok(ft) => ft,
-            Err(_) => continue,
+        let Ok(file_type) = entry.file_type() else {
+            continue;
         };
         if file_type.is_symlink() {
             continue;
         }
         if file_type.is_dir() {
-            walk_dir_at_depth(workspace_root, &path, regex, hits, max_hits, depth + 1)?;
-        } else if file_type.is_file() {
-            scan_file(workspace_root, &path, regex, hits, max_hits)?;
+            walk_dir_at_depth(
+                workspace_root,
+                &path,
+                regex,
+                hits,
+                max_hits,
+                depth.saturating_add(1),
+            );
+            continue;
+        }
+        #[expect(
+            clippy::filetype_is_file,
+            reason = "only regular files are scanned; opening a fifo, socket or device node \
+                      committed to the PR could block or misbehave"
+        )]
+        let is_regular_file = file_type.is_file();
+        if is_regular_file {
+            scan_file(workspace_root, &path, regex, hits, max_hits);
         }
     }
-    Ok(())
 }
 
-/// Hard cap on the bytes scan_file will pull into memory per
-/// file. Files committed to a PR are attacker-controllable;
-/// without this, a malicious 1+ GiB committed text file would
-/// OOM the gateway during the agentic verifier's search pass.
-/// 1 MiB matches the indexer's per-file limit and easily covers
-/// any source file the verifier would meaningfully grep.
-const SCAN_FILE_MAX_BYTES: u64 = 1024 * 1024;
-
+/// Append the lines of `path` that match `regex` to `hits`, up to
+/// `max_hits`. Oversized, binary, non-UTF-8 and unreadable files are
+/// skipped.
 fn scan_file(
     workspace_root: &Path,
     path: &Path,
     regex: &Regex,
     hits: &mut Vec<SearchHit>,
     max_hits: usize,
-) -> Result<(), WorkspaceToolError> {
+) {
     if hits.len() >= max_hits {
-        return Ok(());
+        return;
     }
     // Stat first; refuse to read pathologically large files. A PR
     // committing a 1 GiB text file would otherwise slurp it into
     // RAM here.
     if let Ok(meta) = fs::metadata(path) {
         if meta.len() > SCAN_FILE_MAX_BYTES {
-            return Ok(());
+            return;
         }
     }
-    let content = match fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return Ok(()), // Binary / non-utf8 / unreadable files skipped.
+    let Ok(content) = fs::read_to_string(path) else {
+        return; // Binary / non-utf8 / unreadable files skipped.
     };
     let rel = path
         .strip_prefix(workspace_root)
@@ -272,14 +319,14 @@ fn scan_file(
         if regex.is_match(line) {
             hits.push(SearchHit {
                 path: rel.clone(),
-                line: idx as u32 + 1,
-                line_text: line.to_string(),
+                line: line_number(idx).saturating_add(1),
+                line_text: line.to_owned(),
             });
         }
     }
-    Ok(())
 }
 
+/// Directory names the workspace walk never descends into.
 fn is_skipped_dirname(name: &str) -> bool {
     matches!(
         name,
@@ -310,7 +357,7 @@ fn resolve_inside(workspace_root: &Path, rel_path: &str) -> Result<PathBuf, Work
     // canonicalize() (which would error if the parent doesn't exist
     // for a symbolic-link-relative path).
     for comp in candidate.components() {
-        if matches!(comp, std::path::Component::ParentDir) {
+        if matches!(comp, Component::ParentDir) {
             return Err(WorkspaceToolError::PathEscape(rel_path.into()));
         }
     }
@@ -318,11 +365,11 @@ fn resolve_inside(workspace_root: &Path, rel_path: &str) -> Result<PathBuf, Work
     let canonical_root = workspace_root
         .canonicalize()
         .map_err(WorkspaceToolError::Io)?;
-    let canonical = joined.canonicalize().map_err(|e| {
-        if e.kind() == std::io::ErrorKind::NotFound {
+    let canonical = joined.canonicalize().map_err(|err| {
+        if err.kind() == io::ErrorKind::NotFound {
             WorkspaceToolError::NotFound(rel_path.into())
         } else {
-            WorkspaceToolError::Io(e)
+            WorkspaceToolError::Io(err)
         }
     })?;
     if !canonical.starts_with(&canonical_root) {
@@ -331,38 +378,41 @@ fn resolve_inside(workspace_root: &Path, rel_path: &str) -> Result<PathBuf, Work
     Ok(canonical)
 }
 
-trait TruncateUtf8 {
-    fn truncate_to_char_boundary(&mut self, max: usize);
-}
-
-impl TruncateUtf8 for String {
-    fn truncate_to_char_boundary(&mut self, max: usize) {
-        if self.len() <= max {
-            return;
-        }
-        let mut cut = max;
-        while cut > 0 && !self.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        self.truncate(cut);
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Write;
+    use std::io::Write as _;
 
+    #[expect(
+        clippy::absolute_paths,
+        reason = "the test spells out crate paths (std, tempfile, ar_prompts and similar) inline where it uses them, as written; importing each into the shared test module for one use would widen every test's namespace"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn write(dir: &Path, rel: &str, body: &str) {
-        let p = dir.join(rel);
-        if let Some(parent) = p.parent() {
+        let path_buf = dir.join(rel);
+        if let Some(parent) = path_buf.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let mut f = std::fs::File::create(&p).unwrap();
-        f.write_all(body.as_bytes()).unwrap();
+        let mut file = std::fs::File::create(&path_buf).unwrap();
+        file.write_all(body.as_bytes()).unwrap();
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn read_file_returns_full_content_when_no_range_given() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "src/lib.rs", "line1\nline2\nline3\n");
@@ -374,6 +424,18 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn read_file_respects_line_range() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "x.txt", "a\nb\nc\nd\ne\n");
@@ -384,6 +446,18 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn read_file_clamps_end_to_total_lines() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "x.txt", "a\nb\n");
@@ -392,6 +466,18 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn read_file_marks_truncated_when_content_exceeds_max_bytes() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "big.txt", &"x".repeat(2_000));
@@ -401,6 +487,14 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn read_file_rejects_parent_dir_traversal() {
         let dir = tempfile::tempdir().unwrap();
         let r = read_file(dir.path(), "../etc/passwd", None, None, 4096);
@@ -408,6 +502,14 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn read_file_rejects_absolute_path() {
         let dir = tempfile::tempdir().unwrap();
         let r = read_file(dir.path(), "/etc/passwd", None, None, 4096);
@@ -415,6 +517,14 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn read_file_returns_not_found_for_missing_file() {
         let dir = tempfile::tempdir().unwrap();
         let r = read_file(dir.path(), "nope.txt", None, None, 4096);
@@ -422,6 +532,18 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn search_finds_matches_in_single_file() {
         let dir = tempfile::tempdir().unwrap();
         write(
@@ -429,23 +551,43 @@ mod tests {
             "src/auth.rs",
             "fn validate() {\n    panic!(\"oops\");\n}\n",
         );
-        let hits = search(dir.path(), r"panic!", Some("src/auth.rs"), 100).expect("ok");
+        let hits = search(dir.path(), "panic!", Some("src/auth.rs"), 100).expect("ok");
         assert_eq!(hits.len(), 1);
         assert_eq!(hits[0].line, 2);
         assert!(hits[0].line_text.contains("panic!"));
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn search_walks_workspace_when_no_path_given() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "a.rs", "todo: refactor\n");
         write(dir.path(), "src/b.rs", "todo: rewrite\n");
         write(dir.path(), "src/c.rs", "no match here\n");
-        let hits = search(dir.path(), r"todo:", None, 100).expect("ok");
+        let hits = search(dir.path(), "todo:", None, 100).expect("ok");
         assert_eq!(hits.len(), 2);
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn search_skips_node_modules_and_target_directories() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "src/x.rs", "needle\n");
@@ -457,6 +599,14 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn search_caps_results_at_max_hits() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "x.rs", "TODO\nTODO\nTODO\nTODO\nTODO\n");
@@ -465,6 +615,14 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn search_invalid_regex_is_an_error() {
         let dir = tempfile::tempdir().unwrap();
         let r = search(dir.path(), "(unclosed", None, 100);
@@ -472,6 +630,14 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn search_rejects_path_escape() {
         let dir = tempfile::tempdir().unwrap();
         let r = search(dir.path(), "x", Some("../etc"), 100);
@@ -479,6 +645,26 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "the test spells out crate paths (std, tempfile, ar_prompts and similar) inline where it uses them, as written; importing each into the shared test module for one use would widen every test's namespace"
+    )]
+    #[expect(
+        clippy::create_dir,
+        reason = "the test creates exactly one directory level under a fresh tempdir; create_dir_all would hide an unexpected missing parent"
+    )]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "test code: untyped literals in assertions and JSON fixtures; a suffix would trip separated_literal_suffix or unseparated_literal_suffix instead"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn walk_dir_caps_recursion_depth() {
         // A malicious PR could commit a path nested thousands of
         // levels deep. Without the depth cap, walk_dir would
@@ -511,6 +697,18 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "the test spells out crate paths (std, tempfile, ar_prompts and similar) inline where it uses them, as written; importing each into the shared test module for one use would widen every test's namespace"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn scan_file_skips_oversized_files() {
         // A PR can commit anything; without the size cap, a
         // committed 100 MiB text file would slurp into RAM. The
@@ -519,7 +717,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let big_path = dir.path().join("huge.txt");
         // Write just over 1 MiB of content that matches.
-        let payload: String = "needle\n".repeat(160_000); // ~1.1 MiB
+        let payload = "needle\n".repeat(160_000); // ~1.1 MiB
         std::fs::write(&big_path, &payload).unwrap();
         // Also write a small file with the same content so we can
         // verify search is still working.
@@ -527,8 +725,9 @@ mod tests {
 
         let hits = search(dir.path(), "needle", None, 100).expect("ok");
         // Only the small file should be scanned.
-        let small_hits: Vec<&SearchHit> = hits.iter().filter(|h| h.path == "small.txt").collect();
-        let big_hits: Vec<&SearchHit> = hits.iter().filter(|h| h.path == "huge.txt").collect();
+        let small_hits: Vec<&SearchHit> =
+            hits.iter().filter(|hit| hit.path == "small.txt").collect();
+        let big_hits: Vec<&SearchHit> = hits.iter().filter(|hit| hit.path == "huge.txt").collect();
         assert_eq!(small_hits.len(), 1);
         assert!(
             big_hits.is_empty(),
@@ -537,11 +736,31 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "the test spells out crate paths (std, tempfile, ar_prompts and similar) inline where it uses them, as written; importing each into the shared test module for one use would widen every test's namespace"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: any other variant fails the test through the wildcard arm"
+    )]
     fn read_file_rejects_oversized_files() {
         let dir = tempfile::tempdir().unwrap();
         let big_path = dir.path().join("huge.txt");
         // Just over 1 MiB.
-        let payload: String = "x".repeat(1024 * 1024 + 100);
+        let payload = "x".repeat(1024 * 1024 + 100);
         std::fs::write(&big_path, &payload).unwrap();
         let err = read_file(dir.path(), "huge.txt", None, None, 4096)
             .expect_err("must reject oversized file");
@@ -555,6 +774,22 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "the test spells out crate paths (std, tempfile, ar_prompts and similar) inline where it uses them, as written; importing each into the shared test module for one use would widen every test's namespace"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn walk_dir_skips_symlink_loop_without_spinning() {
         // A malicious PR could commit a directory symlink that
         // points back into the workspace (or itself). Without

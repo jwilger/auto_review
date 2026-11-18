@@ -6,25 +6,32 @@
 //! repos up to a few thousand source files; LanceDB-backed
 //! persistence and incremental updates land later.
 
+use crate::diff::cap_for_embed;
 use crate::rag_context::format_repo_context;
 use ar_index::{
     embed_symbols_with_config, index_workspace, EmbedConfig, EmbedError, EmbeddedSymbol,
     InMemoryVectorStore, LearningsStore, RepoScope, ScoredLearning, ScoredSymbol, VectorStore,
     WalkError,
 };
-use ar_llm::{ModelTier, Router};
+use ar_llm::{Error as LlmError, ModelTier, Router};
+use core::cmp::Ordering;
 use std::collections::HashMap;
 use std::fs;
+use std::io;
 use std::path::Path;
 
+/// Hard failure while building the RAG context block.
 #[derive(Debug, thiserror::Error)]
 pub enum ContextBuildError {
-    #[error("walk: {0}")]
-    Walk(#[from] WalkError),
+    /// Embedding symbols or querying a store failed.
     #[error("embed: {0}")]
     Embed(#[from] EmbedError),
+    /// Reading from the workspace failed.
     #[error("io: {0}")]
-    Io(#[from] std::io::Error),
+    Io(#[from] io::Error),
+    /// Walking the workspace for symbols failed.
+    #[error("walk: {0}")]
+    Walk(#[from] WalkError),
 }
 
 /// Build a markdown context block for the LLM prompt. Returns an empty
@@ -40,6 +47,12 @@ pub enum ContextBuildError {
 /// New callers should prefer [`build_review_context_with_store`] and
 /// thread a shared, persistent store so symbol embeddings survive
 /// across reviews.
+///
+/// # Errors
+///
+/// Returns [`ContextBuildError::Walk`] when the workspace cannot be
+/// indexed; embedding and store failures degrade to an empty section.
+#[inline]
 pub async fn build_review_context(
     workspace_path: &Path,
     router: &Router,
@@ -60,6 +73,12 @@ pub async fn build_review_context(
 /// When `vector_store` is `None`, behaves exactly like the back-compat
 /// helper: a fresh in-memory store is constructed for the call and
 /// thrown away.
+///
+/// # Errors
+///
+/// Returns [`ContextBuildError::Walk`] when the workspace cannot be
+/// indexed; embedding and store failures degrade to an empty section.
+#[inline]
 pub async fn build_review_context_with_store(
     workspace_path: &Path,
     router: &Router,
@@ -90,16 +109,16 @@ pub async fn build_review_context_with_store(
             Ok(contents) => {
                 file_contents.insert(sym.path.clone(), contents);
             }
-            Err(e) => {
-                tracing::debug!(path = %sym.path, error = %e, "skip unreadable file");
+            Err(err) => {
+                tracing::debug!(path = %sym.path, error = %err, "skip unreadable file");
             }
         }
     }
 
     // Drop symbols whose file we couldn't read.
-    let symbols: Vec<_> = symbols
+    let readable_symbols: Vec<_> = symbols
         .into_iter()
-        .filter(|s| file_contents.contains_key(&s.path))
+        .filter(|sym| file_contents.contains_key(&sym.path))
         .collect();
 
     // Embed the diff once and reuse for both the symbol-similarity
@@ -113,11 +132,11 @@ pub async fn build_review_context_with_store(
     // ceilings (e.g. text-embedding-3-small at 8192 tokens) don't
     // get a 400 they can't recover from. See #26.
     let cfg = EmbedConfig::from_env();
-    let query_text = crate::diff::cap_for_embed(diff, cfg.input_cap_bytes);
+    let query_text = cap_for_embed(diff, cfg.input_cap_bytes);
     let query_vec = match router.embed(ModelTier::Embedding, &[query_text]).await {
         Ok(mut vecs) => vecs.pop().unwrap_or_default(),
-        Err(e) => {
-            tracing::warn!(error = %e, "diff embedding failed; skipping RAG context");
+        Err(err) => {
+            tracing::warn!(error = %err, "diff embedding failed; skipping RAG context");
             return Ok(String::new());
         }
     };
@@ -127,7 +146,7 @@ pub async fn build_review_context_with_store(
 
     let scored_symbols = embed_and_query_symbols(
         router,
-        &symbols,
+        &readable_symbols,
         &file_contents,
         &query_vec,
         top_k,
@@ -135,16 +154,16 @@ pub async fn build_review_context_with_store(
         vector_store,
     )
     .await
-    .unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "symbol embedding/query failed; skipping that section");
+    .unwrap_or_else(|err| {
+        tracing::warn!(error = %err, "symbol embedding/query failed; skipping that section");
         Vec::new()
     });
 
     let scored_learnings = match learnings {
         Some(store) => query_learnings(store, &query_vec, top_k, scope)
             .await
-            .unwrap_or_else(|e| {
-                tracing::warn!(error = %e, "learnings query failed; skipping that section");
+            .unwrap_or_else(|err| {
+                tracing::warn!(error = %err, "learnings query failed; skipping that section");
                 Vec::new()
             }),
         None => Vec::new(),
@@ -153,6 +172,8 @@ pub async fn build_review_context_with_store(
     Ok(format_repo_context(&scored_symbols, &scored_learnings))
 }
 
+/// Score `symbols` against `query_vec`, reusing cached embeddings from
+/// `shared_store` when present, and return the `top_k` nearest.
 async fn embed_and_query_symbols(
     router: &Router,
     symbols: &[ar_index::IndexedSymbol],
@@ -176,9 +197,18 @@ async fn embed_and_query_symbols(
         let snippets = compute_snippets(symbols, file_contents)?;
         let keys: Vec<(String, String, u32)> = symbols
             .iter()
-            .map(|s| (s.path.clone(), s.symbol.name.clone(), s.symbol.line_start))
+            .map(|sym| {
+                (
+                    sym.path.clone(),
+                    sym.symbol.name.clone(),
+                    sym.symbol.line_start,
+                )
+            })
             .collect();
-        let cached = store.fetch_by_keys(&keys).await.map_err(map_vector_err)?;
+        let cached = store
+            .fetch_by_keys(&keys)
+            .await
+            .map_err(|err| map_vector_err(&err))?;
 
         let mut to_embed: Vec<ar_index::IndexedSymbol> = Vec::new();
         let mut cached_for_query: Vec<EmbeddedSymbol> = Vec::new();
@@ -205,7 +235,7 @@ async fn embed_and_query_symbols(
             store
                 .upsert(&newly_embedded)
                 .await
-                .map_err(map_vector_err)?;
+                .map_err(|err| map_vector_err(&err))?;
         }
 
         let mut all = cached_for_query;
@@ -216,15 +246,20 @@ async fn embed_and_query_symbols(
         let embedded: Vec<EmbeddedSymbol> =
             embed_symbols_with_config(router, symbols, file_contents, cfg).await?;
         let store = InMemoryVectorStore::new();
-        store.upsert(&embedded).await.map_err(map_vector_err)?;
+        store
+            .upsert(&embedded)
+            .await
+            .map_err(|err| map_vector_err(&err))?;
         let scored = store
             .query_nearest(query_vec, top_k)
             .await
-            .map_err(map_vector_err)?;
+            .map_err(|err| map_vector_err(&err))?;
         Ok(scored)
     }
 }
 
+/// Slice each symbol's source lines out of `file_contents`, mirroring
+/// what the embedder stores as the symbol's content.
 fn compute_snippets(
     symbols: &[ar_index::IndexedSymbol],
     file_contents: &HashMap<String, String>,
@@ -241,19 +276,23 @@ fn compute_snippets(
         // change in content past the cap still produces different
         // bytes pre-cap and re-embeds correctly.
         let lines: Vec<&str> = content.lines().collect();
-        let start = sym.symbol.line_start.saturating_sub(1) as usize;
-        let end = sym.symbol.line_end as usize;
-        if end > lines.len() {
-            return Err(ContextBuildError::Embed(EmbedError::OutOfRange {
+        let out_of_range = || {
+            ContextBuildError::Embed(EmbedError::OutOfRange {
                 path: sym.path.clone(),
                 line_end: sym.symbol.line_end,
-            }));
-        }
-        out.push(lines[start..end].join("\n"));
+            })
+        };
+        // A line number that does not fit usize cannot be in range, so it
+        // saturates and `get` reports it as out of range below.
+        let start = usize::try_from(sym.symbol.line_start.saturating_sub(1)).unwrap_or(usize::MAX);
+        let end = usize::try_from(sym.symbol.line_end).unwrap_or(usize::MAX);
+        let snippet = lines.get(start..end).ok_or_else(out_of_range)?;
+        out.push(snippet.join("\n"));
     }
     Ok(out)
 }
 
+/// Rank `embedded` by cosine similarity to `query`, keeping the `top_k`.
 fn score_against_query(
     embedded: &[EmbeddedSymbol],
     query: &[f32],
@@ -264,41 +303,55 @@ fn score_against_query(
     }
     let mut scored: Vec<ScoredSymbol> = embedded
         .iter()
-        .map(|s| ScoredSymbol {
-            symbol: s.clone(),
-            score: cosine_similarity(query, &s.embedding),
+        .map(|sym| ScoredSymbol {
+            symbol: sym.clone(),
+            score: cosine_similarity(query, &sym.embedding),
         })
         .collect();
-    scored.sort_by(|a, b| {
-        b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
+    scored.sort_by(|left, right| {
+        right
+            .score
+            .partial_cmp(&left.score)
+            .unwrap_or(Ordering::Equal)
     });
     scored.truncate(top_k);
     scored
 }
 
-fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
-    if a.len() != b.len() || a.is_empty() {
+/// Cosine similarity of two equal-length vectors; 0 for mismatched,
+/// empty or zero-norm inputs.
+#[expect(
+    clippy::float_arithmetic,
+    reason = "cosine similarity is inherently float math over f32 embeddings, and the ranking \
+              must match ar-index's vector stores exactly"
+)]
+fn cosine_similarity(left: &[f32], right: &[f32]) -> f32 {
+    if left.len() != right.len() || left.is_empty() {
         return 0.0;
     }
-    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
-    let na: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
-    let nb: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
-    if na == 0.0 || nb == 0.0 {
+    let dot: f32 = left
+        .iter()
+        .zip(right.iter())
+        .map(|(lhs, rhs)| lhs * rhs)
+        .sum();
+    let left_norm = left.iter().map(|val| val * val).sum::<f32>().sqrt();
+    let right_norm = right.iter().map(|val| val * val).sum::<f32>().sqrt();
+    if left_norm == 0.0 || right_norm == 0.0 {
         0.0
     } else {
-        dot / (na * nb)
+        dot / (left_norm * right_norm)
     }
 }
 
-fn map_vector_err(e: ar_index::VectorStoreError) -> ContextBuildError {
-    ContextBuildError::Embed(EmbedError::Llm(ar_llm::Error::Provider {
+/// Report a vector-store failure as a provider-style embed error.
+fn map_vector_err(err: &ar_index::VectorStoreError) -> ContextBuildError {
+    ContextBuildError::Embed(EmbedError::Llm(LlmError::Provider {
         status: 500,
-        body: e.to_string(),
+        body: err.to_string(),
     }))
 }
 
+/// Fetch the `top_k` learnings nearest `query_vec` within `scope`.
 async fn query_learnings(
     store: &(dyn LearningsStore + Sync),
     query_vec: &[f32],
@@ -308,10 +361,10 @@ async fn query_learnings(
     let scored = store
         .query_nearest(query_vec, top_k, scope)
         .await
-        .map_err(|e| {
-            ContextBuildError::Embed(EmbedError::Llm(ar_llm::Error::Provider {
+        .map_err(|err| {
+            ContextBuildError::Embed(EmbedError::Llm(LlmError::Provider {
                 status: 500,
-                body: e.to_string(),
+                body: err.to_string(),
             }))
         })?;
     Ok(scored)
@@ -320,15 +373,12 @@ async fn query_learnings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::sync::Arc;
     use ar_llm::{CompleteRequest, CompleteResponse, Error as LlmError, LlmProvider};
     use async_trait::async_trait;
     use std::fs;
     use std::sync::Mutex;
     use tempfile::tempdir;
-
-    fn scope() -> RepoScope {
-        RepoScope::new("acme", "widget")
-    }
 
     /// Embedder that returns deterministic 3-D vectors keyed off
     /// content and records every batch it was asked to embed.
@@ -338,28 +388,52 @@ mod tests {
     }
 
     impl DeterministicEmbedder {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+        )]
+        fn call_count(&self) -> usize {
+            self.seen.lock().unwrap().len()
+        }
+
         fn new() -> Self {
             Self {
                 seen: Mutex::new(Vec::new()),
             }
         }
-
-        fn call_count(&self) -> usize {
-            self.seen.lock().unwrap().len()
-        }
     }
 
     #[async_trait]
     impl LlmProvider for DeterministicEmbedder {
+        #[expect(
+            clippy::unimplemented,
+            reason = "the embedding fake never serves completions; reaching complete() would be a bug in the test"
+        )]
         async fn complete(&self, _req: CompleteRequest) -> Result<CompleteResponse, LlmError> {
             unimplemented!()
         }
+        #[expect(
+            clippy::as_conversions,
+            reason = "test fixtures convert small counts and bytes with `as`; the values are tiny, so nothing truncates or loses precision"
+        )]
+        #[expect(
+            clippy::cast_lossless,
+            reason = "the fake embedder's u8-to-f32 conversion is the fixture's vector formula, kept as written"
+        )]
+        #[expect(
+            clippy::cast_precision_loss,
+            reason = "the fake embedder turns small byte counts into f32 vector components; the values are tiny, so nothing is lost"
+        )]
+        #[expect(
+            clippy::unwrap_used,
+            reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+        )]
         async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LlmError> {
             self.seen.lock().unwrap().push(texts.to_vec());
             Ok(texts
                 .iter()
-                .map(|t| {
-                    let bytes = t.as_bytes();
+                .map(|text| {
+                    let bytes = text.as_bytes();
                     vec![
                         bytes.len() as f32,
                         bytes.first().copied().unwrap_or(0) as f32,
@@ -370,7 +444,23 @@ mod tests {
         }
     }
 
+    fn scope() -> RepoScope {
+        RepoScope::new("acme", "widget")
+    }
+
     #[tokio::test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn returns_empty_when_no_embedding_tier_configured() {
         let dir = tempdir().unwrap();
         let router = Router::new();
@@ -381,13 +471,29 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "the test spells out crate paths (std, tempfile, ar_prompts and similar) inline where it uses them, as written; importing each into the shared test module for one use would widen every test's namespace"
+    )]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn returns_empty_for_workspace_with_no_extractable_symbols() {
         let dir = tempdir().unwrap();
         // Only files we don't have grammars for.
         fs::write(dir.path().join("data.json"), "{}").unwrap();
         fs::write(dir.path().join("README"), "hello").unwrap();
 
-        let embedder = std::sync::Arc::new(DeterministicEmbedder::new());
+        let embedder = alloc::sync::Arc::new(DeterministicEmbedder::new());
         let router = Router::new().with(ModelTier::Embedding, embedder);
         let result = build_review_context(dir.path(), &router, "diff", None, &scope(), 5)
             .await
@@ -396,6 +502,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "the test spells out crate paths (std, tempfile, ar_prompts and similar) inline where it uses them, as written; importing each into the shared test module for one use would widen every test's namespace"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::let_underscore_untyped,
+        reason = "the test discards this result on purpose: it checks side effects recorded by the fakes, or does best-effort cleanup"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn diff_is_embedded_only_once_even_with_learnings_store() {
         // Regression: previously the diff was embedded twice — once
         // for symbol-similarity, once for learnings-similarity. This
@@ -406,8 +528,8 @@ mod tests {
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("a.rs"), "pub fn foo() {}\n").unwrap();
 
-        let embedder = std::sync::Arc::new(DeterministicEmbedder::new());
-        let calls_handle = embedder.clone();
+        let embedder = alloc::sync::Arc::new(DeterministicEmbedder::new());
+        let calls_handle = Arc::clone(&embedder);
         let router = Router::new().with(ModelTier::Embedding, embedder);
         let store = InMemoryLearningsStore::new();
 
@@ -426,14 +548,26 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "the test spells out crate paths (std, tempfile, ar_prompts and similar) inline where it uses them, as written; importing each into the shared test module for one use would widen every test's namespace"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn learnings_of_another_repository_are_never_retrieved() {
-        use ar_index::{InMemoryLearningsStore, LearningSource, LearningsStore, RepoScope};
+        use ar_index::{InMemoryLearningsStore, LearningSource, LearningsStore as _, RepoScope};
 
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("a.rs"), "pub fn foo() {}\n").unwrap();
-        let embedder = std::sync::Arc::new(DeterministicEmbedder::new());
+        let embedder = alloc::sync::Arc::new(DeterministicEmbedder::new());
         let diff = "diff text";
-        let diff_vec = embedder.embed(&[diff.to_string()]).await.unwrap().remove(0);
+        let diff_vec = embedder.embed(&[diff.to_owned()]).await.unwrap().remove(0);
         let router = Router::new().with(ModelTier::Embedding, embedder);
         let store = InMemoryLearningsStore::new();
         let repo_a = RepoScope::new("acme", "repo-a");
@@ -468,6 +602,30 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "the test spells out crate paths (std, tempfile, ar_prompts and similar) inline where it uses them, as written; importing each into the shared test module for one use would widen every test's namespace"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "the test discards this result on purpose: it checks side effects recorded by the fakes, or does best-effort cleanup"
+    )]
+    #[expect(
+        clippy::let_underscore_untyped,
+        reason = "the test discards this result on purpose: it checks side effects recorded by the fakes, or does best-effort cleanup"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn diff_embedding_input_is_capped_to_embed_config_default() {
         // Regression for #26: the diff used to be capped at a hardcoded
         // 32 KiB byte cap that exceeded text-embedding-3-small's
@@ -483,8 +641,8 @@ mod tests {
         // the assertion below by the leading-`x` predicate.
         fs::write(dir.path().join("a.rs"), "pub fn ok() {}\n").unwrap();
 
-        let embedder = std::sync::Arc::new(DeterministicEmbedder::new());
-        let recorder = embedder.clone();
+        let embedder = alloc::sync::Arc::new(DeterministicEmbedder::new());
+        let recorder = Arc::clone(&embedder);
         let router = Router::new().with(ModelTier::Embedding, embedder);
 
         // 256 KiB diff — well above the historical 32 KiB cap and
@@ -495,7 +653,7 @@ mod tests {
         let seen = recorder.seen.lock().unwrap();
         let diff_call = seen
             .iter()
-            .find(|batch| batch.iter().any(|t| t.starts_with('x')))
+            .find(|batch| batch.iter().any(|text| text.starts_with('x')))
             .expect("expected a diff embed call");
         let diff_input_bytes = diff_call[0].len();
         assert!(
@@ -505,6 +663,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "the test spells out crate paths (std, tempfile, ar_prompts and similar) inline where it uses them, as written; importing each into the shared test module for one use would widen every test's namespace"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn second_review_with_unchanged_content_skips_re_embedding_symbols() {
         // The persistence win: embeddings of symbols whose source
         // hasn't changed between reviews are reused from the shared
@@ -514,8 +684,8 @@ mod tests {
 
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("a.rs"), "pub fn foo() {}\n").unwrap();
-        let embedder = std::sync::Arc::new(DeterministicEmbedder::new());
-        let calls_handle = embedder.clone();
+        let embedder = alloc::sync::Arc::new(DeterministicEmbedder::new());
+        let calls_handle = Arc::clone(&embedder);
         let router = Router::new().with(ModelTier::Embedding, embedder);
 
         let store = SqliteVectorStore::in_memory().await.expect("open store");
@@ -557,6 +727,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "the test spells out crate paths (std, tempfile, ar_prompts and similar) inline where it uses them, as written; importing each into the shared test module for one use would widen every test's namespace"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn changed_content_invalidates_cached_embedding() {
         // Invalidation: when a symbol's source bytes change, the
         // cached entry must NOT be reused — otherwise stale
@@ -566,8 +748,8 @@ mod tests {
 
         let dir = tempdir().unwrap();
         fs::write(dir.path().join("a.rs"), "pub fn foo() {}\n").unwrap();
-        let embedder = std::sync::Arc::new(DeterministicEmbedder::new());
-        let calls_handle = embedder.clone();
+        let embedder = alloc::sync::Arc::new(DeterministicEmbedder::new());
+        let calls_handle = Arc::clone(&embedder);
         let router = Router::new().with(ModelTier::Embedding, embedder);
 
         let store = SqliteVectorStore::in_memory().await.expect("open store");
@@ -610,6 +792,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "the test spells out crate paths (std, tempfile, ar_prompts and similar) inline where it uses them, as written; importing each into the shared test module for one use would widen every test's namespace"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn produces_repo_context_markdown_when_workspace_has_symbols() {
         let dir = tempdir().unwrap();
         fs::write(
@@ -618,7 +812,7 @@ mod tests {
         )
         .unwrap();
 
-        let embedder = std::sync::Arc::new(DeterministicEmbedder::new());
+        let embedder = alloc::sync::Arc::new(DeterministicEmbedder::new());
         let router = Router::new().with(ModelTier::Embedding, embedder);
         let result = build_review_context(dir.path(), &router, "diff", None, &scope(), 5)
             .await

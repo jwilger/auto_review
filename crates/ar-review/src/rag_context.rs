@@ -12,6 +12,8 @@ use ar_index::{ScoredLearning, ScoredSymbol};
 /// Sections are emitted only when their input is non-empty, so the
 /// resulting string is safe to drop into the prompt — no empty
 /// headers when there's nothing to show.
+#[inline]
+#[must_use = "formatting has no side effects; the rendered block is the only result"]
 pub fn format_repo_context(
     similar_symbols: &[ScoredSymbol],
     relevant_learnings: &[ScoredLearning],
@@ -20,18 +22,23 @@ pub fn format_repo_context(
 
     if !similar_symbols.is_empty() {
         out.push_str("### Similar code in this repo\n");
-        for s in similar_symbols {
+        for scored in similar_symbols {
+            #[expect(
+                clippy::format_push_string,
+                reason = "one short header per retrieved snippet; write! into a String returns an \
+                          infallible fmt::Result that would have to be discarded"
+            )]
             out.push_str(&format!(
                 "- **{}** ({:?}) at `{}`:{}-{}\n",
-                s.symbol.indexed.symbol.name,
-                s.symbol.indexed.symbol.kind,
-                s.symbol.indexed.path,
-                s.symbol.indexed.symbol.line_start,
-                s.symbol.indexed.symbol.line_end,
+                scored.symbol.indexed.symbol.name,
+                scored.symbol.indexed.symbol.kind,
+                scored.symbol.indexed.path,
+                scored.symbol.indexed.symbol.line_start,
+                scored.symbol.indexed.symbol.line_end,
             ));
             // Indent the snippet by 4 spaces so it renders as a code
             // block continuation under the bullet.
-            for line in s.symbol.content.lines() {
+            for line in scored.symbol.content.lines() {
                 out.push_str("    ");
                 out.push_str(line);
                 out.push('\n');
@@ -42,10 +49,15 @@ pub fn format_repo_context(
 
     if !relevant_learnings.is_empty() {
         out.push_str("### Project conventions and past feedback\n");
-        for l in relevant_learnings {
+        for scored in relevant_learnings {
+            #[expect(
+                clippy::format_push_string,
+                reason = "one short bullet per retrieved learning; write! into a String returns an \
+                          infallible fmt::Result that would have to be discarded"
+            )]
             out.push_str(&format!(
                 "- ({:?}) {}\n",
-                l.learning.source, l.learning.text
+                scored.learning.source, scored.learning.text
             ));
         }
         out.push('\n');
@@ -96,6 +108,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
     fn empty_inputs_produce_empty_output() {
         let out = format_repo_context(&[], &[]);
         assert!(out.is_empty());

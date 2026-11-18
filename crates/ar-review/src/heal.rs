@@ -1,13 +1,23 @@
+//! JSON self-heal loop around reasoning-tier review generation.
+
 use crate::error::ReviewError;
 use ar_llm::{CompleteRequest, Message, ModelTier, ResponseFormat, Role, Router};
 use ar_prompts::{review_schema, validate_review_output, ReviewOutput};
 
+/// Bounds for the self-heal loop.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "ar-cli (bench) imports this as ar_review::HealConfig; renaming it breaks that crate"
+)]
 pub struct HealConfig {
+    /// Maximum number of generation attempts; zero is treated as one.
     pub max_attempts: u32,
 }
 
 impl Default for HealConfig {
+    #[inline]
     fn default() -> Self {
         Self { max_attempts: 3 }
     }
@@ -17,6 +27,17 @@ impl Default for HealConfig {
 /// output, and on failure feed the validation error back into a follow-up
 /// completion. Returns the first valid `ReviewOutput`, or `Unhealable` if
 /// every attempt fails.
+///
+/// # Errors
+///
+/// Returns [`ReviewError::Llm`] when a completion call fails, and
+/// [`ReviewError::Unhealable`] when every attempt fails schema validation.
+#[inline]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "ar-cli (bench) and review_core call this as generate_with_self_heal; renaming it \
+              breaks those call sites"
+)]
 pub async fn generate_with_self_heal(
     router: &Router,
     system: &str,
@@ -30,12 +51,12 @@ pub async fn generate_with_self_heal(
     let max_attempts = config.max_attempts.max(1);
     let mut attempt: u32 = 0;
     loop {
-        attempt += 1;
+        attempt = attempt.saturating_add(1);
         let req = CompleteRequest {
-            system: Some(system.to_string()),
+            system: Some(system.to_owned()),
             messages: messages.clone(),
             response_format: Some(ResponseFormat::JsonSchema {
-                name: "Review".to_string(),
+                name: "Review".to_owned(),
                 schema: review_schema().clone(),
             }),
             // Deterministic output: same prompt → same findings.
@@ -53,12 +74,12 @@ pub async fn generate_with_self_heal(
                 tracing::debug!(attempts = attempt, "review JSON validated");
                 return Ok(out);
             }
-            Err(e) => {
-                tracing::warn!(attempt, error = %e, "review JSON failed validation");
+            Err(err) => {
+                tracing::warn!(attempt, error = %err, "review JSON failed validation");
                 if attempt >= max_attempts {
                     return Err(ReviewError::Unhealable {
                         attempts: max_attempts,
-                        last_error: e,
+                        last_error: err,
                     });
                 }
                 messages.push(Message {
@@ -66,7 +87,7 @@ pub async fn generate_with_self_heal(
                     content: resp.content,
                 });
                 messages.push(Message::user(format!(
-                    "That output failed validation: {e}\n\nReturn ONLY a JSON object that \
+                    "That output failed validation: {err}\n\nReturn ONLY a JSON object that \
                      conforms to the schema. No prose, no markdown fences."
                 )));
             }
@@ -77,18 +98,25 @@ pub async fn generate_with_self_heal(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::sync::Arc;
     use ar_llm::testing::ScriptedProvider;
-    use std::sync::Arc;
-
-    fn router_with(responses: Vec<&str>) -> (Router, Arc<ScriptedProvider>) {
-        let provider = Arc::new(ScriptedProvider::new(responses));
-        let router = Router::new().with(ModelTier::Reasoning, provider.clone());
-        (router, provider)
-    }
 
     const VALID: &str = r#"{"summary":"ok","findings":[]}"#;
 
+    fn router_with(responses: Vec<&str>) -> (Router, Arc<ScriptedProvider>) {
+        let provider = Arc::new(ScriptedProvider::new(responses));
+        let router = Router::new().with(
+            ModelTier::Reasoning,
+            Arc::<ScriptedProvider>::clone(&provider),
+        );
+        (router, provider)
+    }
+
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
     async fn returns_immediately_when_first_response_validates() {
         let (router, provider) = router_with(vec![VALID]);
         let out = generate_with_self_heal(&router, "sys", "user", HealConfig::default())
@@ -99,6 +127,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
     async fn retries_when_first_response_is_invalid_json() {
         let (router, provider) = router_with(vec!["not json", VALID]);
         let out = generate_with_self_heal(&router, "sys", "user", HealConfig::default())
@@ -109,6 +141,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
     async fn retries_when_first_response_violates_schema() {
         let bad = r#"{"summary":"x","findings":[{"path":"a","line_start":1,"severity":"oops","message":"m"}]}"#;
         let (router, provider) = router_with(vec![bad, VALID]);
@@ -120,6 +156,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::rest_pattern_accessible_field,
+        reason = "the match arm reads only the field the assertion checks; naming the other fields would edit the asserted pattern"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: any other variant fails the test through the wildcard arm"
+    )]
     async fn max_attempts_zero_clamps_to_one_attempt_no_panic() {
         // Defence in depth: a misconfigured `max_attempts: 0`
         // should not panic. The previous implementation called
@@ -138,6 +190,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::rest_pattern_accessible_field,
+        reason = "the match arm reads only the field the assertion checks; naming the other fields would edit the asserted pattern"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: any other variant fails the test through the wildcard arm"
+    )]
     async fn gives_up_after_max_attempts() {
         // Always returns the first item without consuming if pop is empty;
         // here we feed three "not json"s and set max_attempts = 3.

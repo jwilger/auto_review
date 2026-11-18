@@ -6,37 +6,42 @@
 //! break the whole filter.
 
 use ar_forge::ChangedFile;
+use core::iter;
 use globset::{Glob, GlobSet, GlobSetBuilder};
 
 /// Compile a list of glob patterns into a [`GlobSet`]. Patterns that fail
 /// to compile are dropped with a warning log; the resulting matcher
 /// covers the survivors.
+#[inline]
+#[must_use = "building the matcher has no side effects beyond warnings; the set is the result"]
 pub fn build_glob_set(patterns: &[String]) -> GlobSet {
     let mut builder = GlobSetBuilder::new();
-    for p in patterns {
-        match Glob::new(p) {
-            Ok(g) => {
-                builder.add(g);
+    for pattern in patterns {
+        match Glob::new(pattern) {
+            Ok(glob) => {
+                builder.add(glob);
             }
-            Err(e) => {
-                tracing::warn!(pattern = p, error = %e, "ignoring malformed glob pattern");
+            Err(err) => {
+                tracing::warn!(pattern, error = %err, "ignoring malformed glob pattern");
             }
         }
     }
-    builder.build().unwrap_or_else(|e| {
-        tracing::warn!(error = %e, "failed to build glob set; using empty matcher");
+    builder.build().unwrap_or_else(|err| {
+        tracing::warn!(error = %err, "failed to build glob set; using empty matcher");
         GlobSet::empty()
     })
 }
 
 /// Drop any [`ChangedFile`] whose `filename` matches the glob set.
+#[inline]
+#[must_use = "filtering has no side effects; the surviving files are the only result"]
 pub fn filter_changed_files(files: &[ChangedFile], ignored: &GlobSet) -> Vec<ChangedFile> {
     if ignored.is_empty() {
         return files.to_vec();
     }
     files
         .iter()
-        .filter(|f| !ignored.is_match(&f.filename))
+        .filter(|file| !ignored.is_match(&file.filename))
         .cloned()
         .collect()
 }
@@ -46,25 +51,32 @@ pub fn filter_changed_files(files: &[ChangedFile], ignored: &GlobSet) -> Vec<Cha
 /// Recognizes file boundaries via the `diff --git ` marker (only at line
 /// starts). The path is extracted from `diff --git a/<path> b/<path>`;
 /// when extraction fails, the section is kept (fail-open).
+#[inline]
+#[must_use = "filtering has no side effects; the filtered diff is the only result"]
 pub fn filter_diff_paths(diff: &str, ignored: &GlobSet) -> String {
     if ignored.is_empty() {
-        return diff.to_string();
+        return diff.to_owned();
     }
     let sections = split_diff_sections(diff);
     if sections.is_empty() {
-        return diff.to_string();
+        return diff.to_owned();
     }
 
     let mut out = String::with_capacity(diff.len());
-    let mut omitted = 0usize;
-    for s in sections {
-        match extract_diff_path(s) {
-            Some(path) if ignored.is_match(path) => omitted += 1,
-            _ => out.push_str(s),
+    let mut omitted: usize = 0;
+    for section in sections {
+        match extract_diff_path(section) {
+            Some(path) if ignored.is_match(path) => omitted = omitted.saturating_add(1),
+            _ => out.push_str(section),
         }
     }
 
     if omitted > 0 {
+        #[expect(
+            clippy::format_push_string,
+            reason = "a single trailing note per filtered diff; write! into a String returns an \
+                      infallible fmt::Result that would have to be discarded"
+        )]
         out.push_str(&format!(
             "\n[auto_review: omitted {omitted} file section(s) matching ignored_paths]\n"
         ));
@@ -73,6 +85,7 @@ pub fn filter_diff_paths(diff: &str, ignored: &GlobSet) -> String {
 }
 
 /// Return the new-side filenames named by each per-file diff section.
+#[inline]
 pub fn diff_changed_paths(diff: &str) -> Vec<String> {
     split_diff_sections(diff)
         .into_iter()
@@ -81,29 +94,27 @@ pub fn diff_changed_paths(diff: &str) -> Vec<String> {
         .collect()
 }
 
+/// Split `diff` into per-file sections, each starting at a `diff --git `
+/// marker at the start of a line. Returns no sections when no marker exists.
 fn split_diff_sections(diff: &str) -> Vec<&str> {
+    /// Header that opens each file section of a unified git diff.
     const MARKER: &str = "diff --git ";
-    let mut starts: Vec<usize> = Vec::new();
-    let mut search_start = 0;
-    while let Some(rel) = diff[search_start..].find(MARKER) {
-        let abs = search_start + rel;
-        if abs == 0 || diff.as_bytes()[abs - 1] == b'\n' {
-            starts.push(abs);
-        }
-        search_start = abs + MARKER.len();
-    }
-
-    if starts.is_empty() {
-        return Vec::new();
-    }
-
-    let mut out = Vec::with_capacity(starts.len());
-    for i in 0..starts.len() {
-        let begin = starts[i];
-        let end = starts.get(i + 1).copied().unwrap_or(diff.len());
-        out.push(&diff[begin..end]);
-    }
-    out
+    let starts: Vec<usize> = diff
+        .match_indices(MARKER)
+        .map(|(abs, _)| abs)
+        .filter(|abs| {
+            abs.checked_sub(1)
+                .and_then(|prev| diff.as_bytes().get(prev))
+                .is_none_or(|byte| *byte == b'\n')
+        })
+        .collect();
+    let ends = starts.iter().skip(1).copied().chain(iter::once(diff.len()));
+    starts
+        .iter()
+        .copied()
+        .zip(ends)
+        .filter_map(|(begin, end)| diff.get(begin..end))
+        .collect()
 }
 
 /// Extract the new-side path from a `diff --git a/<path> b/<path>` header.
@@ -118,15 +129,13 @@ fn extract_diff_path(section: &str) -> Option<&str> {
     let line = section.lines().next()?;
     let rest = line.strip_prefix("diff --git ")?;
     // Try the quoted form first: `... "b/<path>"`.
-    if let Some(b_idx) = rest.find("\"b/") {
-        let after = &rest[b_idx + "\"b/".len()..];
-        if let Some(end) = after.find('"') {
-            return Some(&after[..end]);
+    if let Some((_, after)) = rest.split_once("\"b/") {
+        if let Some((path, _)) = after.split_once('"') {
+            return Some(path);
         }
     }
     // Unquoted: `... b/<path>` after a space.
-    let b_idx = rest.find(" b/")?;
-    let b_path = &rest[b_idx + " b/".len()..];
+    let (_, b_path) = rest.split_once(" b/")?;
     Some(b_path.trim_end())
 }
 
@@ -159,7 +168,7 @@ mod tests {
         let set = build_glob_set(&["vendor/**".into()]);
         let files = vec![cf("a.rs"), cf("vendor/x.go"), cf("vendor/sub/y.go")];
         let kept = filter_changed_files(&files, &set);
-        let names: Vec<&str> = kept.iter().map(|f| f.filename.as_str()).collect();
+        let names: Vec<&str> = kept.iter().map(|file| file.filename.as_str()).collect();
         assert_eq!(names, vec!["a.rs"]);
     }
 
@@ -170,7 +179,7 @@ mod tests {
         let set = build_glob_set(&["[invalid".into(), "*.lock".into()]);
         let files = vec![cf("Cargo.lock"), cf("src/main.rs")];
         let kept = filter_changed_files(&files, &set);
-        let names: Vec<&str> = kept.iter().map(|f| f.filename.as_str()).collect();
+        let names: Vec<&str> = kept.iter().map(|file| file.filename.as_str()).collect();
         assert_eq!(names, vec!["src/main.rs"]);
     }
 

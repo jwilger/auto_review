@@ -1,5 +1,31 @@
+//! Map validated review output to a repository-host review request.
+
+use crate::diff::char_boundary_prefix;
 use ar_forge::{CreateReviewRequest, ReviewComment, ReviewEvent};
 use ar_prompts::{ReviewFinding, ReviewOutput, ReviewSeverity};
+
+/// Cap on the rendered review body posted to Forgejo. Forgejo
+/// accepts large review bodies but a multi-MB markdown blob from
+/// a misbehaving LLM (no length cap on the schema's `summary` /
+/// `walkthrough` / `mermaid` fields) would either 422 the
+/// `create_review` POST or render unreadably. Cap at 32 KiB to
+/// fit comfortably under any practical Forgejo limit while
+/// holding any reasonable summary + walkthrough + mermaid block.
+const REVIEW_BODY_MAX_BYTES: usize = 32 * 1024;
+
+/// Cap on the `message` text inlined into each review comment's
+/// body. The review JSON schema enforces minLength=1 but no max,
+/// so a misbehaving LLM could emit multi-KB-per-finding messages.
+/// With many findings × huge messages, the `create_review` payload
+/// would either 422 (size limit) or render an unreadable wall of
+/// text. 4 KiB per message comfortably holds any actionable
+/// reviewer comment.
+const FINDING_MESSAGE_MAX_BYTES: usize = 4_096;
+
+/// Cap on the rendered finding title. The schema asks for 8 words or
+/// fewer but does not bound the length, so the model's title is not
+/// trusted to stay short.
+const FINDING_TITLE_MAX_BYTES: usize = 120;
 
 /// Map a validated [`ReviewOutput`] to a Forgejo [`CreateReviewRequest`].
 ///
@@ -15,11 +41,13 @@ use ar_prompts::{ReviewFinding, ReviewOutput, ReviewSeverity};
 ///   `ReviewComment` anchored at `new_position = line_start`. Multi-line
 ///   ranges are rendered as a `**Lines N–M:**` prefix in the body since
 ///   Forgejo's per-line position schema doesn't carry an end line.
+#[inline]
+#[must_use = "mapping has no side effects; the request must be posted to take effect"]
 pub fn output_to_review_request(out: &ReviewOutput, head_sha: &str) -> CreateReviewRequest {
     let event = if out
         .findings
         .iter()
-        .any(|f| matches!(f.severity, ReviewSeverity::Error))
+        .any(|finding| matches!(finding.severity, ReviewSeverity::Error))
     {
         ReviewEvent::RequestChanges
     } else {
@@ -44,26 +72,19 @@ pub fn output_to_review_request(out: &ReviewOutput, head_sha: &str) -> CreateRev
 
     CreateReviewRequest {
         body: render_body(out),
-        commit_id: head_sha.to_string(),
+        commit_id: head_sha.to_owned(),
         event,
         comments,
     }
 }
 
-/// Cap on the rendered review body posted to Forgejo. Forgejo
-/// accepts large review bodies but a multi-MB markdown blob from
-/// a misbehaving LLM (no length cap on the schema's `summary` /
-/// `walkthrough` / `mermaid` fields) would either 422 the
-/// `create_review` POST or render unreadably. Cap at 32 KiB to
-/// fit comfortably under any practical Forgejo limit while
-/// holding any reasonable summary + walkthrough + mermaid block.
-const REVIEW_BODY_MAX_BYTES: usize = 32 * 1024;
-
+/// Render the top-level review body: summary, walkthrough and Mermaid
+/// sections, capped at [`REVIEW_BODY_MAX_BYTES`].
 fn render_body(out: &ReviewOutput) -> String {
     let mut body = out.summary.clone();
     if body.starts_with("This PR fixes ") || body.starts_with("This PR addresses ") {
         if let Some((_, rest)) = body.split_once(". ") {
-            body = rest.to_string();
+            body = rest.to_owned();
         }
     }
     if !out.walkthrough.is_empty() {
@@ -82,11 +103,7 @@ fn render_body(out: &ReviewOutput) -> String {
         body.push_str("\n```");
     }
     if body.len() > REVIEW_BODY_MAX_BYTES {
-        let mut cut = REVIEW_BODY_MAX_BYTES;
-        while cut > 0 && !body.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        let mut truncated = body[..cut].to_string();
+        let mut truncated = char_boundary_prefix(&body, REVIEW_BODY_MAX_BYTES).to_owned();
         if !truncated.ends_with('\n') {
             truncated.push('\n');
         }
@@ -96,58 +113,53 @@ fn render_body(out: &ReviewOutput) -> String {
     body
 }
 
-/// Cap on the `message` text inlined into each review comment's
-/// body. The review JSON schema enforces minLength=1 but no max,
-/// so a misbehaving LLM could emit multi-KB-per-finding messages.
-/// With many findings × huge messages, the create_review payload
-/// would either 422 (size limit) or render an unreadable wall of
-/// text. 4 KiB per message comfortably holds any actionable
-/// reviewer comment.
-const FINDING_MESSAGE_MAX_BYTES: usize = 4_096;
-
-fn finding_to_comment(f: &ReviewFinding) -> ReviewComment {
-    let message = if f.message.len() > FINDING_MESSAGE_MAX_BYTES {
-        let mut cut = FINDING_MESSAGE_MAX_BYTES;
-        while cut > 0 && !f.message.is_char_boundary(cut) {
-            cut -= 1;
-        }
-        format!("{}… [truncated]", &f.message[..cut])
+/// Render one finding as an inline review comment on its first line.
+fn finding_to_comment(finding: &ReviewFinding) -> ReviewComment {
+    let message = if finding.message.len() > FINDING_MESSAGE_MAX_BYTES {
+        format!(
+            "{}… [truncated]",
+            char_boundary_prefix(&finding.message, FINDING_MESSAGE_MAX_BYTES)
+        )
     } else {
-        f.message.clone()
+        finding.message.clone()
     };
-    let label = severity_label(f.severity);
-    let title = sanitize_title(&f.title);
+    let label = severity_label(finding.severity);
+    let title = sanitize_title(&finding.title);
     let prefix = if title.is_empty() {
-        label.to_string()
+        label.to_owned()
     } else {
         format!("{label} **{title}** —")
     };
-    let body = match f.line_end {
-        Some(end) if end > f.line_start => {
-            format!("{prefix} **Lines {}–{}:** {message}", f.line_start, end)
+    let body = match finding.line_end {
+        Some(end) if end > finding.line_start => {
+            format!(
+                "{prefix} **Lines {}–{}:** {message}",
+                finding.line_start, end
+            )
         }
         _ => format!("{prefix} {message}"),
     };
     ReviewComment {
-        path: f.path.clone(),
+        path: finding.path.clone(),
         body,
         old_position: None,
-        new_position: Some(f.line_start),
+        new_position: Some(finding.line_start),
     }
 }
-
-/// Cap on the rendered finding title. The schema asks for 8 words or
-/// fewer but does not bound the length, so the model's title is not
-/// trusted to stay short.
-const FINDING_TITLE_MAX_BYTES: usize = 120;
 
 /// Make a model-supplied title safe to inline after the severity label:
 /// trim it, collapse every run of whitespace or control characters
 /// (newlines included) to a single space so it stays on one line, and cap
 /// it at [`FINDING_TITLE_MAX_BYTES`] on a char boundary with `…` appended
 /// when cut.
+#[expect(
+    clippy::non_ascii_literal,
+    reason = "the ellipsis is the exact character appended to cut titles in posted comments; \
+              a \\u{2026} escape would hide what reviewers see"
+)]
 fn sanitize_title(raw: &str) -> String {
-    let mut collapsed = String::with_capacity(raw.len().min(FINDING_TITLE_MAX_BYTES + 4));
+    let mut collapsed =
+        String::with_capacity(raw.len().min(FINDING_TITLE_MAX_BYTES.saturating_add(4)));
     let mut pending_space = false;
     for ch in raw.chars() {
         if ch.is_whitespace() || ch.is_control() {
@@ -164,17 +176,22 @@ fn sanitize_title(raw: &str) -> String {
         return collapsed;
     }
     // Leave room for the ellipsis so the rendered title stays within the cap.
-    let mut cut = FINDING_TITLE_MAX_BYTES - '…'.len_utf8();
-    while cut > 0 && !collapsed.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    let mut truncated = collapsed[..cut].trim_end().to_string();
+    let budget = FINDING_TITLE_MAX_BYTES.saturating_sub('…'.len_utf8());
+    let mut truncated = char_boundary_prefix(&collapsed, budget)
+        .trim_end()
+        .to_owned();
     truncated.push('…');
     truncated
 }
 
-fn severity_label(s: ReviewSeverity) -> &'static str {
-    match s {
+/// Label that opens each inline comment, by severity.
+#[expect(
+    clippy::non_ascii_literal,
+    reason = "the emoji are the exact severity markers posted in review comments; escapes \
+              would hide what reviewers see"
+)]
+fn severity_label(severity: ReviewSeverity) -> &'static str {
+    match severity {
         ReviewSeverity::Error => "🔴 **Error:**",
         ReviewSeverity::Warning => "🟡 **Warning:**",
         ReviewSeverity::Note => "💡 **Note:**",
@@ -206,12 +223,20 @@ mod tests {
         }
     }
 
-    fn titled(mut f: ReviewFinding, title: &str) -> ReviewFinding {
-        f.title = title.into();
-        f
+    fn titled(mut finding: ReviewFinding, title: &str) -> ReviewFinding {
+        finding.title = title.into();
+        finding
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::non_ascii_literal,
+        reason = "the fixture and expected text hold the exact non-ASCII characters (em dash, ellipsis, emoji, multi-byte letters) the code under test renders or must cut on a character boundary; escapes would edit what the test checks"
+    )]
     fn titled_single_line_finding_renders_bold_title_after_severity() {
         let req = output_to_review_request(
             &output(
@@ -230,6 +255,14 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::non_ascii_literal,
+        reason = "the fixture and expected text hold the exact non-ASCII characters (em dash, ellipsis, emoji, multi-byte letters) the code under test renders or must cut on a character boundary; escapes would edit what the test checks"
+    )]
     fn titled_multi_line_finding_renders_title_before_line_range() {
         let req = output_to_review_request(
             &output(
@@ -248,6 +281,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
     fn whitespace_only_title_renders_exactly_as_untitled() {
         for (start, end) in [(4, None), (5, Some(9))] {
             let untitled = output_to_review_request(
@@ -266,6 +303,18 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::non_ascii_literal,
+        reason = "the fixture and expected text hold the exact non-ASCII characters (em dash, ellipsis, emoji, multi-byte letters) the code under test renders or must cut on a character boundary; escapes would edit what the test checks"
+    )]
     fn multi_line_and_overlong_title_renders_on_one_line_within_cap() {
         let raw = format!("Unchecked\n\n index\r\t{}", "y".repeat(500));
         let req = output_to_review_request(
@@ -296,6 +345,14 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn category_does_not_affect_review_event() {
         use ar_prompts::FindingCategory;
         for severity in [
@@ -306,9 +363,9 @@ mod tests {
             let events: Vec<ReviewEvent> = FindingCategory::ALL
                 .iter()
                 .map(|category| {
-                    let mut f = finding(severity, 1, None);
-                    f.category = *category;
-                    output_to_review_request(&output("", vec![f]), "x").event
+                    let mut finding = finding(severity, 1, None);
+                    finding.category = *category;
+                    output_to_review_request(&output("", vec![finding]), "x").event
                 })
                 .collect();
             assert!(
@@ -319,6 +376,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
     fn clean_output_is_an_approved_review_to_supersede_stale_request_changes() {
         let req = output_to_review_request(&output("lgtm", vec![]), "deadbeef");
         assert_eq!(req.event, ReviewEvent::Approved);
@@ -343,6 +404,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
     fn warning_only_or_note_only_output_is_approved_but_keeps_inline_comments() {
         for severity in [ReviewSeverity::Warning, ReviewSeverity::Note] {
             let req =
@@ -355,6 +420,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
     fn line_start_becomes_new_position() {
         let req = output_to_review_request(
             &output("", vec![finding(ReviewSeverity::Note, 17, None)]),
@@ -365,6 +434,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(clippy::single_char_pattern, reason = "the assertion stays as written")]
     fn multi_line_range_is_annotated_in_body() {
         let req = output_to_review_request(
             &output("", vec![finding(ReviewSeverity::Warning, 5, Some(9))]),
@@ -376,6 +450,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
     fn single_line_range_does_not_include_range_label() {
         let req = output_to_review_request(
             &output("", vec![finding(ReviewSeverity::Note, 3, Some(3))]),
@@ -386,6 +464,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
     fn finding_body_includes_severity_label() {
         let req = output_to_review_request(
             &output("", vec![finding(ReviewSeverity::Error, 1, None)]),
@@ -477,12 +559,16 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
     fn oversized_finding_message_is_truncated() {
         // Per-finding message length isn't bounded by the schema.
         // A misbehaving LLM emitting 50 findings × 100 KiB message
         // each would 422 the create_review payload.
         let huge = "x".repeat(20_000);
-        let f = ReviewFinding {
+        let finding = ReviewFinding {
             path: "src/x.rs".into(),
             line_start: 1,
             line_end: None,
@@ -491,7 +577,7 @@ mod tests {
             title: String::new(),
             category: ar_prompts::FindingCategory::Correctness,
         };
-        let req = output_to_review_request(&output("ok", vec![f]), "x");
+        let req = output_to_review_request(&output("ok", vec![finding]), "x");
         let comment_body = &req.comments[0].body;
         assert!(comment_body.contains("[truncated]"));
         assert!(

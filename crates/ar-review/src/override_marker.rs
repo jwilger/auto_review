@@ -17,35 +17,42 @@ pub const TITLE_MARKER: &str = "[override-approved] ";
 /// are invisible in rendered markdown yet trivially machine-detectable,
 /// independent of the surrounding body content.
 const BODY_START: &str = "<!-- auto-review:override:start -->";
+/// Closing sentinel of the body section; see [`BODY_START`].
 const BODY_END: &str = "<!-- auto-review:override:end -->";
 
 /// Whether `title` already carries the override marker.
+#[inline]
+#[must_use = "the check has no side effects; the answer is the only result"]
 pub fn title_has_marker(title: &str) -> bool {
     title.starts_with(TITLE_MARKER)
 }
 
 /// Prepend the override marker to `title`, unless it is already present.
+#[inline]
+#[must_use = "the marked title is returned, not written to the pull request"]
 pub fn apply_title_marker(title: &str) -> String {
     if title_has_marker(title) {
-        title.to_string()
+        title.to_owned()
     } else {
         format!("{TITLE_MARKER}{title}")
     }
 }
 
 /// Remove the override marker prefix from `title`, if present.
+#[inline]
+#[must_use = "the stripped title is returned, not written to the pull request"]
 pub fn strip_title_marker(title: &str) -> String {
-    title
-        .strip_prefix(TITLE_MARKER)
-        .unwrap_or(title)
-        .to_string()
+    title.strip_prefix(TITLE_MARKER).unwrap_or(title).to_owned()
 }
 
 /// Whether `body` already contains the override section.
+#[inline]
+#[must_use = "the check has no side effects; the answer is the only result"]
 pub fn body_has_section(body: &str) -> bool {
     body.contains(BODY_START) && body.contains(BODY_END)
 }
 
+/// Wrap `inner` (trimmed) in the start and end sentinels.
 fn build_block(inner: &str) -> String {
     format!("{BODY_START}\n{}\n{BODY_END}", inner.trim())
 }
@@ -54,6 +61,8 @@ fn build_block(inner: &str) -> String {
 /// markdown content (e.g. a `## Approval override` heading plus the reason and
 /// overridden findings). Idempotent: calling it again replaces the existing
 /// block rather than nesting a second one.
+#[inline]
+#[must_use = "the updated body is returned, not written to the pull request"]
 pub fn apply_body_section(body: &str, inner: &str) -> String {
     let block = build_block(inner);
     let base = strip_body_section(body);
@@ -66,19 +75,29 @@ pub fn apply_body_section(body: &str, inner: &str) -> String {
 
 /// Remove the override section (and the blank lines hugging it) from `body`.
 /// A no-op when no section is present.
+#[inline]
+#[must_use = "the stripped body is returned, not written to the pull request"]
 pub fn strip_body_section(body: &str) -> String {
     let (Some(start), Some(end_pos)) = (body.find(BODY_START), body.find(BODY_END)) else {
-        return body.to_string();
+        return body.to_owned();
     };
     if end_pos < start {
-        return body.to_string();
+        return body.to_owned();
     }
-    let end = end_pos + BODY_END.len();
-    let before = body[..start].trim_end_matches(['\n', '\r', ' ', '\t']);
-    let after = body[end..].trim_start_matches(['\n', '\r', ' ', '\t']);
+    let end = end_pos.saturating_add(BODY_END.len());
+    // Both offsets come from `find` on ASCII sentinels, so they sit on
+    // character boundaries and `get` always returns `Some`.
+    let before = body
+        .get(..start)
+        .unwrap_or_default()
+        .trim_end_matches(['\n', '\r', ' ', '\t']);
+    let after = body
+        .get(end..)
+        .unwrap_or_default()
+        .trim_start_matches(['\n', '\r', ' ', '\t']);
     match (before.is_empty(), after.is_empty()) {
-        (true, _) => after.to_string(),
-        (false, true) => before.to_string(),
+        (true, _) => after.to_owned(),
+        (false, true) => before.to_owned(),
         (false, false) => format!("{before}\n\n{after}"),
     }
 }

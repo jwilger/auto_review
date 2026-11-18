@@ -10,15 +10,18 @@
 
 use ar_forge::ChangedFile;
 
+/// Review value of one changed file.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FileClass {
-    /// Auto-generated, vendored, or otherwise not worth a review pass.
-    Trivial,
     /// Anything else.
     Reviewable,
+    /// Auto-generated, vendored, or otherwise not worth a review pass.
+    Trivial,
 }
 
 /// Classify a single changed file purely by name.
+#[inline]
+#[must_use = "classification has no side effects; the class is the only result"]
 pub fn classify(filename: &str) -> FileClass {
     let lower = filename.to_ascii_lowercase();
     let basename = lower.rsplit('/').next().unwrap_or(&lower);
@@ -40,11 +43,16 @@ pub fn classify(filename: &str) -> FileClass {
 /// scrutiny as a PR adding them. The previous filter+all idiom
 /// would have returned true vacuously here (empty filtered set ⇒
 /// `all` is true), silently skipping every pure-removal PR.
+#[inline]
+#[must_use = "the check has no side effects; callers skip review only on a true result"]
 pub fn pr_is_skippable(files: &[ChangedFile]) -> bool {
     if files.is_empty() {
         return false;
     }
-    let surviving: Vec<&ChangedFile> = files.iter().filter(|f| f.status != "removed").collect();
+    let surviving: Vec<&ChangedFile> = files
+        .iter()
+        .filter(|file| file.status != "removed")
+        .collect();
     if surviving.is_empty() {
         // Pure-removal PR: don't skip. Reviewing the deletion is
         // the operator's whole point.
@@ -52,9 +60,10 @@ pub fn pr_is_skippable(files: &[ChangedFile]) -> bool {
     }
     surviving
         .iter()
-        .all(|f| classify(&f.filename) == FileClass::Trivial)
+        .all(|file| classify(&file.filename) == FileClass::Trivial)
 }
 
+/// True when `basename` (already lowercased) names a dependency lockfile.
 fn is_lockfile(basename: &str) -> bool {
     matches!(
         basename,
@@ -74,6 +83,12 @@ fn is_lockfile(basename: &str) -> bool {
     )
 }
 
+/// True when the lowercased path looks like generated or minified output.
+#[expect(
+    clippy::case_sensitive_file_extension_comparisons,
+    reason = "classify lowercases the path before calling this, so the lowercase suffixes match \
+              every spelling"
+)]
 fn is_generated_path(lower: &str) -> bool {
     lower.contains("/generated/")
         || lower.starts_with("generated/")
@@ -84,6 +99,7 @@ fn is_generated_path(lower: &str) -> bool {
         || lower.ends_with(".map")
 }
 
+/// True when the lowercased path sits under a vendored dependency directory.
 fn is_vendored(lower: &str) -> bool {
     lower.contains("/vendor/")
         || lower.starts_with("vendor/")
