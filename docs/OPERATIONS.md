@@ -277,6 +277,15 @@ skip paths, webhook intake, and chat surface.
   (incremental dedup), `trivial` (lockfiles / vendored /
   generated), `disabled` (`enabled: false`). Operators
   shouldn't alert on these.
+- `auto_review_local_diff_fallbacks_total{reason}` — full reviews
+  that used the host's diff because the local merge-base diff was
+  unavailable. `reason` is `no_merge_base`, `history_cap`,
+  `timed_out`, `fetch_failed`, `git_error`, or `unknown` (a reason
+  this gateway's metrics map does not know). A fleet-wide rise in
+  `git_error` usually means git older than 2.42 (the gateway logs a
+  startup WARN for it); `fetch_failed` and `timed_out` point at the
+  forge. The `AutoReviewLocalDiffFallbacks` alert fires when more
+  than half of started reviews fall back for 30 minutes.
 
 *Background poller:*
 - `auto_review_poll_cycles_total` — should tick at
@@ -532,7 +541,8 @@ own. If reviews start taking minutes, check:
    request base, and the previously reviewed commit for an incremental
    review) before the review falls back to the host's diff. The fallback
    logs `local pull request diff unavailable; using the host's diff` at
-   WARN with `repo`, `pr` and the reason.
+   WARN with `repo`, `pr` and the reason, and counts it in
+   `auto_review_local_diff_fallbacks_total{reason}`.
 3. CI latency. If semantic reviews are CI-triggered, slow deterministic jobs
    delay the trigger before the gateway receives work.
 

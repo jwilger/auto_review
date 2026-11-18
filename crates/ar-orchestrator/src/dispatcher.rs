@@ -44,6 +44,14 @@ pub enum ReviewObservation {
         duration: Duration,
         error_class: &'static str,
     },
+    /// A full review could not compute its diff locally (merge base to
+    /// head in the workspace) and used the host's diff instead, which
+    /// GitHub refuses for pull requests over 300 files. `reason` is one of
+    /// `"no_merge_base"`, `"history_cap"`, `"timed_out"`,
+    /// `"fetch_failed"` or `"git_error"`. Fires at most once per review,
+    /// alongside the review's own outcome; a fleet-wide rise points at a
+    /// git downgrade or a stalled forge.
+    LocalDiffFallback { reason: &'static str },
     /// The dispatch had to wait on the concurrency-cap semaphore
     /// before the review could begin. Counts how often the cap is
     /// engaging — sustained increases mean
@@ -542,6 +550,10 @@ struct WorkspacePrepOutput {
     /// Repository config read from the base branch through
     /// [`load_repo_config_from_base`]; defaults when absent or unreadable.
     config: RepoConfig,
+    /// Why the local diff was unavailable and the host's diff was used,
+    /// for [`ReviewObservation::LocalDiffFallback`]. `None` when the local
+    /// diff was used, or was never attempted (no workspace, no base SHA).
+    diff_fallback: Option<&'static str>,
     /// The pull request diff used for context building: computed locally in
     /// the workspace (merge base to head) when possible, otherwise fetched
     /// from the host. Surfaced back so the review pipeline can reuse it as
@@ -752,6 +764,7 @@ pub async fn run_review_job(
         config,
         raw_diff,
         repo_context,
+        diff_fallback,
         workspace,
     } = prep;
     let ignored_paths = build_glob_set(&config.ignored_paths);
@@ -793,6 +806,9 @@ pub async fn run_review_job(
     // skip also fired Started. Operator dashboards rely on
     // `started_total ≈ succeeded + failed_*` for sanity checks.
     observe(ReviewObservation::Started);
+    if let Some(reason) = diff_fallback {
+        observe(ReviewObservation::LocalDiffFallback { reason });
+    }
 
     let result = review_pull_request(ReviewArgs {
         host: forgejo,
@@ -948,6 +964,7 @@ async fn prepare_workspace_context(
             return WorkspacePrep::Ready(Box::new(WorkspacePrepOutput {
                 changed_files: None,
                 config,
+                diff_fallback: None,
                 raw_diff: String::new(),
                 repo_context: String::new(),
                 workspace: None,
@@ -958,13 +975,13 @@ async fn prepare_workspace_context(
     // host diff limit applies. Without a local diff, fetch the host's diff
     // once for the RAG context build; failure there just means we skip
     // optional context and the review still proceeds.
-    let (raw_diff, changed_files) = match local_pr_diff(&workspace, job).await {
-        Some((diff, files)) => (diff, Some(files)),
-        None => match fetch_context_diff(host, job).await {
-            Ok(diff) => (diff, None),
+    let (raw_diff, changed_files, diff_fallback) = match local_pr_diff(&workspace, job).await {
+        Ok((diff, files)) => (diff, Some(files), None),
+        Err(fallback) => match fetch_context_diff(host, job).await {
+            Ok(diff) => (diff, None, fallback),
             Err(err) => {
                 tracing::warn!(error = %err, "diff fetch for context failed; continuing");
-                (String::new(), None)
+                (String::new(), None, fallback)
             }
         },
     };
@@ -994,6 +1011,7 @@ async fn prepare_workspace_context(
     WorkspacePrep::Ready(Box::new(WorkspacePrepOutput {
         changed_files,
         config,
+        diff_fallback,
         raw_diff,
         repo_context,
         workspace: Some(workspace),
@@ -1056,14 +1074,15 @@ async fn clone_head_workspace(
 }
 
 /// The pull request's diff and changed files computed in `workspace`,
-/// merge base to head, or `None` when the workspace cannot supply them. The
+/// merge base to head, or `Err` when the workspace cannot supply them. The
 /// reason (no merge base and why, or a git failure) is logged once here with
-/// the job's repository and pull request; a base that was not a commit SHA
-/// was already logged by [`clone_head_workspace`].
+/// the job's repository and pull request and returned as a
+/// [`local_diff_fallback_reason`] label; a base that was not a commit SHA
+/// was already logged by [`clone_head_workspace`] and returns `Err(None)`.
 async fn local_pr_diff(
     workspace: &PreparedWorkspace,
     job: &ReviewJob,
-) -> Option<(String, Vec<ar_forge::ChangedFile>)> {
+) -> Result<(String, Vec<ar_forge::ChangedFile>), Option<&'static str>> {
     let local = async {
         Ok::<_, WorkspaceError>((
             workspace.pr_diff().await?,
@@ -1071,8 +1090,8 @@ async fn local_pr_diff(
         ))
     };
     match local.await {
-        Ok(diff_and_files) => Some(diff_and_files),
-        Err(WorkspaceError::NoMergeBase(MergeBaseUnavailable::NotRequested)) => None,
+        Ok(diff_and_files) => Ok(diff_and_files),
+        Err(WorkspaceError::NoMergeBase(MergeBaseUnavailable::NotRequested)) => Err(None),
         Err(err) => {
             tracing::warn!(
                 repo = format!("{}/{}", job.owner, job.repo),
@@ -1080,8 +1099,33 @@ async fn local_pr_diff(
                 error = %err,
                 "local pull request diff unavailable; using the host's diff"
             );
-            None
+            Err(Some(local_diff_fallback_reason(&err)))
         }
+    }
+}
+
+/// Bounded metrics label for why a local diff was unavailable.
+#[expect(
+    clippy::pattern_type_mismatch,
+    reason = "binding the merge-base reason out of a borrowed error needs either default binding \
+              modes or `ref` patterns, and clippy::ref_patterns forbids `ref`"
+)]
+fn local_diff_fallback_reason(err: &WorkspaceError) -> &'static str {
+    match err {
+        WorkspaceError::NoMergeBase(reason) | WorkspaceError::NoIncrementalBase(reason) => {
+            match reason {
+                MergeBaseUnavailable::HistoryCap => "history_cap",
+                MergeBaseUnavailable::TimedOut(_) => "timed_out",
+                MergeBaseUnavailable::Fetch(_) | MergeBaseUnavailable::Deepen(_) => "fetch_failed",
+                MergeBaseUnavailable::NotRequested
+                | MergeBaseUnavailable::NoPullRequestMergeBase
+                | MergeBaseUnavailable::UnrelatedHistories => "no_merge_base",
+            }
+        }
+        WorkspaceError::Git(_)
+        | WorkspaceError::Io(_)
+        | WorkspaceError::InvalidBaseUrl(_)
+        | WorkspaceError::CredentialEncoding => "git_error",
     }
 }
 
@@ -1444,8 +1488,6 @@ the repository instead.\",\"errors\":[{\"resource\":\"PullRequest\",\"field\":\"
         }
     }
 
-    /// Embeds every text to the same direction, so any stored learning
-    /// with that embedding is a nearest match for the diff.
     /// Log lines written while a [`tracing`] subscriber built by
     /// [`captured_logs`] is the thread's default.
     #[derive(Clone, Default)]
@@ -1471,6 +1513,8 @@ the repository instead.\",\"errors\":[{\"resource\":\"PullRequest\",\"field\":\"
         }
     }
 
+    /// Embeds every text to the same direction, so any stored learning
+    /// with that embedding is a nearest match for the diff.
     struct ConstantEmbedder;
 
     #[async_trait]
@@ -2215,6 +2259,71 @@ the repository instead.\",\"errors\":[{\"resource\":\"PullRequest\",\"field\":\"
                 && warning.contains("could not fetch the commit"),
             "{warning}"
         );
+    }
+
+    /// Operators alert on fleet-wide fallbacks from a counter, not logs.
+    #[tokio::test]
+    async fn local_diff_fallback_is_observed_with_its_reason() {
+        let pr = pr_repo_with(
+            &[("src/lib.rs", "pub fn old() {}\n")],
+            &[("src/lib.rs", "pub fn old() {}\npub fn local_added() {}\n")],
+            &[],
+        );
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url(&pr.url)
+            .with_pr_base_sha("0123456789abcdef0123456789abcdef01234567");
+        let observer = RecordingObserver::default();
+
+        run_with(
+            &host,
+            Arc::new(CannedProvider::new(vec![])),
+            Some(&observer),
+            &pr.head_sha,
+        )
+        .await;
+
+        let fallbacks: Vec<&'static str> = observer
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|observation| {
+                if let ReviewObservation::LocalDiffFallback { reason } = *observation {
+                    Some(reason)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(fallbacks, vec!["fetch_failed"]);
+    }
+
+    #[test]
+    fn local_diff_fallback_reasons_are_bounded_labels() {
+        let no_base = |reason| WorkspaceError::NoMergeBase(reason);
+        let cases = [
+            (no_base(MergeBaseUnavailable::HistoryCap), "history_cap"),
+            (
+                no_base(MergeBaseUnavailable::TimedOut(Duration::from_secs(1))),
+                "timed_out",
+            ),
+            (
+                no_base(MergeBaseUnavailable::Fetch("gone".into())),
+                "fetch_failed",
+            ),
+            (
+                WorkspaceError::NoIncrementalBase(MergeBaseUnavailable::Deepen("x".into())),
+                "fetch_failed",
+            ),
+            (
+                no_base(MergeBaseUnavailable::UnrelatedHistories),
+                "no_merge_base",
+            ),
+            (WorkspaceError::Git("unknown option".into()), "git_error"),
+        ];
+        for (err, label) in cases {
+            assert_eq!(local_diff_fallback_reason(&err), label, "{err}");
+        }
     }
 
     #[tokio::test]

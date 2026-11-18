@@ -84,14 +84,14 @@ fields. The review event and severity floor are derived from `severity` only;
 `prepare_workspace_from_clone_url(clone_url, head_sha, base_sha,
 previous_sha)` clones the head. With `Some(base_sha)` it then, before the
 credential-bearing `origin` remote is removed, fetches the base commit and
-deepens both tips in the bounded steps of `MERGE_BASE_DEEPEN_STEPS` (64, 256
-and 680 commits, together `MERGE_BASE_HISTORY_CAP`, 1000 commits) until
-`git merge-base` finds a common ancestor, within `MERGE_BASE_FETCH_TIMEOUT`
-(120 seconds); on expiry the running git process is killed. Both SHAs are
-validated as hex before git runs. A base that cannot be fetched, no merge base
-within the bound, or a timeout still returns the workspace, with
-`PreparedWorkspace::merge_base()` `None`. Workspace preparation logs nothing
-about it: the diff methods return the reason as a `MergeBaseUnavailable`
+deepens both tips in bounded steps (64, 256 and 680 commits, together a cap
+of 1000 commits; crate-private constants `MERGE_BASE_DEEPEN_STEPS` and
+`MERGE_BASE_HISTORY_CAP`) until `git merge-base` finds a common ancestor,
+within 120 seconds per commit (`MERGE_BASE_FETCH_TIMEOUT`); on expiry the
+running git process is killed. Both SHAs are validated as hex before git runs.
+A base that cannot be fetched, no merge base within the bound, or a timeout
+still returns the workspace, without a merge base. Workspace preparation logs
+nothing about it: the diff methods return the reason as a `MergeBaseUnavailable`
 (`NotRequested`, `NoPullRequestMergeBase`, `Fetch`, `Deepen`,
 `UnrelatedHistories`, `HistoryCap`, `TimedOut`) for the caller to log with its
 repository and pull request.
@@ -102,9 +102,12 @@ request, so inline-comment line numbers match. It does not depend on a host's
 whole-diff endpoint or its 300-file limit. Binary files appear as
 `Binary files ... differ` lines without their content, renames as renames, and
 external diff drivers and textconv filters are disabled. At most
-`LOCAL_DIFF_MAX_BYTES` (32 MiB) of diff text is read, cut at a line boundary,
-and git is stopped there, so a huge pull request is never buffered in full;
-`incremental_diff()` has the same bound.
+32 MiB (`LOCAL_DIFF_MAX_BYTES`, crate-private) of diff text is read, cut at a
+line boundary, and git is stopped there, so a huge pull request is never
+buffered in full; `incremental_diff()` has the same bound. The cut comes before
+ignored paths are filtered, so it logs a WARN: files git lists after it, even
+after ignored ones, are missing from the review text, though the changed-file
+list stays complete.
 `PreparedWorkspace::pr_changed_files()` returns the same comparison as
 `ar_forge::ChangedFile` values in the host's status vocabulary (`added`,
 `modified`, `removed`, `renamed`, `copied`, `changed`), binary files with zero
@@ -119,6 +122,11 @@ head's attributes. Without a merge base both return
 `filter_diff_paths` and `cap_diff` to what reaches the model.
 `ar_review::is_valid_git_sha` is the same hex check, exported so callers can
 decide before cloning whether a base SHA is usable.
+`ar_review::local_diff_git_version_warning(git_version_output)` returns `None`
+for git 2.42 or newer and otherwise an operator warning naming the requirement
+and the host-diff fallback (also for output with no readable version); the
+gateway's startup git probe logs it at WARN and `auto-review ops doctor` reports
+its `git` check as WARN with it.
 
 With `Some(previous_sha)` as well, once the merge base is found, it also fetches
 the commit an earlier review covered, with the same validation and bounded
@@ -146,7 +154,10 @@ pipeline's `list_changed_files` are not called. The pre-clone trivial-files
 triage still reads the host's changed-file list. Without a merge base, or when
 the local git commands fail, the review fetches the host's diff and file list
 as before, after one warning that names the repository, the pull request and
-the reason. Incremental reviews also pass the previously reviewed commit to
+the reason; the reason is also reported as
+`ReviewObservation::LocalDiffFallback { reason }` (`no_merge_base`,
+`history_cap`, `timed_out`, `fetch_failed`, `git_error`), which the gateway
+counts as `auto_review_local_diff_fallbacks_total{reason}`. Incremental reviews also pass the previously reviewed commit to
 `prepare_workspace_from_clone_url` and take their diff from
 `PreparedWorkspace::incremental_diff()`, so the host's compare endpoint and its
 size limit are not used. Without a workspace, or when the previous commit is

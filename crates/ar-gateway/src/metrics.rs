@@ -20,6 +20,18 @@ use std::sync::Arc;
 /// `review_duration_ms_sum + reviews_completed_count` pair.
 const DURATION_BUCKETS_SECS: &[f64] = &[1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0];
 
+/// `reason` label values of `auto_review_local_diff_fallbacks_total`, in
+/// render order. The orchestrator's `ReviewObservation::LocalDiffFallback`
+/// reasons, plus `unknown` for a reason this sink was not updated for.
+const LOCAL_DIFF_FALLBACK_REASONS: [&str; 6] = [
+    "no_merge_base",
+    "history_cap",
+    "timed_out",
+    "fetch_failed",
+    "git_error",
+    "unknown",
+];
+
 #[derive(Default)]
 pub struct Metrics {
     pub webhooks_pull_request: AtomicU64,
@@ -74,6 +86,10 @@ pub struct Metrics {
     pub review_findings_sum: AtomicU64,
     pub verifier_findings_dropped: AtomicU64,
     pub review_queue_waits: AtomicU64,
+    /// Full reviews that used the host's diff because the local merge-base
+    /// diff was unavailable, one counter per `LOCAL_DIFF_FALLBACK_REASONS`
+    /// entry. Rendered as one labelled family.
+    local_diff_fallbacks: [AtomicU64; 6],
 
     // Poller counters: track the background ChatPoller's progress
     // so operators can see whether inline-thread mentions are being
@@ -219,6 +235,21 @@ impl Metrics {
 
     pub fn record_review_queue_wait(&self) {
         self.review_queue_waits.fetch_add(1, Ordering::Relaxed);
+    }
+
+    pub fn record_local_diff_fallback(&self, reason: &str) {
+        let index = LOCAL_DIFF_FALLBACK_REASONS
+            .iter()
+            .position(|known| *known == reason && *known != "unknown")
+            .unwrap_or_else(|| {
+                tracing::warn!(
+                    reason,
+                    "unknown local diff fallback reason; counting it as reason=\"unknown\" — \
+                     update the metrics map to track this reason explicitly"
+                );
+                LOCAL_DIFF_FALLBACK_REASONS.len() - 1
+            });
+        self.local_diff_fallbacks[index].fetch_add(1, Ordering::Relaxed);
     }
 
     pub fn record_review_skipped(&self, reason: &str) {
@@ -425,8 +456,30 @@ impl Metrics {
             out.push_str(&counter.load(Ordering::Relaxed).to_string());
             out.push('\n');
         }
+        self.render_local_diff_fallbacks(&mut out);
         self.render_duration_histogram(&mut out);
         out
+    }
+
+    /// Emit `auto_review_local_diff_fallbacks_total`, one sample per
+    /// bounded `reason` label, every reason present from zero.
+    fn render_local_diff_fallbacks(&self, out: &mut String) {
+        out.push_str(
+            "# HELP auto_review_local_diff_fallbacks_total Full reviews that used the host's diff \
+             because the local merge-base diff was unavailable, by reason. A fleet-wide rise \
+             points at a git older than 2.42 or a stalled forge; GitHub refuses the host diff for \
+             pull requests over 300 files.\n",
+        );
+        out.push_str("# TYPE auto_review_local_diff_fallbacks_total counter\n");
+        for (reason, counter) in LOCAL_DIFF_FALLBACK_REASONS
+            .iter()
+            .zip(&self.local_diff_fallbacks)
+        {
+            out.push_str(&format!(
+                "auto_review_local_diff_fallbacks_total{{reason=\"{reason}\"}} {}\n",
+                counter.load(Ordering::Relaxed)
+            ));
+        }
     }
 
     /// Emit the Prometheus histogram lines for review duration:
@@ -509,6 +562,9 @@ impl ReviewObserver for MetricsObserver {
                 .record_review_failed(duration.as_millis() as u64, error_class),
             ReviewObservation::Skipped { reason } => self.metrics.record_review_skipped(reason),
             ReviewObservation::QueueWait => self.metrics.record_review_queue_wait(),
+            ReviewObservation::LocalDiffFallback { reason } => {
+                self.metrics.record_local_diff_fallback(reason);
+            }
         }
     }
 }
@@ -559,9 +615,19 @@ mod tests {
             "auto_review_webhooks_ping_total",
             "auto_review_webhooks_pull_request_total",
         ];
+        // Counter families with labels: a # TYPE line, then one sample per
+        // label value (pinned by their own tests), so no bare `name 0` line.
+        const EXPECTED_LABELLED: &[&str] = &["auto_review_local_diff_fallbacks_total"];
 
         let m = Metrics::new();
         let out = m.render();
+        for name in EXPECTED_LABELLED {
+            let type_line = format!("# TYPE {name} counter");
+            assert!(
+                out.contains(&type_line),
+                "render() missing # TYPE for {name}"
+            );
+        }
         for name in EXPECTED {
             // Each counter family must show up as both a # TYPE
             // line and a sample line.
@@ -585,7 +651,8 @@ mod tests {
             .filter_map(|line| line.strip_prefix("# TYPE "))
             .filter_map(|rest| rest.strip_suffix(" counter"))
             .collect();
-        let expected: std::collections::BTreeSet<&str> = EXPECTED.iter().copied().collect();
+        let expected: std::collections::BTreeSet<&str> =
+            EXPECTED.iter().chain(EXPECTED_LABELLED).copied().collect();
         let extra: Vec<&&str> = actual.difference(&expected).collect();
         assert!(
             extra.is_empty(),
@@ -872,6 +939,52 @@ mod tests {
         assert!(out.contains("auto_review_reviews_skipped_trivial_total 1\n"));
         assert!(out.contains("auto_review_reviews_skipped_disabled_total 1\n"));
         assert!(out.contains("auto_review_reviews_skipped_unknown_total 0\n"));
+    }
+
+    #[test]
+    fn local_diff_fallbacks_are_counted_by_reason() {
+        let m = Arc::new(Metrics::new());
+        let obs = MetricsObserver::new(m.clone());
+        obs.record(ReviewObservation::LocalDiffFallback {
+            reason: "history_cap",
+        });
+        obs.record(ReviewObservation::LocalDiffFallback {
+            reason: "history_cap",
+        });
+        obs.record(ReviewObservation::LocalDiffFallback {
+            reason: "git_error",
+        });
+        let out = m.render();
+        assert!(
+            out.contains("# TYPE auto_review_local_diff_fallbacks_total counter\n"),
+            "{out}"
+        );
+        assert!(
+            out.contains("auto_review_local_diff_fallbacks_total{reason=\"history_cap\"} 2\n"),
+            "{out}"
+        );
+        assert!(out.contains("auto_review_local_diff_fallbacks_total{reason=\"git_error\"} 1\n"));
+        // Every known reason is exposed from zero, so rate() works at once.
+        for reason in ["no_merge_base", "timed_out", "fetch_failed", "unknown"] {
+            assert!(
+                out.contains(&format!(
+                    "auto_review_local_diff_fallbacks_total{{reason=\"{reason}\"}} 0\n"
+                )),
+                "{reason}: {out}"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_local_diff_fallback_reason_routes_to_unknown() {
+        let m = Metrics::new();
+        m.record_local_diff_fallback("definitely_not_a_reason");
+        let out = m.render();
+        assert!(
+            out.contains("auto_review_local_diff_fallbacks_total{reason=\"unknown\"} 1\n"),
+            "{out}"
+        );
+        assert!(!out.contains("definitely_not_a_reason"), "{out}");
     }
 
     #[test]

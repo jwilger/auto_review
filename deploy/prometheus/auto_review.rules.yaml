@@ -168,6 +168,39 @@ groups:
                  SQLite history (AR_HISTORY_DB pointing at the
                  same file).
 
+      # Full reviews normally diff locally in the workspace (merge
+      # base to head). When most of them fall back to the host's
+      # diff instead, large GitHub pull requests (over 300 files)
+      # are reviewed only from GitHub's per-file patches, which
+      # omit the hunks of very large files. Fleet-wide causes: git
+      # older than 2.42 (reason="git_error") or a slow or failing
+      # forge (fetch_failed, timed_out).
+      - alert: AutoReviewLocalDiffFallbacks
+        expr: |
+          sum(rate(auto_review_local_diff_fallbacks_total[30m]))
+            / clamp_min(rate(auto_review_reviews_started_total[30m]), 0.0001)
+            > 0.5
+        for: 30m
+        labels:
+          severity: warning
+          service: auto_review
+        annotations:
+          summary: "auto_review: most reviews fall back to the host's diff"
+          description: |
+            More than half of started reviews used the host's diff
+            instead of the local merge-base diff over 30m. Break
+            auto_review_local_diff_fallbacks_total down by reason:
+              - git_error → check the gateway's startup log and
+                `auto-review ops doctor` for a git older than 2.42
+              - fetch_failed / timed_out → the forge is slow or
+                refusing fetches of the base commit
+              - history_cap / no_merge_base → pull requests whose
+                base is far ahead of (or unrelated to) the head;
+                expected occasionally, not fleet-wide
+            Reviews still run, but GitHub pull requests over 300
+            files are reviewed from per-file patches, which leave
+            out the hunks of files GitHub sends no patch for.
+
       # The poller is a background loop; if it stops ticking,
       # inline-thread mentions go silently unanswered.
       - alert: AutoReviewPollerStalled

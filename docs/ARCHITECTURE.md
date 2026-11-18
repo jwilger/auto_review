@@ -73,6 +73,7 @@ LLM agent:
 
 ```text
 clone workspace
+  -> pull request diff: local merge base to head (host's diff as fallback)
   -> deterministic triage
   -> context curation
   -> review generation
@@ -160,20 +161,23 @@ Components receive only the workspace capability they need:
   GitHub uses installation-token auth material. Given the pull request's base
   SHA, workspace preparation also fetches a bounded amount of base and head
   history (in commits and in time) to find the merge base, so the
-  pull-request diff and changed-file
-  list can be computed locally instead of through a host's size-limited diff
-  endpoint. That local diff reads `.gitattributes` from the merge base, never
-  the head checkout, through git's `--attr-source` option, which git older
-  than 2.42 rejects (the review then uses the host's diff). `run_review_job` takes the base SHA from the `ReviewJob`
-  when the intake supplied it, otherwise from the pull request it fetched, and
-  full reviews use the local diff and changed-file list for both RAG context
-  and review generation, so neither the host's whole-diff endpoint nor its
-  changed-file list is read. Ignored paths and the diff byte cap still apply
-  before the model sees it. Without a merge base the review logs why, with
-  the repository and pull request, and uses the host's diff as before. Incremental reviews also fetch the previously reviewed
-  commit into the workspace and diff only what was pushed since, locally
-  first, then through the host's compare endpoint, then as a full review when
-  the previous commit is gone.
+  pull-request diff and changed-file list can be computed locally instead of
+  through a host's size-limited diff endpoint. That local diff reads
+  `.gitattributes` from the merge base, never the head checkout, through
+  git's `--attr-source` option, which git older than 2.42 rejects (the review
+  then uses the host's diff; the gateway's startup git probe and
+  `auto-review ops doctor` warn about such a git). `run_review_job` takes the
+  base SHA from the `ReviewJob` when the intake supplied it, otherwise from
+  the pull request it fetched, and full reviews use the local diff and
+  changed-file list for both RAG context and review generation, so neither
+  the host's whole-diff endpoint nor its changed-file list is read. Ignored
+  paths and the diff byte cap still apply before the model sees it. Without a
+  merge base the review logs why, with the repository and pull request,
+  counts it in `auto_review_local_diff_fallbacks_total{reason}`, and uses the
+  host's diff as before. Incremental reviews also fetch the previously
+  reviewed commit into the workspace and diff only what was pushed since,
+  locally first, then through the host's compare endpoint, then as a full
+  review when the previous commit is gone.
 - Context building and agentic verification use read-only, path-confined access
   under the clone root with symlink escape rejection and output/result caps.
 - Agentic verifier tools are file read and search capabilities, not shell access.
