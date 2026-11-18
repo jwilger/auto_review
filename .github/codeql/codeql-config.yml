@@ -1,0 +1,14 @@
+# CodeQL configuration for .github/workflows/codeql.yml.
+#
+# Integration-test code is excluded from analysis. Test fixtures use fixed
+# keys (for example webhook HMAC secrets), which the
+# rust/hard-coded-cryptographic-value query flags. Every PR that moves those
+# lines re-reports them as new alerts, and the resulting review threads block
+# auto-merge. This excludes the paths from every query, not only that one;
+# production code under crates/*/src/** and the workflows under .github/ stay
+# analysed, and the default query suite is unchanged.
+name: auto_review CodeQL config
+
+paths-ignore:
+  - "crates/*/tests/**"
+  - "tests/**"
