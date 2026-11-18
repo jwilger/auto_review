@@ -96,18 +96,20 @@ impl PreparedWorkspace {
     ) -> Result<String, WorkspaceError> {
         let stdout = git_stdout_in(
             self.path(),
-            &[
-                "diff",
-                "--no-color",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--find-renames",
-                "--src-prefix=a/",
-                "--dst-prefix=b/",
-                from,
-                &self.head_sha,
-            ],
-            &attributes_from(attributes_tree),
+            &with_attributes_from(
+                attributes_tree,
+                &[
+                    "diff",
+                    "--no-color",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--find-renames",
+                    "--src-prefix=a/",
+                    "--dst-prefix=b/",
+                    from,
+                    &self.head_sha,
+                ],
+            ),
         )
         .await?;
         Ok(String::from_utf8_lossy(&stdout).into_owned())
@@ -123,35 +125,38 @@ impl PreparedWorkspace {
     /// hunks come from [`Self::pr_diff`].
     pub async fn pr_changed_files(&self) -> Result<Vec<ChangedFile>, WorkspaceError> {
         let merge_base = self.require_merge_base()?;
-        let attributes = attributes_from(merge_base);
         let name_status = git_stdout_in(
             self.path(),
-            &[
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--find-renames",
-                "--name-status",
-                "-z",
+            &with_attributes_from(
                 merge_base,
-                &self.head_sha,
-            ],
-            &attributes,
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--find-renames",
+                    "--name-status",
+                    "-z",
+                    merge_base,
+                    &self.head_sha,
+                ],
+            ),
         )
         .await?;
         let numstat = git_stdout_in(
             self.path(),
-            &[
-                "diff",
-                "--no-ext-diff",
-                "--no-textconv",
-                "--find-renames",
-                "--numstat",
-                "-z",
+            &with_attributes_from(
                 merge_base,
-                &self.head_sha,
-            ],
-            &attributes,
+                &[
+                    "diff",
+                    "--no-ext-diff",
+                    "--no-textconv",
+                    "--find-renames",
+                    "--numstat",
+                    "-z",
+                    merge_base,
+                    &self.head_sha,
+                ],
+            ),
         )
         .await?;
         // Keyed by path so a pull request with thousands of files is matched
@@ -383,7 +388,7 @@ async fn locate_merge_base(
 /// `git merge-base <base> <head>`, or `None` when git finds none in the
 /// history fetched so far.
 async fn merge_base_of(path: &Path, head_sha: &str, base_sha: &str) -> Option<String> {
-    let stdout = git_stdout_in(path, &["merge-base", base_sha, head_sha], &[])
+    let stdout = git_stdout_in(path, &["merge-base", base_sha, head_sha])
         .await
         .ok()?;
     let merge_base = String::from_utf8_lossy(&stdout).trim().to_owned();
@@ -453,18 +458,26 @@ fn parse_numstat_z(stdout: &[u8]) -> Vec<(String, (u32, u32))> {
     files
 }
 
-/// Environment that makes git read `.gitattributes` from `tree` instead of
-/// the head checkout. Without it a pull request could add `path -diff` and
-/// show its own text changes as `Binary files ... differ`, hiding them from
-/// review. The merge base is on the base branch, which the pull request
-/// cannot change (the same trust rule as ADR-0024's base-branch config).
-fn attributes_from(tree: &str) -> [(&'static str, &str); 1] {
-    [("GIT_ATTR_SOURCE", tree)]
+/// Prefix git `args` with the global `--attr-source=<tree>` option, so git
+/// reads `.gitattributes` from `tree` instead of the head checkout. Without
+/// it a pull request could add `path -diff` and show its own text changes as
+/// `Binary files ... differ`, hiding them from review. The merge base is on
+/// the base branch, which the pull request cannot change (the same trust
+/// rule as ADR-0024's base-branch config).
+///
+/// An option, not the `GIT_ATTR_SOURCE` environment variable: git before
+/// 2.42 ignores the variable without error, but rejects the unknown option,
+/// so on an old git the local diff fails closed and the review falls back to
+/// the host's diff.
+fn with_attributes_from(tree: &str, args: &[&str]) -> Vec<String> {
+    std::iter::once(format!("--attr-source={tree}"))
+        .chain(args.iter().map(|arg| (*arg).to_owned()))
+        .collect()
 }
 
 /// Whether the clone at `path` still has a shallow history boundary.
 async fn is_shallow(path: &Path) -> bool {
-    git_stdout_in(path, &["rev-parse", "--is-shallow-repository"], &[])
+    git_stdout_in(path, &["rev-parse", "--is-shallow-repository"])
         .await
         .map_or(true, |stdout| stdout.trim_ascii() != b"false")
 }
@@ -488,21 +501,15 @@ async fn git<S: AsRef<OsStr>>(args: &[S]) -> Result<(), WorkspaceError> {
 }
 
 async fn git_in(dir: &Path, args: &[&str]) -> Result<(), WorkspaceError> {
-    git_stdout_in(dir, args, &[]).await.map(drop)
+    git_stdout_in(dir, args).await.map(drop)
 }
 
-/// Run hermetic git in `dir` with extra environment `envs` and return its
-/// stdout.
-async fn git_stdout_in(
-    dir: &Path,
-    args: &[&str],
-    envs: &[(&str, &str)],
-) -> Result<Vec<u8>, WorkspaceError> {
+/// Run hermetic git in `dir` and return its stdout.
+async fn git_stdout_in<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<Vec<u8>, WorkspaceError> {
     let output = hermetic_git_command()
         .arg("-C")
         .arg(dir)
         .args(args)
-        .envs(envs.iter().copied())
         .output()
         .await?;
     if !output.status.success() {
@@ -1265,6 +1272,19 @@ line three of the renamed file\nline four of the renamed file\n";
         assert!(
             diff.contains("+hidden feature change"),
             "head-side .gitattributes must not hide a text change, got:\n{diff}"
+        );
+    }
+
+    /// T3a must fail closed: git before 2.42 silently ignores the
+    /// `GIT_ATTR_SOURCE` environment variable and would read the head
+    /// checkout's `.gitattributes`, but it rejects the unknown global
+    /// `--attr-source` option, so the diff errors and the review falls back
+    /// to the host's diff instead.
+    #[test]
+    fn attributes_come_from_a_global_option_older_git_rejects() {
+        assert_eq!(
+            with_attributes_from("abc1234", &["diff", "--no-color"]),
+            vec!["--attr-source=abc1234", "diff", "--no-color"]
         );
     }
 

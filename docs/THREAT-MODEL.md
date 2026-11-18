@@ -270,9 +270,14 @@ A PR could also add a `.gitattributes` marking its own text files
 `-diff` or `binary`, so a diff shows them as `Binary files ... differ`
 and the model never sees the change. The workspace's local
 pull-request diff (`PreparedWorkspace::pr_diff` and
-`pr_changed_files`) reads attributes from the merge base through
-`GIT_ATTR_SOURCE`, never from the head checkout, pinned by
+`pr_changed_files`) reads attributes from the merge base through git's
+global `--attr-source` option, never from the head checkout, pinned by
 `workspace::tests::pr_diff_ignores_gitattributes_added_by_the_pull_request`.
+The option fails closed: git before 2.42 rejects it (where the
+`GIT_ATTR_SOURCE` variable would be silently ignored), so the local diff
+errors and the review uses the host's diff instead; pinned by
+`workspace::tests::attributes_come_from_a_global_option_older_git_rejects`.
+`docs/DEPLOYMENT.md` requires git 2.42 or newer.
 The incremental diff (`PreparedWorkspace::incremental_diff`) also reads them
 from the pull request's merge base, not the previously reviewed commit, which
 is pull-request content; pinned by
@@ -601,7 +606,9 @@ threat-model claims fail CI when a regression slips in:
   covers T3a (PR-supplied `.gitattributes`): the head adds
   `notes.txt -diff` and edits `notes.txt`; the local pull-request diff
   still shows the text change because attributes come from the merge
-  base.
+  base. `tests::attributes_come_from_a_global_option_older_git_rejects`
+  pins that the attribute source is the `--attr-source` option, which
+  git older than 2.42 rejects instead of ignoring.
 - `crates/ar-review/tests/red_team_workspace_tools.rs` — covers
   T4 (LLM tool calls escape workspace): symlink escape, chained
   symlinks, empty paths, pathological regex; and T5 (clone credential
