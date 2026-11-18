@@ -11,74 +11,102 @@ use crate::error::ReviewError;
 use crate::heal::{generate_with_self_heal, HealConfig};
 use crate::pipeline::{apply_severity_floor, drop_findings_outside_changed_paths, VerifyMode};
 use crate::verify::verify_findings;
+use alloc::sync::Arc;
 use ar_llm::{ModelTier, Router as LlmRouter};
-use ar_prompts::{render_review_prompt, system_prompt, ReviewPromptInputs, ReviewSeverity};
+use ar_prompts::{
+    render_review_prompt, system_prompt, ReviewOutput, ReviewPromptInputs, ReviewSeverity,
+};
 use std::path::Path;
+use std::sync::Mutex;
 
 /// One LLM call's usage: tier, provider base URL, model, input tokens,
 /// output tokens.
 pub type ReviewUsageEntry = (ModelTier, String, String, u32, u32);
 
+/// Shared sink the usage collector closure appends to.
+type UsageLog = Arc<Mutex<Vec<ReviewUsageEntry>>>;
+
 /// All inputs to [`run_review_core`]. The diff is already filtered and
 /// capped and the prior discussion is already rendered; the core does
 /// no host I/O.
-pub struct ReviewCoreArgs<'a> {
-    pub llm: &'a LlmRouter,
-    /// Repository label rendered into the prompt (e.g. `owner/repo`).
-    pub repo_full_name: &'a str,
-    pub pr_number: u64,
-    pub pr_title: &'a str,
-    pub pr_body: &'a str,
-    /// Unified diff, already filtered for ignored paths and capped.
-    pub diff: &'a str,
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "run_review_core takes this as its only input and the type has no constructor; \
+              callers outside ar-review (the bench and local review surfaces) build it with a \
+              struct literal, which #[non_exhaustive] would forbid"
+)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "the crate root re-exports this as ar_review::ReviewCoreArgs for the bench and \
+              local review surfaces; renaming it changes that public path"
+)]
+pub struct ReviewCoreArgs<'args> {
     /// Paths the change touches; findings outside them are dropped.
-    pub changed_files: &'a [String],
-    pub guidelines: &'a str,
-    pub repo_context: &'a str,
-    pub previous_review_sha: Option<&'a str>,
-    /// Prior PR discussion, already rendered for the prompt.
-    pub prior_discussion: &'a str,
+    pub changed_files: &'args [String],
+    /// Unified diff, already filtered for ignored paths and capped.
+    pub diff: &'args str,
     /// Per-run nonce for the untrusted-data fences in the review prompt;
     /// the caller shares it with any other prompt it fences in the same run.
-    pub fence_nonce: &'a str,
+    pub fence_nonce: &'args str,
+    pub guidelines: &'args str,
+    pub llm: &'args LlmRouter,
+    /// Drop findings below this severity.
+    pub min_severity: ReviewSeverity,
+    pub pr_body: &'args str,
+    pub pr_number: u64,
+    pub pr_title: &'args str,
+    pub previous_review_sha: Option<&'args str>,
+    /// Prior PR discussion, already rendered for the prompt.
+    pub prior_discussion: &'args str,
+    pub repo_context: &'args str,
+    /// Repository label rendered into the prompt (e.g. `owner/repo`).
+    pub repo_full_name: &'args str,
     /// Verifier strategy. `Agentic` without `workspace_path` falls back
     /// to `Simple`.
     pub verify_mode: VerifyMode,
-    pub workspace_path: Option<&'a Path>,
-    /// Drop findings below this severity.
-    pub min_severity: ReviewSeverity,
+    pub workspace_path: Option<&'args Path>,
 }
 
 /// Result of [`run_review_core`].
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct ReviewDraft {
     /// Findings after both severity-floor passes and the path guard.
-    pub output: ar_prompts::ReviewOutput,
-    /// Findings after the first severity floor, before the verifier.
-    pub pre_verify_count: usize,
+    pub output: ReviewOutput,
     /// Findings straight after the verifier, before the second floor
     /// and the path guard.
     pub post_verify_count: usize,
-    /// `pre_verify_count - post_verify_count`, saturating.
-    pub verifier_dropped: usize,
+    /// Findings after the first severity floor, before the verifier.
+    pub pre_verify_count: usize,
     /// One entry per LLM call the core made.
     pub usage: Vec<ReviewUsageEntry>,
+    /// `pre_verify_count - post_verify_count`, saturating.
+    pub verifier_dropped: usize,
 }
 
-type UsageLog = std::sync::Arc<std::sync::Mutex<Vec<ReviewUsageEntry>>>;
-
 /// Run the host-free review stages over an already-fetched diff.
+///
+/// # Errors
+///
+/// Returns [`ReviewError::Llm`] or [`ReviewError::Unhealable`] when review
+/// generation fails; verifier failures fall open and are not errors.
+#[inline]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "the crate root re-exports this as ar_review::run_review_core for the bench and \
+              local review surfaces; renaming it changes that public path"
+)]
 pub async fn run_review_core(args: ReviewCoreArgs<'_>) -> Result<ReviewDraft, ReviewError> {
-    let usage: UsageLog = std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+    let usage: UsageLog = Arc::new(Mutex::new(Vec::new()));
     let llm = {
-        let usage_capture = usage.clone();
+        let usage_capture = Arc::clone(&usage);
         args.llm.clone().with_usage_collector(
             move |tier, base_url, model, input_tokens, output_tokens| {
-                if let Ok(mut usage) = usage_capture.lock() {
-                    usage.push((
+                if let Ok(mut entries) = usage_capture.lock() {
+                    entries.push((
                         tier,
-                        base_url.to_string(),
-                        model.to_string(),
+                        base_url.to_owned(),
+                        model.to_owned(),
                         input_tokens,
                         output_tokens,
                     ));
@@ -130,22 +158,23 @@ pub async fn run_review_core(args: ReviewCoreArgs<'_>) -> Result<ReviewDraft, Re
     // 422 the entire review payload.
     drop_findings_outside_changed_paths(&mut output, args.changed_files);
 
-    let usage = usage.lock().map(|u| u.clone()).unwrap_or_default();
+    let usage_entries = usage.lock().map_or_default(|entries| entries.clone());
     Ok(ReviewDraft {
         output,
         pre_verify_count,
         post_verify_count,
         verifier_dropped: pre_verify_count.saturating_sub(post_verify_count),
-        usage,
+        usage: usage_entries,
     })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::sync::Arc;
     use ar_llm::{CompleteRequest, CompleteResponse, Error as LlmError, LlmProvider};
     use async_trait::async_trait;
-    use std::sync::{Arc, Mutex};
+    use std::sync::Mutex;
 
     /// Returns canned contents in call order.
     struct CannedProvider {
@@ -153,15 +182,29 @@ mod tests {
     }
 
     impl CannedProvider {
+        #[expect(
+            clippy::absolute_paths,
+            reason = "the test spells out crate paths (std, tempfile, ar_prompts and similar) inline where it uses them, as written; importing each into the shared test module for one use would widen every test's namespace"
+        )]
         fn new(responses: &[&str]) -> Arc<Self> {
             Arc::new(Self {
-                responses: Mutex::new(responses.iter().rev().map(|s| s.to_string()).collect()),
+                responses: Mutex::new(
+                    responses
+                        .iter()
+                        .rev()
+                        .map(alloc::string::ToString::to_string)
+                        .collect(),
+                ),
             })
         }
     }
 
     #[async_trait]
     impl LlmProvider for CannedProvider {
+        #[expect(
+            clippy::unwrap_used,
+            reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+        )]
         async fn complete(&self, _req: CompleteRequest) -> Result<CompleteResponse, LlmError> {
             let content = self.responses.lock().unwrap().pop().unwrap_or_default();
             Ok(CompleteResponse {
@@ -173,6 +216,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn applies_severity_floor_and_path_guard_without_a_host() {
         let generation = r#"{
             "summary": "s",
@@ -187,7 +242,7 @@ mod tests {
         let router = LlmRouter::new()
             .with(ModelTier::Reasoning, CannedProvider::new(&[generation]))
             .with(ModelTier::Cheap, CannedProvider::new(&[verification]));
-        let changed_files = vec!["src/a.rs".to_string()];
+        let changed_files = vec!["src/a.rs".to_owned()];
 
         let draft = run_review_core(ReviewCoreArgs {
             llm: &router,

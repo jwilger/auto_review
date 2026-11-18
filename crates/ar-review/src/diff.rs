@@ -10,6 +10,8 @@
 //! A more sophisticated strategy (importance-rank hunks, summarize
 //! remainder) is a Milestone 2 follow-up; this is the pragmatic floor.
 
+use core::iter;
+
 /// Default cap. Roughly ~25k tokens in worst-case English; well below
 /// even a small reasoning model's context window.
 pub const DEFAULT_MAX_DIFF_BYTES: usize = 100_000;
@@ -26,16 +28,16 @@ pub const CHEAP_TIER_DIFF_CAP: usize = 40 * 1024;
 /// boundary, plus a single trailing line containing `marker` (so
 /// the model can see the body was abridged). Used by every
 /// cheap-tier prompt builder that embeds the PR's unified diff.
+#[inline]
+#[must_use = "capping has no side effects; the capped body is the only result"]
 pub fn cap_for_prompt(body: &str, max_bytes: usize, marker: &str) -> String {
     if body.len() <= max_bytes {
-        return body.to_string();
+        return body.to_owned();
     }
-    let mut cut = max_bytes;
-    while cut > 0 && !body.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    let mut out = String::with_capacity(cut + marker.len() + 2);
-    out.push_str(&body[..cut]);
+    let prefix = char_boundary_prefix(body, max_bytes);
+    let mut out =
+        String::with_capacity(prefix.len().saturating_add(marker.len()).saturating_add(2));
+    out.push_str(prefix);
     if !out.ends_with('\n') {
         out.push('\n');
     }
@@ -51,22 +53,27 @@ pub fn cap_for_prompt(body: &str, max_bytes: usize, marker: &str) -> String {
 /// embeddings represent semantic content rather than literal text,
 /// and a "[truncated]" suffix would only inflate token usage.
 /// Hard upper bound: the returned string is `<= max_bytes`.
+#[inline]
+#[must_use = "capping has no side effects; the capped body is the only result"]
 pub fn cap_for_embed(body: &str, max_bytes: usize) -> String {
     if body.len() <= max_bytes {
-        return body.to_string();
+        return body.to_owned();
     }
-    let mut cut = max_bytes;
-    while cut > 0 && !body.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    body[..cut].to_string()
+    char_boundary_prefix(body, max_bytes).to_owned()
 }
 
 /// Cap a unified diff at `max_bytes`, splitting at `diff --git ` file
 /// boundaries. Returns the original diff unchanged when it already fits.
+#[inline]
+#[must_use = "capping has no side effects; the capped diff is the only result"]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "ar-cli (commands) and the red-team tests import this as ar_review::cap_diff; \
+              renaming it breaks those callers"
+)]
 pub fn cap_diff(diff: &str, max_bytes: usize) -> String {
     if diff.len() <= max_bytes {
-        return diff.to_string();
+        return diff.to_owned();
     }
 
     let files = split_files(diff);
@@ -76,18 +83,29 @@ pub fn cap_diff(diff: &str, max_bytes: usize) -> String {
     }
 
     let mut out = String::with_capacity(max_bytes);
-    let mut included = 0usize;
-    let mut omitted = 0usize;
-    for f in files {
-        if out.len() + f.len() <= max_bytes {
-            out.push_str(f);
-            included += 1;
+    let mut included: usize = 0;
+    let mut omitted: usize = 0;
+    for file in files {
+        if out.len().saturating_add(file.len()) <= max_bytes {
+            out.push_str(file);
+            included = included.saturating_add(1);
         } else {
-            omitted += 1;
+            omitted = omitted.saturating_add(1);
         }
     }
 
     if omitted > 0 {
+        #[expect(
+            clippy::format_push_string,
+            reason = "a single trailing note per capped diff; write! into a String returns an \
+                      infallible fmt::Result that would have to be discarded"
+        )]
+        #[expect(
+            clippy::integer_division,
+            clippy::integer_division_remainder_used,
+            reason = "the note reports the cap in whole KiB, so rounding down is the intended \
+                      display; 1024 is a non-zero constant"
+        )]
         out.push_str(&format!(
             "\n\n[auto_review: omitted {omitted} file(s) to fit a {} KiB diff cap; included {included} file(s)]\n",
             max_bytes / 1024
@@ -97,38 +115,50 @@ pub fn cap_diff(diff: &str, max_bytes: usize) -> String {
     out
 }
 
-fn split_files(diff: &str) -> Vec<&str> {
-    const MARKER: &str = "diff --git ";
-    let mut starts: Vec<usize> = Vec::new();
-    let mut search_start = 0;
-    while let Some(rel) = diff[search_start..].find(MARKER) {
-        let abs = search_start + rel;
-        if abs == 0 || diff.as_bytes()[abs - 1] == b'\n' {
-            starts.push(abs);
-        }
-        search_start = abs + MARKER.len();
+/// Longest prefix of `text` that is at most `max_bytes` long and ends on a
+/// UTF-8 character boundary.
+#[expect(
+    clippy::pub_with_shorthand,
+    reason = "pub(crate) is the spelling rustfmt and the Rust reference use; the restriction \
+              group also enables the opposite pub_without_shorthand, so one spelling must carry \
+              an expectation"
+)]
+pub(crate) fn char_boundary_prefix(text: &str, max_bytes: usize) -> &str {
+    let mut end = max_bytes.min(text.len());
+    // Don't truncate in the middle of a UTF-8 codepoint.
+    while end > 0 && !text.is_char_boundary(end) {
+        end = end.saturating_sub(1);
     }
-
-    if starts.is_empty() {
-        return Vec::new();
-    }
-
-    let mut out = Vec::with_capacity(starts.len());
-    for i in 0..starts.len() {
-        let begin = starts[i];
-        let end = starts.get(i + 1).copied().unwrap_or(diff.len());
-        out.push(&diff[begin..end]);
-    }
-    out
+    text.get(..end).unwrap_or_default()
 }
 
+/// Split `diff` into per-file chunks, each starting at a `diff --git `
+/// marker at the start of a line. Returns no chunks when no marker exists.
+fn split_files(diff: &str) -> Vec<&str> {
+    /// Header that opens each file section of a unified git diff.
+    const MARKER: &str = "diff --git ";
+    let starts: Vec<usize> = diff
+        .match_indices(MARKER)
+        .map(|(abs, _)| abs)
+        .filter(|abs| {
+            abs.checked_sub(1)
+                .and_then(|prev| diff.as_bytes().get(prev))
+                .is_none_or(|byte| *byte == b'\n')
+        })
+        .collect();
+    let ends = starts.iter().skip(1).copied().chain(iter::once(diff.len()));
+    starts
+        .iter()
+        .copied()
+        .zip(ends)
+        .filter_map(|(begin, end)| diff.get(begin..end))
+        .collect()
+}
+
+/// Truncate `diff` to at most `max_bytes` on a character boundary and
+/// append a note that the diff was cut.
 fn truncate_flat(diff: &str, max_bytes: usize) -> String {
-    let mut end = max_bytes.min(diff.len());
-    // Don't truncate in the middle of a UTF-8 codepoint.
-    while end > 0 && !diff.is_char_boundary(end) {
-        end -= 1;
-    }
-    let mut out = diff[..end].to_string();
+    let mut out = char_boundary_prefix(diff, max_bytes).to_owned();
     out.push_str("\n\n[auto_review: diff truncated to fit byte cap]\n");
     out
 }
@@ -138,6 +168,10 @@ mod tests {
     use super::*;
 
     #[test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn diff_within_cap_is_unchanged() {
         let d = "diff --git a/x b/x\n@@ -1 +1 @@\n-a\n+b\n";
         assert_eq!(cap_diff(d, 1024), d);
@@ -171,6 +205,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn diff_with_no_file_markers_falls_back_to_flat_truncation() {
         let d = "x".repeat(1000);
         let capped = cap_diff(&d, 100);
@@ -179,6 +217,18 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "fully qualified paths appear in this test's assertions, which stay as written"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::std_instead_of_core,
+        reason = "the assertion names std paths and stays as written"
+    )]
     fn flat_truncation_does_not_split_utf8_codepoint() {
         // 'é' is two bytes in UTF-8 (0xC3 0xA9).
         let d = format!("héllo {}", "x".repeat(1000));
@@ -188,6 +238,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
     fn split_files_recognizes_file_markers_only_at_line_starts() {
         // The string "diff --git" appearing inside a hunk content line
         // (after a +/-, or with surrounding text) must not be treated as
@@ -225,6 +279,26 @@ diff --git a/b b/b
     }
 
     #[test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "fully qualified paths appear in this test's assertions, which stay as written"
+    )]
+    #[expect(
+        clippy::assertions_on_result_states,
+        reason = "the assertion stays as written; it checks only whether the call failed or succeeded"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::non_ascii_literal,
+        reason = "the fixture and expected text hold the exact non-ASCII characters (em dash, ellipsis, emoji, multi-byte letters) the code under test renders or must cut on a character boundary; escapes would edit what the test checks"
+    )]
+    #[expect(
+        clippy::std_instead_of_core,
+        reason = "the assertion names std paths and stays as written"
+    )]
     fn cap_for_prompt_walks_back_to_utf8_boundary() {
         // 4-byte emoji at the cut boundary must not be split.
         let mut s = "x".repeat(98);
@@ -249,6 +323,26 @@ diff --git a/b b/b
     }
 
     #[test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "fully qualified paths appear in this test's assertions, which stay as written"
+    )]
+    #[expect(
+        clippy::assertions_on_result_states,
+        reason = "the assertion stays as written; it checks only whether the call failed or succeeded"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::non_ascii_literal,
+        reason = "the fixture and expected text hold the exact non-ASCII characters (em dash, ellipsis, emoji, multi-byte letters) the code under test renders or must cut on a character boundary; escapes would edit what the test checks"
+    )]
+    #[expect(
+        clippy::std_instead_of_core,
+        reason = "the assertion names std paths and stays as written"
+    )]
     fn cap_for_embed_walks_back_to_utf8_boundary() {
         let mut s = "x".repeat(98);
         s.push_str("🦀tail");

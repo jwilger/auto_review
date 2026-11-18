@@ -30,15 +30,55 @@ use std::os::unix::fs::symlink;
 use std::path::Path;
 use std::process::Command;
 
+/// Stands in for the bot credential production puts in the clone URL's
+/// userinfo. `file://` URLs accept userinfo with a `localhost` host, so the
+/// fixture clone stores it in `.git/config` exactly as a credentialed HTTPS
+/// clone does.
+const CREDENTIAL_SENTINEL: &str = "SENTINEL-bot-credential";
+
+/// A pull-request-shaped repository whose base branch moved on after the
+/// feature branched, so finding the merge base needs the deepening fetches,
+/// plus an unrelated root commit.
+struct PullRequestRepo {
+    base_sha: String,
+    /// Clone URL carrying [`CREDENTIAL_SENTINEL`] in its userinfo.
+    credentialed_url: String,
+    head_sha: String,
+    /// A feature commit an earlier review covered.
+    reviewed_sha: String,
+    /// A root commit sharing no history with the head.
+    unrelated_sha: String,
+}
+
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+)]
 fn write(dir: &Path, rel: &str, body: &str) {
-    let p = dir.join(rel);
-    if let Some(parent) = p.parent() {
+    let path_buf = dir.join(rel);
+    if let Some(parent) = path_buf.parent() {
         fs::create_dir_all(parent).unwrap();
     }
-    fs::write(&p, body).unwrap();
+    fs::write(&path_buf, body).unwrap();
 }
 
 #[test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+)]
+#[expect(
+    clippy::min_ident_chars,
+    reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+)]
 fn read_file_rejects_symlink_pointing_outside_workspace() {
     let dir = tempfile::tempdir().unwrap();
     // Sentinel file outside the workspace root.
@@ -57,6 +97,18 @@ fn read_file_rejects_symlink_pointing_outside_workspace() {
 }
 
 #[test]
+#[expect(
+    clippy::min_ident_chars,
+    reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+)]
 fn read_file_rejects_chain_of_symlinks_pointing_outside() {
     let dir = tempfile::tempdir().unwrap();
     let outside_dir = tempfile::tempdir().unwrap();
@@ -76,6 +128,18 @@ fn read_file_rejects_chain_of_symlinks_pointing_outside() {
 }
 
 #[test]
+#[expect(
+    clippy::min_ident_chars,
+    reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+)]
 fn read_file_with_empty_relative_path_does_not_panic() {
     let dir = tempfile::tempdir().unwrap();
     // An empty path resolves to the workspace root itself, which
@@ -87,6 +151,22 @@ fn read_file_with_empty_relative_path_does_not_panic() {
 }
 
 #[test]
+#[expect(
+    clippy::absolute_paths,
+    reason = "fully qualified paths appear in this test's assertions, which stay as written"
+)]
+#[expect(
+    clippy::std_instead_of_core,
+    reason = "the assertion names std paths and stays as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+)]
 fn search_with_pathological_regex_completes_in_bounded_time() {
     // Catastrophic-backtracking pattern on a backtracking engine:
     // `(a+)+$` on input "aaaaaaaaaaaaaaaaaab". On Perl/PCRE this
@@ -94,11 +174,11 @@ fn search_with_pathological_regex_completes_in_bounded_time() {
     // linear time, so this must complete quickly. We assert on
     // wall-clock to lock in the property.
     let dir = tempfile::tempdir().unwrap();
-    let payload = "a".repeat(40) + "b";
+    let payload = format!("{}b", "a".repeat(40));
     write(dir.path(), "evil.txt", &payload);
 
     let started = std::time::Instant::now();
-    let result = search(dir.path(), r"(a+)+$", Some("evil.txt"), 100);
+    let result = search(dir.path(), "(a+)+$", Some("evil.txt"), 100);
     let elapsed = started.elapsed();
     assert!(result.is_ok(), "search must not error: {result:?}");
     assert!(
@@ -108,6 +188,26 @@ fn search_with_pathological_regex_completes_in_bounded_time() {
 }
 
 #[test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
+#[expect(
+    clippy::unused_result_ok,
+    reason = "the trap fixture writes are best-effort as written; this lint-only change keeps the test's setup unchanged"
+)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+)]
 fn search_walks_safely_past_binary_files_in_workspace() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "src/x.rs", "needle here\n");
@@ -132,6 +232,18 @@ fn search_walks_safely_past_binary_files_in_workspace() {
 }
 
 #[test]
+#[expect(
+    clippy::min_ident_chars,
+    reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+)]
 fn read_file_against_workspace_root_is_rejected_or_errors() {
     // Some attackers try to read the directory itself. Either
     // NotFound (since it's not a regular file), Io, or PathEscape
@@ -146,6 +258,18 @@ fn read_file_against_workspace_root_is_rejected_or_errors() {
 }
 
 #[test]
+#[expect(
+    clippy::min_ident_chars,
+    reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+)]
 fn search_with_relative_dot_dot_in_path_is_rejected() {
     let dir = tempfile::tempdir().unwrap();
     write(dir.path(), "src/x.rs", "x\n");
@@ -161,6 +285,10 @@ fn search_with_relative_dot_dot_in_path_is_rejected() {
 
 /// Run git for fixture setup only, isolated from the host git config so the
 /// fixture does not depend on (or run) anything the developer configured.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+)]
 fn fixture_git(dir: &Path, args: &[&str]) -> String {
     let output = Command::new("git")
         .env("GIT_CONFIG_NOSYSTEM", "true")
@@ -189,6 +317,14 @@ fn fixture_git(dir: &Path, args: &[&str]) -> String {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+)]
 async fn read_file_on_prepared_workspace_git_config_exposes_no_clone_url() {
     let fixture = tempfile::tempdir().unwrap();
     let src = fixture.path().join("src");
@@ -212,7 +348,7 @@ async fn read_file_on_prepared_workspace_git_config_exposes_no_clone_url() {
             "fixture",
         ],
     );
-    let head_sha = fixture_git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+    let head_sha = fixture_git(&src, &["rev-parse", "HEAD"]).trim().to_owned();
     fixture_git(
         fixture.path(),
         &[
@@ -252,12 +388,6 @@ async fn read_file_on_prepared_workspace_git_config_exposes_no_clone_url() {
     );
 }
 
-/// Stands in for the bot credential production puts in the clone URL's
-/// userinfo. `file://` URLs accept userinfo with a `localhost` host, so the
-/// fixture clone stores it in `.git/config` exactly as a credentialed HTTPS
-/// clone does.
-const CREDENTIAL_SENTINEL: &str = "SENTINEL-bot-credential";
-
 /// Commit everything in `dir` with a fixed fixture identity; return the SHA.
 fn fixture_commit(dir: &Path, message: &str) -> String {
     fixture_git(dir, &["add", "-A"]);
@@ -276,23 +406,17 @@ fn fixture_commit(dir: &Path, message: &str) -> String {
             message,
         ],
     );
-    fixture_git(dir, &["rev-parse", "HEAD"]).trim().to_string()
+    fixture_git(dir, &["rev-parse", "HEAD"]).trim().to_owned()
 }
 
-/// A pull-request-shaped repository whose base branch moved on after the
-/// feature branched, so finding the merge base needs the deepening fetches,
-/// plus an unrelated root commit.
-struct PullRequestRepo {
-    /// Clone URL carrying [`CREDENTIAL_SENTINEL`] in its userinfo.
-    credentialed_url: String,
-    head_sha: String,
-    base_sha: String,
-    /// A feature commit an earlier review covered.
-    reviewed_sha: String,
-    /// A root commit sharing no history with the head.
-    unrelated_sha: String,
-}
-
+#[expect(
+    clippy::default_numeric_fallback,
+    reason = "test code: untyped literals in assertions and JSON fixtures; a suffix would trip separated_literal_suffix or unseparated_literal_suffix instead"
+)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+)]
 fn pull_request_repo(root: &Path) -> PullRequestRepo {
     let src = root.join("src");
     let bare = root.join("bare.git");
@@ -314,7 +438,7 @@ fn pull_request_repo(root: &Path) -> PullRequestRepo {
         write(&src, "base.txt", &format!("base v{n}\n"));
         fixture_commit(&src, &format!("b{n}"));
     }
-    let base_sha = fixture_git(&src, &["rev-parse", "HEAD"]).trim().to_string();
+    let base_sha = fixture_git(&src, &["rev-parse", "HEAD"]).trim().to_owned();
     fixture_git(&src, &["checkout", "--quiet", "--orphan", "unrelated"]);
     write(&src, "lib.rs", "unrelated\n");
     let unrelated_sha = fixture_commit(&src, "unrelated root");
@@ -342,12 +466,28 @@ fn pull_request_repo(root: &Path) -> PullRequestRepo {
 }
 
 /// Every regular file under `dir`, recursively.
+#[expect(
+    clippy::absolute_paths,
+    reason = "the test spells out crate paths (std, tempfile, ar_prompts and similar) inline where it uses them, as written; importing each into the shared test module for one use would widen every test's namespace"
+)]
+#[expect(
+    clippy::else_if_without_else,
+    reason = "lines or entries matching neither branch are skipped on purpose"
+)]
+#[expect(
+    clippy::filetype_is_file,
+    reason = "the fixture walk reads only regular files; symlinks and other entry types are skipped on purpose"
+)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+)]
 fn files_under(dir: &Path) -> Vec<std::path::PathBuf> {
     let mut files = Vec::new();
     let mut pending = vec![dir.to_path_buf()];
     while let Some(next) = pending.pop() {
-        for entry in fs::read_dir(&next).unwrap() {
-            let entry = entry.unwrap();
+        for entry_result in fs::read_dir(&next).unwrap() {
+            let entry = entry_result.unwrap();
             let file_type = entry.file_type().unwrap();
             if file_type.is_dir() {
                 pending.push(entry.path());
@@ -362,6 +502,10 @@ fn files_under(dir: &Path) -> Vec<std::path::PathBuf> {
 /// No file under the workspace's `.git` (config, `FETCH_HEAD`, reflogs,
 /// `shallow`, packed refs, leftover locks) holds the clone credential, and
 /// `read_file(".git/config")` shows no remote URL.
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+)]
 fn assert_no_clone_credential_in_git_dir(workspace: &Path) {
     for file in files_under(&workspace.join(".git")) {
         let bytes = fs::read(&file).unwrap();
@@ -390,6 +534,14 @@ fn assert_no_clone_credential_in_git_dir(workspace: &Path) {
 /// remote is removed; none of those fetches may leave the credential where
 /// the LLM `read_file` tool can reach it (T5).
 #[tokio::test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+)]
 async fn merge_base_fetches_leave_no_clone_credential_in_the_git_dir() {
     let fixture = tempfile::tempdir().unwrap();
     let repo = pull_request_repo(fixture.path());
@@ -413,6 +565,18 @@ async fn merge_base_fetches_leave_no_clone_credential_in_the_git_dir() {
 /// rounds, or a previously reviewed commit the host no longer has) still
 /// removes the credentialed remote.
 #[tokio::test]
+#[expect(
+    clippy::assertions_on_result_states,
+    reason = "the assertion stays as written; it checks only whether the call failed or succeeded"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+)]
 async fn failed_merge_base_lookups_leave_no_clone_credential_in_the_git_dir() {
     let fixture = tempfile::tempdir().unwrap();
     let repo = pull_request_repo(fixture.path());

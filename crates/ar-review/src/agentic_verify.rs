@@ -1,4 +1,4 @@
-//! Agentic verifier: per-finding ReAct loop with read-only workspace
+//! Agentic verifier: per-finding `ReAct` loop with read-only workspace
 //! tools.
 //!
 //! Where [`crate::verify::verify_findings`] does a single-pass yes/no
@@ -24,17 +24,24 @@
 //! the finding rather than dropping it.
 
 use crate::agent_loop::{run_agent_loop, LoopEnd, Toolbox};
+use crate::diff::{cap_for_prompt, CHEAP_TIER_DIFF_CAP};
 use crate::error::ReviewError;
 use ar_llm::{Message, ModelTier, Router};
 use ar_prompts::{ReviewFinding, ReviewOutput};
+use core::fmt::Write as _;
 use serde_json::json;
-use std::fmt::Write;
 use std::path::Path;
 
 /// Maximum number of tool calls the verifier is allowed to make per
 /// finding before it must emit a verdict.
 const DEFAULT_MAX_TURNS: usize = 5;
 
+/// System prompt for the agentic verifier: tool catalog and verdict rules.
+#[expect(
+    clippy::non_ascii_literal,
+    reason = "the prompt sent to the model contains an em dash; a raw string cannot hold the \
+              \\u{2014} escape, and rewriting it as an escaped string would hide the prompt text"
+)]
 const SYSTEM_PROMPT: &str = r#"You are an agentic verifier of code-review findings. You will receive
 one finding at a time, plus the unified diff that produced it. Your job
 is to decide whether the finding is corroborated by the actual code in
@@ -62,6 +69,15 @@ the finding. False positives at the verifier hurt review quality less
 than false negatives (dropping real bugs).
 "#;
 
+/// Per-finding outcome the loop converges to.
+enum Verdict {
+    /// The investigation contradicted the finding; drop it.
+    Drop,
+    /// The finding stands (also the fail-open default).
+    Keep,
+}
+
+/// JSON schema each agent turn must satisfy: one tool call or a verdict.
 fn agent_action_schema() -> serde_json::Value {
     json!({
         "type": "object",
@@ -79,18 +95,18 @@ fn agent_action_schema() -> serde_json::Value {
     })
 }
 
-/// Per-finding outcome the loop converges to.
-enum Verdict {
-    Keep,
-    Drop,
-}
-
 /// Run the agentic verifier over `output.findings`. Returns a new
 /// [`ReviewOutput`] with only the findings the verifier corroborates.
 ///
 /// Behavior when the verifier can't run (no Cheap tier configured,
 /// any per-finding loop error): the finding stays. Verifier failures
 /// must not silently drop real findings.
+///
+/// # Errors
+///
+/// Currently never returns an error: every verifier failure falls open
+/// and keeps the finding. The `Result` keeps room for hard failures.
+#[inline]
 pub async fn verify_findings_agentic(
     router: &Router,
     output: ReviewOutput,
@@ -109,11 +125,11 @@ pub async fn verify_findings_agentic(
     } = output;
 
     let mut kept: Vec<ReviewFinding> = Vec::with_capacity(findings.len());
-    let mut dropped = 0usize;
+    let mut dropped: usize = 0;
     for finding in findings {
         match verify_one(router, &finding, workspace_path, diff, DEFAULT_MAX_TURNS).await {
             Verdict::Keep => kept.push(finding),
-            Verdict::Drop => dropped += 1,
+            Verdict::Drop => dropped = dropped.saturating_add(1),
         }
     }
     if dropped > 0 {
@@ -132,6 +148,7 @@ pub async fn verify_findings_agentic(
     })
 }
 
+/// Run the tool loop for one finding and map its end state to a verdict.
 async fn verify_one(
     router: &Router,
     finding: &ReviewFinding,
@@ -171,14 +188,24 @@ async fn verify_one(
     }
 }
 
+/// Render the first user message: the finding, then the capped diff.
 fn initial_user_prompt(finding: &ReviewFinding, diff: &str) -> String {
-    let capped = crate::diff::cap_for_prompt(
+    let capped = cap_for_prompt(
         diff,
-        crate::diff::CHEAP_TIER_DIFF_CAP,
+        CHEAP_TIER_DIFF_CAP,
         "[diff truncated for agentic verifier]",
     );
-    let mut out = String::with_capacity(capped.len() + 512);
+    let mut out = String::with_capacity(capped.len().saturating_add(512));
     out.push_str("Finding to verify:\n");
+    #[expect(
+        clippy::let_underscore_must_use,
+        reason = "fmt::Write for String never returns Err, so there is no error to handle"
+    )]
+    #[expect(
+        clippy::use_debug,
+        reason = "the prompt names the severity by its variant name (Error, Warning, ...), which \
+                  is what the Debug format prints"
+    )]
     let _ = writeln!(
         out,
         "  path: {}\n  line_start: {}\n  severity: {:?}\n  message: {}",
@@ -196,18 +223,26 @@ fn initial_user_prompt(finding: &ReviewFinding, diff: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use alloc::sync::Arc;
     use ar_llm::testing::ScriptedProvider;
     use ar_prompts::ReviewSeverity;
     use std::io::Write as _;
-    use std::sync::Arc;
 
+    #[expect(
+        clippy::absolute_paths,
+        reason = "the test spells out crate paths (std, tempfile, ar_prompts and similar) inline where it uses them, as written; importing each into the shared test module for one use would widen every test's namespace"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     fn write(dir: &Path, rel: &str, body: &str) {
-        let p = dir.join(rel);
-        if let Some(parent) = p.parent() {
+        let path_buf = dir.join(rel);
+        if let Some(parent) = path_buf.parent() {
             std::fs::create_dir_all(parent).unwrap();
         }
-        let mut f = std::fs::File::create(&p).unwrap();
-        f.write_all(body.as_bytes()).unwrap();
+        let mut file = std::fs::File::create(&path_buf).unwrap();
+        file.write_all(body.as_bytes()).unwrap();
     }
 
     fn finding(i: u32, msg: &str, path: &str) -> ReviewFinding {
@@ -232,6 +267,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn returns_input_unchanged_when_cheap_tier_missing() {
         let dir = tempfile::tempdir().unwrap();
         let router = Router::new();
@@ -247,6 +290,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn returns_input_unchanged_when_findings_empty() {
         let dir = tempfile::tempdir().unwrap();
         let provider = Arc::new(ScriptedProvider::new(vec![]));
@@ -258,6 +313,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn drops_finding_when_verdict_says_keep_false() {
         let dir = tempfile::tempdir().unwrap();
         let provider = Arc::new(ScriptedProvider::new(vec![
@@ -276,6 +343,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn keeps_finding_when_verdict_says_keep_true() {
         let dir = tempfile::tempdir().unwrap();
         let provider = Arc::new(ScriptedProvider::new(vec![
@@ -294,6 +369,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "short bindings are read by this test's assertions; renaming them would edit those assertions"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn kept_finding_keeps_its_title_and_category() {
         let dir = tempfile::tempdir().unwrap();
         let provider = Arc::new(ScriptedProvider::new(vec![
@@ -310,6 +397,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the emptiness assertion stays as written; this lint-only change leaves assertions unedited"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn read_file_action_then_verdict_drops_finding() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "src/foo.rs", "line1\nline2\nline3\n");
@@ -331,6 +430,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn search_action_then_verdict_keeps_finding() {
         let dir = tempfile::tempdir().unwrap();
         write(
@@ -355,6 +462,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn malformed_json_keeps_finding() {
         let dir = tempfile::tempdir().unwrap();
         let provider = Arc::new(ScriptedProvider::new(vec!["this is not json"]));
@@ -372,6 +487,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn unknown_tool_keeps_finding() {
         let dir = tempfile::tempdir().unwrap();
         let provider = Arc::new(ScriptedProvider::new(vec![
@@ -390,6 +513,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn turn_budget_exhausted_keeps_finding() {
         let dir = tempfile::tempdir().unwrap();
         write(dir.path(), "x.rs", "x\n");
@@ -416,6 +547,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn read_file_path_escape_is_a_tool_error_finding_kept() {
         let dir = tempfile::tempdir().unwrap();
         // First turn: try to escape. Second turn: verdict keep
@@ -439,6 +578,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "indexes results whose length this test sets up or asserts; an out-of-range index fails the test, as it should"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn per_finding_independence_kept_and_dropped_findings_split() {
         let dir = tempfile::tempdir().unwrap();
         // Two findings: first dropped, second kept.

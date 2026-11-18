@@ -1,11 +1,11 @@
 //! Trusted loader for repository-controlled instruction files.
 //!
 //! This module is the single loader for every file a repository uses to
-//! instruct auto_review: `.auto_review.yaml` / `.auto_review.yml` today, and
+//! instruct `auto_review`: `.auto_review.yaml` / `.auto_review.yml` today, and
 //! later `AGENTS.md`, `CLAUDE.md`, `REVIEW.md` and path-scoped instructions.
 //! Every such file is read from the pull request's **base branch** through
 //! the repository host API, never from the head checkout. A pull request
-//! therefore cannot change how auto_review reviews it: a PR that adds
+//! therefore cannot change how `auto_review` reviews it: a PR that adds
 //! `enabled: false` or `ignored_paths: ["**"]` only takes effect once it
 //! has been merged into the base branch.
 //!
@@ -16,27 +16,6 @@
 
 use crate::config::{parse_repo_config, RepoConfig};
 use ar_forge::{HostError, ReviewHost};
-
-/// The base branch a pull request targets, as fetched once per review job.
-///
-/// `name` is the branch name trusted files are read at: reading the branch
-/// tip by name means a config change merged to the base applies to open
-/// pull requests on their next review. `sha` is the base tip the host
-/// reported when the pull request was fetched.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct BaseRef {
-    pub name: String,
-    pub sha: String,
-}
-
-impl From<&ar_forge::PullRequestRefSummary> for BaseRef {
-    fn from(base: &ar_forge::PullRequestRefSummary) -> Self {
-        Self {
-            name: base.ref_name.clone(),
-            sha: base.sha.clone(),
-        }
-    }
-}
 
 /// Largest repository-controlled file body the trusted loader will parse.
 ///
@@ -50,6 +29,33 @@ pub const MAX_TRUSTED_FILE_BYTES: usize = 64 * 1024;
 
 /// Repo config file names, in lookup order: `.yaml` wins over `.yml`.
 pub const REPO_CONFIG_FILE_NAMES: [&str; 2] = [".auto_review.yaml", ".auto_review.yml"];
+
+/// The base branch a pull request targets, as fetched once per review job.
+///
+/// `name` is the branch name trusted files are read at: reading the branch
+/// tip by name means a config change merged to the base applies to open
+/// pull requests on their next review. `sha` is the base tip the host
+/// reported when the pull request was fetched.
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "ar-orchestrator (dispatcher tests) and the red-team tests build BaseRef with a \
+              struct literal; #[non_exhaustive] would break that construction"
+)]
+pub struct BaseRef {
+    pub name: String,
+    pub sha: String,
+}
+
+impl From<&ar_forge::PullRequestRefSummary> for BaseRef {
+    #[inline]
+    fn from(base: &ar_forge::PullRequestRefSummary) -> Self {
+        Self {
+            name: base.ref_name.clone(),
+            sha: base.sha.clone(),
+        }
+    }
+}
 
 /// Why a trusted file could not be read.
 #[derive(Debug, Clone, thiserror::Error, PartialEq, Eq)]
@@ -72,36 +78,6 @@ pub enum TrustedFileError {
     },
 }
 
-/// Read a repository-controlled file from `base_ref` through the host API.
-///
-/// Returns `Ok(None)` when the file does not exist at that ref. Bodies over
-/// [`MAX_TRUSTED_FILE_BYTES`] are rejected with [`TrustedFileError::TooLarge`].
-pub async fn read_trusted_repo_file<H: ReviewHost + ?Sized>(
-    host: &H,
-    owner: &str,
-    repo: &str,
-    path: &str,
-    base_ref: &str,
-) -> Result<Option<String>, TrustedFileError> {
-    let body = host
-        .get_file_content(owner, repo, path, base_ref)
-        .await
-        .map_err(|source| TrustedFileError::Fetch {
-            path: path.to_string(),
-            ref_name: base_ref.to_string(),
-            source,
-        })?;
-    match body {
-        Some(body) if body.len() > MAX_TRUSTED_FILE_BYTES => Err(TrustedFileError::TooLarge {
-            path: path.to_string(),
-            ref_name: base_ref.to_string(),
-            size: body.len(),
-            limit: MAX_TRUSTED_FILE_BYTES,
-        }),
-        other => Ok(other),
-    }
-}
-
 /// Where a loaded [`RepoConfig`] came from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ConfigProvenance {
@@ -114,6 +90,7 @@ pub enum ConfigProvenance {
 
 /// A repo config together with where it came from and any fallback warning.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub struct LoadedRepoConfig {
     pub config: RepoConfig,
     pub provenance: ConfigProvenance,
@@ -124,6 +101,7 @@ pub struct LoadedRepoConfig {
 }
 
 impl LoadedRepoConfig {
+    /// Built-in defaults with an optional fallback `warning`.
     fn defaults(warning: Option<String>) -> Self {
         Self {
             config: RepoConfig::default(),
@@ -133,28 +111,71 @@ impl LoadedRepoConfig {
     }
 }
 
+/// Read a repository-controlled file from `base_ref` through the host API.
+///
+/// Returns `Ok(None)` when the file does not exist at that ref. Bodies over
+/// [`MAX_TRUSTED_FILE_BYTES`] are rejected with [`TrustedFileError::TooLarge`].
+///
+/// # Errors
+///
+/// Returns [`TrustedFileError::Fetch`] when the host fails for a reason other
+/// than "not found", and [`TrustedFileError::TooLarge`] for an oversized body.
+#[inline]
+pub async fn read_trusted_repo_file<H>(
+    host: &H,
+    owner: &str,
+    repo: &str,
+    path: &str,
+    base_ref: &str,
+) -> Result<Option<String>, TrustedFileError>
+where
+    H: ReviewHost + ?Sized,
+{
+    let fetched = host
+        .get_file_content(owner, repo, path, base_ref)
+        .await
+        .map_err(|source| TrustedFileError::Fetch {
+            path: path.to_owned(),
+            ref_name: base_ref.to_owned(),
+            source,
+        })?;
+    match fetched {
+        Some(body) if body.len() > MAX_TRUSTED_FILE_BYTES => Err(TrustedFileError::TooLarge {
+            path: path.to_owned(),
+            ref_name: base_ref.to_owned(),
+            size: body.len(),
+            limit: MAX_TRUSTED_FILE_BYTES,
+        }),
+        other => Ok(other),
+    }
+}
+
 /// Load `.auto_review.yaml` (then `.auto_review.yml`) from the base branch
 /// `base_ref` through the host API.
 ///
 /// Never fails: a missing config yields defaults with no warning; a fetch
 /// error, an oversized body or an unparsable body yields defaults with a
 /// warning (also emitted through `tracing::warn!`) so the review proceeds.
-pub async fn load_repo_config_from_base<H: ReviewHost + ?Sized>(
+#[inline]
+pub async fn load_repo_config_from_base<H>(
     host: &H,
     owner: &str,
     repo: &str,
     base_ref: &str,
-) -> LoadedRepoConfig {
+) -> LoadedRepoConfig
+where
+    H: ReviewHost + ?Sized,
+{
     for path in REPO_CONFIG_FILE_NAMES {
         match read_trusted_repo_file(host, owner, repo, path, base_ref).await {
-            Ok(None) => continue,
+            Ok(None) => {}
             Ok(Some(body)) => {
                 return match parse_repo_config(&body) {
                     Ok(config) => LoadedRepoConfig {
                         config,
                         provenance: ConfigProvenance::BaseBranch {
-                            path: path.to_string(),
-                            ref_name: base_ref.to_string(),
+                            path: path.to_owned(),
+                            ref_name: base_ref.to_owned(),
                         },
                         warning: None,
                     },
@@ -191,36 +212,31 @@ mod tests {
     /// Serves base-branch files from a map keyed by `(ref, path)`.
     #[derive(Default)]
     struct FakeHost {
-        files: HashMap<(String, String), String>,
         fail_with: Option<String>,
+        files: HashMap<(String, String), String>,
         requests: Mutex<Vec<(String, String)>>,
     }
 
     impl FakeHost {
         fn with_file(mut self, ref_name: &str, path: &str, body: &str) -> Self {
             self.files
-                .insert((ref_name.to_string(), path.to_string()), body.to_string());
+                .insert((ref_name.to_owned(), path.to_owned()), body.to_owned());
             self
         }
     }
 
-    fn unused() -> HostError {
-        HostError::new("not used in trusted_files tests")
-    }
-
     #[async_trait]
     impl ReviewHost for FakeHost {
-        async fn get_pull_request(
+        async fn create_review(
             &self,
             _: &str,
             _: &str,
             _: u64,
-        ) -> Result<PullRequestSummary, HostError> {
+            _: &CreateReviewRequest,
+        ) -> Result<CreatedReview, HostError> {
             Err(unused())
         }
-        async fn get_pr_diff(&self, _: &str, _: &str, _: u64) -> Result<String, HostError> {
-            Err(unused())
-        }
+
         async fn get_compare_diff(
             &self,
             _: &str,
@@ -230,39 +246,15 @@ mod tests {
         ) -> Result<String, HostError> {
             Err(unused())
         }
-        async fn list_changed_files(
-            &self,
-            _: &str,
-            _: &str,
-            _: u64,
-        ) -> Result<Vec<ChangedFile>, HostError> {
-            Err(unused())
-        }
-        async fn list_pr_review_comments(
-            &self,
-            _: &str,
-            _: &str,
-            _: u64,
-        ) -> Result<Vec<PrReviewComment>, HostError> {
-            Err(unused())
-        }
-        async fn list_pull_reviews(
-            &self,
-            _: &str,
-            _: &str,
-            _: u64,
-        ) -> Result<Vec<PullReviewSummary>, HostError> {
-            Err(unused())
-        }
-        async fn list_pull_review_comments(
-            &self,
-            _: &str,
-            _: &str,
-            _: u64,
-            _: u64,
-        ) -> Result<Vec<PrReviewComment>, HostError> {
-            Err(unused())
-        }
+
+        #[expect(
+            clippy::pattern_type_mismatch,
+            reason = "the test matches borrowed fixtures and recorded values with default binding modes; explicit & patterns would edit the matched shapes the assertions read"
+        )]
+        #[expect(
+            clippy::unwrap_used,
+            reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+        )]
         async fn get_file_content(
             &self,
             _owner: &str,
@@ -273,15 +265,76 @@ mod tests {
             self.requests
                 .lock()
                 .unwrap()
-                .push((ref_.to_string(), file_path.to_string()));
+                .push((ref_.to_owned(), file_path.to_owned()));
             if let Some(message) = &self.fail_with {
                 return Err(HostError::new(message.clone()));
             }
             Ok(self
                 .files
-                .get(&(ref_.to_string(), file_path.to_string()))
+                .get(&(ref_.to_owned(), file_path.to_owned()))
                 .cloned())
         }
+
+        async fn get_pr_diff(&self, _: &str, _: &str, _: u64) -> Result<String, HostError> {
+            Err(unused())
+        }
+
+        async fn get_pull_request(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+        ) -> Result<PullRequestSummary, HostError> {
+            Err(unused())
+        }
+
+        async fn list_changed_files(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+        ) -> Result<Vec<ChangedFile>, HostError> {
+            Err(unused())
+        }
+
+        async fn list_pr_review_comments(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+        ) -> Result<Vec<PrReviewComment>, HostError> {
+            Err(unused())
+        }
+
+        async fn list_pull_review_comments(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+            _: u64,
+        ) -> Result<Vec<PrReviewComment>, HostError> {
+            Err(unused())
+        }
+
+        async fn list_pull_reviews(
+            &self,
+            _: &str,
+            _: &str,
+            _: u64,
+        ) -> Result<Vec<PullReviewSummary>, HostError> {
+            Err(unused())
+        }
+
+        async fn post_commit_status(
+            &self,
+            _: &str,
+            _: &str,
+            _: &str,
+            _: &CommitStatus,
+        ) -> Result<(), HostError> {
+            Err(unused())
+        }
+
         async fn update_pull_request(
             &self,
             _: &str,
@@ -292,24 +345,10 @@ mod tests {
         ) -> Result<(), HostError> {
             Err(unused())
         }
-        async fn post_commit_status(
-            &self,
-            _: &str,
-            _: &str,
-            _: &str,
-            _: &CommitStatus,
-        ) -> Result<(), HostError> {
-            Err(unused())
-        }
-        async fn create_review(
-            &self,
-            _: &str,
-            _: &str,
-            _: u64,
-            _: &CreateReviewRequest,
-        ) -> Result<CreatedReview, HostError> {
-            Err(unused())
-        }
+    }
+
+    fn unused() -> HostError {
+        HostError::new("not used in trusted_files tests")
     }
 
     async fn load(host: &FakeHost) -> LoadedRepoConfig {
@@ -332,6 +371,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::str_to_string,
+        reason = "the expected values in this test's assertions build their strings with to_string and stay as written"
+    )]
     async fn loads_yml_when_only_yml_exists() {
         let host = FakeHost::default().with_file(
             "main",
@@ -360,6 +403,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::str_to_string,
+        reason = "the expected values in this test's assertions build their strings with to_string and stay as written"
+    )]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line; unwrap reports the error"
+    )]
     async fn neither_file_yields_defaults_without_warning() {
         let host = FakeHost::default();
         let loaded = load(&host).await;
@@ -385,8 +436,16 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::decimal_literal_representation,
+        reason = "the asserted byte counts are the 64 KiB cap and one byte over it, written in decimal; the assertions stay as written"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
     async fn body_over_limit_falls_back_to_defaults_with_warning() {
-        let mut body = "enabled: false\n".to_string();
+        let mut body = "enabled: false\n".to_owned();
         body.push_str(&"#".repeat(MAX_TRUSTED_FILE_BYTES + 1 - body.len()));
         assert_eq!(body.len(), 65_537);
         let host = FakeHost::default().with_file("main", ".auto_review.yaml", &body);
@@ -401,8 +460,12 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::decimal_literal_representation,
+        reason = "the asserted byte counts are the 64 KiB cap and one byte over it, written in decimal; the assertions stay as written"
+    )]
     async fn body_at_exact_limit_parses() {
-        let mut body = "enabled: false\n".to_string();
+        let mut body = "enabled: false\n".to_owned();
         body.push_str(&"#".repeat(MAX_TRUSTED_FILE_BYTES - body.len()));
         assert_eq!(body.len(), 65_536);
         let host = FakeHost::default().with_file("main", ".auto_review.yaml", &body);
@@ -412,6 +475,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed setup, fixture or tool call should fail this test at that line with the labelled message"
+    )]
     async fn fetch_error_falls_back_to_defaults_with_warning() {
         let host = FakeHost {
             fail_with: Some("HTTP 500".into()),
