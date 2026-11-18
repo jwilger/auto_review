@@ -23,3 +23,6 @@ ar-review = { path = "../ar-review" }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 wiremock.workspace = true
+
+[lints]
+workspace = true
