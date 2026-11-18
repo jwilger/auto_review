@@ -282,6 +282,17 @@ The incremental diff (`PreparedWorkspace::incremental_diff`) also reads them
 from the pull request's merge base, not the previously reviewed commit, which
 is pull-request content; pinned by
 `workspace::tests::incremental_diff_holds_only_the_commits_after_the_previous_review`.
+A PR could also name a file so that its name forges a diff section: git
+allows a newline in a path, so `src/evil.rs\ndiff --git a/vendor/x b/vendor/x`
+would, written raw into a header, attribute the real patch to `vendor/x`,
+which `filter_diff_paths` then drops when `vendor/**` is ignored. A PR can
+force the GitHub per-file patch fallback that writes those headers (over 300
+files makes the whole-diff endpoint refuse, and a head far enough from its
+fork point leaves the workspace without a merge base), and chat commands
+always use it. `ar-github` writes every file name through `diff_path`, which
+C-quotes a name holding a control character, `"` or `\` the way git does, so
+it stays inside one header line; pinned by `ar-github`
+`tests::diff_from_file_patches_quotes_a_file_name_that_could_start_a_new_section`.
 _Residual risk:_ a maintainer who merges a hostile config change to
 the base branch disables or narrows review for every open PR on its
 next review. That is a base-branch write, outside this threat. The
@@ -612,6 +623,11 @@ threat-model claims fail CI when a regression slips in:
   base. `tests::attributes_come_from_a_global_option_older_git_rejects`
   pins that the attribute source is the `--attr-source` option, which
   git older than 2.42 rejects instead of ignoring.
+- `crates/ar-github/src/lib.rs` test
+  `tests::diff_from_file_patches_quotes_a_file_name_that_could_start_a_new_section`
+  — covers T3a (PR file name forges a diff section in the per-file patch
+  fallback): a name holding a newline and a fake `diff --git` header is
+  C-quoted into one header line.
 - `crates/ar-review/tests/red_team_workspace_tools.rs` — covers
   T4 (LLM tool calls escape workspace): symlink escape, chained
   symlinks, empty paths, pathological regex; and T5 (clone credential

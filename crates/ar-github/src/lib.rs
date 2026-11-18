@@ -1730,20 +1730,23 @@ fn cap_for_error(body: &str) -> String {
 /// `diff --git` header per file, rename lines for a renamed file, and the
 /// file's hunks when GitHub sent a patch. A file without a patch keeps only
 /// its header, so it still counts as changed without any content.
+///
+/// File names are pull-request text, so each one goes through
+/// [`diff_path`]: a name with a newline cannot start a section of its own.
 fn diff_from_file_patches(files: &[ar_forge::ChangedFile]) -> String {
     let mut diff = String::new();
     for file in files {
         let old_path = file.previous_filename.as_deref().unwrap_or(&file.filename);
-        diff.push_str("diff --git a/");
-        diff.push_str(old_path);
-        diff.push_str(" b/");
-        diff.push_str(&file.filename);
+        diff.push_str("diff --git ");
+        diff.push_str(&diff_path("a/", old_path));
+        diff.push(' ');
+        diff.push_str(&diff_path("b/", &file.filename));
         diff.push('\n');
         if file.previous_filename.is_some() {
             diff.push_str("rename from ");
-            diff.push_str(old_path);
+            diff.push_str(&diff_path("", old_path));
             diff.push_str("\nrename to ");
-            diff.push_str(&file.filename);
+            diff.push_str(&diff_path("", &file.filename));
             diff.push('\n');
         }
         let Some(patch) = file.patch.as_deref().filter(|patch| !patch.is_empty()) else {
@@ -1752,15 +1755,15 @@ fn diff_from_file_patches(files: &[ar_forge::ChangedFile]) -> String {
         if file.status == "added" {
             diff.push_str("--- /dev/null\n");
         } else {
-            diff.push_str("--- a/");
-            diff.push_str(old_path);
+            diff.push_str("--- ");
+            diff.push_str(&diff_path("a/", old_path));
             diff.push('\n');
         }
         if file.status == "removed" {
             diff.push_str("+++ /dev/null\n");
         } else {
-            diff.push_str("+++ b/");
-            diff.push_str(&file.filename);
+            diff.push_str("+++ ");
+            diff.push_str(&diff_path("b/", &file.filename));
             diff.push('\n');
         }
         diff.push_str(patch);
@@ -1769,6 +1772,51 @@ fn diff_from_file_patches(files: &[ar_forge::ChangedFile]) -> String {
         }
     }
     diff
+}
+
+/// `prefix` and `path` as git writes them in a diff header: as is, or, when
+/// the path holds a control character, `"` or `\\`, C-quoted inside double
+/// quotes (`"b/new\\nline"`). Non-ASCII text is kept as UTF-8, as with git's
+/// `core.quotePath=false`.
+fn diff_path(prefix: &str, path: &str) -> String {
+    if !path
+        .chars()
+        .any(|ch| ch.is_control() || ch == '"' || ch == '\\')
+    {
+        return format!("{prefix}{path}");
+    }
+    let mut quoted =
+        String::with_capacity(path.len().saturating_add(prefix.len()).saturating_add(2));
+    quoted.push('"');
+    quoted.push_str(prefix);
+    for ch in path.chars() {
+        match ch {
+            '"' => quoted.push_str("\\\""),
+            '\\' => quoted.push_str("\\\\"),
+            '\u{7}' => quoted.push_str("\\a"),
+            '\u{8}' => quoted.push_str("\\b"),
+            '\t' => quoted.push_str("\\t"),
+            '\n' => quoted.push_str("\\n"),
+            '\u{b}' => quoted.push_str("\\v"),
+            '\u{c}' => quoted.push_str("\\f"),
+            '\r' => quoted.push_str("\\r"),
+            control if control.is_control() => {
+                /// Bit offsets of a byte's three octal digits, high first.
+                const OCTAL_SHIFTS: [u32; 3] = [6, 3, 0];
+                let mut utf8: [u8; 4] = [0; 4];
+                for byte in control.encode_utf8(&mut utf8).bytes() {
+                    // `\ooo`: the byte as three octal digits.
+                    quoted.push('\\');
+                    for shift in OCTAL_SHIFTS {
+                        quoted.push(char::from(b'0' | ((byte >> shift) & 7)));
+                    }
+                }
+            }
+            other => quoted.push(other),
+        }
+    }
+    quoted.push('"');
+    quoted
 }
 
 /// The review body with every inline comment appended, for the retry after
@@ -1866,6 +1914,38 @@ mod tests {
             "diff --git a/new.rs b/new.rs\n--- /dev/null\n+++ b/new.rs\n@@ -0,0 +1 @@\n+fresh\n\
              diff --git a/gone.rs b/gone.rs\n--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-stale\n"
         );
+    }
+
+    /// THREAT-MODEL T3/T8: a file name is pull-request text. Git allows a
+    /// newline in a path, so an unescaped name could start a fake
+    /// `diff --git` section and move the real patch under another path
+    /// (for example an ignored `vendor/**` one). Names with control
+    /// characters are C-quoted the way git quotes them.
+    #[test]
+    fn diff_from_file_patches_quotes_a_file_name_that_could_start_a_new_section() {
+        let evil = "src/evil.rs\ndiff --git a/vendor/x b/vendor/x";
+
+        let diff = diff_from_file_patches(&[file(evil, "modified", Some("@@ -1 +1 @@\n-a\n+b"))]);
+
+        assert_eq!(
+            diff,
+            "diff --git \"a/src/evil.rs\\ndiff --git a/vendor/x b/vendor/x\" \
+             \"b/src/evil.rs\\ndiff --git a/vendor/x b/vendor/x\"\n\
+             --- \"a/src/evil.rs\\ndiff --git a/vendor/x b/vendor/x\"\n\
+             +++ \"b/src/evil.rs\\ndiff --git a/vendor/x b/vendor/x\"\n\
+             @@ -1 +1 @@\n-a\n+b\n"
+        );
+    }
+
+    #[test]
+    fn diff_path_c_quotes_like_git_and_leaves_plain_and_unicode_paths_alone() {
+        assert_eq!(diff_path("b/", "src/lib.rs"), "b/src/lib.rs");
+        assert_eq!(diff_path("b/", "docs/\u{fc}ber.md"), "b/docs/\u{fc}ber.md");
+        assert_eq!(
+            diff_path("a/", "tab\there \"q\" back\\slash"),
+            "\"a/tab\\there \\\"q\\\" back\\\\slash\""
+        );
+        assert_eq!(diff_path("", "esc\u{1b}[31m"), "\"esc\\033[31m\"");
     }
 
     #[test]
