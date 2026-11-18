@@ -80,8 +80,8 @@ the repository it is posted in.
 | `bench run` | Replays PR fixtures through the LLM review path. `--baseline FILE` compares against an earlier JSON run; `--fail-on-regression` exits non-zero on configured precision/recall/latency regressions. |
 
 `agentcore serve`, `review once` and `bench run` accept
-`--llm-omit-temperature [BOOL]` (env `LLM_OMIT_TEMPERATURE`, default `false`;
-true/false, yes/no, on/off, 1/0; the bare flag means `true`). When true, every
+`--llm-omit-temperature[=BOOL]` (env `LLM_OMIT_TEMPERATURE`, default `false`;
+true/false, yes/no, on/off, 1/0; the bare flag means `true`; attach a value with `=`). When true, every
 LLM tier the command builds omits `temperature` from chat requests. Set it for
 OpenAI reasoning models (`gpt-5.x`, `gpt-6.x`, `o`-series), which reject a
 non-default temperature; leave it unset for Ollama and `gpt-4.x` to keep the

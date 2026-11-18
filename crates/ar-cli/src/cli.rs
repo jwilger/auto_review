@@ -118,6 +118,7 @@ pub struct AgentcoreServeArgs {
         default_value = "false",
         num_args = 0..=1,
         default_missing_value = "true",
+        require_equals = true,
         action = clap::ArgAction::Set,
         value_parser = parse_llm_omit_temperature
     )]
@@ -335,6 +336,7 @@ pub struct ReviewOnceArgs {
         default_value = "false",
         num_args = 0..=1,
         default_missing_value = "true",
+        require_equals = true,
         action = clap::ArgAction::Set,
         value_parser = parse_llm_omit_temperature
     )]
@@ -578,6 +580,7 @@ pub struct BenchArgs {
         default_value = "false",
         num_args = 0..=1,
         default_missing_value = "true",
+        require_equals = true,
         action = clap::ArgAction::Set,
         value_parser = parse_llm_omit_temperature
     )]
@@ -814,7 +817,7 @@ mod tests {
     #[test]
     fn llm_omit_temperature_flag_accepts_bool_vocabulary() {
         assert!(
-            review_once_with(&["--llm-omit-temperature", "YES"])
+            review_once_with(&["--llm-omit-temperature=YES"])
                 .expect("parse")
                 .llm_omit_temperature
         );
@@ -824,7 +827,7 @@ mod tests {
                 .llm_omit_temperature
         );
         assert!(
-            !review_once_with(&["--llm-omit-temperature", "off"])
+            !review_once_with(&["--llm-omit-temperature=off"])
                 .expect("parse")
                 .llm_omit_temperature
         );
@@ -832,10 +835,34 @@ mod tests {
 
     #[test]
     fn llm_omit_temperature_flag_rejects_garbage_naming_the_flag() {
-        let err = review_once_with(&["--llm-omit-temperature", "maybe"])
+        let err = review_once_with(&["--llm-omit-temperature=maybe"])
             .expect_err("garbage must not parse");
         assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
         assert!(err.to_string().contains("--llm-omit-temperature"), "{err}");
+    }
+
+    #[test]
+    fn bare_llm_omit_temperature_does_not_swallow_bench_fixture_path() {
+        let cli = Cli::try_parse_from([
+            "auto-review",
+            "bench",
+            "run",
+            "--llm-base-url",
+            "http://localhost:11434",
+            "--llm-omit-temperature",
+            "fixtures/x.json",
+        ])
+        .expect("bare flag followed by a fixture path parses");
+        match cli.command {
+            Command::Bench(BenchCommand::Run(a)) => {
+                assert!(a.llm_omit_temperature);
+                assert_eq!(
+                    a.fixtures,
+                    vec![std::path::PathBuf::from("fixtures/x.json")]
+                );
+            }
+            other => panic!("expected BenchRun, got {other:?}"),
+        }
     }
 
     #[test]
