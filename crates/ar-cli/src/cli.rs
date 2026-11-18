@@ -108,6 +108,22 @@ pub struct AgentcoreServeArgs {
     #[arg(long, default_value = "qwen2.5-coder:32b", env = "LLM_REASONING_MODEL")]
     pub llm_model: String,
 
+    /// Omit `temperature` from every chat request. Set to true for `OpenAI`
+    /// reasoning models (gpt-5.x, gpt-6.x, o-series), which reject a
+    /// non-default temperature; leave unset for Ollama and gpt-4.x.
+    #[arg(
+        long,
+        env = "LLM_OMIT_TEMPERATURE",
+        value_name = "BOOL",
+        default_value = "false",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = parse_llm_omit_temperature
+    )]
+    pub llm_omit_temperature: bool,
+
     /// DynamoDB table for durable AgentCore invocation idempotency.
     #[arg(
         long = "idempotency-dynamodb-table",
@@ -309,6 +325,22 @@ pub struct ReviewOnceArgs {
 
     #[arg(long, env = "LLM_REASONING_MODEL", default_value = "qwen2.5-coder:32b")]
     pub llm_model: String,
+
+    /// Omit `temperature` from every chat request. Set to true for `OpenAI`
+    /// reasoning models (gpt-5.x, gpt-6.x, o-series), which reject a
+    /// non-default temperature; leave unset for Ollama and gpt-4.x.
+    #[arg(
+        long,
+        env = "LLM_OMIT_TEMPERATURE",
+        value_name = "BOOL",
+        default_value = "false",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = parse_llm_omit_temperature
+    )]
+    pub llm_omit_temperature: bool,
 
     /// Print the rendered base LLM prompt and exit. Skips clone, RAG context,
     /// repo config loading, LLM calls, and posting. Useful for debugging prompt
@@ -538,6 +570,22 @@ pub struct BenchArgs {
     #[arg(long, env = "LLM_REASONING_MODEL", default_value = "qwen2.5-coder:32b")]
     pub llm_model: String,
 
+    /// Omit `temperature` from every chat request. Set to true for `OpenAI`
+    /// reasoning models (gpt-5.x, gpt-6.x, o-series), which reject a
+    /// non-default temperature; leave unset for Ollama and gpt-4.x.
+    #[arg(
+        long,
+        env = "LLM_OMIT_TEMPERATURE",
+        value_name = "BOOL",
+        default_value = "false",
+        num_args = 0..=1,
+        default_missing_value = "true",
+        require_equals = true,
+        action = clap::ArgAction::Set,
+        value_parser = parse_llm_omit_temperature
+    )]
+    pub llm_omit_temperature: bool,
+
     /// Optional cheap-tier model. When set, runs the verifier pass
     /// after the reasoning model and reports findings before/after.
     #[arg(long, env = "LLM_CHEAP_MODEL")]
@@ -645,6 +693,18 @@ fn default_scopes() -> Vec<String> {
     ]
 }
 
+/// Parse `--llm-omit-temperature` / `LLM_OMIT_TEMPERATURE`, using
+/// the same vocabulary as the gateway: true/false, yes/no, on/off, 1/0
+/// (case-insensitive). A blank value means unset, i.e. false. Anything
+/// else is rejected so a typo cannot silently keep the old behaviour.
+fn parse_llm_omit_temperature(raw: &str) -> Result<bool, String> {
+    match raw.trim().to_ascii_lowercase().as_str() {
+        "" | "0" | "false" | "no" | "off" => Ok(false),
+        "1" | "true" | "yes" | "on" => Ok(true),
+        _ => Err("LLM_OMIT_TEMPERATURE takes true/false, yes/no, on/off, or 1/0".to_owned()),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -726,6 +786,104 @@ mod tests {
                 assert_eq!(a.gateway_url, "https://g.example");
             }
             _ => panic!("expected RegisterWebhook"),
+        }
+    }
+
+    fn review_once_with(extra: &[&str]) -> Result<ReviewOnceArgs, clap::Error> {
+        let mut argv = vec![
+            "auto-review",
+            "review",
+            "once",
+            "--forgejo-url",
+            "https://x",
+            "--token",
+            "tok",
+            "--owner",
+            "alice",
+            "--repo",
+            "widgets",
+            "--pr",
+            "42",
+            "--llm-base-url",
+            "http://localhost:11434",
+        ];
+        argv.extend_from_slice(extra);
+        match Cli::try_parse_from(argv)?.command {
+            Command::Review(ReviewCommand::Once(a)) => Ok(a),
+            other => panic!("expected ReviewOnce, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn llm_omit_temperature_flag_accepts_bool_vocabulary() {
+        assert!(
+            review_once_with(&["--llm-omit-temperature=YES"])
+                .expect("parse")
+                .llm_omit_temperature
+        );
+        assert!(
+            review_once_with(&["--llm-omit-temperature"])
+                .expect("bare flag parses")
+                .llm_omit_temperature
+        );
+        assert!(
+            !review_once_with(&["--llm-omit-temperature=off"])
+                .expect("parse")
+                .llm_omit_temperature
+        );
+    }
+
+    #[test]
+    fn llm_omit_temperature_flag_rejects_garbage_naming_the_flag() {
+        let err = review_once_with(&["--llm-omit-temperature=maybe"])
+            .expect_err("garbage must not parse");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        assert!(err.to_string().contains("--llm-omit-temperature"), "{err}");
+    }
+
+    #[test]
+    fn bare_llm_omit_temperature_does_not_swallow_bench_fixture_path() {
+        let cli = Cli::try_parse_from([
+            "auto-review",
+            "bench",
+            "run",
+            "--llm-base-url",
+            "http://localhost:11434",
+            "--llm-omit-temperature",
+            "fixtures/x.json",
+        ])
+        .expect("bare flag followed by a fixture path parses");
+        match cli.command {
+            Command::Bench(BenchCommand::Run(a)) => {
+                assert!(a.llm_omit_temperature);
+                assert_eq!(
+                    a.fixtures,
+                    vec![std::path::PathBuf::from("fixtures/x.json")]
+                );
+            }
+            other => panic!("expected BenchRun, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn llm_omit_temperature_is_on_every_provider_building_command() {
+        use clap::CommandFactory;
+
+        let cmd = Cli::command();
+        for path in [["agentcore", "serve"], ["review", "once"], ["bench", "run"]] {
+            let sub = cmd
+                .find_subcommand(path[0])
+                .and_then(|group| group.find_subcommand(path[1]))
+                .unwrap_or_else(|| panic!("missing subcommand {path:?}"));
+            let arg = sub
+                .get_arguments()
+                .find(|a| a.get_id() == "llm_omit_temperature")
+                .unwrap_or_else(|| panic!("{path:?} lacks --llm-omit-temperature"));
+            assert_eq!(
+                arg.get_env().and_then(|e| e.to_str()),
+                Some("LLM_OMIT_TEMPERATURE"),
+                "{path:?}"
+            );
         }
     }
 

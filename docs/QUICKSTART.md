@@ -75,6 +75,8 @@ LLM_REASONING_MODEL=qwen2.5-coder:32b
 # LLM_BASE_URL=https://api.openai.com
 # LLM_API_KEY=<provider key>
 # LLM_REASONING_MODEL=gpt-4o-mini
+# For OpenAI reasoning models (gpt-5.x, gpt-6.x, o-series) also set:
+# LLM_OMIT_TEMPERATURE=true
 ```
 
 `AR_CI_REVIEW_TOKEN` enables `POST /reviews/ci`; store the same value as the Forgejo
@@ -237,6 +239,7 @@ Common optional env vars:
 | `LLM_CHEAP_BASE_URL` / `LLM_CHEAP_API_KEY` | `=LLM_BASE_URL` / `=LLM_API_KEY` | Optional cheap-tier endpoint override |
 | `LLM_EMBEDDING_MODEL` | — | Enables RAG context retrieval |
 | `LLM_EMBEDDING_BASE_URL` / `LLM_EMBEDDING_API_KEY` | `=LLM_BASE_URL` / `=LLM_API_KEY` | Optional embedding endpoint override |
+| `LLM_OMIT_TEMPERATURE` | `false` | Set `true` for OpenAI reasoning models (`gpt-5.x`, `gpt-6.x`, `o`-series), which reject a non-default temperature; leave unset for Ollama and `gpt-4.x` to keep deterministic `temperature: 0.0` |
 | `AR_GATEWAY_BIND` | `0.0.0.0:8080` | Listen address |
 | `AR_BOT_LOGIN` | `auto-review` | Forgejo username for self-loop detection |
 | `AR_BOT_NAME` | `=AR_BOT_LOGIN` | Mention handle |

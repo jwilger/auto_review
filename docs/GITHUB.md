@@ -59,6 +59,8 @@ GITHUB_WEBHOOK_SECRET=<webhook secret from step 1>
 LLM_BASE_URL=https://api.openai.com
 LLM_API_KEY=<provider key>
 LLM_REASONING_MODEL=gpt-4o-mini
+# For OpenAI reasoning models (gpt-5.x, gpt-6.x, o-series) also set:
+# LLM_OMIT_TEMPERATURE=true
 AR_CI_REVIEW_TOKEN=<32+ random characters>
 ```
 

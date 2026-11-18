@@ -79,6 +79,16 @@ the repository it is posted in.
 | `review once` | Runs a one-shot reasoning-path review against one PR without the gateway. It does not wire every gateway runtime store or optional LLM tier. `--dry-run` prints the base rendered LLM prompt and exits without clone/RAG/repo-config loading/posting. The PR title and body appear inside `<<<UNTRUSTED_DATA ...>>>` fences whose `nonce` is drawn at random on every invocation, so two dry runs of the same PR differ in the nonce. |
 | `bench run` | Replays PR fixtures through the LLM review path. `--baseline FILE` compares against an earlier JSON run; `--fail-on-regression` exits non-zero on configured precision/recall/latency regressions. |
 
+`agentcore serve`, `review once` and `bench run` accept
+`--llm-omit-temperature[=BOOL]` (env `LLM_OMIT_TEMPERATURE`, default `false`;
+true/false, yes/no, on/off, 1/0; the bare flag means `true`; attach a value with `=`). When true, every
+LLM tier the command builds omits `temperature` from chat requests. Set it for
+OpenAI reasoning models (`gpt-5.x`, `gpt-6.x`, `o`-series), which reject a
+non-default temperature; leave it unset for Ollama and `gpt-4.x` to keep the
+deterministic `temperature: 0.0`. Any other value fails argument parsing with
+exit code 2 and an error naming the flag and variable. The `gateway` command
+reads `LLM_OMIT_TEMPERATURE` from its environment with the same rules.
+
 Benchmark fixture details live in [Benchmarks](./BENCHMARKS.md).
 
 ## Gateway isolation flags
@@ -105,14 +115,16 @@ gateway chat path and posts the reply through the selected repository host.
 Configure exactly one repository provider for semantic-review invocations.
 Forgejo mode uses the same runtime inputs as the gateway:
 `--forgejo-url`/`FORGEJO_BASE_URL`, `--token`/`AR_FORGEJO_TOKEN`,
-`--llm-base-url`/`LLM_BASE_URL`, optional `--llm-api-key`/`LLM_API_KEY`, and
-`--llm-model`/`LLM_REASONING_MODEL`.
+`--llm-base-url`/`LLM_BASE_URL`, optional `--llm-api-key`/`LLM_API_KEY`,
+`--llm-model`/`LLM_REASONING_MODEL`, and optional
+`--llm-omit-temperature`/`LLM_OMIT_TEMPERATURE`.
 
 GitHub mode uses GitHub App credentials: `--github-api-url`/`GITHUB_API_URL`
 (default `https://api.github.com`), `--github-app-id`/`GITHUB_APP_ID`,
 `--github-app-private-key`/`GITHUB_APP_PRIVATE_KEY`, `--llm-base-url`/
 `LLM_BASE_URL`, optional `--llm-api-key`/`LLM_API_KEY`, and `--llm-model`/
-`LLM_REASONING_MODEL`. The private key may be provided as a PEM string or with
+`LLM_REASONING_MODEL`, plus optional `--llm-omit-temperature`/
+`LLM_OMIT_TEMPERATURE`. The private key may be provided as a PEM string or with
 literal `\n` escapes in environment variables. GitHub semantic-review
 invocations, including chat commands, must include `installation_id`; the
 runtime mints a scoped installation token for the requested repository and uses
