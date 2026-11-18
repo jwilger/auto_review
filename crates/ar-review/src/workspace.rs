@@ -1037,6 +1037,9 @@ mod tests {
     const RENAMED_BODY: &str = "line one of the renamed file\nline two of the renamed file\n\
 line three of the renamed file\nline four of the renamed file\n";
 
+    /// The small edit the pull request makes to the renamed file.
+    const RENAMED_ADDED_LINE: &str = "line five, added with the rename";
+
     /// Bytes git classifies as binary (NUL bytes) with a recognisable
     /// marker that must never appear in a diff.
     const BINARY_BODY: &[u8] = b"\x89PNG\r\n\x1a\n\0\0\0\rIHDR-BINARY-MARKER\0\0";
@@ -1051,7 +1054,8 @@ line three of the renamed file\nline four of the renamed file\n";
     /// ```
     ///
     /// The feature edits `README.md`, adds a binary `logo.png`, renames
-    /// `old_name.txt` to `new_name.txt`, and adds a `.gitattributes` that
+    /// `old_name.txt` to `new_name.txt` with a one-line addition, and adds
+    /// a `.gitattributes` that
     /// marks `notes.txt` (which it also edits) as binary. Main edits
     /// `base_only.txt` after the fork point.
     async fn diverged_repo(root: &Path) -> DivergedRepo {
@@ -1070,6 +1074,11 @@ line three of the renamed file\nline four of the renamed file\n";
         fixture_commit(&src, "f1").await;
         fs::write(src.join("logo.png"), BINARY_BODY).unwrap();
         fixture_git(&src, &["mv", "old_name.txt", "new_name.txt"]).await;
+        fs::write(
+            src.join("new_name.txt"),
+            format!("{RENAMED_BODY}{RENAMED_ADDED_LINE}\n"),
+        )
+        .unwrap();
         let reviewed_sha = fixture_commit(&src, "f2").await;
         fs::write(src.join(".gitattributes"), "notes.txt -diff\n").unwrap();
         fs::write(
@@ -1182,6 +1191,85 @@ line three of the renamed file\nline four of the renamed file\n";
         );
     }
 
+    /// Head-side line number of the added line `text` in `path`'s section of
+    /// a unified diff, counted from the `+start` of its hunk header the way
+    /// the host counts the lines of its own pull-request diff.
+    fn head_line_of_added(diff: &str, path: &str, text: &str) -> Option<u32> {
+        let header_end = format!(" b/{path}");
+        let section = diff.split("diff --git ").find(|section| {
+            section
+                .lines()
+                .next()
+                .is_some_and(|header| header.ends_with(&header_end))
+        })?;
+        let mut line = 0;
+        for diff_line in section.lines() {
+            if let Some(header) = diff_line.strip_prefix("@@ ") {
+                let new_range = header.split(' ').nth(1)?.strip_prefix('+')?;
+                line = new_range.split(',').next()?.parse().ok()?;
+            } else if let Some(added) = diff_line.strip_prefix('+') {
+                if added == text {
+                    return Some(line);
+                }
+                line += 1;
+            } else if diff_line.starts_with(' ') {
+                line += 1;
+            }
+        }
+        None
+    }
+
+    /// Issue #260 C12: a finding on a changed line of the locally diffed
+    /// renamed file maps to the new path and the head-side line, exactly as
+    /// for the host's diff, and a finding on a file the pull request never
+    /// changed (one only the base branch touched after the fork point) is
+    /// not posted inline.
+    #[tokio::test]
+    async fn findings_on_the_local_diff_map_to_the_renamed_path_and_head_line() {
+        let fixture = TempDir::new().unwrap();
+        let workspace = diverged_workspace(fixture.path()).await;
+        let diff = workspace.pr_diff().await.unwrap();
+        let line = head_line_of_added(&diff, "new_name.txt", RENAMED_ADDED_LINE)
+            .unwrap_or_else(|| panic!("renamed file must carry a hunk, got:\n{diff}"));
+        let head_text = fs::read_to_string(workspace.path().join("new_name.txt")).unwrap();
+        assert_eq!(
+            head_text.lines().nth(line as usize - 1),
+            Some(RENAMED_ADDED_LINE)
+        );
+
+        let finding = |path: &str, line_start: u32| ar_prompts::ReviewFinding {
+            path: path.to_owned(),
+            line_start,
+            line_end: None,
+            severity: ar_prompts::ReviewSeverity::Warning,
+            message: format!("finding on {path}"),
+            title: String::new(),
+            category: ar_prompts::FindingCategory::Correctness,
+        };
+        let mut output = ar_prompts::ReviewOutput {
+            summary: String::new(),
+            walkthrough: String::new(),
+            mermaid: String::new(),
+            findings: vec![finding("new_name.txt", line), finding("base_only.txt", 1)],
+        };
+        let changed: Vec<String> = workspace
+            .pr_changed_files()
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|file| file.filename)
+            .collect();
+        crate::pipeline::drop_findings_outside_changed_paths(&mut output, &changed);
+        let review = crate::mapping::output_to_review_request(&output, &workspace.head_sha);
+
+        let anchors: Vec<_> = review
+            .comments
+            .iter()
+            .map(|c| (c.path.as_str(), c.old_position, c.new_position))
+            .collect();
+        assert_eq!(anchors, vec![("new_name.txt", None, Some(line))]);
+    }
+
     /// A pull request must not hide its own changes from review by adding
     /// a `.gitattributes` that marks a text file `-diff` (THREAT-MODEL T3a):
     /// attributes come from the merge base, never the head.
@@ -1223,7 +1311,7 @@ line three of the renamed file\nline four of the renamed file\n";
                 changed(".gitattributes", "added", 1, 0),
                 changed("README.md", "modified", 1, 0),
                 changed("logo.png", "added", 0, 0),
-                changed("new_name.txt", "renamed", 0, 0),
+                changed("new_name.txt", "renamed", 1, 0),
                 changed("notes.txt", "modified", 1, 0),
             ]
         );
