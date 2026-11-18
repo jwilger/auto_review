@@ -54,7 +54,6 @@ The factory never merges a `factory` class pull request; the maintainer does.
 A change that matches any of these is built and opened for review, and waits for a human. A `factory` class change is reviewed and merged by the maintainer. Any other escalated change is merged by the factory once a human approves it (an approving review on its head, or the `factory:approved` label), by the approval merge sequence in `.claude/skills/factory/SKILL.md`; the factory never merges one on its own say-so.
 - any change in class factory
 - a spec decision marked needs_human
-- review that needed every allowed round
 
 A spec decision is marked `needs_human` only when it is a product, policy or
 security choice with no clearly recommendable option. Every other recorded
@@ -74,7 +73,12 @@ the required checks pass.
 dark
 
 ## Review rounds
-2
+No fixed limit. A run keeps building and reviewing for as long as each
+round converges: it leaves strictly less to fix than the round before it,
+counting blocking findings first, then should-fix findings, then all
+findings. A round that does not converge, or a finding only a person can
+resolve, stops the run and sends the item to a person (`awaiting-human`),
+never back to the queue.
 
 ## Stale run
 2 hours
