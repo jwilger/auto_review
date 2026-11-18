@@ -194,7 +194,7 @@
     {
       "type": "timeseries",
       "title": "Local diff fallbacks by reason",
-      "description": "Full reviews that used the host's diff because the local merge-base diff was unavailable. GitHub refuses the host diff for pull requests over 300 files. git_error across the fleet usually means git older than 2.42; fetch_failed or timed_out point at the forge. Drives the AutoReviewLocalDiffFallbacks alert.",
+      "description": "Full reviews that used the host's diff because the local merge-base diff was unavailable. GitHub refuses the host diff for pull requests over 300 files. git_error across the fleet usually means git older than 2.42; clone_failed, fetch_failed or timed_out point at the forge or the bot's clone credentials. Drives the AutoReviewLocalDiffFallbacks alert.",
       "gridPos": {"h": 8, "w": 12, "x": 12, "y": 16},
       "datasource": {"type": "prometheus", "uid": "${DS_PROMETHEUS}"},
       "targets": [

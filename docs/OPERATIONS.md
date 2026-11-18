@@ -279,12 +279,13 @@ skip paths, webhook intake, and chat surface.
   shouldn't alert on these.
 - `auto_review_local_diff_fallbacks_total{reason}` — full reviews
   that used the host's diff because the local merge-base diff was
-  unavailable. `reason` is `no_merge_base`, `history_cap`,
-  `timed_out`, `fetch_failed`, `git_error`, or `unknown` (a reason
-  this gateway's metrics map does not know). A fleet-wide rise in
-  `git_error` usually means git older than 2.42 (the gateway logs a
-  startup WARN for it); `fetch_failed` and `timed_out` point at the
-  forge. The `AutoReviewLocalDiffFallbacks` alert fires when more
+  unavailable. `reason` is `clone_failed` (the workspace could not
+  be cloned at all), `no_merge_base`, `history_cap`, `timed_out`,
+  `fetch_failed`, `git_error`, or `unknown` (a reason this gateway's
+  metrics map does not know). A fleet-wide rise in `git_error`
+  usually means git older than 2.42 (the gateway logs a startup WARN
+  for it); `clone_failed`, `fetch_failed` and `timed_out` point at
+  the forge or the bot's clone credentials. The `AutoReviewLocalDiffFallbacks` alert fires when more
   than half of started reviews fall back for 30 minutes.
 
 *Background poller:*
@@ -542,7 +543,9 @@ own. If reviews start taking minutes, check:
    review) before the review falls back to the host's diff. The fallback
    logs `local pull request diff unavailable; using the host's diff` at
    WARN with `repo`, `pr` and the reason, and counts it in
-   `auto_review_local_diff_fallbacks_total{reason}`.
+   `auto_review_local_diff_fallbacks_total{reason}`. A clone that fails
+   outright logs `workspace prep failed` with `repo`, `pr` and the error
+   and counts as `reason="clone_failed"`.
 3. CI latency. If semantic reviews are CI-triggered, slow deterministic jobs
    delay the trigger before the gateway receives work.
 

@@ -23,7 +23,8 @@ const DURATION_BUCKETS_SECS: &[f64] = &[1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0
 /// `reason` label values of `auto_review_local_diff_fallbacks_total`, in
 /// render order. The orchestrator's `ReviewObservation::LocalDiffFallback`
 /// reasons, plus `unknown` for a reason this sink was not updated for.
-const LOCAL_DIFF_FALLBACK_REASONS: [&str; 6] = [
+const LOCAL_DIFF_FALLBACK_REASONS: [&str; 7] = [
+    "clone_failed",
     "no_merge_base",
     "history_cap",
     "timed_out",
@@ -89,7 +90,7 @@ pub struct Metrics {
     /// Full reviews that used the host's diff because the local merge-base
     /// diff was unavailable, one counter per `LOCAL_DIFF_FALLBACK_REASONS`
     /// entry. Rendered as one labelled family.
-    local_diff_fallbacks: [AtomicU64; 6],
+    local_diff_fallbacks: [AtomicU64; 7],
 
     // Poller counters: track the background ChatPoller's progress
     // so operators can see whether inline-thread mentions are being
@@ -467,7 +468,7 @@ impl Metrics {
         out.push_str(
             "# HELP auto_review_local_diff_fallbacks_total Full reviews that used the host's diff \
              because the local merge-base diff was unavailable, by reason. A fleet-wide rise \
-             points at a git older than 2.42 or a stalled forge; GitHub refuses the host diff for \
+             points at a git older than 2.42, a failing clone or a stalled forge; GitHub refuses the host diff for \
              pull requests over 300 files.\n",
         );
         out.push_str("# TYPE auto_review_local_diff_fallbacks_total counter\n");
@@ -965,7 +966,13 @@ mod tests {
         );
         assert!(out.contains("auto_review_local_diff_fallbacks_total{reason=\"git_error\"} 1\n"));
         // Every known reason is exposed from zero, so rate() works at once.
-        for reason in ["no_merge_base", "timed_out", "fetch_failed", "unknown"] {
+        for reason in [
+            "clone_failed",
+            "no_merge_base",
+            "timed_out",
+            "fetch_failed",
+            "unknown",
+        ] {
             assert!(
                 out.contains(&format!(
                     "auto_review_local_diff_fallbacks_total{{reason=\"{reason}\"}} 0\n"
@@ -973,6 +980,17 @@ mod tests {
                 "{reason}: {out}"
             );
         }
+    }
+
+    #[test]
+    fn clone_failures_are_counted_as_their_own_fallback_reason() {
+        let m = Metrics::new();
+        m.record_local_diff_fallback("clone_failed");
+        let out = m.render();
+        assert!(
+            out.contains("auto_review_local_diff_fallbacks_total{reason=\"clone_failed\"} 1\n"),
+            "{out}"
+        );
     }
 
     #[test]

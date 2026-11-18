@@ -156,7 +156,9 @@ the local git commands fail, the review fetches the host's diff and file list
 as before, after one warning that names the repository, the pull request and
 the reason; the reason is also reported as
 `ReviewObservation::LocalDiffFallback { reason }` (`no_merge_base`,
-`history_cap`, `timed_out`, `fetch_failed`, `git_error`), which the gateway
+`history_cap`, `timed_out`, `fetch_failed`, `git_error`, or `clone_failed`
+when the workspace could not be cloned at all, logged as `workspace prep
+failed` with the repository and pull request), which the gateway
 counts as `auto_review_local_diff_fallbacks_total{reason}`. Incremental reviews also pass the previously reviewed commit to
 `prepare_workspace_from_clone_url` and take their diff from
 `PreparedWorkspace::incremental_diff()`, so the host's compare endpoint and its

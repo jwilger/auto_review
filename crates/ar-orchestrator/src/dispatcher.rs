@@ -17,6 +17,10 @@ use std::path::Path;
 use std::time::Instant;
 use tokio::sync::Semaphore;
 
+/// Fallback label for a review whose workspace could not be cloned at all
+/// (clone URL lookup or clone failed), so no local diff could be attempted.
+const CLONE_FAILED_FALLBACK_REASON: &str = "clone_failed";
+
 /// Commit-status context every review status is posted under.
 const STATUS_CONTEXT: &str = "auto_review";
 
@@ -960,11 +964,17 @@ async fn prepare_workspace_context(
     let workspace = match clone_head_workspace(host, job, base_sha, incremental_from).await {
         Ok(workspace) => workspace,
         Err(err) => {
-            tracing::warn!(error = %err, "workspace prep failed; continuing without workspace context");
+            tracing::warn!(
+                repo = format!("{}/{}", job.owner, job.repo),
+                pr = job.pr_number,
+                error = %err,
+                "workspace prep failed; using the host's diff and continuing without workspace \
+                 context"
+            );
             return WorkspacePrep::Ready(Box::new(WorkspacePrepOutput {
                 changed_files: None,
                 config,
-                diff_fallback: None,
+                diff_fallback: Some(CLONE_FAILED_FALLBACK_REASON),
                 raw_diff: String::new(),
                 repo_context: String::new(),
                 workspace: None,
@@ -2296,6 +2306,68 @@ the repository instead.\",\"errors\":[{\"resource\":\"PullRequest\",\"field\":\"
             })
             .collect();
         assert_eq!(fallbacks, vec!["fetch_failed"]);
+    }
+
+    /// A clone that fails (forge refusing it, bad credentials) also leaves
+    /// the review on the host's diff, and a fleet-wide clone failure must
+    /// feed the same fallback counter.
+    #[tokio::test]
+    async fn clone_failure_is_observed_as_a_local_diff_fallback() {
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url("file:///nonexistent/auto-review-fixture.git")
+            .with_pr_base_sha("0123456789abcdef0123456789abcdef01234567");
+        let observer = RecordingObserver::default();
+
+        run_with(
+            &host,
+            Arc::new(CannedProvider::new(vec![])),
+            Some(&observer),
+            "abcdef0123456789abcdef0123456789abcdef01",
+        )
+        .await;
+
+        let fallbacks: Vec<&'static str> = observer
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .filter_map(|observation| {
+                if let ReviewObservation::LocalDiffFallback { reason } = *observation {
+                    Some(reason)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        assert_eq!(fallbacks, vec!["clone_failed"]);
+    }
+
+    #[tokio::test]
+    async fn clone_failure_warning_names_the_pull_request() {
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url("file:///nonexistent/auto-review-fixture.git")
+            .with_pr_base_sha("0123456789abcdef0123456789abcdef01234567");
+        let (logs, _guard) = captured_logs();
+
+        run_with(
+            &host,
+            Arc::new(CannedProvider::new(vec![])),
+            None,
+            "abcdef0123456789abcdef0123456789abcdef01",
+        )
+        .await;
+
+        let output = logs.contents();
+        let warning = output
+            .lines()
+            .find(|line| line.contains("workspace prep failed"))
+            .unwrap_or_else(|| panic!("no clone failure warning in:\n{output}"));
+        assert!(
+            warning.contains("WARN")
+                && warning.contains("repo=\"alice/widgets\"")
+                && warning.contains("pr=42"),
+            "{warning}"
+        );
     }
 
     #[test]

@@ -173,8 +173,9 @@ groups:
       # diff instead, large GitHub pull requests (over 300 files)
       # are reviewed only from GitHub's per-file patches, which
       # omit the hunks of very large files. Fleet-wide causes: git
-      # older than 2.42 (reason="git_error") or a slow or failing
-      # forge (fetch_failed, timed_out).
+      # older than 2.42 (reason="git_error"), failing clones
+      # (clone_failed) or a slow or failing forge (fetch_failed,
+      # timed_out).
       - alert: AutoReviewLocalDiffFallbacks
         expr: |
           sum without (reason) (rate(auto_review_local_diff_fallbacks_total[30m]))
@@ -192,6 +193,9 @@ groups:
             auto_review_local_diff_fallbacks_total down by reason:
               - git_error → check the gateway's startup log and
                 `auto-review ops doctor` for a git older than 2.42
+              - clone_failed → the forge refuses the clone or the
+                bot's clone credentials are invalid; see the
+                `workspace prep failed` warnings
               - fetch_failed / timed_out → the forge is slow or
                 refusing fetches of the base commit
               - history_cap / no_merge_base → pull requests whose

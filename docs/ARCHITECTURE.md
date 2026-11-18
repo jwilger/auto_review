@@ -172,9 +172,10 @@ Components receive only the workspace capability they need:
   changed-file list for both RAG context and review generation, so neither
   the host's whole-diff endpoint nor its changed-file list is read. Ignored
   paths and the diff byte cap still apply before the model sees it. Without a
-  merge base the review logs why, with the repository and pull request,
-  counts it in `auto_review_local_diff_fallbacks_total{reason}`, and uses the
-  host's diff as before. Incremental reviews also fetch the previously
+  merge base, or without a workspace because the clone failed, the review
+  logs why, with the repository and pull request, counts it in
+  `auto_review_local_diff_fallbacks_total{reason}`, and uses the host's diff
+  as before. Incremental reviews also fetch the previously
   reviewed commit into the workspace and diff only what was pushed since,
   locally first, then through the host's compare endpoint, then as a full
   review when the previous commit is gone.
