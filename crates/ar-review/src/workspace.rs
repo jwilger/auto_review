@@ -277,11 +277,17 @@ pub async fn prepare_workspace_from_clone_url_with_previous(
     clone_workspace(clone_url, head_sha, Some(base_sha), Some(previous_sha)).await
 }
 
+/// The most extra history, in commits behind each tip, a review fetches
+/// while looking for a merge base. It bounds the clone, so a pull request
+/// against a huge-history repository (or unrelated histories) cannot stall
+/// a review or turn the shallow clone into a full one.
+pub const MERGE_BASE_HISTORY_CAP: u32 = 1000;
+
 /// How many more commits each deepening round fetches behind the head and
-/// base while looking for their merge base. The sum bounds the history a
-/// review fetches, so a pull request against a huge-history repository (or
-/// unrelated histories) cannot stall the clone.
-pub const MERGE_BASE_DEEPEN_STEPS: &[u32] = &[64, 256, 1024, 4096];
+/// base while looking for their merge base. Small first steps keep the
+/// common case (a recent fork point) cheap; the steps sum to
+/// [`MERGE_BASE_HISTORY_CAP`].
+pub const MERGE_BASE_DEEPEN_STEPS: &[u32] = &[64, 256, 680];
 
 async fn clone_workspace(
     clone_url: &str,
@@ -1282,6 +1288,13 @@ line three of the renamed file\nline four of the renamed file\n";
                 .contains("base_sha \"--upload-pack=evil\" is not a hex commit SHA"),
             "unexpected error: {err}"
         );
+    }
+
+    #[test]
+    fn merge_base_deepening_fetches_at_most_the_history_cap() {
+        let fetched: u32 = MERGE_BASE_DEEPEN_STEPS.iter().sum();
+        assert_eq!(fetched, MERGE_BASE_HISTORY_CAP);
+        assert_eq!(MERGE_BASE_HISTORY_CAP, 1000);
     }
 
     #[tokio::test]

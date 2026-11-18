@@ -84,8 +84,9 @@ fields. The review event and severity floor are derived from `severity` only;
 `prepare_workspace_from_clone_url_with_base(clone_url, head_sha, base_sha)`
 clones the head like `prepare_workspace_from_clone_url`, then, before the
 credential-bearing `origin` remote is removed, fetches the base commit and
-deepens both tips in the bounded steps of `MERGE_BASE_DEEPEN_STEPS` (64, 256,
-1024 and 4096 commits) until `git merge-base` finds a common ancestor. Both
+deepens both tips in the bounded steps of `MERGE_BASE_DEEPEN_STEPS` (64, 256
+and 680 commits, together `MERGE_BASE_HISTORY_CAP`, 1000 commits) until
+`git merge-base` finds a common ancestor. Both
 SHAs are validated as hex before git runs. A base that cannot be fetched, or no
 merge base within the bound, still returns the workspace, with
 `PreparedWorkspace::merge_base()` `None`.
