@@ -453,7 +453,9 @@ misconfiguration probes.
 _Attacker:_ A1.
 _Path:_ PR includes a huge diff/workspace or attackers flood webhook intake.
 _Mitigation:_ Diff is capped (`DEFAULT_MAX_DIFF_BYTES`)
-before reaching the LLM. The workspace clone stays shallow: the history
+before reaching the LLM, and the local workspace diff stops reading git's
+output at `LOCAL_DIFF_MAX_BYTES` (32 MiB), so a pull request adding hundreds of
+MB of text is not buffered in full. The workspace clone stays shallow: the history
 fetched to find the pull request's merge base (and, for incremental reviews,
 the previously reviewed commit) deepens in the fixed steps of
 `MERGE_BASE_DEEPEN_STEPS` and stops at `MERGE_BASE_HISTORY_CAP` (1000 commits

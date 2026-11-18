@@ -7,8 +7,9 @@
 
 use crate::error::ReviewError;
 use ar_forge::ChangedFile;
-use std::{collections::HashMap, env, ffi::OsStr, path::Path, time::Duration};
+use std::{collections::HashMap, env, ffi::OsStr, path::Path, process::Stdio, time::Duration};
 use tempfile::TempDir;
+use tokio::io::AsyncReadExt as _;
 use tokio::process::Command;
 use url::Url;
 
@@ -97,12 +98,21 @@ impl PreparedWorkspace {
     /// `Binary files ... differ` line, never with its content. External
     /// diff drivers and textconv filters are disabled.
     ///
+    /// At most [`LOCAL_DIFF_MAX_BYTES`] are read, cut at a line boundary;
+    /// git is stopped there, so a huge pull request is never buffered in
+    /// full.
+    ///
     /// Errors with [`WorkspaceError::NoMergeBase`] and its reason when the
     /// workspace has no merge base (prepared without a base SHA, or the
     /// bounded history fetch found none).
     pub async fn pr_diff(&self) -> Result<String, WorkspaceError> {
+        self.pr_diff_within(LOCAL_DIFF_MAX_BYTES).await
+    }
+
+    /// [`Self::pr_diff`] read up to `max_bytes`.
+    async fn pr_diff_within(&self, max_bytes: usize) -> Result<String, WorkspaceError> {
         let merge_base = self.require_merge_base()?;
-        self.diff_to_head(merge_base, merge_base).await
+        self.diff_to_head(merge_base, merge_base, max_bytes).await
     }
 
     /// Unified diff of the commits pushed since an earlier review: from the
@@ -124,17 +134,21 @@ impl PreparedWorkspace {
             .incremental_base
             .as_deref()
             .map_err(|reason| WorkspaceError::NoIncrementalBase(reason.clone()))?;
-        self.diff_to_head(incremental_base, merge_base).await
+        self.diff_to_head(incremental_base, merge_base, LOCAL_DIFF_MAX_BYTES)
+            .await
     }
 
-    /// `git diff <from> <head>` with attributes read from `attributes_tree`.
+    /// `git diff <from> <head>` with attributes read from `attributes_tree`,
+    /// read up to `max_bytes` and cut at the last whole line.
     async fn diff_to_head(
         &self,
         from: &str,
         attributes_tree: &str,
+        max_bytes: usize,
     ) -> Result<String, WorkspaceError> {
-        let stdout = git_stdout_in(
+        let stdout = git_stdout_bounded_in(
             self.path(),
+            max_bytes,
             &with_attributes_from(
                 attributes_tree,
                 &[
@@ -297,6 +311,13 @@ pub async fn prepare_workspace_from_clone_url(
 ) -> Result<PreparedWorkspace, WorkspaceError> {
     clone_workspace(clone_url, head_sha, base_sha, previous_sha).await
 }
+
+/// The most diff text, in bytes, read from git for one local pull request
+/// or incremental diff: 320 times the 100 kB the model sees
+/// (`DEFAULT_MAX_DIFF_BYTES`), leaving room for ignored paths
+/// (`filter_diff_paths`) to be dropped before `cap_diff` applies, while a
+/// pull request adding hundreds of MB of text is never buffered in full.
+pub const LOCAL_DIFF_MAX_BYTES: usize = 32 * 1024 * 1024;
 
 /// The most extra history, in commits behind each tip, a review fetches
 /// while looking for a merge base. It bounds the clone, so a pull request
@@ -589,6 +610,61 @@ async fn git_stdout_in<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<Vec<u8
         return Err(WorkspaceError::Git(redact_token(&stderr)));
     }
     Ok(output.stdout)
+}
+
+/// Run hermetic git in `dir` and return at most `max_bytes` of its stdout,
+/// cut after the last newline. Once the bound is reached git is killed
+/// rather than left writing output nobody reads, and the truncated output
+/// is returned as success.
+async fn git_stdout_bounded_in<S: AsRef<OsStr>>(
+    dir: &Path,
+    max_bytes: usize,
+    args: &[S],
+) -> Result<Vec<u8>, WorkspaceError> {
+    let mut child = hermetic_git_command()
+        .arg("-C")
+        .arg(dir)
+        .args(args)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()?;
+    let (Some(stdout), Some(mut stderr)) = (child.stdout.take(), child.stderr.take()) else {
+        return Err(WorkspaceError::Git("git output was not captured".into()));
+    };
+    let limit = u64::try_from(max_bytes)
+        .unwrap_or(u64::MAX)
+        .saturating_add(1);
+    let mut out = Vec::new();
+    let mut err = Vec::new();
+    let read_stdout = async {
+        let read = stdout.take(limit).read_to_end(&mut out).await;
+        // Stop git once the bound is reached; it would otherwise block on a
+        // full pipe and never close stderr.
+        if out.len() > max_bytes {
+            child.start_kill()?;
+        }
+        read
+    };
+    let (stdout_read, stderr_read) = tokio::join!(read_stdout, stderr.read_to_end(&mut err));
+    stdout_read?;
+    stderr_read?;
+    let status = child.wait().await?;
+    if out.len() > max_bytes {
+        out.truncate(max_bytes);
+        let cut = out
+            .iter()
+            .rposition(|byte| *byte == b'\n')
+            .map_or(0, |newline| newline.saturating_add(1));
+        out.truncate(cut);
+        return Ok(out);
+    }
+    if !status.success() {
+        return Err(WorkspaceError::Git(redact_token(&String::from_utf8_lossy(
+            &err,
+        ))));
+    }
+    Ok(out)
 }
 
 fn hermetic_git_command() -> Command {
@@ -1236,6 +1312,23 @@ line three of the renamed file\nline four of the renamed file\n";
         assert!(
             !diff.contains("BINARY-MARKER"),
             "binary content must never reach the diff, got:\n{diff}"
+        );
+    }
+
+    /// A pull request adding hundreds of MB of text must not be buffered in
+    /// full: the read stops at the byte bound, on a line boundary.
+    #[tokio::test]
+    async fn pr_diff_read_stops_at_the_byte_bound_on_a_line_boundary() {
+        let fixture = TempDir::new().unwrap();
+        let workspace = diverged_workspace(fixture.path()).await;
+        let full = workspace.pr_diff().await.unwrap();
+
+        let bounded = workspace.pr_diff_within(80).await.unwrap();
+
+        assert!(bounded.len() <= 80, "{} bytes: {bounded:?}", bounded.len());
+        assert!(
+            bounded.ends_with('\n') && full.starts_with(&bounded),
+            "{bounded:?}"
         );
     }
 
