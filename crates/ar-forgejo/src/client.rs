@@ -1,41 +1,44 @@
+use crate::capabilities::capabilities_for_version;
 use crate::types::{
     ChangedFile, CommitStatus, CreateReviewRequest, CreateWebhookRequest, CreatedWebhook,
-    PullRequestSummary,
+    PrReviewComment, PullRequestSummary, PullReviewSummary, WebhookSummary,
 };
-pub use ar_forge::CreatedReview;
+use crate::{cap_for_error, host_error, probe};
+use alloc::sync::Arc;
+use async_trait::async_trait;
+use core::time::Duration;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
+use std::collections::HashMap;
 use thiserror::Error;
 use tokio::sync::OnceCell;
 use url::Url;
 
-#[derive(Debug, Error)]
-pub enum Error {
-    #[error("invalid base URL: {0}")]
-    InvalidBaseUrl(String),
-    #[error("HTTP error: {0}")]
-    Http(#[from] reqwest::Error),
-    #[error("API error {status}: {body}")]
-    Api { status: u16, body: String },
-    #[error("URL build error: {0}")]
-    UrlBuild(#[from] url::ParseError),
-    #[error("request timed out after {0:?}")]
-    Timeout(std::time::Duration),
-}
-
-/// Default Forgejo page size for paginated list endpoints.
-/// Forgejo's actual default is 50; this matches it explicitly so
-/// behaviour is deterministic regardless of server-side defaults
-/// (which can be tuned per-instance via `app.ini`).
-pub(crate) const PAGINATION_PAGE_SIZE: u32 = 50;
+#[expect(
+    clippy::useless_attribute,
+    reason = "clippy flags any lint attribute on a use item outside its fixed list, which omits \
+              pub_use, yet the pub_use expectation below is what suppresses that lint here"
+)]
+#[expect(
+    clippy::pub_use,
+    reason = "ar_forgejo::client::CreatedReview is the public path for the create_review return \
+              type; dropping the re-export removes that path from the crate API"
+)]
+pub use ar_forge::CreatedReview;
 
 /// Defensive cap on the number of pages a paginated list call
 /// will fetch. 100 pages × 50 rows = 5,000 rows. Hitting this
 /// limit means either an accidental everything-is-renamed PR or
 /// a bug in the loop's termination condition; better to stop
 /// here than OOM on serialised JSON.
-pub(crate) const PAGINATION_MAX_PAGES: u32 = 100;
+const PAGINATION_MAX_PAGES: u32 = 100;
+
+/// Default Forgejo page size for paginated list endpoints.
+/// Forgejo's actual default is 50; this matches it explicitly so
+/// behaviour is deterministic regardless of server-side defaults
+/// (which can be tuned per-instance via `app.ini`).
+const PAGINATION_PAGE_SIZE: usize = 50;
 
 /// Forgejo REST client.
 ///
@@ -44,68 +47,75 @@ pub(crate) const PAGINATION_MAX_PAGES: u32 = 100;
 /// to the bot user.
 #[derive(Debug, Clone)]
 pub struct Client {
-    http: reqwest::Client,
+    /// Normalised server base URL, always ending in `/`.
     base: Url,
-    token: String,
-    /// Server capabilities, probed once and shared by every clone.
-    pub(crate) capabilities: Arc<OnceCell<ar_forge::HostCapabilities>>,
     /// The bot's own login, resolved once (or seeded) and shared by
     /// every clone.
-    pub(crate) bot_login: Arc<OnceCell<String>>,
+    bot_login: Arc<OnceCell<String>>,
+    /// Server capabilities, probed once and shared by every clone.
+    capabilities: Arc<OnceCell<ar_forge::HostCapabilities>>,
+    /// HTTP client carrying the token auth and JSON default headers.
+    http: reqwest::Client,
+    /// The bot's API token, also embedded in clone URLs.
+    token: String,
 }
 
+#[expect(
+    clippy::error_impl_error,
+    reason = "ar-gateway (startup), ar-review (error) and this crate's integration tests name \
+              this type ar_forgejo::Error; renaming it breaks them"
+)]
+#[derive(Debug, Error)]
+pub enum Error {
+    #[error("API error {status}: {body}")]
+    Api { status: u16, body: String },
+    #[error("HTTP error: {0}")]
+    Http(#[from] reqwest::Error),
+    #[error("invalid base URL: {0}")]
+    InvalidBaseUrl(String),
+    #[error("request timed out after {0:?}")]
+    Timeout(Duration),
+    #[error("URL build error: {0}")]
+    UrlBuild(#[from] url::ParseError),
+}
+
+/// Forgejo's wire shape for the list-webhooks endpoint. Internal
+/// to [`Client::list_webhooks`]; flattened to [`WebhookSummary`]
+/// before returning so callers don't need to reach through nested
+/// `config.url`.
+#[derive(Debug, Clone, Deserialize)]
+struct WebhookListItem {
+    /// Whether the webhook fires.
+    #[serde(default)]
+    active: bool,
+    /// The webhook's config map; only `url` is kept.
+    #[serde(default)]
+    config: HashMap<String, String>,
+    /// Event names the webhook subscribes to.
+    #[serde(default)]
+    events: Vec<String>,
+    /// Forgejo's webhook id.
+    id: u64,
+    /// Webhook type, such as `forgejo` or `gitea`.
+    #[serde(rename = "type")]
+    #[serde(default)]
+    kind: String,
+}
+
+#[expect(
+    clippy::same_name_method,
+    reason = "ar-cli (commands) and ar-gateway call these inherent methods on Client by the same \
+              names the ReviewHost impl below delegates to; renaming either side breaks callers"
+)]
 impl Client {
-    pub fn new(base_url: &str, token: &str) -> Result<Self, Error> {
-        // Forgejo can be deployed under a subpath (e.g.
-        // `https://example.com/forgejo`). `Url::join` resolves
-        // relative to the *last path component*, so a base without
-        // a trailing slash silently drops the subpath when joining
-        // `api/v1/`. Append `/` defensively so subpath deploys work
-        // without requiring operators to remember the convention.
-        let normalized = if base_url.ends_with('/') {
-            base_url.to_string()
-        } else {
-            format!("{base_url}/")
-        };
-        let base =
-            Url::parse(&normalized).map_err(|_| Error::InvalidBaseUrl(normalized.clone()))?;
-        let mut headers = HeaderMap::new();
-        let mut auth_value = HeaderValue::from_str(&format!("token {token}"))
-            .map_err(|_| Error::InvalidBaseUrl("non-ascii token".into()))?;
-        // Mark the auth header as sensitive so reqwest's Debug
-        // impl and any HTTP/2 frame logging redacts it. The
-        // InitClient already does this; the main Client should
-        // too — without it, a stray `tracing::debug!(?client)`
-        // anywhere in the stack would leak the bot's PAT into
-        // operator logs.
-        auth_value.set_sensitive(true);
-        headers.insert(AUTHORIZATION, auth_value);
-        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_static(concat!("auto_review/", env!("CARGO_PKG_VERSION"))),
-        );
-        let http = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()?;
-        Ok(Self {
-            http,
-            base,
-            token: token.to_string(),
-            capabilities: Arc::new(OnceCell::new()),
-            bot_login: Arc::new(OnceCell::new()),
-        })
-    }
-
-    /// Seed the bot login resolved elsewhere (the gateway's startup
-    /// identity, so `AR_BOT_LOGIN` wins) so
-    /// [`ar_forge::ReviewHost::bot_login`] never calls `GET /user`.
-    pub fn with_bot_login(mut self, login: impl Into<String>) -> Self {
-        self.bot_login = Arc::new(OnceCell::new_with(Some(login.into())));
-        self
-    }
-
+    /// Build an authenticated `git clone` URL for `owner/repo`, keeping a
+    /// subpath deploy's base path and carrying the token as the password.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidBaseUrl`] when the base URL cannot carry
+    /// credentials.
+    #[inline]
     pub fn clone_url(&self, owner: &str, repo: &str) -> Result<String, Error> {
         let mut url = self.base.clone();
         let path = {
@@ -114,65 +124,19 @@ impl Client {
         };
         url.set_path(&path);
         url.set_username("oauth2")
-            .map_err(|_| Error::InvalidBaseUrl("failed to set clone username".into()))?;
+            .map_err(|()| Error::InvalidBaseUrl("failed to set clone username".into()))?;
         url.set_password(Some(&self.token))
-            .map_err(|_| Error::InvalidBaseUrl("failed to set clone password".into()))?;
+            .map_err(|()| Error::InvalidBaseUrl("failed to set clone password".into()))?;
         Ok(url.to_string())
     }
 
-    fn url(&self, path: &str) -> Result<Url, Error> {
-        // Strip leading slash so `Url::join` doesn't drop the base path.
-        let trimmed = path.trim_start_matches('/');
-        let joined = self.base.join("api/v1/")?.join(trimmed)?;
-        Ok(joined)
-    }
-
-    /// Fetch the unified diff for a pull request.
-    pub async fn get_pr_diff(&self, owner: &str, repo: &str, n: u64) -> Result<String, Error> {
-        let url = self.url(&format!("repos/{owner}/{repo}/pulls/{n}.diff"))?;
-        let resp = self
-            .http
-            .get(url)
-            .header(ACCEPT, "text/plain")
-            .send()
-            .await?;
-        let status = resp.status();
-        let body = resp.text().await?;
-        if !status.is_success() {
-            return Err(Error::Api {
-                status: status.as_u16(),
-                body: cap_for_error(&body),
-            });
-        }
-        Ok(body)
-    }
-
-    /// List changed files for a pull request, including patch
-    /// hunks. Paginates internally — see `PAGINATION_PAGE_SIZE`
-    /// and `PAGINATION_MAX_PAGES`. Large PRs return the full
-    /// file set instead of the first page only.
-    pub async fn list_changed_files(
-        &self,
-        owner: &str,
-        repo: &str,
-        n: u64,
-    ) -> Result<Vec<ChangedFile>, Error> {
-        let mut all = Vec::new();
-        for page in 1..=PAGINATION_MAX_PAGES {
-            let url = self.url(&format!(
-                "repos/{owner}/{repo}/pulls/{n}/files?page={page}&limit={PAGINATION_PAGE_SIZE}"
-            ))?;
-            let chunk: Vec<ChangedFile> = json_get(&self.http, url).await?;
-            let chunk_len = chunk.len();
-            all.extend(chunk);
-            if chunk_len < PAGINATION_PAGE_SIZE as usize {
-                break;
-            }
-        }
-        Ok(all)
-    }
-
     /// Create a review on a pull request, optionally with inline line comments.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails, Forgejo answers with a
+    /// non-success status, or the response does not decode.
+    #[inline]
     pub async fn create_review(
         &self,
         owner: &str,
@@ -184,29 +148,14 @@ impl Client {
         json_post(&self.http, url, req).await
     }
 
-    /// Post a commit status (the aggregate pass/fail badge on the PR).
-    pub async fn post_commit_status(
-        &self,
-        owner: &str,
-        repo: &str,
-        sha: &str,
-        status: &CommitStatus,
-    ) -> Result<(), Error> {
-        let url = self.url(&format!("repos/{owner}/{repo}/statuses/{sha}"))?;
-        let resp = self.http.post(url).json(status).send().await?;
-        let s = resp.status();
-        if !s.is_success() {
-            let body = resp.text().await.unwrap_or_default();
-            return Err(Error::Api {
-                status: s.as_u16(),
-                body: cap_for_error(&body),
-            });
-        }
-        Ok(())
-    }
-
     /// Register a webhook on a repository so it POSTs PR events to
     /// `request.config.url`. `secret` is what the gateway HMAC-verifies.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails, Forgejo answers with a
+    /// non-success status, or the response does not decode.
+    #[inline]
     pub async fn create_webhook(
         &self,
         owner: &str,
@@ -217,33 +166,15 @@ impl Client {
         json_post(&self.http, url, request).await
     }
 
-    /// List webhooks installed on a repository. Operators use this
-    /// to audit which webhook(s) point at the gateway and to find
-    /// the `id` needed for `delete_webhook`. Paginates internally
-    /// (50/page) so a repo with many hooks returns the full set.
-    pub async fn list_webhooks(
-        &self,
-        owner: &str,
-        repo: &str,
-    ) -> Result<Vec<crate::types::WebhookSummary>, Error> {
-        let mut all = Vec::new();
-        for page in 1..=PAGINATION_MAX_PAGES {
-            let url = self.url(&format!(
-                "repos/{owner}/{repo}/hooks?page={page}&limit={PAGINATION_PAGE_SIZE}"
-            ))?;
-            let chunk: Vec<crate::types::WebhookListItem> = json_get(&self.http, url).await?;
-            let chunk_len = chunk.len();
-            all.extend(chunk.into_iter().map(Into::into));
-            if chunk_len < PAGINATION_PAGE_SIZE as usize {
-                break;
-            }
-        }
-        Ok(all)
-    }
-
     /// Delete a webhook by id. The id comes from `list_webhooks` or
     /// from the operator's records when they ran `register-webhook`
     /// (it printed the id at creation).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails or Forgejo answers with a
+    /// non-success status.
+    #[inline]
     pub async fn delete_webhook(&self, owner: &str, repo: &str, id: u64) -> Result<(), Error> {
         let url = self.url(&format!("repos/{owner}/{repo}/hooks/{id}"))?;
         let resp = self.http.delete(url).send().await?;
@@ -258,150 +189,60 @@ impl Client {
         Ok(())
     }
 
-    /// Fetch a compact summary of a pull request — used by ad-hoc CLI
-    /// invocations (e.g. `auto_review review-once`) to drive the same
-    /// pipeline the webhook flow uses, without needing the webhook
-    /// payload.
-    pub async fn get_pull_request(
+    /// Replace the body of an existing comment. Forgejo v11+ edits
+    /// both top-level issue/PR comments and inline code comments
+    /// through this endpoint. Callers must pass only ids of comments
+    /// the bot authored (THREAT-MODEL.md T9).
+    ///
+    /// Forgejo answers `204 No Content` without editing when the
+    /// comment type does not support content, so a 204 is an error.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails, Forgejo answers with a
+    /// non-success status, or Forgejo answers `204 No Content`.
+    #[inline]
+    pub async fn edit_issue_comment(
         &self,
         owner: &str,
         repo: &str,
-        n: u64,
-    ) -> Result<PullRequestSummary, Error> {
-        let url = self.url(&format!("repos/{owner}/{repo}/pulls/{n}"))?;
-        json_get(&self.http, url).await
-    }
-
-    /// Edit a pull request's title and/or body. Only the provided fields are
-    /// sent (Forgejo leaves omitted fields unchanged). Used to stamp — and
-    /// later strip — the human-override marker on the PR so it rides into the
-    /// squash/merge commit the maintainer creates from the PR title/body.
-    pub async fn update_pull_request(
-        &self,
-        owner: &str,
-        repo: &str,
-        n: u64,
-        title: Option<&str>,
-        body: Option<&str>,
+        comment_id: u64,
+        body: &str,
     ) -> Result<(), Error> {
-        #[derive(Serialize)]
-        struct Req<'a> {
-            #[serde(skip_serializing_if = "Option::is_none")]
-            title: Option<&'a str>,
-            #[serde(skip_serializing_if = "Option::is_none")]
-            body: Option<&'a str>,
+        #[derive(serde::Serialize)]
+        struct Req<'text> {
+            body: &'text str,
         }
-        let url = self.url(&format!("repos/{owner}/{repo}/pulls/{n}"))?;
-        let resp = self
-            .http
-            .patch(url)
-            .json(&Req { title, body })
-            .send()
-            .await?;
-        let status = resp.status();
-        if !status.is_success() {
-            let body = resp.text().await.unwrap_or_default();
+        let url = self.url(&format!(
+            "repos/{owner}/{repo}/issues/comments/{comment_id}"
+        ))?;
+        let status = json_patch(&self.http, url, &Req { body }).await?;
+        if status == reqwest::StatusCode::NO_CONTENT {
             return Err(Error::Api {
                 status: status.as_u16(),
-                body: cap_for_error(&body),
+                body: format!(
+                    "comment {comment_id} was not edited (Forgejo returned 204 No Content)"
+                ),
             });
         }
         Ok(())
     }
 
-    /// Fetch a file's raw contents from the repo at `ref_` (a branch, tag, or
-    /// commit SHA). Returns `Ok(None)` when the file does not exist (404) so
-    /// callers can treat "no config" the same as "default config".
+    /// `GET /user`: login of the account the token belongs to.
     ///
-    /// This is the transport for the trusted base-branch loader
-    /// (`ar_review::trusted_files`): both the review dispatcher and the chat
-    /// handler read `.auto_review.yaml` through it at the PR's base branch,
-    /// never from the head checkout. The whole body is read into memory; the
-    /// loader's size cap applies after the read.
-    pub async fn get_file_content(
-        &self,
-        owner: &str,
-        repo: &str,
-        file_path: &str,
-        ref_: &str,
-    ) -> Result<Option<String>, Error> {
-        // Build the path segment-by-segment and the query through
-        // `query_pairs_mut` so branch names such as `feature/a&b` and file
-        // names containing `#` or `?` reach Forgejo intact instead of
-        // splitting into stray query params or a fragment.
-        let mut url = self.url(&format!("repos/{owner}/{repo}/raw/"))?;
-        url.path_segments_mut()
-            .map_err(|()| Error::InvalidBaseUrl("base URL cannot carry path segments".into()))?
-            .pop_if_empty()
-            .extend(file_path.split('/').filter(|s| !s.is_empty()));
-        url.query_pairs_mut().append_pair("ref", ref_);
-        let resp = self
-            .http
-            .get(url)
-            .header(ACCEPT, "text/plain")
-            .send()
-            .await?;
-        let status = resp.status();
-        if status.as_u16() == 404 {
-            return Ok(None);
+    /// # Errors
+    ///
+    /// Returns an error when the request fails, Forgejo answers with a
+    /// non-success status, or the response does not decode.
+    #[inline]
+    pub async fn get_authenticated_user_login(&self) -> Result<String, Error> {
+        #[derive(serde::Deserialize)]
+        struct UserResponse {
+            login: String,
         }
-        let body = resp.text().await?;
-        if !status.is_success() {
-            return Err(Error::Api {
-                status: status.as_u16(),
-                body: cap_for_error(&body),
-            });
-        }
-        Ok(Some(body))
-    }
-
-    /// Fetch an issue by number. Forgejo serves pull requests on the same
-    /// endpoint and marks them with a non-null `pull_request` object, which
-    /// becomes `is_pull_request`. Returns `Ok(None)` on 404; every other
-    /// non-success status is an error with a capped body.
-    pub async fn get_issue(
-        &self,
-        owner: &str,
-        repo: &str,
-        n: u64,
-    ) -> Result<Option<ar_forge::IssueSummary>, Error> {
-        #[derive(Deserialize)]
-        struct RawIssue {
-            number: u64,
-            title: String,
-            #[serde(default)]
-            body: Option<String>,
-            state: String,
-            #[serde(default)]
-            html_url: String,
-            #[serde(default)]
-            pull_request: Option<serde_json::Value>,
-        }
-        let url = self.url(&format!("repos/{owner}/{repo}/issues/{n}"))?;
-        let resp = self.http.get(url).send().await?;
-        let status = resp.status();
-        if status.as_u16() == 404 {
-            return Ok(None);
-        }
-        let body = resp.text().await?;
-        if !status.is_success() {
-            return Err(Error::Api {
-                status: status.as_u16(),
-                body: cap_for_error(&body),
-            });
-        }
-        let raw: RawIssue = serde_json::from_str(&body).map_err(|e| Error::Api {
-            status: status.as_u16(),
-            body: format!("decode error: {e}: {}", cap_for_error(&body)),
-        })?;
-        Ok(Some(ar_forge::IssueSummary {
-            number: raw.number,
-            title: raw.title,
-            body: raw.body.unwrap_or_default(),
-            state: raw.state,
-            is_pull_request: raw.pull_request.is_some_and(|value| !value.is_null()),
-            html_url: raw.html_url,
-        }))
+        let url = self.url("user")?;
+        let resp: UserResponse = json_get(&self.http, url).await?;
+        Ok(resp.login)
     }
 
     /// Fetch the unified diff between two commit SHAs (or branches).
@@ -411,6 +252,12 @@ impl Client {
     ///
     /// Forgejo accepts the standard `base...head` triple-dot syntax
     /// for range diffs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the URL cannot be built, the request fails, or
+    /// Forgejo answers with a non-success status.
+    #[inline]
     pub async fn get_compare_diff(
         &self,
         owner: &str,
@@ -438,62 +285,206 @@ impl Client {
         Ok(body)
     }
 
-    /// Post a top-level comment on an issue or pull request. Used by
-    /// the agentic chat handler to reply to `@auto_review` mentions.
-    /// Returns the comment id on success.
-    pub async fn post_issue_comment(
-        &self,
-        owner: &str,
-        repo: &str,
-        issue_number: u64,
-        body: &str,
-    ) -> Result<u64, Error> {
-        #[derive(serde::Serialize)]
-        struct Req<'a> {
-            body: &'a str,
-        }
-        #[derive(serde::Deserialize)]
-        struct Resp {
-            id: u64,
-        }
-        let url = self.url(&format!(
-            "repos/{owner}/{repo}/issues/{issue_number}/comments"
-        ))?;
-        let resp: Resp = json_post(&self.http, url, &Req { body }).await?;
-        Ok(resp.id)
-    }
-
-    /// Replace the body of an existing comment. Forgejo v11+ edits
-    /// both top-level issue/PR comments and inline code comments
-    /// through this endpoint. Callers must pass only ids of comments
-    /// the bot authored (THREAT-MODEL.md T9).
+    /// Fetch a file's raw contents from the repo at `ref_` (a branch, tag, or
+    /// commit SHA). Returns `Ok(None)` when the file does not exist (404) so
+    /// callers can treat "no config" the same as "default config".
     ///
-    /// Forgejo answers `204 No Content` without editing when the
-    /// comment type does not support content, so a 204 is an error.
-    pub async fn edit_issue_comment(
+    /// This is the transport for the trusted base-branch loader
+    /// (`ar_review::trusted_files`): both the review dispatcher and the chat
+    /// handler read `.auto_review.yaml` through it at the PR's base branch,
+    /// never from the head checkout. The whole body is read into memory; the
+    /// loader's size cap applies after the read.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the URL cannot be built, the request fails, or
+    /// Forgejo answers with a non-success status other than 404.
+    #[inline]
+    pub async fn get_file_content(
         &self,
         owner: &str,
         repo: &str,
-        comment_id: u64,
-        body: &str,
-    ) -> Result<(), Error> {
-        #[derive(serde::Serialize)]
-        struct Req<'a> {
-            body: &'a str,
+        file_path: &str,
+        ref_: &str,
+    ) -> Result<Option<String>, Error> {
+        // Build the path segment-by-segment and the query through
+        // `query_pairs_mut` so branch names such as `feature/a&b` and file
+        // names containing `#` or `?` reach Forgejo intact instead of
+        // splitting into stray query params or a fragment.
+        let mut url = self.url(&format!("repos/{owner}/{repo}/raw/"))?;
+        url.path_segments_mut()
+            .map_err(|()| Error::InvalidBaseUrl("base URL cannot carry path segments".into()))?
+            .pop_if_empty()
+            .extend(file_path.split('/').filter(|segment| !segment.is_empty()));
+        url.query_pairs_mut().append_pair("ref", ref_);
+        let resp = self
+            .http
+            .get(url)
+            .header(ACCEPT, "text/plain")
+            .send()
+            .await?;
+        let status = resp.status();
+        if status.as_u16() == 404 {
+            return Ok(None);
         }
-        let url = self.url(&format!(
-            "repos/{owner}/{repo}/issues/comments/{comment_id}"
-        ))?;
-        let status = json_patch(&self.http, url, &Req { body }).await?;
-        if status == reqwest::StatusCode::NO_CONTENT {
+        let body = resp.text().await?;
+        if !status.is_success() {
             return Err(Error::Api {
                 status: status.as_u16(),
-                body: format!(
-                    "comment {comment_id} was not edited (Forgejo returned 204 No Content)"
-                ),
+                body: cap_for_error(&body),
             });
         }
-        Ok(())
+        Ok(Some(body))
+    }
+
+    /// Fetch an issue by number. Forgejo serves pull requests on the same
+    /// endpoint and marks them with a non-null `pull_request` object, which
+    /// becomes `is_pull_request`. Returns `Ok(None)` on 404; every other
+    /// non-success status is an error with a capped body.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails, Forgejo answers with a
+    /// non-success status other than 404, or the response does not decode.
+    #[inline]
+    pub async fn get_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        n: u64,
+    ) -> Result<Option<ar_forge::IssueSummary>, Error> {
+        #[derive(Deserialize)]
+        struct RawIssue {
+            #[serde(default)]
+            body: Option<String>,
+            #[serde(default)]
+            html_url: String,
+            number: u64,
+            #[serde(default)]
+            pull_request: Option<serde_json::Value>,
+            state: String,
+            title: String,
+        }
+        let url = self.url(&format!("repos/{owner}/{repo}/issues/{n}"))?;
+        let resp = self.http.get(url).send().await?;
+        let status = resp.status();
+        if status.as_u16() == 404 {
+            return Ok(None);
+        }
+        let body = resp.text().await?;
+        if !status.is_success() {
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body: cap_for_error(&body),
+            });
+        }
+        let raw: RawIssue = serde_json::from_str(&body).map_err(|error| Error::Api {
+            status: status.as_u16(),
+            body: format!("decode error: {error}: {}", cap_for_error(&body)),
+        })?;
+        Ok(Some(ar_forge::IssueSummary {
+            number: raw.number,
+            title: raw.title,
+            body: raw.body.unwrap_or_default(),
+            state: raw.state,
+            is_pull_request: raw.pull_request.is_some_and(|value| !value.is_null()),
+            html_url: raw.html_url,
+        }))
+    }
+
+    /// Fetch the unified diff for a pull request.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails or Forgejo answers with a
+    /// non-success status.
+    #[inline]
+    pub async fn get_pr_diff(&self, owner: &str, repo: &str, n: u64) -> Result<String, Error> {
+        let url = self.url(&format!("repos/{owner}/{repo}/pulls/{n}.diff"))?;
+        let resp = self
+            .http
+            .get(url)
+            .header(ACCEPT, "text/plain")
+            .send()
+            .await?;
+        let status = resp.status();
+        let body = resp.text().await?;
+        if !status.is_success() {
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body: cap_for_error(&body),
+            });
+        }
+        Ok(body)
+    }
+
+    /// Fetch a compact summary of a pull request — used by ad-hoc CLI
+    /// invocations (e.g. `auto_review review-once`) to drive the same
+    /// pipeline the webhook flow uses, without needing the webhook
+    /// payload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails, Forgejo answers with a
+    /// non-success status, or the response does not decode.
+    #[inline]
+    pub async fn get_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        n: u64,
+    ) -> Result<PullRequestSummary, Error> {
+        let url = self.url(&format!("repos/{owner}/{repo}/pulls/{n}"))?;
+        json_get(&self.http, url).await
+    }
+
+    /// Fetch the Forgejo server's reported version string. Used as a
+    /// cheap connectivity probe by readiness checks at gateway startup.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails, Forgejo answers with a
+    /// non-success status, or the response does not decode.
+    #[inline]
+    pub async fn get_server_version(&self) -> Result<String, Error> {
+        #[derive(serde::Deserialize)]
+        struct VersionResponse {
+            version: String,
+        }
+        let url = self.url("version")?;
+        let resp: VersionResponse = json_get(&self.http, url).await?;
+        Ok(resp.version)
+    }
+
+    /// List changed files for a pull request, including patch
+    /// hunks. Paginates internally — see `PAGINATION_PAGE_SIZE`
+    /// and `PAGINATION_MAX_PAGES`. Large PRs return the full
+    /// file set instead of the first page only.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any page request fails, Forgejo answers with a
+    /// non-success status, or a page does not decode.
+    #[inline]
+    pub async fn list_changed_files(
+        &self,
+        owner: &str,
+        repo: &str,
+        n: u64,
+    ) -> Result<Vec<ChangedFile>, Error> {
+        let mut all = Vec::new();
+        for page in 1..=PAGINATION_MAX_PAGES {
+            let url = self.url(&format!(
+                "repos/{owner}/{repo}/pulls/{n}/files?page={page}&limit={PAGINATION_PAGE_SIZE}"
+            ))?;
+            let chunk: Vec<ChangedFile> = json_get(&self.http, url).await?;
+            let chunk_len = chunk.len();
+            all.extend(chunk);
+            if chunk_len < PAGINATION_PAGE_SIZE {
+                break;
+            }
+        }
+        Ok(all)
     }
 
     /// List the top-level conversation-tab comments on a PR.
@@ -504,43 +495,27 @@ impl Client {
     /// this endpoint to plain comments, so inline review-thread comments
     /// are never included; list those per review with
     /// [`Self::list_pull_review_comments`]. Paginates internally.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any page request fails, Forgejo answers with a
+    /// non-success status, or a page does not decode.
+    #[inline]
     pub async fn list_pr_review_comments(
         &self,
         owner: &str,
         repo: &str,
         n: u64,
-    ) -> Result<Vec<crate::types::PrReviewComment>, Error> {
+    ) -> Result<Vec<PrReviewComment>, Error> {
         let mut all = Vec::new();
         for page in 1..=PAGINATION_MAX_PAGES {
             let url = self.url(&format!(
                 "repos/{owner}/{repo}/issues/{n}/comments?page={page}&limit={PAGINATION_PAGE_SIZE}"
             ))?;
-            let chunk: Vec<crate::types::PrReviewComment> = json_get(&self.http, url).await?;
+            let chunk: Vec<PrReviewComment> = json_get(&self.http, url).await?;
             let chunk_len = chunk.len();
             all.extend(chunk);
-            if chunk_len < PAGINATION_PAGE_SIZE as usize {
-                break;
-            }
-        }
-        Ok(all)
-    }
-
-    /// List pull request review records.
-    pub async fn list_pull_reviews(
-        &self,
-        owner: &str,
-        repo: &str,
-        n: u64,
-    ) -> Result<Vec<crate::types::PullReviewSummary>, Error> {
-        let mut all = Vec::new();
-        for page in 1..=PAGINATION_MAX_PAGES {
-            let url = self.url(&format!(
-                "repos/{owner}/{repo}/pulls/{n}/reviews?page={page}&limit={PAGINATION_PAGE_SIZE}"
-            ))?;
-            let chunk: Vec<crate::types::PullReviewSummary> = json_get(&self.http, url).await?;
-            let chunk_len = chunk.len();
-            all.extend(chunk);
-            if chunk_len < PAGINATION_PAGE_SIZE as usize {
+            if chunk_len < PAGINATION_PAGE_SIZE {
                 break;
             }
         }
@@ -554,47 +529,532 @@ impl Client {
     /// list, so this is a single request. Paging it would fetch the same
     /// full list repeatedly until `PAGINATION_MAX_PAGES` for any review
     /// with at least `PAGINATION_PAGE_SIZE` comments.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails, Forgejo answers with a
+    /// non-success status, or the response does not decode.
+    #[inline]
     pub async fn list_pull_review_comments(
         &self,
         owner: &str,
         repo: &str,
         n: u64,
         review_id: u64,
-    ) -> Result<Vec<crate::types::PrReviewComment>, Error> {
+    ) -> Result<Vec<PrReviewComment>, Error> {
         let url = self.url(&format!(
             "repos/{owner}/{repo}/pulls/{n}/reviews/{review_id}/comments"
         ))?;
         json_get(&self.http, url).await
     }
 
-    /// Fetch the Forgejo server's reported version string. Used as a
-    /// cheap connectivity probe by readiness checks at gateway startup.
-    pub async fn get_server_version(&self) -> Result<String, Error> {
-        #[derive(serde::Deserialize)]
-        struct VersionResponse {
-            version: String,
+    /// List pull request review records.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any page request fails, Forgejo answers with a
+    /// non-success status, or a page does not decode.
+    #[inline]
+    pub async fn list_pull_reviews(
+        &self,
+        owner: &str,
+        repo: &str,
+        n: u64,
+    ) -> Result<Vec<PullReviewSummary>, Error> {
+        let mut all = Vec::new();
+        for page in 1..=PAGINATION_MAX_PAGES {
+            let url = self.url(&format!(
+                "repos/{owner}/{repo}/pulls/{n}/reviews?page={page}&limit={PAGINATION_PAGE_SIZE}"
+            ))?;
+            let chunk: Vec<PullReviewSummary> = json_get(&self.http, url).await?;
+            let chunk_len = chunk.len();
+            all.extend(chunk);
+            if chunk_len < PAGINATION_PAGE_SIZE {
+                break;
+            }
         }
-        let url = self.url("version")?;
-        let resp: VersionResponse = json_get(&self.http, url).await?;
-        Ok(resp.version)
+        Ok(all)
     }
 
-    /// `GET /user`: login of the account the token belongs to.
-    pub async fn get_authenticated_user_login(&self) -> Result<String, Error> {
-        #[derive(serde::Deserialize)]
-        struct UserResponse {
-            login: String,
+    /// List webhooks installed on a repository. Operators use this
+    /// to audit which webhook(s) point at the gateway and to find
+    /// the `id` needed for `delete_webhook`. Paginates internally
+    /// (50/page) so a repo with many hooks returns the full set.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when any page request fails, Forgejo answers with a
+    /// non-success status, or a page does not decode.
+    #[inline]
+    pub async fn list_webhooks(
+        &self,
+        owner: &str,
+        repo: &str,
+    ) -> Result<Vec<WebhookSummary>, Error> {
+        let mut all = Vec::new();
+        for page in 1..=PAGINATION_MAX_PAGES {
+            let url = self.url(&format!(
+                "repos/{owner}/{repo}/hooks?page={page}&limit={PAGINATION_PAGE_SIZE}"
+            ))?;
+            let chunk: Vec<WebhookListItem> = json_get(&self.http, url).await?;
+            let chunk_len = chunk.len();
+            all.extend(chunk.into_iter().map(Into::into));
+            if chunk_len < PAGINATION_PAGE_SIZE {
+                break;
+            }
         }
-        let url = self.url("user")?;
-        let resp: UserResponse = json_get(&self.http, url).await?;
-        Ok(resp.login)
+        Ok(all)
+    }
+
+    /// Build a client for the Forgejo server at `base_url` that
+    /// authenticates as the bot with `token`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidBaseUrl`] when `base_url` is not a URL or
+    /// `token` is not a valid header value, and [`Error::Http`] when the
+    /// HTTP client cannot be built.
+    #[inline]
+    pub fn new(base_url: &str, token: &str) -> Result<Self, Error> {
+        // Forgejo can be deployed under a subpath (e.g.
+        // `https://example.com/forgejo`). `Url::join` resolves
+        // relative to the *last path component*, so a base without
+        // a trailing slash silently drops the subpath when joining
+        // `api/v1/`. Append `/` defensively so subpath deploys work
+        // without requiring operators to remember the convention.
+        let normalized = if base_url.ends_with('/') {
+            base_url.to_owned()
+        } else {
+            format!("{base_url}/")
+        };
+        #[expect(
+            clippy::map_err_ignore,
+            reason = "InvalidBaseUrl reports the rejected URL itself; the url::ParseError \
+                      detail is not part of the message callers and operators see"
+        )]
+        let base =
+            Url::parse(&normalized).map_err(|_| Error::InvalidBaseUrl(normalized.clone()))?;
+        let mut headers = HeaderMap::new();
+        #[expect(
+            clippy::map_err_ignore,
+            reason = "InvalidHeaderValue carries no detail beyond its kind, and the error \
+                      text must never echo the token it rejected"
+        )]
+        let mut auth_value = HeaderValue::from_str(&format!("token {token}"))
+            .map_err(|_| Error::InvalidBaseUrl("non-ascii token".into()))?;
+        // Mark the auth header as sensitive so reqwest's Debug
+        // impl and any HTTP/2 frame logging redacts it. The
+        // InitClient already does this; the main Client should
+        // too — without it, a stray `tracing::debug!(?client)`
+        // anywhere in the stack would leak the bot's PAT into
+        // operator logs.
+        auth_value.set_sensitive(true);
+        headers.insert(AUTHORIZATION, auth_value);
+        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static(concat!("auto_review/", env!("CARGO_PKG_VERSION"))),
+        );
+        let http = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()?;
+        Ok(Self {
+            http,
+            base,
+            token: token.to_owned(),
+            capabilities: Arc::new(OnceCell::new()),
+            bot_login: Arc::new(OnceCell::new()),
+        })
+    }
+
+    /// Post a commit status (the aggregate pass/fail badge on the PR).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails or Forgejo answers with a
+    /// non-success status.
+    #[inline]
+    pub async fn post_commit_status(
+        &self,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        status: &CommitStatus,
+    ) -> Result<(), Error> {
+        let url = self.url(&format!("repos/{owner}/{repo}/statuses/{sha}"))?;
+        let resp = self.http.post(url).json(status).send().await?;
+        let response_status = resp.status();
+        if !response_status.is_success() {
+            let body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api {
+                status: response_status.as_u16(),
+                body: cap_for_error(&body),
+            });
+        }
+        Ok(())
+    }
+
+    /// Post a top-level comment on an issue or pull request. Used by
+    /// the agentic chat handler to reply to `@auto_review` mentions.
+    /// Returns the comment id on success.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails, Forgejo answers with a
+    /// non-success status, or the response does not decode.
+    #[inline]
+    pub async fn post_issue_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+        body: &str,
+    ) -> Result<u64, Error> {
+        #[derive(serde::Serialize)]
+        struct Req<'text> {
+            body: &'text str,
+        }
+        #[derive(serde::Deserialize)]
+        struct Resp {
+            id: u64,
+        }
+        let url = self.url(&format!(
+            "repos/{owner}/{repo}/issues/{issue_number}/comments"
+        ))?;
+        let resp: Resp = json_post(&self.http, url, &Req { body }).await?;
+        Ok(resp.id)
+    }
+
+    /// Edit a pull request's title and/or body. Only the provided fields are
+    /// sent (Forgejo leaves omitted fields unchanged). Used to stamp — and
+    /// later strip — the human-override marker on the PR so it rides into the
+    /// squash/merge commit the maintainer creates from the PR title/body.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails or Forgejo answers with a
+    /// non-success status.
+    #[inline]
+    pub async fn update_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        n: u64,
+        title: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<(), Error> {
+        #[derive(Serialize)]
+        #[expect(
+            clippy::arbitrary_source_item_ordering,
+            reason = "field order sets the JSON key order of the PATCH pulls/{n} body, which \
+                      stays byte-for-byte as Forgejo received it before"
+        )]
+        struct Req<'text> {
+            #[serde(skip_serializing_if = "Option::is_none")]
+            title: Option<&'text str>,
+            #[serde(skip_serializing_if = "Option::is_none")]
+            body: Option<&'text str>,
+        }
+        let url = self.url(&format!("repos/{owner}/{repo}/pulls/{n}"))?;
+        let resp = self
+            .http
+            .patch(url)
+            .json(&Req { title, body })
+            .send()
+            .await?;
+        let status = resp.status();
+        if !status.is_success() {
+            let error_body = resp.text().await.unwrap_or_default();
+            return Err(Error::Api {
+                status: status.as_u16(),
+                body: cap_for_error(&error_body),
+            });
+        }
+        Ok(())
+    }
+
+    /// Resolve an API path such as `repos/o/r/pulls/1` against
+    /// `{base}api/v1/`.
+    fn url(&self, path: &str) -> Result<Url, Error> {
+        // Strip leading slash so `Url::join` doesn't drop the base path.
+        let trimmed = path.trim_start_matches('/');
+        let joined = self.base.join("api/v1/")?.join(trimmed)?;
+        Ok(joined)
+    }
+
+    /// Seed the bot login resolved elsewhere (the gateway's startup
+    /// identity, so `AR_BOT_LOGIN` wins) so
+    /// [`ar_forge::ReviewHost::bot_login`] never calls `GET /user`.
+    #[must_use = "the seeded login lives only on the returned client"]
+    #[inline]
+    pub fn with_bot_login(mut self, login: impl Into<String>) -> Self {
+        self.bot_login = Arc::new(OnceCell::new_with(Some(login.into())));
+        self
     }
 }
 
-async fn json_get<T: for<'de> Deserialize<'de>>(
-    http: &reqwest::Client,
-    url: Url,
-) -> Result<T, Error> {
+#[async_trait]
+impl ar_forge::ReviewHost for Client {
+    #[inline]
+    async fn bot_login(&self) -> Result<String, ar_forge::HostError> {
+        self.bot_login
+            .get_or_try_init(|| probe(self.get_authenticated_user_login()))
+            .await
+            .cloned()
+            .map_err(|error| host_error(&error))
+    }
+
+    #[inline]
+    async fn capabilities(&self) -> ar_forge::HostCapabilities {
+        // Transport, HTTP and timeout failures leave the cell empty so the
+        // next call probes again; an unparseable version is deterministic
+        // and is cached.
+        let probed = self
+            .capabilities
+            .get_or_try_init(|| async {
+                let version = probe(self.get_server_version()).await?;
+                Ok::<_, Error>(capabilities_for_version(&version).unwrap_or_else(|| {
+                    tracing::warn!(
+                        version = %cap_for_error(&version),
+                        "unparseable Forgejo version; treating the server as \
+                         supporting no optional review features"
+                    );
+                    ar_forge::HostCapabilities::default()
+                }))
+            })
+            .await;
+        match probed {
+            Ok(capabilities) => *capabilities,
+            Err(error) => {
+                tracing::warn!(
+                    error = %error,
+                    "Forgejo version probe failed; treating the server as \
+                     supporting no optional review features until a later probe succeeds"
+                );
+                ar_forge::HostCapabilities::default()
+            }
+        }
+    }
+
+    #[inline]
+    async fn clone_url(&self, owner: &str, repo: &str) -> Result<String, ar_forge::HostError> {
+        self.clone_url(owner, repo)
+            .map_err(|error| host_error(&error))
+    }
+
+    #[inline]
+    async fn create_review(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+        request: &ar_forge::CreateReviewRequest,
+    ) -> Result<ar_forge::CreatedReview, ar_forge::HostError> {
+        self.create_review(owner, repo, pr_number, request)
+            .await
+            .map_err(|error| host_error(&error))
+    }
+
+    #[inline]
+    async fn edit_issue_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<(), ar_forge::HostError> {
+        self.edit_issue_comment(owner, repo, comment_id, body)
+            .await
+            .map_err(|error| host_error(&error))
+    }
+
+    /// Forgejo v11+ edits inline code comments through the
+    /// issue-comment endpoint; there is no `pulls/comments/{id}` PATCH.
+    #[inline]
+    async fn edit_review_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        comment_id: u64,
+        body: &str,
+    ) -> Result<(), ar_forge::HostError> {
+        self.edit_issue_comment(owner, repo, comment_id, body)
+            .await
+            .map_err(|error| host_error(&error))
+    }
+
+    #[inline]
+    async fn get_compare_diff(
+        &self,
+        owner: &str,
+        repo: &str,
+        base: &str,
+        head: &str,
+    ) -> Result<String, ar_forge::HostError> {
+        self.get_compare_diff(owner, repo, base, head)
+            .await
+            .map_err(|error| host_error(&error))
+    }
+
+    #[inline]
+    async fn get_file_content(
+        &self,
+        owner: &str,
+        repo: &str,
+        file_path: &str,
+        ref_: &str,
+    ) -> Result<Option<String>, ar_forge::HostError> {
+        self.get_file_content(owner, repo, file_path, ref_)
+            .await
+            .map_err(|error| host_error(&error))
+    }
+
+    #[inline]
+    async fn get_issue(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+    ) -> Result<Option<ar_forge::IssueSummary>, ar_forge::HostError> {
+        self.get_issue(owner, repo, issue_number)
+            .await
+            .map_err(|error| host_error(&error))
+    }
+
+    #[inline]
+    async fn get_pr_diff(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+    ) -> Result<String, ar_forge::HostError> {
+        self.get_pr_diff(owner, repo, pr_number)
+            .await
+            .map_err(|error| host_error(&error))
+    }
+
+    #[inline]
+    async fn get_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+    ) -> Result<ar_forge::PullRequestSummary, ar_forge::HostError> {
+        self.get_pull_request(owner, repo, pr_number)
+            .await
+            .map_err(|error| host_error(&error))
+    }
+
+    #[inline]
+    async fn list_changed_files(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+    ) -> Result<Vec<ar_forge::ChangedFile>, ar_forge::HostError> {
+        self.list_changed_files(owner, repo, pr_number)
+            .await
+            .map_err(|error| host_error(&error))
+    }
+
+    #[inline]
+    async fn list_pr_review_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+    ) -> Result<Vec<ar_forge::PrReviewComment>, ar_forge::HostError> {
+        self.list_pr_review_comments(owner, repo, pr_number)
+            .await
+            .map_err(|error| host_error(&error))
+    }
+
+    #[inline]
+    async fn list_pull_review_comments(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+        review_id: u64,
+    ) -> Result<Vec<ar_forge::PrReviewComment>, ar_forge::HostError> {
+        self.list_pull_review_comments(owner, repo, pr_number, review_id)
+            .await
+            .map_err(|error| host_error(&error))
+    }
+
+    #[inline]
+    async fn list_pull_reviews(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+    ) -> Result<Vec<ar_forge::PullReviewSummary>, ar_forge::HostError> {
+        self.list_pull_reviews(owner, repo, pr_number)
+            .await
+            .map_err(|error| host_error(&error))
+    }
+
+    #[inline]
+    async fn post_commit_status(
+        &self,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        status: &ar_forge::CommitStatus,
+    ) -> Result<(), ar_forge::HostError> {
+        self.post_commit_status(owner, repo, sha, status)
+            .await
+            .map_err(|error| host_error(&error))
+    }
+
+    #[inline]
+    async fn post_issue_comment(
+        &self,
+        owner: &str,
+        repo: &str,
+        issue_number: u64,
+        body: &str,
+    ) -> Result<u64, ar_forge::HostError> {
+        self.post_issue_comment(owner, repo, issue_number, body)
+            .await
+            .map_err(|error| host_error(&error))
+    }
+
+    #[inline]
+    async fn update_pull_request(
+        &self,
+        owner: &str,
+        repo: &str,
+        pr_number: u64,
+        title: Option<&str>,
+        body: Option<&str>,
+    ) -> Result<(), ar_forge::HostError> {
+        self.update_pull_request(owner, repo, pr_number, title, body)
+            .await
+            .map_err(|error| host_error(&error))
+    }
+}
+
+impl From<WebhookListItem> for WebhookSummary {
+    #[inline]
+    fn from(item: WebhookListItem) -> Self {
+        Self {
+            id: item.id,
+            kind: item.kind,
+            active: item.active,
+            events: item.events,
+            url: item.config.get("url").cloned().unwrap_or_default(),
+        }
+    }
+}
+
+/// GET `url` and decode the JSON body, mapping a non-success status to
+/// [`Error::Api`] with a capped body.
+async fn json_get<T>(http: &reqwest::Client, url: Url) -> Result<T, Error>
+where
+    T: DeserializeOwned,
+{
     let resp = http.get(url).send().await?;
     let status = resp.status();
     let body = resp.text().await?;
@@ -604,39 +1064,22 @@ async fn json_get<T: for<'de> Deserialize<'de>>(
             body: cap_for_error(&body),
         });
     }
-    serde_json::from_str(&body).map_err(|e| Error::Api {
+    serde_json::from_str(&body).map_err(|error| Error::Api {
         status: 200,
-        body: format!("decode error: {e}: {}", cap_for_error(&body)),
-    })
-}
-
-async fn json_post<I: Serialize, T: for<'de> Deserialize<'de>>(
-    http: &reqwest::Client,
-    url: Url,
-    input: &I,
-) -> Result<T, Error> {
-    let resp = http.post(url).json(input).send().await?;
-    let status = resp.status();
-    let body = resp.text().await?;
-    if !status.is_success() {
-        return Err(Error::Api {
-            status: status.as_u16(),
-            body: cap_for_error(&body),
-        });
-    }
-    serde_json::from_str(&body).map_err(|e| Error::Api {
-        status: 200,
-        body: format!("decode error: {e}: {}", cap_for_error(&body)),
+        body: format!("decode error: {error}: {}", cap_for_error(&body)),
     })
 }
 
 /// PATCH a JSON body and return the 2xx status without decoding the
 /// response, which callers may not need.
-async fn json_patch<I: Serialize>(
+async fn json_patch<I>(
     http: &reqwest::Client,
     url: Url,
     input: &I,
-) -> Result<reqwest::StatusCode, Error> {
+) -> Result<reqwest::StatusCode, Error>
+where
+    I: Serialize,
+{
     let resp = http.patch(url).json(input).send().await?;
     let status = resp.status();
     if !status.is_success() {
@@ -649,22 +1092,26 @@ async fn json_patch<I: Serialize>(
     Ok(status)
 }
 
-/// Cap the response body included in error messages. Forgejo
-/// errors are usually small JSON ({"message": "..."}), but a
-/// misbehaving reverse proxy can return a multi-KB HTML stub.
-/// Including it verbatim in `Error::Api` holds that much in memory
-/// and pollutes operator logs. 1 KiB easily covers any real
-/// Forgejo error response while bounding the worst case.
-pub(crate) fn cap_for_error(s: &str) -> String {
-    const CAP: usize = 1024;
-    if s.len() <= CAP {
-        return s.to_string();
+/// POST a JSON body and decode the JSON response, mapping a non-success
+/// status to [`Error::Api`] with a capped body.
+async fn json_post<I, T>(http: &reqwest::Client, url: Url, input: &I) -> Result<T, Error>
+where
+    I: Serialize,
+    T: DeserializeOwned,
+{
+    let resp = http.post(url).json(input).send().await?;
+    let status = resp.status();
+    let body = resp.text().await?;
+    if !status.is_success() {
+        return Err(Error::Api {
+            status: status.as_u16(),
+            body: cap_for_error(&body),
+        });
     }
-    let mut cut = CAP;
-    while cut > 0 && !s.is_char_boundary(cut) {
-        cut -= 1;
-    }
-    format!("{}… [+{} bytes]", &s[..cut], s.len() - cut)
+    serde_json::from_str(&body).map_err(|error| Error::Api {
+        status: 200,
+        body: format!("decode error: {error}: {}", cap_for_error(&body)),
+    })
 }
 
 #[cfg(test)]
@@ -674,6 +1121,10 @@ mod tests {
     use wiremock::matchers::{body_json, header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    #[expect(
+        clippy::expect_used,
+        reason = "a mock-server client that fails to build should abort the calling test at setup"
+    )]
     async fn mock_client() -> (MockServer, Client) {
         let server = MockServer::start().await;
         let client = Client::new(&server.uri(), "test-token").expect("client");
@@ -681,6 +1132,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     fn base_url_without_trailing_slash_keeps_path_when_joined() {
         // Forgejo deployed under a subpath
         // (`https://example.com/forgejo`) is a real configuration.
@@ -697,6 +1152,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     fn base_url_with_trailing_slash_works() {
         let client = Client::new("https://example.com/forgejo/", "tok").expect("client");
         let url = client.url("repos/x/y/pulls/1.diff").expect("url");
@@ -704,6 +1163,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     fn base_url_at_root_works_with_or_without_trailing_slash() {
         for input in ["https://example.com", "https://example.com/"] {
             let client = Client::new(input, "tok").expect("client");
@@ -717,6 +1180,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     fn clone_url_uses_oauth2_token_and_preserves_subpath() {
         let client = Client::new("https://example.com/forgejo", "to/k:n#1").expect("client");
         let url = client.clone_url("alice", "widgets").expect("clone url");
@@ -727,6 +1194,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn get_pr_diff_returns_text() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
@@ -741,6 +1212,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the length assertion just before pins how many elements exist, so indexing cannot panic and the asserted values stay as written"
+    )]
     async fn list_changed_files_decodes_json() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
@@ -765,6 +1248,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the length assertion just before pins how many elements exist, so indexing cannot panic and the asserted values stay as written"
+    )]
     async fn list_changed_files_paginates_through_full_result_set() {
         use wiremock::matchers::query_param;
         let (server, client) = mock_client().await;
@@ -819,6 +1314,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn list_changed_files_short_first_page_terminates_loop() {
         use wiremock::matchers::query_param;
         let (server, client) = mock_client().await;
@@ -858,6 +1361,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn create_review_posts_expected_body() {
         let (server, client) = mock_client().await;
         let req = CreateReviewRequest {
@@ -886,6 +1397,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn post_commit_status_succeeds() {
         let (server, client) = mock_client().await;
         let status = CommitStatus {
@@ -908,6 +1423,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn get_compare_diff_returns_text() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
@@ -923,6 +1442,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "an unexpected Error variant must fail this test, printing the variant it got"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "every Error variant other than the asserted one is a test failure, reported by the catch-all panic arm"
+    )]
     async fn get_compare_diff_propagates_404() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
@@ -944,6 +1475,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn post_issue_comment_returns_new_id() {
         let (server, client) = mock_client().await;
         Mock::given(method("POST"))
@@ -963,6 +1502,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "an unexpected Error variant must fail this test, printing the variant it got"
+    )]
+    #[expect(
+        clippy::rest_pattern_accessible_field,
+        reason = "this test asserts only the status code; the error body is irrelevant to the case"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "every Error variant other than the asserted one is a test failure, reported by the catch-all panic arm"
+    )]
     async fn post_issue_comment_propagates_403() {
         let (server, client) = mock_client().await;
         Mock::given(method("POST"))
@@ -981,6 +1536,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn get_pull_request_decodes_summary() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
@@ -1007,6 +1570,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "an unexpected Error variant must fail this test, printing the variant it got"
+    )]
+    #[expect(
+        clippy::rest_pattern_accessible_field,
+        reason = "this test asserts only the status code; the error body is irrelevant to the case"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "every Error variant other than the asserted one is a test failure, reported by the catch-all panic arm"
+    )]
     async fn get_pull_request_propagates_404() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
@@ -1025,6 +1604,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
+    #[expect(
+        clippy::non_ascii_literal,
+        reason = "the PR body fixture contains the `…` the override stamp writes; escaping it would edit the expected request body"
+    )]
     async fn update_pull_request_patches_title_and_body() {
         let (server, client) = mock_client().await;
         Mock::given(method("PATCH"))
@@ -1053,6 +1644,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn update_pull_request_omits_unset_fields() {
         let (server, client) = mock_client().await;
         // Only `title` is provided; the JSON body must NOT carry `body`.
@@ -1070,6 +1665,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn get_file_content_returns_some_on_200() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
@@ -1091,6 +1690,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn get_file_content_percent_encodes_ref_query_param() {
         use wiremock::matchers::{query_param, query_param_is_missing};
         let (server, client) = mock_client().await;
@@ -1110,6 +1713,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn get_file_content_percent_encodes_path_segments() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
@@ -1126,6 +1733,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn get_file_content_returns_none_on_404() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
@@ -1142,6 +1753,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "the short binding feeds the assertion below; renaming it would edit that assertion"
+    )]
     async fn get_server_version_returns_version_string() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
@@ -1157,6 +1776,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "an unexpected Error variant must fail this test, printing the variant it got"
+    )]
+    #[expect(
+        clippy::rest_pattern_accessible_field,
+        reason = "this test asserts only the status code; the error body is irrelevant to the case"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "every Error variant other than the asserted one is a test failure, reported by the catch-all panic arm"
+    )]
     async fn get_server_version_propagates_5xx_errors() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
@@ -1173,6 +1808,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::absolute_paths,
+        reason = "the test names the request types by their crate path, as the struct literal sent to the mock server was written"
+    )]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn create_webhook_posts_expected_body() {
         let (server, client) = mock_client().await;
         let req = crate::types::CreateWebhookRequest {
@@ -1203,6 +1850,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the length assertion just before pins how many elements exist, so indexing cannot panic and the asserted values stay as written"
+    )]
     async fn list_webhooks_flattens_config_url_into_summary() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
@@ -1249,6 +1908,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "the length assertion just before pins how many elements exist, so indexing cannot panic and the asserted values stay as written"
+    )]
     async fn list_webhooks_paginates_through_full_result_set() {
         use wiremock::matchers::query_param;
         let (server, client) = mock_client().await;
@@ -1296,6 +1967,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "the short binding feeds the assertion below; renaming it would edit that assertion"
+    )]
     async fn list_pr_review_comments_paginates() {
         use wiremock::matchers::query_param;
         let (server, client) = mock_client().await;
@@ -1347,6 +2030,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "the assertion stays as written; it checks the decoded webhook list is empty"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn list_webhooks_handles_empty_response() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
@@ -1359,6 +2050,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn delete_webhook_uses_delete_verb_and_id_path() {
         let (server, client) = mock_client().await;
         Mock::given(method("DELETE"))
@@ -1370,6 +2065,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "an unexpected Error variant must fail this test, printing the variant it got"
+    )]
+    #[expect(
+        clippy::rest_pattern_accessible_field,
+        reason = "this test asserts only the status code; the error body is irrelevant to the case"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "every Error variant other than the asserted one is a test failure, reported by the catch-all panic arm"
+    )]
     async fn delete_webhook_propagates_404_as_api_error() {
         let (server, client) = mock_client().await;
         Mock::given(method("DELETE"))
@@ -1385,6 +2096,18 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "an unexpected Error variant must fail this test, printing the variant it got"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "every Error variant other than the asserted one is a test failure, reported by the catch-all panic arm"
+    )]
     async fn api_error_propagates_status_and_body() {
         let (server, client) = mock_client().await;
         Mock::given(method("GET"))
@@ -1404,6 +2127,14 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn list_pull_review_comments_fetches_an_unpaginated_endpoint_once() {
         // Forgejo's review-comments endpoint takes no page/limit and
         // returns the whole list on every request. A client that paged it

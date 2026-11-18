@@ -20,18 +20,27 @@ pub const THREAD_FEATURES_MAJOR: u64 = 18;
 ///
 /// One optional leading `v` is allowed. Returns `None` when the string does
 /// not start with a numeric major component.
+#[must_use = "parsing the version has no side effect"]
+#[inline]
 pub fn parse_major_version(version: &str) -> Option<u64> {
-    let version = version.trim();
-    let version = version.strip_prefix('v').unwrap_or(version);
-    let major = version
+    let trimmed = version.trim();
+    let unprefixed = trimmed.strip_prefix('v').unwrap_or(trimmed);
+    let major = unprefixed
         .split(['.', '-', '+'])
         .next()
-        .filter(|major| !major.is_empty() && major.bytes().all(|b| b.is_ascii_digit()))?;
+        .filter(|major| !major.is_empty() && major.bytes().all(|byte| byte.is_ascii_digit()))?;
     major.parse().ok()
 }
 
 /// Capabilities of a Forgejo server reporting `version`. An unparseable
 /// version reports none.
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "public path ar_forgejo::capabilities::capabilities_for_version; renaming it \
+              changes the crate's exported API"
+)]
+#[must_use = "computing capabilities has no side effect"]
+#[inline]
 pub fn capabilities_for_version(version: &str) -> Option<HostCapabilities> {
     let major = parse_major_version(version)?;
     let threads = major >= THREAD_FEATURES_MAJOR;
@@ -87,6 +96,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::pattern_type_mismatch,
+        reason = "the loop binds through the table's references so the assertion below keeps \
+                  its `*expected` comparison as written"
+    )]
     fn maps_each_version_to_its_capabilities() {
         let cases: &[(&str, Option<HostCapabilities>)] = &[
             ("15.0.1", Some(NONE)),

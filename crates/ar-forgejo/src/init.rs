@@ -6,58 +6,38 @@
 //! complicate the main token-based [`Client`](crate::Client) for a
 //! once-per-install operation.
 
-use crate::client::{cap_for_error, Error};
+use crate::cap_for_error;
+use crate::client::Error;
 use crate::types::{CreateAccessTokenRequest, CreatedAccessToken};
+use base64::engine::general_purpose::STANDARD;
+use base64::Engine as _;
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
 use url::Url;
 
 /// One-shot client for setup operations that pre-date the bot's PAT.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "ar-cli (commands) imports this as ar_forgejo::InitClient; renaming it breaks that \
+              import"
+)]
 pub struct InitClient {
-    http: reqwest::Client,
+    /// Normalised server base URL, always ending in `/`.
     base: Url,
+    /// HTTP client carrying the Basic-auth and JSON default headers.
+    http: reqwest::Client,
 }
 
 impl InitClient {
-    pub fn new(base_url: &str, username: &str, password: &str) -> Result<Self, Error> {
-        // Same subpath-deploy normalisation as `Client::new`. Forgejo
-        // mounted at `https://example.com/forgejo` would otherwise
-        // silently lose its subpath when joining `api/v1/`, leading
-        // to confusing 404s during `auto_review init` — and init is
-        // operators' first impression of the bot.
-        let normalized = if base_url.ends_with('/') {
-            base_url.to_string()
-        } else {
-            format!("{base_url}/")
-        };
-        let base =
-            Url::parse(&normalized).map_err(|_| Error::InvalidBaseUrl(normalized.clone()))?;
-        let mut headers = HeaderMap::new();
-        let basic = base64_basic(username, password);
-        let mut auth_value = HeaderValue::from_str(&format!("Basic {basic}"))
-            .map_err(|_| Error::InvalidBaseUrl("non-ascii credentials".into()))?;
-        auth_value.set_sensitive(true);
-        headers.insert(AUTHORIZATION, auth_value);
-        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
-        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
-        headers.insert(
-            USER_AGENT,
-            HeaderValue::from_static(concat!("auto_review/", env!("CARGO_PKG_VERSION"))),
-        );
-        let http = reqwest::Client::builder()
-            .default_headers(headers)
-            .build()?;
-        Ok(Self { http, base })
-    }
-
-    fn url(&self, path: &str) -> Result<Url, Error> {
-        let trimmed = path.trim_start_matches('/');
-        Ok(self.base.join("api/v1/")?.join(trimmed)?)
-    }
-
     /// Mint a personal access token for `username` with the given scopes.
     /// `username` must match the basic-auth principal — Forgejo rejects
     /// cross-user token minting.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the request fails, Forgejo answers with a
+    /// non-success status, or the response does not decode.
+    #[inline]
     pub async fn create_access_token(
         &self,
         username: &str,
@@ -73,17 +53,75 @@ impl InitClient {
                 body: cap_for_error(&body),
             });
         }
-        serde_json::from_str(&body).map_err(|e| Error::Api {
+        serde_json::from_str(&body).map_err(|error| Error::Api {
             status: 200,
-            body: format!("decode error: {e}: {}", cap_for_error(&body)),
+            body: format!("decode error: {error}: {}", cap_for_error(&body)),
         })
+    }
+
+    /// Build a client for the Forgejo server at `base_url` that
+    /// authenticates with HTTP Basic auth as `username`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`Error::InvalidBaseUrl`] when `base_url` is not a URL or the
+    /// credentials are not a valid header value, and [`Error::Http`] when the
+    /// HTTP client cannot be built.
+    #[inline]
+    pub fn new(base_url: &str, username: &str, password: &str) -> Result<Self, Error> {
+        // Same subpath-deploy normalisation as `Client::new`. Forgejo
+        // mounted at `https://example.com/forgejo` would otherwise
+        // silently lose its subpath when joining `api/v1/`, leading
+        // to confusing 404s during `auto_review init` — and init is
+        // operators' first impression of the bot.
+        let normalized = if base_url.ends_with('/') {
+            base_url.to_owned()
+        } else {
+            format!("{base_url}/")
+        };
+        #[expect(
+            clippy::map_err_ignore,
+            reason = "InvalidBaseUrl reports the rejected URL itself; the url::ParseError \
+                      detail is not part of the message callers and operators see"
+        )]
+        let base =
+            Url::parse(&normalized).map_err(|_| Error::InvalidBaseUrl(normalized.clone()))?;
+        let mut headers = HeaderMap::new();
+        let basic = base64_basic(username, password);
+        #[expect(
+            clippy::map_err_ignore,
+            reason = "InvalidHeaderValue carries no detail beyond its kind, and the error \
+                      text must never echo the credentials it rejected"
+        )]
+        let mut auth_value = HeaderValue::from_str(&format!("Basic {basic}"))
+            .map_err(|_| Error::InvalidBaseUrl("non-ascii credentials".into()))?;
+        auth_value.set_sensitive(true);
+        headers.insert(AUTHORIZATION, auth_value);
+        headers.insert(ACCEPT, HeaderValue::from_static("application/json"));
+        headers.insert(CONTENT_TYPE, HeaderValue::from_static("application/json"));
+        headers.insert(
+            USER_AGENT,
+            HeaderValue::from_static(concat!("auto_review/", env!("CARGO_PKG_VERSION"))),
+        );
+        let http = reqwest::Client::builder()
+            .default_headers(headers)
+            .build()?;
+        Ok(Self { base, http })
+    }
+
+    /// Resolve an API path such as `users/alice/tokens` against
+    /// `{base}api/v1/`.
+    fn url(&self, path: &str) -> Result<Url, Error> {
+        let trimmed = path.trim_start_matches('/');
+        Ok(self.base.join("api/v1/")?.join(trimmed)?)
     }
 }
 
+/// Encode `user:pass` as the base64 token of an HTTP Basic `Authorization`
+/// header.
 fn base64_basic(user: &str, pass: &str) -> String {
-    use base64::Engine;
     let raw = format!("{user}:{pass}");
-    base64::engine::general_purpose::STANDARD.encode(raw.as_bytes())
+    STANDARD.encode(raw.as_bytes())
 }
 
 #[cfg(test)]
@@ -93,6 +131,14 @@ mod tests {
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
     #[tokio::test]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     async fn create_access_token_sends_basic_auth_and_decodes_response() {
         let server = MockServer::start().await;
         let client = InitClient::new(&server.uri(), "alice", "hunter2").expect("client");
@@ -125,6 +171,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
     fn init_client_subpath_base_url_keeps_path_when_joined() {
         // Same defence-in-depth as the main client. Operators
         // running `auto_review init` against a subpath-deployed
@@ -140,6 +190,22 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::expect_used,
+        reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "an unexpected Error variant must fail this test, printing the variant it got"
+    )]
+    #[expect(
+        clippy::rest_pattern_accessible_field,
+        reason = "this test asserts only the status code; the error body is irrelevant to the case"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "every Error variant other than the asserted one is a test failure, reported by the catch-all panic arm"
+    )]
     async fn create_access_token_propagates_401() {
         let server = MockServer::start().await;
         let client = InitClient::new(&server.uri(), "alice", "wrong").expect("client");
