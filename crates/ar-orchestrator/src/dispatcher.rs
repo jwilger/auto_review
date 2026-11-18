@@ -1479,6 +1479,8 @@ the repository instead.\",\"errors\":[{\"resource\":\"PullRequest\",\"field\":\"
         head_clone_url: Option<String>,
         /// Base SHA `get_pull_request` reports; `None` serves `"base"`.
         pr_base_sha: Option<String>,
+        /// When set, `get_pr_diff` fails with this error.
+        pr_diff_error: Option<String>,
         pr_diff_requests: Mutex<Vec<(String, String, u64)>>,
         /// When set, `get_pull_request` fails with this error.
         pr_fetch_error: Option<String>,
@@ -1506,6 +1508,11 @@ the repository instead.\",\"errors\":[{\"resource\":\"PullRequest\",\"field\":\"
 
         fn with_pr_base_sha(mut self, sha: &str) -> Self {
             self.pr_base_sha = Some(sha.to_owned());
+            self
+        }
+
+        fn with_pr_diff_error(mut self, message: &str) -> Self {
+            self.pr_diff_error = Some(message.to_owned());
             self
         }
     }
@@ -1622,6 +1629,9 @@ the repository instead.\",\"errors\":[{\"resource\":\"PullRequest\",\"field\":\"
                 repo.to_owned(),
                 pr_number,
             ));
+            if let Some(message) = self.pr_diff_error.as_ref() {
+                return Err(ar_forge::HostError::new(message.clone()));
+            }
             Ok("diff --git a/src/lib.rs b/src/lib.rs\n+context\n".to_owned())
         }
 
@@ -2040,6 +2050,61 @@ the repository instead.\",\"errors\":[{\"resource\":\"PullRequest\",\"field\":\"
             host.compare_requests.lock().unwrap().is_empty(),
             "the host's compare diff must not be fetched when the local diff succeeds"
         );
+    }
+
+    #[tokio::test]
+    async fn pull_request_whose_host_diff_is_too_large_is_reviewed_with_findings() {
+        let too_many_lines = DIFF_TOO_LARGE.replace(
+            "maximum number of files (300)",
+            "maximum number of lines (20000)",
+        );
+        for refusal in [DIFF_TOO_LARGE, too_many_lines.as_str()] {
+            let pr = pr_repo_with(
+                &[("src/lib.rs", "pub fn old() {}\n")],
+                &[("src/lib.rs", "pub fn old() {}\npub fn local_added() {}\n")],
+                &[],
+            );
+            let host = RecordingReviewHost::default()
+                .with_head_clone_url(&pr.url)
+                .with_pr_base_sha(&pr.base_sha)
+                .with_pr_diff_error(refusal)
+                .with_compare_error(refusal);
+            let provider = Arc::new(CannedProvider::new(vec![
+                r#"{"verdicts":[{"finding_index":0,"keep":true,"reasoning":"real"}]}"#,
+                r#"{"summary":"one issue","findings":[{"path":"src/lib.rs","line_start":2,"severity":"warning","message":"LOCAL-FINDING"}]}"#,
+            ]));
+            let reasoning: Arc<CannedProvider> = Arc::clone(&provider);
+            let llm = Router::new()
+                .with(ModelTier::Reasoning, reasoning)
+                .with(ModelTier::Cheap, provider);
+
+            run_review_job(
+                &host,
+                &llm,
+                "",
+                "",
+                &InMemoryReviewHistory::new(),
+                None,
+                None,
+                None,
+                job_at(&pr.head_sha),
+            )
+            .await;
+
+            let reviews = host.review_requests.lock().unwrap();
+            assert_eq!(reviews.len(), 1, "{refusal}");
+            let posted = format!("{:?}", reviews[0].3);
+            assert!(posted.contains("LOCAL-FINDING"), "{posted}");
+            let statuses = host.status_requests.lock().unwrap();
+            let last = statuses.last().map(|entry| entry.3.clone()).unwrap();
+            assert!(
+                matches!(
+                    last.state,
+                    CommitStatusState::Success | CommitStatusState::Failure
+                ),
+                "the final status reports the review, not a failed one: {last:?}"
+            );
+        }
     }
 
     #[tokio::test]

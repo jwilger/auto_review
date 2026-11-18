@@ -268,6 +268,7 @@ dependencies = [
  "ar-forge",
  "ar-forgejo",
  "ar-gateway",
+ "ar-github",
  "ar-index",
  "ar-llm",
  "ar-review",
