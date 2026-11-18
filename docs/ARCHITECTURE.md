@@ -113,7 +113,12 @@ app JWT for scoped installation access tokens, caches fresh tokens by
 installation and requested repository/permission scope, and uses installation
 tokens for repository-scoped API calls. The implemented repository reads cover
 GitHub pull request summaries, unified pull request diffs, and changed files for
-PR triage and path guarding. The first write path can create GitHub pull request
+PR triage and path guarding. GitHub refuses the whole-diff media type with
+`406 too_large` for a pull request over 300 files or its line and byte limits;
+the client then assembles the diff from the per-file `patch` fields of
+`pulls/{n}/files`, keeping a header-only entry for files GitHub sends no patch
+for (binary or too large), so callers without a workspace, such as the chat
+commands, still get a diff. The first write path can create GitHub pull request
 reviews, including inline review comments translated from the provider-neutral
 review DTO, and post commit statuses for aggregate pass/fail reporting. GitHub
 top-level pull request comment reads use the Issues comments API because GitHub
@@ -163,7 +168,10 @@ Components receive only the workspace capability they need:
   and review generation, so neither the host's whole-diff endpoint nor its
   changed-file list is read. Ignored paths and the diff byte cap still apply
   before the model sees it. Without a merge base the review uses the host's
-  diff as before.
+  diff as before. Incremental reviews also fetch the previously reviewed
+  commit into the workspace and diff only what was pushed since, locally
+  first, then through the host's compare endpoint, then as a full review when
+  the previous commit is gone.
 - Context building and agentic verification use read-only, path-confined access
   under the clone root with symlink escape rejection and output/result caps.
 - Agentic verifier tools are file read and search capabilities, not shell access.

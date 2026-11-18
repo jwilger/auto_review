@@ -273,6 +273,10 @@ pull-request diff (`PreparedWorkspace::pr_diff` and
 `pr_changed_files`) reads attributes from the merge base through
 `GIT_ATTR_SOURCE`, never from the head checkout, pinned by
 `workspace::tests::pr_diff_ignores_gitattributes_added_by_the_pull_request`.
+The incremental diff (`PreparedWorkspace::incremental_diff`) also reads them
+from the pull request's merge base, not the previously reviewed commit, which
+is pull-request content; pinned by
+`workspace::tests::incremental_diff_holds_only_the_commits_after_the_previous_review`.
 _Residual risk:_ a maintainer who merges a hostile config change to
 the base branch disables or narrows review for every open PR on its
 next review. That is a base-branch write, outside this threat. The
@@ -444,7 +448,12 @@ misconfiguration probes.
 _Attacker:_ A1.
 _Path:_ PR includes a huge diff/workspace or attackers flood webhook intake.
 _Mitigation:_ Diff is capped (`DEFAULT_MAX_DIFF_BYTES`)
-before reaching the LLM. The orchestrator supports a review concurrency cap.
+before reaching the LLM. The workspace clone stays shallow: the history
+fetched to find the pull request's merge base (and, for incremental reviews,
+the previously reviewed commit) deepens in the fixed steps of
+`MERGE_BASE_DEEPEN_STEPS` and stops there, falling back to the host's diff,
+so a huge or unrelated history cannot stall a review. GitHub's per-file patch
+fallback reads at most 30 pages of 100 files. The orchestrator supports a review concurrency cap.
 **In addition**, an
 optional global token-bucket rate limiter on the
 `/webhooks/forgejo` route (`AR_WEBHOOK_RATE_PER_SEC` +

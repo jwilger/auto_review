@@ -525,7 +525,9 @@ own. If reviews start taking minutes, check:
    per token than on GPU.
 2. Workspace clone size. Monorepos clone slowly. Consider
    `--depth=1` (already set) and shallow-fetch (set by the workspace
-   builder).
+   builder). Finding a pull request's merge base deepens that history
+   in bounded steps (`MERGE_BASE_DEEPEN_STEPS`: 64, 256, 1024 and 4096
+   commits) before the review falls back to the host's diff.
 3. CI latency. If semantic reviews are CI-triggered, slow deterministic jobs
    delay the trigger before the gateway receives work.
 

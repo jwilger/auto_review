@@ -8,10 +8,10 @@ instructions live in [Quickstart](./QUICKSTART.md) and [Deployment](./DEPLOYMENT
 |---|---|
 | `ar-agentcore` | AWS Bedrock AgentCore-compatible HTTP runtime surface, including `/ping` health handling, provider-neutral `/invocations` payload parsing, handler-backed serving, in-memory and DynamoDB invocation idempotency, semantic-review dispatch, and stale-head rejection. |
 | `ar-gateway` | HTTP server, Forgejo HMAC and GitHub `X-Hub-Signature-256` verification, Forgejo and GitHub App webhook intake, provider-routed CI-triggered dispatch, Forgejo chat poller, health/readiness/info/metrics routes. |
-| `ar-orchestrator` | `JobDispatcher`, production `SpawningDispatcher`, in-memory/SQLite/DynamoDB review history, one pull-request fetch per job to resolve the base branch that repo config is read from, review diff and changed-file list computed locally in the workspace from the merge base (host diff as fallback), incremental compare-diff, changed-file triage, and status calls, and per-PR lifecycle observations for metrics. |
+| `ar-orchestrator` | `JobDispatcher`, production `SpawningDispatcher`, in-memory/SQLite/DynamoDB review history, one pull-request fetch per job to resolve the base branch that repo config is read from, review diff and changed-file list computed locally in the workspace from the merge base (host diff as fallback), incremental diff computed locally from the previously reviewed commit (compare-diff as fallback), changed-file triage, and status calls, and per-PR lifecycle observations for metrics. |
 | `ar-forge` | Provider-neutral repository-host DTOs, host error type, `HostCapabilities`, and `ReviewHost` trait for clone URLs, PR summaries, diffs, reviews, issue comments, repo config reads, issue lookups (`get_issue` returning `IssueSummary`, `None` on 404, with an `is_pull_request` marker telling PRs from issues), PR metadata, statuses, host capabilities, and the bot login, shared by Forgejo and GitHub adapters. See [Host capabilities](#host-capabilities) for the per-version matrix. Comment editing goes through `edit_issue_comment` and `edit_review_comment`, whose default implementations return a `HostError`. |
 | `ar-forgejo` | Forgejo REST client, webhook DTOs, review/comment/status/webhook APIs, Basic-auth bootstrap client, server-version capability probe and bot-login lookup (see [Host capabilities](#host-capabilities)). `edit_issue_comment` and `edit_review_comment` both `PATCH issues/comments/{id}` (Forgejo v11+ edits inline code comments there too); a `204 No Content` reply means the comment was not edited and is an error. |
-| `ar-github` | GitHub App REST client foundation, including app JWT minting, installation-token exchange/cache, `ReviewHost` wrapper, clone URL auth material, PR summary reads, PR and compare-diff reads, changed-file reads, top-level PR comment reads/posts, pull-review and review-comment reads, PR metadata updates, repo config file reads, issue fetches (`None` on 404, PRs marked), pull request review posting, commit-status posting, `X-Hub-Signature-256` webhook signature verification, typed issue-comment and review-comment webhook payloads, and the long-lived `AppReviewHost` that signs fresh app JWTs, resolves per-repository installations, and mints repository-scoped installation tokens for the gateway. Both hosts report every capability and resolve the `<app slug>[bot]` login (see [Host capabilities](#host-capabilities)). Both `ReviewHost` implementations edit comments with `edit_issue_comment` (`PATCH issues/comments/{id}`) and `edit_review_comment` (`PATCH pulls/comments/{id}`). |
+| `ar-github` | GitHub App REST client foundation, including app JWT minting, installation-token exchange/cache, `ReviewHost` wrapper, clone URL auth material, PR summary reads, PR and compare-diff reads, changed-file reads, top-level PR comment reads/posts, pull-review and review-comment reads, PR metadata updates, a PR-diff fallback that assembles the diff from the per-file `patch` fields of `pulls/{n}/files` when GitHub answers the diff media type with `406 too_large` (files without a patch, binary or too large, keep a header-only entry), repo config file reads, issue fetches (`None` on 404, PRs marked), pull request review posting, commit-status posting, `X-Hub-Signature-256` webhook signature verification, typed issue-comment and review-comment webhook payloads, and the long-lived `AppReviewHost` that signs fresh app JWTs, resolves per-repository installations, and mints repository-scoped installation tokens for the gateway. Both hosts report every capability and resolve the `<app slug>[bot]` login (see [Host capabilities](#host-capabilities)). Both `ReviewHost` implementations edit comments with `edit_issue_comment` (`PATCH issues/comments/{id}`) and `edit_review_comment` (`PATCH pulls/comments/{id}`). |
 | `ar-llm` | Provider trait, OpenAI-compatible provider, and tier router for `Reasoning`, `Cheap`, and `Embedding`. |
 | `ar-index` | Tree-sitter symbols, embeddings, SQLite/in-memory vector stores, and in-memory/SQLite/DynamoDB learnings store. `RepoScope` (lowercased `owner/repo`) scopes learnings: `LearningsStore::add` takes the scope and origin PR, `list` takes a filter (all, one repository, or unscoped), `remove` takes an optional scope (`None` for operator CLI removal), and `query_nearest` only returns learnings in the given scope. A stored repository value that does not parse as `owner/repo` is read as unscoped. |
 | `ar-prompts` | Prompt templates, JSON schemas, DTOs, and validators for review and verification LLM calls; `fence_untrusted` and `fence_nonce` are the reusable helpers that wrap untrusted text in nonce-tagged `UNTRUSTED_DATA` markers (with marker neutralization, invisible-character stripping, CRLF normalization and a byte cap) for the review and metadata-check prompts today and for verifiers, chat and later features. |
@@ -107,6 +107,16 @@ base both return `WorkspaceError::Git`. The caller still applies
 `ar_review::is_valid_git_sha` is the same hex check, exported so callers can
 decide before cloning whether a base SHA is usable.
 
+`prepare_workspace_from_clone_url_with_previous(clone_url, head_sha, base_sha,
+previous_sha)` does the same and, once the merge base is found, also fetches
+the commit an earlier review covered, with the same validation and bounded
+deepening. `PreparedWorkspace::incremental_diff()` then returns the diff from
+the merge base of that commit and the head to the head, the host's
+`previous...head` comparison, with attributes still read from the pull
+request's merge base. It returns `WorkspaceError::Git` when the previous
+commit could not be fetched (for example after a force push) or no merge base
+was found.
+
 ## `ar-orchestrator` review diff source
 
 `ReviewJob::base_sha` carries the pull request's base commit when the intake
@@ -123,10 +133,18 @@ diff (`ReviewArgs::diff_override`) and file list
 pipeline's `list_changed_files` are not called. The pre-clone trivial-files
 triage still reads the host's changed-file list. Without a merge base, or when
 the local git commands fail, the review fetches the host's diff and file list
-as before. Incremental reviews still diff `previous_sha..head` through
-`ReviewHost::get_compare_diff`. `auto-review review-once` reviews through
-`run_review_job` and gets the same behaviour; its `--dry-run` prompt stays on
-the Forgejo API diff.
+as before. Incremental reviews prepare the workspace with
+`prepare_workspace_from_clone_url_with_previous` and take their diff from
+`PreparedWorkspace::incremental_diff()`, so the host's compare endpoint and its
+size limit are not used. Without a workspace, or when the previous commit is
+not in it, they fall back to `ReviewHost::get_compare_diff`, and when that fails
+too, to a full review as before. The same-SHA, trivial-files and
+disabled-by-config skips still run before the clone. `auto-review review-once`
+reviews through `run_review_job` and gets the same behaviour; its `--dry-run`
+prompt stays on the Forgejo API diff, which has no file limit. The chat
+commands that read the pull request diff have no workspace and stay on
+`ReviewHost::get_pr_diff`; on GitHub the `ar-github` per-file patch fallback
+covers pull requests over its diff limits.
 
 ## Host capabilities
 
