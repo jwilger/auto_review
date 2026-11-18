@@ -29,7 +29,12 @@ type UsageLog = Arc<Mutex<Vec<ReviewUsageEntry>>>;
 /// All inputs to [`run_review_core`]. The diff is already filtered and
 /// capped and the prior discussion is already rendered; the core does
 /// no host I/O.
-#[non_exhaustive]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "run_review_core takes this as its only input and the type has no constructor; \
+              callers outside ar-review (the bench and local review surfaces) build it with a \
+              struct literal, which #[non_exhaustive] would forbid"
+)]
 #[expect(
     clippy::module_name_repetitions,
     reason = "the crate root re-exports this as ar_review::ReviewCoreArgs for the bench and \
