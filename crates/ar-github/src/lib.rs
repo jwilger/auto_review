@@ -910,6 +910,14 @@ impl Client {
                 let files = self
                     .list_changed_files(owner, repo, pull_number, installation_token)
                     .await?;
+                tracing::info!(
+                    repo = format!("{owner}/{repo}"),
+                    pr = pull_number,
+                    files = files.len(),
+                    without_patch = files.iter().filter(|file| file.patch.is_none()).count(),
+                    "GitHub refused the pull request diff as too large; using per-file patches \
+                     (files without a patch appear as headers only)"
+                );
                 Ok(diff_from_file_patches(&files))
             }
             other => other,
