@@ -1,8 +1,13 @@
 use ar_github::GitHubAppJwt;
 use base64::prelude::{Engine as _, BASE64_URL_SAFE_NO_PAD};
+use core::error::Error;
 use jsonwebtoken::{decode_header, Algorithm};
 use serde_json::Value;
 
+#[expect(
+    clippy::needless_raw_strings,
+    reason = "ar-cli's agentcore tests include this file and locate the key by its `r#\"` and `\"#;` delimiters, so the raw-string form is load-bearing"
+)]
 const TEST_PRIVATE_KEY: &str = r#"-----BEGIN PRIVATE KEY-----
 MIIEvgIBADANBgkqhkiG9w0BAQEFAASCBKgwggSkAgEAAoIBAQCTj+cMup5fx8o5
 NmzvputlN0EN+2Q3bOH4PsnDUZtkx9Ycpa0l135cnnDWqZ5OHaS8IwpUl75MnBpe
@@ -32,21 +37,38 @@ E7WVGvUKDVt8xSzWQ6sJm2EOLwwU+lbXYDpiGalrthdB/bBZRumLEVfewFUnvJUM
 AYKARgALZ8eYvQborOT7wnhm
 -----END PRIVATE KEY-----"#;
 
+type TestResult = Result<(), Box<dyn Error>>;
+
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
+#[expect(
+    clippy::indexing_slicing,
+    reason = "indexing a serde_json::Value by key yields Null for a missing claim instead of panicking; the claim assertions stay as written"
+)]
+#[expect(
+    clippy::default_numeric_fallback,
+    reason = "the expected claim timestamps are compared against untyped JSON numbers; a type suffix would edit the asserted literals"
+)]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "the test reports setup and request failures through `?` and its checks through the assertions, which stay as written"
+)]
 #[test]
-fn app_jwt_uses_rs256_app_id_issued_at_and_ten_minute_expiry() {
-    let signer = GitHubAppJwt::from_rsa_pem(12345, TEST_PRIVATE_KEY.as_bytes()).expect("signer");
+fn app_jwt_uses_rs256_app_id_issued_at_and_ten_minute_expiry() -> TestResult {
+    let signer = GitHubAppJwt::from_rsa_pem(12345, TEST_PRIVATE_KEY.as_bytes())?;
 
-    let jwt = signer.jwt_at_unix(1_700_000_000).expect("jwt");
+    let jwt = signer.jwt_at_unix(1_700_000_000)?;
 
-    let header = decode_header(&jwt).expect("header");
+    let header = decode_header(&jwt)?;
     assert_eq!(header.alg, Algorithm::RS256);
 
-    let payload = jwt.split('.').nth(1).expect("payload segment");
-    let decoded = BASE64_URL_SAFE_NO_PAD
-        .decode(payload)
-        .expect("payload base64");
-    let claims: Value = serde_json::from_slice(&decoded).expect("claims json");
+    let payload = jwt.split('.').nth(1).ok_or("payload segment")?;
+    let decoded = BASE64_URL_SAFE_NO_PAD.decode(payload)?;
+    let claims: Value = serde_json::from_slice(&decoded)?;
     assert_eq!(claims["iss"], "12345");
     assert_eq!(claims["iat"], 1_700_000_000);
     assert_eq!(claims["exp"], 1_700_000_600);
+    Ok(())
 }
