@@ -1,6 +1,9 @@
-use ar_orchestrator::{PrKey, ReviewHistory};
+extern crate alloc;
+
+use alloc::sync::Arc;
+use ar_orchestrator::{PrKey, ReviewHistory as _};
 use async_trait::async_trait;
-use std::sync::{Arc, Mutex};
+use std::sync::Mutex;
 
 #[derive(Clone)]
 struct FixedClock {
@@ -15,49 +18,88 @@ impl ar_orchestrator::HistoryEpochSecondsClock for FixedClock {
 
 #[derive(Default)]
 struct RecordingClient {
-    puts: Mutex<Vec<PutRequest>>,
-    gets: Mutex<Vec<GetRequest>>,
     deletes: Mutex<Vec<DeleteRequest>>,
     get_result: Mutex<Option<String>>,
+    gets: Mutex<Vec<GetRequest>>,
+    puts: Mutex<Vec<PutRequest>>,
     scan_result: Mutex<Vec<PrKey>>,
 }
 
 #[derive(Debug, PartialEq)]
 struct PutRequest {
-    table_name: String,
-    pk: String,
     key: PrKey,
-    sha: String,
-    updated_at_epoch_seconds: i64,
     per_review_cost_usd: f64,
+    pk: String,
+    sha: String,
+    table_name: String,
+    updated_at_epoch_seconds: i64,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct GetRequest {
-    table_name: String,
     pk: String,
+    table_name: String,
 }
 
 #[derive(Debug, PartialEq, Eq)]
 struct DeleteRequest {
-    table_name: String,
     pk: String,
+    table_name: String,
 }
 
 #[async_trait]
 impl ar_orchestrator::DynamoDbReviewHistoryClient for RecordingClient {
+    #[expect(
+        clippy::expect_used,
+        reason = "the trait fixes the error type to HistoryError; a poisoned lock means another \
+                  test thread already panicked, so panicking here is the honest test failure"
+    )]
+    async fn delete_reviewed(
+        &self,
+        table_name: &str,
+        pk: &str,
+    ) -> Result<(), ar_orchestrator::HistoryError> {
+        self.deletes.lock().expect("deletes").push(DeleteRequest {
+            table_name: table_name.to_owned(),
+            pk: pk.to_owned(),
+        });
+        Ok(())
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "the trait fixes the error type to HistoryError; a poisoned lock means another \
+                  test thread already panicked, so panicking here is the honest test failure"
+    )]
     async fn get_last_reviewed(
         &self,
         table_name: &str,
         pk: &str,
     ) -> Result<Option<String>, ar_orchestrator::HistoryError> {
         self.gets.lock().expect("gets").push(GetRequest {
-            table_name: table_name.to_string(),
-            pk: pk.to_string(),
+            table_name: table_name.to_owned(),
+            pk: pk.to_owned(),
         });
         Ok(self.get_result.lock().expect("get result").clone())
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "the trait fixes the error type to HistoryError; a poisoned lock means another \
+                  test thread already panicked, so panicking here is the honest test failure"
+    )]
+    async fn list_known(
+        &self,
+        _table_name: &str,
+    ) -> Result<Vec<PrKey>, ar_orchestrator::HistoryError> {
+        Ok(self.scan_result.lock().expect("scan result").clone())
+    }
+
+    #[expect(
+        clippy::expect_used,
+        reason = "the trait fixes the error type to HistoryError; a poisoned lock means another \
+                  test thread already panicked, so panicking here is the honest test failure"
+    )]
     async fn put_reviewed(
         &self,
         table_name: &str,
@@ -68,47 +110,37 @@ impl ar_orchestrator::DynamoDbReviewHistoryClient for RecordingClient {
         per_review_cost_usd: f64,
     ) -> Result<(), ar_orchestrator::HistoryError> {
         self.puts.lock().expect("puts").push(PutRequest {
-            table_name: table_name.to_string(),
-            pk: pk.to_string(),
+            table_name: table_name.to_owned(),
+            pk: pk.to_owned(),
             key: key.clone(),
-            sha: sha.to_string(),
+            sha: sha.to_owned(),
             updated_at_epoch_seconds,
             per_review_cost_usd,
         });
         Ok(())
     }
-
-    async fn delete_reviewed(
-        &self,
-        table_name: &str,
-        pk: &str,
-    ) -> Result<(), ar_orchestrator::HistoryError> {
-        self.deletes.lock().expect("deletes").push(DeleteRequest {
-            table_name: table_name.to_string(),
-            pk: pk.to_string(),
-        });
-        Ok(())
-    }
-
-    async fn list_known(
-        &self,
-        _table_name: &str,
-    ) -> Result<Vec<PrKey>, ar_orchestrator::HistoryError> {
-        Ok(self.scan_result.lock().expect("scan result").clone())
-    }
 }
 
 #[tokio::test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; \
+              there is no #[cfg(test)] module to place this in"
+)]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed history call or poisoned lock should fail this test at the named step"
+)]
 async fn dynamodb_review_history_uses_stable_key_and_timestamp_contract() {
     let client = Arc::new(RecordingClient::default());
     let history = ar_orchestrator::DynamoDbReviewHistory::from_parts(
-        client.clone(),
+        Arc::<RecordingClient>::clone(&client),
         "agentcore-review-history",
         Arc::new(FixedClock { now: 1_800_000_000 }),
     );
     let key = PrKey {
-        owner: "alice".to_string(),
-        repo: "widgets".to_string(),
+        owner: "alice".to_owned(),
+        repo: "widgets".to_owned(),
         pr_number: 42,
     };
 
@@ -119,16 +151,16 @@ async fn dynamodb_review_history_uses_stable_key_and_timestamp_contract() {
     assert_eq!(
         client.puts.lock().expect("puts").as_slice(),
         &[PutRequest {
-            table_name: "agentcore-review-history".to_string(),
-            pk: "alice/widgets#42".to_string(),
+            table_name: "agentcore-review-history".to_owned(),
+            pk: "alice/widgets#42".to_owned(),
             key: key.clone(),
-            sha: "abc123".to_string(),
+            sha: "abc123".to_owned(),
             updated_at_epoch_seconds: 1_800_000_000,
             per_review_cost_usd: 0.25,
         }]
     );
 
-    *client.get_result.lock().expect("get result") = Some("abc123".to_string());
+    *client.get_result.lock().expect("get result") = Some("abc123".to_owned());
     assert_eq!(
         history.last_reviewed(&key).await.expect("last").as_deref(),
         Some("abc123")
@@ -136,8 +168,8 @@ async fn dynamodb_review_history_uses_stable_key_and_timestamp_contract() {
     assert_eq!(
         client.gets.lock().expect("gets").as_slice(),
         &[GetRequest {
-            table_name: "agentcore-review-history".to_string(),
-            pk: "alice/widgets#42".to_string(),
+            table_name: "agentcore-review-history".to_owned(),
+            pk: "alice/widgets#42".to_owned(),
         }]
     );
 
@@ -148,8 +180,8 @@ async fn dynamodb_review_history_uses_stable_key_and_timestamp_contract() {
     assert_eq!(
         client.deletes.lock().expect("deletes").as_slice(),
         &[DeleteRequest {
-            table_name: "agentcore-review-history".to_string(),
-            pk: "alice/widgets#42".to_string(),
+            table_name: "agentcore-review-history".to_owned(),
+            pk: "alice/widgets#42".to_owned(),
         }]
     );
 }
