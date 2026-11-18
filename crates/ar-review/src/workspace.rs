@@ -35,6 +35,7 @@ impl From<WorkspaceError> for ReviewError {
 pub struct PreparedWorkspace {
     dir: TempDir,
     head_sha: String,
+    incremental_base: Option<String>,
     merge_base: Option<String>,
 }
 
@@ -62,6 +63,37 @@ impl PreparedWorkspace {
     /// base SHA, or the bounded history fetch found none).
     pub async fn pr_diff(&self) -> Result<String, WorkspaceError> {
         let merge_base = self.require_merge_base()?;
+        self.diff_to_head(merge_base, merge_base).await
+    }
+
+    /// Unified diff of the commits pushed since an earlier review: from the
+    /// merge base of the previously reviewed commit and the head, to the
+    /// head. The same comparison as the host's `previous...head` compare
+    /// view, with the binary, rename and driver rules of [`Self::pr_diff`].
+    /// Attributes still come from the pull request's merge base, because
+    /// the previously reviewed commit is pull-request content.
+    ///
+    /// Errors when the workspace was not prepared through
+    /// [`prepare_workspace_from_clone_url_with_previous`], or the previous
+    /// commit or either merge base could not be found within the bounded
+    /// history fetch (for example after a force push removed it).
+    pub async fn incremental_diff(&self) -> Result<String, WorkspaceError> {
+        let merge_base = self.require_merge_base()?;
+        let incremental_base = self.incremental_base.as_deref().ok_or_else(|| {
+            WorkspaceError::Git(
+                "no incremental base: the previously reviewed commit is not in the workspace"
+                    .into(),
+            )
+        })?;
+        self.diff_to_head(incremental_base, merge_base).await
+    }
+
+    /// `git diff <from> <head>` with attributes read from `attributes_tree`.
+    async fn diff_to_head(
+        &self,
+        from: &str,
+        attributes_tree: &str,
+    ) -> Result<String, WorkspaceError> {
         let stdout = git_stdout_in(
             self.path(),
             &[
@@ -72,10 +104,10 @@ impl PreparedWorkspace {
                 "--find-renames",
                 "--src-prefix=a/",
                 "--dst-prefix=b/",
-                merge_base,
+                from,
                 &self.head_sha,
             ],
-            &attributes_from(merge_base),
+            &attributes_from(attributes_tree),
         )
         .await?;
         Ok(String::from_utf8_lossy(&stdout).into_owned())
@@ -203,7 +235,7 @@ pub async fn prepare_workspace_from_clone_url(
     clone_url: &str,
     head_sha: &str,
 ) -> Result<PreparedWorkspace, WorkspaceError> {
-    clone_workspace(clone_url, head_sha, None).await
+    clone_workspace(clone_url, head_sha, None, None).await
 }
 
 /// Clone an already-authenticated repository URL at `head_sha` and also
@@ -222,7 +254,27 @@ pub async fn prepare_workspace_from_clone_url_with_base(
     head_sha: &str,
     base_sha: &str,
 ) -> Result<PreparedWorkspace, WorkspaceError> {
-    clone_workspace(clone_url, head_sha, Some(base_sha)).await
+    clone_workspace(clone_url, head_sha, Some(base_sha), None).await
+}
+
+/// Like [`prepare_workspace_from_clone_url_with_base`], and also fetch the
+/// commit an earlier review covered (`previous_sha`), so
+/// [`PreparedWorkspace::incremental_diff`] can show only what was pushed
+/// since without the host's compare endpoint.
+///
+/// All three SHAs are validated before git runs. The previous commit is
+/// fetched with the same bounded deepening as the base, and only when the
+/// pull request's merge base was found. When it cannot be fetched (a force
+/// push removed it) or no merge base with the head appears within the
+/// bound, the workspace is still returned and `incremental_diff` errors,
+/// so callers fall back to the host or to a full review.
+pub async fn prepare_workspace_from_clone_url_with_previous(
+    clone_url: &str,
+    head_sha: &str,
+    base_sha: &str,
+    previous_sha: &str,
+) -> Result<PreparedWorkspace, WorkspaceError> {
+    clone_workspace(clone_url, head_sha, Some(base_sha), Some(previous_sha)).await
 }
 
 /// How many more commits each deepening round fetches behind the head and
@@ -235,6 +287,7 @@ async fn clone_workspace(
     clone_url: &str,
     head_sha: &str,
     base_sha: Option<&str>,
+    previous_sha: Option<&str>,
 ) -> Result<PreparedWorkspace, WorkspaceError> {
     // Defence in depth: head_sha is interpolated into git argv
     // (`git fetch origin <sha>`, `git checkout <sha>`) and git
@@ -256,6 +309,11 @@ async fn clone_workspace(
             "refusing to clone: base_sha {base_sha:?} is not a hex commit SHA"
         )));
     }
+    if let Some(previous_sha) = previous_sha.filter(|sha| !is_valid_git_sha(sha)) {
+        return Err(WorkspaceError::Git(format!(
+            "refusing to clone: previous_sha {previous_sha:?} is not a hex commit SHA"
+        )));
+    }
     let dir = TempDir::new()?;
     let path = dir.path().to_owned();
 
@@ -275,6 +333,14 @@ async fn clone_workspace(
         }
         None => None,
     };
+    // Only with the pull request's merge base: it is the trusted attribute
+    // source an incremental diff needs.
+    let incremental_base = match (merge_base.as_ref(), previous_sha) {
+        (Some(_), Some(previous_sha)) => {
+            locate_merge_base(&path, head_sha, previous_sha, MERGE_BASE_DEEPEN_STEPS).await
+        }
+        _ => None,
+    };
     // The clone URL carries the bot credential in its userinfo and `git
     // clone` stores it as `remote.origin.url` in `.git/config`, which the
     // LLM-driven `read_file` tool can reach. Drop the remote now that the
@@ -285,6 +351,7 @@ async fn clone_workspace(
     Ok(PreparedWorkspace {
         dir,
         head_sha: head_sha.to_owned(),
+        incremental_base,
         merge_base,
     })
 }
@@ -955,6 +1022,8 @@ mod tests {
         head_sha: String,
         base_sha: String,
         fork_point: String,
+        /// `f2`: a feature commit an earlier review covered.
+        reviewed_sha: String,
     }
 
     /// Text long enough for git's rename detection to pair the old and
@@ -995,7 +1064,7 @@ line three of the renamed file\nline four of the renamed file\n";
         fixture_commit(&src, "f1").await;
         fs::write(src.join("logo.png"), BINARY_BODY).unwrap();
         fixture_git(&src, &["mv", "old_name.txt", "new_name.txt"]).await;
-        fixture_commit(&src, "f2").await;
+        let reviewed_sha = fixture_commit(&src, "f2").await;
         fs::write(src.join(".gitattributes"), "notes.txt -diff\n").unwrap();
         fs::write(
             src.join("notes.txt"),
@@ -1030,6 +1099,7 @@ line three of the renamed file\nline four of the renamed file\n";
             head_sha,
             base_sha,
             fork_point,
+            reviewed_sha,
         }
     }
 
@@ -1150,6 +1220,50 @@ line three of the renamed file\nline four of the renamed file\n";
                 changed("new_name.txt", "renamed", 0, 0),
                 changed("notes.txt", "modified", 1, 0),
             ]
+        );
+    }
+
+    #[tokio::test]
+    async fn incremental_diff_holds_only_the_commits_after_the_previous_review() {
+        let fixture = TempDir::new().unwrap();
+        let repo = diverged_repo(fixture.path()).await;
+        let workspace = prepare_workspace_from_clone_url_with_previous(
+            &repo.clone_url,
+            &repo.head_sha,
+            &repo.base_sha,
+            &repo.reviewed_sha,
+        )
+        .await
+        .unwrap();
+
+        let diff = workspace.incremental_diff().await.unwrap();
+
+        assert!(
+            diff.contains("+hidden feature change"),
+            "the commit after the reviewed one must be in the diff (attributes from the \
+             merge base), got:\n{diff}"
+        );
+        assert!(
+            !diff.contains("README.md") && !diff.contains("logo.png"),
+            "commits the previous review covered must not appear, got:\n{diff}"
+        );
+    }
+
+    #[tokio::test]
+    async fn prepare_workspace_with_previous_rejects_non_sha_previous_before_invoking_git() {
+        let err = prepare_workspace_from_clone_url_with_previous(
+            "https://oauth2:tok@forgejo.example.com/alice/widgets.git",
+            "deadbeef",
+            "cafef00d",
+            "--upload-pack=evil",
+        )
+        .await
+        .expect_err("must reject");
+
+        assert!(
+            err.to_string()
+                .contains("previous_sha \"--upload-pack=evil\" is not a hex commit SHA"),
+            "unexpected error: {err}"
         );
     }
 

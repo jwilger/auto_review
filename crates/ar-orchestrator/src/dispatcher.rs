@@ -7,8 +7,8 @@ use ar_llm::Router as LlmRouter;
 use ar_review::{
     build_glob_set, build_review_context_with_store, is_valid_git_sha, load_repo_config_from_base,
     pr_is_skippable, prepare_workspace_from_clone_url, prepare_workspace_from_clone_url_with_base,
-    review_pull_request, BaseRef, PreparedWorkspace, RepoConfig, ReviewArgs, ReviewError,
-    VerifyMode, WorkspaceError,
+    prepare_workspace_from_clone_url_with_previous, review_pull_request, BaseRef,
+    PreparedWorkspace, RepoConfig, ReviewArgs, ReviewError, VerifyMode, WorkspaceError,
 };
 use async_trait::async_trait;
 use core::time::Duration;
@@ -609,7 +609,9 @@ pub async fn run_review_job(
             None
         }
     };
-    let mut incremental_diff: Option<String> = None;
+    // The previously reviewed commit when this is an incremental review.
+    // Its diff is computed once the workspace exists.
+    let mut incremental_from: Option<&str> = None;
     if let Some(prev) = last_reviewed_sha.as_ref() {
         if prev == &job.head_sha {
             if job.force {
@@ -636,7 +638,7 @@ pub async fn run_review_job(
                 "force=true: full review (skipping compare-diff incremental path)"
             );
         } else {
-            incremental_diff = fetch_incremental_diff(forgejo, &job, prev).await;
+            incremental_from = Some(prev.as_str());
         }
     }
 
@@ -720,6 +722,7 @@ pub async fn run_review_job(
         vector_store,
         &job,
         &base_ref,
+        incremental_from,
     )
     .await
     {
@@ -752,6 +755,12 @@ pub async fn run_review_job(
         workspace,
     } = prep;
     let ignored_paths = build_glob_set(&config.ignored_paths);
+    let incremental_diff = match incremental_from {
+        Some(previous_sha) => {
+            incremental_review_diff(forgejo, &job, previous_sha, workspace.as_ref()).await
+        }
+        None => None,
+    };
 
     // The agentic verifier needs the cloned workspace to inspect.
     // Operators opt in by setting AR_AGENTIC_VERIFIER=1; without it,
@@ -918,6 +927,7 @@ async fn prepare_workspace_context(
     vector_store: Option<&dyn VectorStore>,
     job: &ReviewJob,
     base_ref: &BaseRef,
+    incremental_from: Option<&str>,
 ) -> WorkspacePrep {
     let loaded = load_repo_config_from_base(host, &job.owner, &job.repo, &base_ref.name).await;
     tracing::debug!(
@@ -931,7 +941,7 @@ async fn prepare_workspace_context(
         return WorkspacePrep::DisabledByConfig;
     }
     let base_sha = job.base_sha.as_deref().unwrap_or(&base_ref.sha);
-    let workspace = match clone_head_workspace(host, job, base_sha).await {
+    let workspace = match clone_head_workspace(host, job, base_sha, incremental_from).await {
         Ok(workspace) => workspace,
         Err(err) => {
             tracing::warn!(error = %err, "workspace prep failed; continuing without workspace context");
@@ -1013,21 +1023,35 @@ async fn job_review_context(
 }
 
 /// Clone the job's repository at its head SHA, fetching enough of
-/// `base_sha`'s history to find the pull request's merge base.
+/// `base_sha`'s history to find the pull request's merge base, and of
+/// `incremental_from` (the previously reviewed commit) to diff what was
+/// pushed since.
 ///
 /// A `base_sha` that is not a commit SHA still clones the head (for
 /// context and the agentic verifier); the workspace then has no merge
-/// base and the review falls back to the host's diff.
+/// base and the review falls back to the host's diff. An
+/// `incremental_from` that is not a commit SHA is not fetched, so the
+/// incremental diff falls back to the host.
 async fn clone_head_workspace(
     host: &dyn ReviewHost,
     job: &ReviewJob,
     base_sha: &str,
+    incremental_from: Option<&str>,
 ) -> Result<PreparedWorkspace, WorkspacePrepError> {
     let clone_url = host
         .clone_url(&job.owner, &job.repo)
         .await
         .map_err(WorkspacePrepError::Host)?;
     if is_valid_git_sha(base_sha) {
+        if let Some(previous_sha) = incremental_from.filter(|sha| is_valid_git_sha(sha)) {
+            return Ok(prepare_workspace_from_clone_url_with_previous(
+                &clone_url,
+                &job.head_sha,
+                base_sha,
+                previous_sha,
+            )
+            .await?);
+        }
         return Ok(
             prepare_workspace_from_clone_url_with_base(&clone_url, &job.head_sha, base_sha).await?,
         );
@@ -1103,6 +1127,33 @@ fn review_summary(outcome: &ar_review::ReviewOutcome) -> String {
         return format!("auto_review: {} findings", outcome.findings_count);
     }
     format!("auto_review: {}", parts.join(", "))
+}
+
+/// Diff of the commits pushed since `previous_sha` was reviewed: computed
+/// in `workspace` when it holds the previous commit, so no host diff limit
+/// applies, otherwise fetched from the host's compare endpoint. `None`
+/// (falling back to a full review) when neither can supply it, for example
+/// after a force push removed the previous commit.
+async fn incremental_review_diff(
+    host: &dyn ReviewHost,
+    job: &ReviewJob,
+    previous_sha: &str,
+    workspace: Option<&PreparedWorkspace>,
+) -> Option<String> {
+    if let Some(prepared) = workspace {
+        match prepared.incremental_diff().await {
+            Ok(diff) => return Some(diff),
+            Err(err) => {
+                tracing::info!(
+                    repo = format!("{}/{}", job.owner, job.repo),
+                    pr = job.pr_number,
+                    error = %err,
+                    "local incremental diff unavailable; trying the host's compare diff"
+                );
+            }
+        }
+    }
+    fetch_incremental_diff(host, job, previous_sha).await
 }
 
 /// Diff between the previously reviewed SHA and the job's head, or
@@ -1334,6 +1385,12 @@ pr_metadata_check: false
 override_approvers: [\"pr-author\"]
 ";
 
+    /// GitHub's answer when a diff is over its size limits.
+    const DIFF_TOO_LARGE: &str = "API error 406: {\"message\":\"Sorry, the diff exceeded the \
+maximum number of files (300). Consider using 'List pull requests files' API or locally cloning \
+the repository instead.\",\"errors\":[{\"resource\":\"PullRequest\",\"field\":\"diff\",\
+\"code\":\"too_large\"}],\"status\":\"406\"}";
+
     struct CannedProvider {
         responses: Mutex<Vec<String>>,
         seen: Mutex<Vec<CompleteRequest>>,
@@ -1411,6 +1468,8 @@ override_approvers: [\"pr-author\"]
         base_files: HashMap<(String, String), String>,
         changed_file_requests: Mutex<Vec<(String, String, u64)>>,
         clone_url_requests: Mutex<Vec<(String, String)>>,
+        /// When set, `get_compare_diff` fails with this error.
+        compare_error: Option<String>,
         compare_requests: Mutex<Vec<(String, String, String, String)>>,
         /// When set, `get_file_content` fails with this non-404 error.
         file_error: Option<String>,
@@ -1432,6 +1491,11 @@ override_approvers: [\"pr-author\"]
         fn with_base_file(mut self, ref_name: &str, path: &str, body: &str) -> Self {
             self.base_files
                 .insert((ref_name.to_owned(), path.to_owned()), body.to_owned());
+            self
+        }
+
+        fn with_compare_error(mut self, message: &str) -> Self {
+            self.compare_error = Some(message.to_owned());
             self
         }
 
@@ -1521,6 +1585,9 @@ override_approvers: [\"pr-author\"]
                 base.to_owned(),
                 head.to_owned(),
             ));
+            if let Some(message) = self.compare_error.as_ref() {
+                return Err(ar_forge::HostError::new(message.clone()));
+            }
             Ok("diff --git a/src/lib.rs b/src/lib.rs\n+new\n".to_owned())
         }
 
@@ -1778,6 +1845,7 @@ override_approvers: [\"pr-author\"]
             None,
             &job,
             &test_base_ref(),
+            None,
         )
         .await;
 
@@ -1844,6 +1912,17 @@ override_approvers: [\"pr-author\"]
         head: &[(&str, &str)],
         base_only: &[(&str, &str)],
     ) -> PrRepo {
+        pr_repo_with_pushes(fork, &[head], base_only).0
+    }
+
+    /// Like [`pr_repo_with`], with the `topic` branch built from one commit
+    /// per entry of `pushes`. Also returns each push's commit SHA; the last
+    /// is the head.
+    fn pr_repo_with_pushes(
+        fork: &[(&str, &str)],
+        pushes: &[&[(&str, &str)]],
+        base_only: &[(&str, &str)],
+    ) -> (PrRepo, Vec<String>) {
         let dir = tempfile::tempdir().unwrap();
         let git = |args: &[&str]| {
             // Same hook-safe environment as `head_repo_with`.
@@ -1885,16 +1964,120 @@ override_approvers: [\"pr-author\"]
         git(&["init", "-q"]);
         commit(fork, "fork point");
         git(&["checkout", "-q", "-b", "topic"]);
-        let head_sha = commit(head, "pull request");
+        let push_shas: Vec<String> = pushes
+            .iter()
+            .map(|files| commit(files, "pull request push"))
+            .collect();
+        let head_sha = push_shas.last().cloned().unwrap();
         git(&["checkout", "-q", "main"]);
         let base_sha = commit(base_only, "base moved on");
         let url = format!("file://{}", dir.path().display());
-        PrRepo {
-            _dir: dir,
-            base_sha,
-            head_sha,
-            url,
-        }
+        (
+            PrRepo {
+                _dir: dir,
+                base_sha,
+                head_sha,
+                url,
+            },
+            push_shas,
+        )
+    }
+
+    /// Run `job` with `previous_sha` recorded as the last reviewed commit.
+    async fn run_incremental(
+        host: &RecordingReviewHost,
+        provider: Arc<CannedProvider>,
+        previous_sha: &str,
+        job: ReviewJob,
+    ) {
+        let history = InMemoryReviewHistory::new();
+        history
+            .record(
+                &PrKey {
+                    owner: job.owner.clone(),
+                    repo: job.repo.clone(),
+                    pr_number: job.pr_number,
+                },
+                previous_sha,
+            )
+            .await
+            .unwrap();
+        let llm = router_with(provider);
+        run_review_job(host, &llm, "", "", &history, None, None, None, job).await;
+    }
+
+    #[tokio::test]
+    async fn incremental_review_diffs_new_commits_locally_when_the_host_compare_is_too_large() {
+        let (pr, pushes) = pr_repo_with_pushes(
+            &[("src/lib.rs", "pub fn old() {}\n")],
+            &[
+                &[("src/first.rs", "pub fn FIRST_PUSH() {}\n")],
+                &[("src/second.rs", "pub fn SECOND_PUSH() {}\n")],
+            ],
+            &[],
+        );
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url(&pr.url)
+            .with_pr_base_sha(&pr.base_sha)
+            .with_compare_error(DIFF_TOO_LARGE);
+        let provider = Arc::new(CannedProvider::new(vec![]));
+
+        run_incremental(
+            &host,
+            Arc::clone(&provider),
+            &pushes[0],
+            job_at(&pr.head_sha),
+        )
+        .await;
+
+        let prompt = provider.last_user_prompt().expect("LLM called");
+        assert!(prompt.contains("+pub fn SECOND_PUSH() {}"), "{prompt}");
+        assert!(
+            !prompt.contains("FIRST_PUSH"),
+            "an incremental review covers only the commits since the previous review: {prompt}"
+        );
+        assert!(
+            host.compare_requests.lock().unwrap().is_empty(),
+            "the host's compare diff must not be fetched when the local diff succeeds"
+        );
+    }
+
+    #[tokio::test]
+    async fn incremental_review_falls_back_to_a_full_review_when_the_previous_commit_is_gone() {
+        let (pr, _pushes) = pr_repo_with_pushes(
+            &[("src/lib.rs", "pub fn old() {}\n")],
+            &[
+                &[("src/first.rs", "pub fn FIRST_PUSH() {}\n")],
+                &[("src/second.rs", "pub fn SECOND_PUSH() {}\n")],
+            ],
+            &[],
+        );
+        // A force push removed the reviewed commit: neither the workspace
+        // nor the host's compare endpoint can find it.
+        let host = RecordingReviewHost::default()
+            .with_head_clone_url(&pr.url)
+            .with_pr_base_sha(&pr.base_sha)
+            .with_compare_error("API error 404: Not Found");
+        let provider = Arc::new(CannedProvider::new(vec![]));
+
+        run_incremental(
+            &host,
+            Arc::clone(&provider),
+            "0123456789abcdef0123456789abcdef01234567",
+            job_at(&pr.head_sha),
+        )
+        .await;
+
+        assert_eq!(host.compare_requests.lock().unwrap().len(), 1);
+        let prompt = provider.last_user_prompt().expect("LLM called");
+        assert!(
+            prompt.contains("FIRST_PUSH") && prompt.contains("SECOND_PUSH"),
+            "a full review covers every commit of the pull request: {prompt}"
+        );
+        assert!(
+            host.pr_diff_requests.lock().unwrap().is_empty(),
+            "the full review still uses the local merge-base diff"
+        );
     }
 
     #[tokio::test]
@@ -2212,6 +2395,7 @@ override_approvers: [\"pr-author\"]
             None,
             &job_at(&head.sha),
             &test_base_ref(),
+            None,
         )
         .await;
 
