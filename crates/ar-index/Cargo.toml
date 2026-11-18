@@ -27,3 +27,6 @@ ar-llm = { path = "../ar-llm" }
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 tempfile = "3"
+
+[lints]
+workspace = true

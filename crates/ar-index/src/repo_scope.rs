@@ -5,20 +5,23 @@
 //! a repository mirrored between Forgejo and GitHub under the same
 //! `owner/repo` shares its learnings.
 
+use alloc::fmt;
 use serde::{Deserialize, Serialize};
-use std::fmt;
 
 /// Lowercased `owner/repo` scope of a repository.
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 #[serde(try_from = "String", into = "String")]
 pub struct RepoScope {
+    /// Lowercased repository owner (user or organization) name.
     owner: String,
+    /// Lowercased repository name within `owner`.
     repo: String,
 }
 
 impl RepoScope {
     /// Build a scope, lowercasing both parts so lookups are
     /// case-insensitive the way forge owner and repository names are.
+    #[inline]
     pub fn new(owner: impl AsRef<str>, repo: impl AsRef<str>) -> Self {
         Self {
             owner: owner.as_ref().to_lowercase(),
@@ -26,9 +29,18 @@ impl RepoScope {
         }
     }
 
+    /// Lowercased owner part of the scope.
+    #[inline]
+    #[must_use = "reading the owner has no side effects"]
+    pub fn owner(&self) -> &str {
+        &self.owner
+    }
+
     /// Parse the `owner/repo` form produced by [`fmt::Display`]. Returns
     /// `None` unless the value holds exactly one slash with a non-empty
     /// part on each side.
+    #[inline]
+    #[must_use = "parsing has no side effects; the scope is the only result"]
     pub fn parse(value: &str) -> Option<Self> {
         let (owner, repo) = value.split_once('/')?;
         if owner.is_empty() || repo.is_empty() || repo.contains('/') {
@@ -37,22 +49,23 @@ impl RepoScope {
         Some(Self::new(owner, repo))
     }
 
-    pub fn owner(&self) -> &str {
-        &self.owner
-    }
-
+    /// Lowercased repository-name part of the scope.
+    #[inline]
+    #[must_use = "reading the repository name has no side effects"]
     pub fn repo(&self) -> &str {
         &self.repo
     }
 }
 
 impl fmt::Display for RepoScope {
+    #[inline]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         write!(f, "{}/{}", self.owner, self.repo)
     }
 }
 
 impl From<RepoScope> for String {
+    #[inline]
     fn from(scope: RepoScope) -> Self {
         scope.to_string()
     }
@@ -61,6 +74,7 @@ impl From<RepoScope> for String {
 impl TryFrom<String> for RepoScope {
     type Error = String;
 
+    #[inline]
     fn try_from(value: String) -> Result<Self, Self::Error> {
         Self::parse(&value).ok_or_else(|| format!("invalid repository scope: {value}"))
     }
@@ -73,6 +87,8 @@ impl TryFrom<String> for RepoScope {
 /// Before learnings carried a repository column, review corrections
 /// embedded their repository in this prefix; stores use it to scope
 /// such rows. Any other text is unscoped and yields `None`.
+#[inline]
+#[must_use = "parsing has no side effects; the scope is the only result"]
 pub fn parse_legacy_correction_repo(text: &str) -> Option<RepoScope> {
     let rest = text.strip_prefix("Repository ")?;
     let token_end = rest.find(char::is_whitespace)?;

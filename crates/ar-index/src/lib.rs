@@ -4,6 +4,8 @@
 //! in-memory vector stores, and learnings stores used by review context
 //! construction and chat `remember`/`forget` workflows.
 
+extern crate alloc;
+
 pub mod dynamodb_learnings;
 pub mod embed;
 pub mod learnings;
@@ -14,23 +16,36 @@ pub mod symbols;
 pub mod vector_store;
 pub mod walker;
 
-pub use dynamodb_learnings::{
-    AwsDynamoDbLearningsClient, DynamoDbLearningsClient, DynamoDbLearningsStore,
+#[expect(
+    clippy::useless_attribute,
+    reason = "clippy flags any lint attribute on a use item outside its fixed list, which omits \
+              pub_use, yet the pub_use expectation below is what suppresses that lint here"
+)]
+#[expect(
+    clippy::pub_use,
+    reason = "ar-chat, ar-cli, ar-gateway, ar-orchestrator and ar-review import these items from \
+              the crate root (for example ar_index::LearningsStore and \
+              ar_index::embed_symbols_with_config); dropping the re-exports breaks them"
+)]
+pub use crate::{
+    dynamodb_learnings::{
+        AwsDynamoDbLearningsClient, DynamoDbLearningsClient, DynamoDbLearningsStore,
+    },
+    embed::{
+        embed_symbols, embed_symbols_with_config, EmbedConfig, EmbedError, EmbeddedSymbol,
+        DEFAULT_EMBED_BATCH_SIZE, DEFAULT_EMBED_INPUT_CAP_BYTES,
+    },
+    learnings::{
+        InMemoryLearningsStore, LearningRecord, LearningSource, LearningsError, LearningsFilter,
+        LearningsStore, ScoredLearning,
+    },
+    repo_scope::{parse_legacy_correction_repo, RepoScope},
+    sqlite_learnings::SqliteLearningsStore,
+    sqlite_vector_store::SqliteVectorStore,
+    symbols::{
+        extract_go_symbols, extract_python_symbols, extract_rust_symbols, extract_symbols_for_path,
+        extract_tsx_symbols, extract_typescript_symbols, ExtractError, Symbol, SymbolKind,
+    },
+    vector_store::{InMemoryVectorStore, ScoredSymbol, VectorStore, VectorStoreError},
+    walker::{index_workspace, IndexedSymbol, WalkError},
 };
-pub use embed::{
-    embed_symbols, embed_symbols_with_config, EmbedConfig, EmbedError, EmbeddedSymbol,
-    DEFAULT_EMBED_BATCH_SIZE, DEFAULT_EMBED_INPUT_CAP_BYTES,
-};
-pub use learnings::{
-    InMemoryLearningsStore, LearningRecord, LearningSource, LearningsError, LearningsFilter,
-    LearningsStore, ScoredLearning,
-};
-pub use repo_scope::{parse_legacy_correction_repo, RepoScope};
-pub use sqlite_learnings::SqliteLearningsStore;
-pub use sqlite_vector_store::SqliteVectorStore;
-pub use symbols::{
-    extract_go_symbols, extract_python_symbols, extract_rust_symbols, extract_symbols_for_path,
-    extract_tsx_symbols, extract_typescript_symbols, ExtractError, Symbol, SymbolKind,
-};
-pub use vector_store::{InMemoryVectorStore, ScoredSymbol, VectorStore, VectorStoreError};
-pub use walker::{index_workspace, IndexedSymbol, WalkError};
