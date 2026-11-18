@@ -11,12 +11,19 @@
 
 use async_trait::async_trait;
 use std::collections::HashMap;
+use tokio::sync::Mutex;
 
+/// Identifies one pull request on one repository.
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "ar-cli (commands) and ar-gateway (poller, webhook) build PrKey by struct literal; \
+              #[non_exhaustive] would break those dependents"
+)]
 pub struct PrKey {
     pub owner: String,
-    pub repo: String,
     pub pr_number: u64,
+    pub repo: String,
 }
 
 #[derive(Debug, thiserror::Error)]
@@ -27,8 +34,18 @@ pub enum HistoryError {
 
 #[async_trait]
 pub trait ReviewHistory: Send + Sync {
+    /// Drop the recorded SHA — used when a PR is closed or reopened
+    /// to force the next review to be a full one.
+    async fn clear(&self, key: &PrKey) -> Result<(), HistoryError>;
+
     /// Look up the SHA we most recently posted a review for, if any.
     async fn last_reviewed(&self, key: &PrKey) -> Result<Option<String>, HistoryError>;
+
+    /// List every PR we've recorded a review for. Used by the chat
+    /// poller to know which PRs to scan for new mentions; the
+    /// `pull_request_review_comment` webhook is unreliable on
+    /// Forgejo so a periodic poll picks up the gap.
+    async fn list_known(&self) -> Result<Vec<PrKey>, HistoryError>;
 
     /// Record that we just posted a review at `sha`. Replaces any
     /// previous record for the same PR.
@@ -39,6 +56,7 @@ pub trait ReviewHistory: Send + Sync {
     ///
     /// Default implementation preserves existing behavior for
     /// backends that only track SHA history.
+    #[inline]
     async fn record_with_cost(
         &self,
         key: &PrKey,
@@ -47,24 +65,24 @@ pub trait ReviewHistory: Send + Sync {
     ) -> Result<(), HistoryError> {
         self.record(key, sha).await
     }
-
-    /// Drop the recorded SHA — used when a PR is closed or reopened
-    /// to force the next review to be a full one.
-    async fn clear(&self, key: &PrKey) -> Result<(), HistoryError>;
-
-    /// List every PR we've recorded a review for. Used by the chat
-    /// poller to know which PRs to scan for new mentions; the
-    /// `pull_request_review_comment` webhook is unreliable on
-    /// Forgejo so a periodic poll picks up the gap.
-    async fn list_known(&self) -> Result<Vec<PrKey>, HistoryError>;
 }
 
+/// Process-local [`ReviewHistory`]; forgets everything on restart.
 #[derive(Default)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "ar-cli (commands) and ar-gateway (startup, poller) import this public name; \
+              renaming it breaks them"
+)]
 pub struct InMemoryReviewHistory {
-    inner: tokio::sync::Mutex<HashMap<PrKey, String>>,
+    /// Last reviewed head SHA per PR.
+    inner: Mutex<HashMap<PrKey, String>>,
 }
 
 impl InMemoryReviewHistory {
+    /// An empty history.
+    #[inline]
+    #[must_use = "the history does nothing until a dispatcher records into it"]
     pub fn new() -> Self {
         Self::default()
     }
@@ -72,26 +90,34 @@ impl InMemoryReviewHistory {
 
 #[async_trait]
 impl ReviewHistory for InMemoryReviewHistory {
-    async fn last_reviewed(&self, key: &PrKey) -> Result<Option<String>, HistoryError> {
-        Ok(self.inner.lock().await.get(key).cloned())
-    }
-
-    async fn record(&self, key: &PrKey, sha: &str) -> Result<(), HistoryError> {
-        self.inner.lock().await.insert(key.clone(), sha.to_string());
-        Ok(())
-    }
-
+    #[inline]
     async fn clear(&self, key: &PrKey) -> Result<(), HistoryError> {
         self.inner.lock().await.remove(key);
         Ok(())
     }
 
+    #[inline]
+    async fn last_reviewed(&self, key: &PrKey) -> Result<Option<String>, HistoryError> {
+        Ok(self.inner.lock().await.get(key).cloned())
+    }
+
+    #[inline]
     async fn list_known(&self) -> Result<Vec<PrKey>, HistoryError> {
         Ok(self.inner.lock().await.keys().cloned().collect())
+    }
+
+    #[inline]
+    async fn record(&self, key: &PrKey, sha: &str) -> Result<(), HistoryError> {
+        self.inner.lock().await.insert(key.clone(), sha.to_owned());
+        Ok(())
     }
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "a failed storage call should fail the test at that line; unwrap reports the error and the tests stay as plain assertions"
+)]
 mod tests {
     use super::*;
 
@@ -105,56 +131,71 @@ mod tests {
 
     #[tokio::test]
     async fn unknown_pr_returns_none() {
-        let h = InMemoryReviewHistory::new();
-        assert_eq!(h.last_reviewed(&key("o", "r", 1)).await.unwrap(), None);
+        let history = InMemoryReviewHistory::new();
+        assert_eq!(
+            history.last_reviewed(&key("o", "r", 1)).await.unwrap(),
+            None
+        );
     }
 
     #[tokio::test]
     async fn record_then_lookup_returns_the_sha() {
-        let h = InMemoryReviewHistory::new();
-        let k = key("o", "r", 1);
-        h.record(&k, "deadbeef").await.unwrap();
+        let history = InMemoryReviewHistory::new();
+        let pr_key = key("o", "r", 1);
+        history.record(&pr_key, "deadbeef").await.unwrap();
         assert_eq!(
-            h.last_reviewed(&k).await.unwrap().as_deref(),
+            history.last_reviewed(&pr_key).await.unwrap().as_deref(),
             Some("deadbeef")
         );
     }
 
     #[tokio::test]
     async fn record_replaces_previous_sha_for_same_pr() {
-        let h = InMemoryReviewHistory::new();
-        let k = key("o", "r", 1);
-        h.record(&k, "old").await.unwrap();
-        h.record(&k, "new").await.unwrap();
-        assert_eq!(h.last_reviewed(&k).await.unwrap().as_deref(), Some("new"));
+        let history = InMemoryReviewHistory::new();
+        let pr_key = key("o", "r", 1);
+        history.record(&pr_key, "old").await.unwrap();
+        history.record(&pr_key, "new").await.unwrap();
+        assert_eq!(
+            history.last_reviewed(&pr_key).await.unwrap().as_deref(),
+            Some("new")
+        );
     }
 
     #[tokio::test]
     async fn clear_drops_the_record() {
-        let h = InMemoryReviewHistory::new();
-        let k = key("o", "r", 1);
-        h.record(&k, "deadbeef").await.unwrap();
-        h.clear(&k).await.unwrap();
-        assert_eq!(h.last_reviewed(&k).await.unwrap(), None);
+        let history = InMemoryReviewHistory::new();
+        let pr_key = key("o", "r", 1);
+        history.record(&pr_key, "deadbeef").await.unwrap();
+        history.clear(&pr_key).await.unwrap();
+        assert_eq!(history.last_reviewed(&pr_key).await.unwrap(), None);
     }
 
     #[tokio::test]
     async fn clear_on_unknown_key_is_a_noop() {
-        let h = InMemoryReviewHistory::new();
-        h.clear(&key("o", "r", 999)).await.unwrap();
+        let history = InMemoryReviewHistory::new();
+        history.clear(&key("o", "r", 999)).await.unwrap();
     }
 
     #[tokio::test]
     async fn distinct_prs_are_isolated() {
-        let h = InMemoryReviewHistory::new();
+        let history = InMemoryReviewHistory::new();
         let k1 = key("o", "r", 1);
         let k2 = key("o", "r", 2);
         let k3 = key("o", "other-repo", 1);
-        h.record(&k1, "a").await.unwrap();
-        h.record(&k2, "b").await.unwrap();
-        h.record(&k3, "c").await.unwrap();
-        assert_eq!(h.last_reviewed(&k1).await.unwrap().as_deref(), Some("a"));
-        assert_eq!(h.last_reviewed(&k2).await.unwrap().as_deref(), Some("b"));
-        assert_eq!(h.last_reviewed(&k3).await.unwrap().as_deref(), Some("c"));
+        history.record(&k1, "a").await.unwrap();
+        history.record(&k2, "b").await.unwrap();
+        history.record(&k3, "c").await.unwrap();
+        assert_eq!(
+            history.last_reviewed(&k1).await.unwrap().as_deref(),
+            Some("a")
+        );
+        assert_eq!(
+            history.last_reviewed(&k2).await.unwrap().as_deref(),
+            Some("b")
+        );
+        assert_eq!(
+            history.last_reviewed(&k3).await.unwrap().as_deref(),
+            Some("c")
+        );
     }
 }

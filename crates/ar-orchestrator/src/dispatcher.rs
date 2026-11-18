@@ -1,4 +1,5 @@
 use crate::review_history::{InMemoryReviewHistory, PrKey, ReviewHistory};
+use alloc::sync::Arc;
 use ar_forge::ReviewHost;
 use ar_forgejo::{Client as ForgejoClient, CommitStatus, CommitStatusState, PullRequestEvent};
 use ar_index::{LearningsStore, VectorStore};
@@ -9,10 +10,24 @@ use ar_review::{
     ReviewArgs, ReviewError, VerifyMode, WorkspaceError,
 };
 use async_trait::async_trait;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use core::time::Duration;
+use std::env;
+use std::path::Path;
+use std::time::Instant;
+use tokio::sync::Semaphore;
 
+/// Commit-status context every review status is posted under.
 const STATUS_CONTEXT: &str = "auto_review";
+
+/// Forgejo's commit-status `description` is capped at 255 chars.
+/// Posting more returns 422 and the user sees no status update at
+/// all — leaving the PR stuck on "Pending" with no operator-visible
+/// signal that the review actually completed (with an error). LLM
+/// errors in particular can dump multi-hundred-char provider response
+/// bodies into the format string. Cap at 240 to leave room for the
+/// status badge UI's own padding and end with an ellipsis so users
+/// know it was truncated.
+const MAX_STATUS_DESCRIPTION: usize = 240;
 
 /// Observed at the boundary of a single review job's lifecycle.
 /// Wired into the gateway's Prometheus counters via
@@ -20,6 +35,26 @@ const STATUS_CONTEXT: &str = "auto_review";
 /// having to know about the metrics format.
 #[derive(Debug, Clone)]
 pub enum ReviewObservation {
+    /// A review terminated with an error (LLM/Workspace/Forgejo
+    /// failure or unhealable JSON). `error_class` is one of:
+    /// `"forgejo"`, `"workspace"`, `"llm"`, `"unhealable"`. Stable
+    /// strings so operators can label dashboards.
+    Failed {
+        duration: Duration,
+        error_class: &'static str,
+    },
+    /// The dispatch had to wait on the concurrency-cap semaphore
+    /// before the review could begin. Counts how often the cap is
+    /// engaging — sustained increases mean
+    /// `AR_REVIEW_CONCURRENCY` is too tight (or traffic exceeds
+    /// capacity). Fires AT MOST once per dispatch, before any
+    /// other observation; firing implies a `Started` will follow.
+    QueueWait,
+    /// The review was a no-op for a benign reason — same SHA already
+    /// reviewed (and not forced), all-trivial files, or
+    /// `enabled: false`. Distinguished from Failed because operators
+    /// shouldn't alert on these.
+    Skipped { reason: &'static str },
     /// A review just started executing. Posted before any I/O the
     /// dispatcher does on the PR's behalf, so it counts review
     /// *attempts* including ones that immediately fail.
@@ -37,26 +72,6 @@ pub enum ReviewObservation {
         findings_count: usize,
         verifier_dropped: usize,
     },
-    /// A review terminated with an error (LLM/Workspace/Forgejo
-    /// failure or unhealable JSON). `error_class` is one of:
-    /// `"forgejo"`, `"workspace"`, `"llm"`, `"unhealable"`. Stable
-    /// strings so operators can label dashboards.
-    Failed {
-        duration: Duration,
-        error_class: &'static str,
-    },
-    /// The review was a no-op for a benign reason — same SHA already
-    /// reviewed (and not forced), all-trivial files, or
-    /// `enabled: false`. Distinguished from Failed because operators
-    /// shouldn't alert on these.
-    Skipped { reason: &'static str },
-    /// The dispatch had to wait on the concurrency-cap semaphore
-    /// before the review could begin. Counts how often the cap is
-    /// engaging — sustained increases mean
-    /// `AR_REVIEW_CONCURRENCY` is too tight (or traffic exceeds
-    /// capacity). Fires AT MOST once per dispatch, before any
-    /// other observation; firing implies a `Started` will follow.
-    QueueWait,
 }
 
 /// Optional sink for [`ReviewObservation`]s. The gateway provides
@@ -70,37 +85,45 @@ pub trait ReviewObserver: Send + Sync {
 /// One review job's worth of input — extracted from a webhook event so the
 /// dispatcher can be tested without depending on the full event shape.
 #[derive(Debug, Clone)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "ar-agentcore, ar-chat (handler), ar-cli (commands) and ar-gateway (webhook) build \
+              ReviewJob by struct literal; #[non_exhaustive] would break those dependents"
+)]
 pub struct ReviewJob {
-    pub owner: String,
-    pub repo: String,
-    pub pr_number: u64,
-    pub head_sha: String,
-    pub pr_title: String,
-    pub pr_body: String,
     /// When true, bypasses the per-PR review-history dedup check and
     /// forces a fresh review even if this SHA was already reviewed.
     /// Used by the chat handler's `re-review` command.
     pub force: bool,
+    pub head_sha: String,
+    pub owner: String,
+    pub pr_body: String,
+    pub pr_number: u64,
+    pub pr_title: String,
+    pub repo: String,
 }
 
 impl ReviewJob {
     /// Learnings scope of the reviewed repository: the lowercased
     /// `owner/repo`, so a mixed-case job still finds its learnings.
+    #[inline]
+    #[must_use = "computing the scope has no side effects"]
     pub fn repo_scope(&self) -> ar_index::RepoScope {
         ar_index::RepoScope::new(&self.owner, &self.repo)
     }
 }
 
 impl From<&PullRequestEvent> for ReviewJob {
+    #[inline]
     fn from(evt: &PullRequestEvent) -> Self {
         Self {
-            owner: evt.repository.owner.login.clone(),
-            repo: evt.repository.name.clone(),
-            pr_number: evt.pull_request.number,
-            head_sha: evt.pull_request.head.sha.clone(),
-            pr_title: evt.pull_request.title.clone(),
-            pr_body: evt.pull_request.body.clone(),
             force: false,
+            head_sha: evt.pull_request.head.sha.clone(),
+            owner: evt.repository.owner.login.clone(),
+            pr_body: evt.pull_request.body.clone(),
+            pr_number: evt.pull_request.number,
+            pr_title: evt.pull_request.title.clone(),
+            repo: evt.repository.name.clone(),
         }
     }
 }
@@ -109,6 +132,11 @@ impl From<&PullRequestEvent> for ReviewJob {
 /// `dispatch` and returns immediately; the actual review may run for
 /// minutes in the background.
 #[async_trait]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "ar-agentcore, ar-chat (handler), ar-gateway (lib, startup, webhook, poller) and \
+              ar-cli (commands) import this public trait name; renaming it breaks them"
+)]
 pub trait JobDispatcher: Send + Sync {
     async fn dispatch(&self, job: ReviewJob);
 }
@@ -116,10 +144,21 @@ pub trait JobDispatcher: Send + Sync {
 /// Discards every job. Useful for tests that exercise the gateway's
 /// dispatch surface without wiring the full review pipeline.
 #[derive(Debug, Default, Clone)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "ar-gateway (startup, webhook, poller, github_webhook) and ar-cli (commands) import \
+              this public name; renaming it breaks them"
+)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "a stateless unit struct that ar-gateway and ar-cli use as a value by name; \
+              #[non_exhaustive] would stop them constructing it"
+)]
 pub struct NoOpDispatcher;
 
 #[async_trait]
 impl JobDispatcher for NoOpDispatcher {
+    #[inline]
     async fn dispatch(&self, _job: ReviewJob) {}
 }
 
@@ -127,50 +166,76 @@ impl JobDispatcher for NoOpDispatcher {
 /// after the review job has run to completion. Unlike [`SpawningDispatcher`],
 /// this does not spawn a background task.
 #[derive(Clone)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "ar-cli (commands) imports this public name; renaming it breaks that dependent"
+)]
 pub struct InlineDispatcher {
-    host: Arc<dyn ReviewHost>,
-    llm: Arc<LlmRouter>,
+    /// Review history used for same-SHA dedup and incremental diffs.
     history: Arc<dyn ReviewHistory>,
+    /// Repository host the review reads from and posts to.
+    host: Arc<dyn ReviewHost>,
+    /// Optional learnings store for repository guidance.
     learnings: Option<Arc<dyn LearningsStore>>,
-    vector_store: Option<Arc<dyn VectorStore>>,
+    /// Tiered LLM router for the review pipeline.
+    llm: Arc<LlmRouter>,
+    /// Optional metrics sink for review outcomes.
     observer: Option<Arc<dyn ReviewObserver>>,
+    /// Optional shared vector store for symbol embeddings.
+    vector_store: Option<Arc<dyn VectorStore>>,
 }
 
 impl InlineDispatcher {
+    /// Dispatcher over `host` and `llm` with in-memory history and no
+    /// optional stores.
+    #[inline]
     pub fn new_with_host(host: Arc<dyn ReviewHost>, llm: Arc<LlmRouter>) -> Self {
         Self {
-            host,
-            llm,
             history: Arc::new(InMemoryReviewHistory::new()),
+            host,
             learnings: None,
-            vector_store: None,
+            llm,
             observer: None,
+            vector_store: None,
         }
     }
 
+    /// Replace the default in-memory history.
+    #[inline]
+    #[must_use = "builder method: returns the updated dispatcher and does nothing if dropped"]
     pub fn with_history(mut self, history: Arc<dyn ReviewHistory>) -> Self {
         self.history = history;
         self
     }
 
+    /// Wire in a learnings store.
+    #[inline]
+    #[must_use = "builder method: returns the updated dispatcher and does nothing if dropped"]
     pub fn with_learnings(mut self, learnings: Arc<dyn LearningsStore>) -> Self {
         self.learnings = Some(learnings);
         self
     }
 
-    pub fn with_vector_store(mut self, store: Arc<dyn VectorStore>) -> Self {
-        self.vector_store = Some(store);
+    /// Wire in a metrics observer.
+    #[inline]
+    #[must_use = "builder method: returns the updated dispatcher and does nothing if dropped"]
+    pub fn with_observer(mut self, observer: Arc<dyn ReviewObserver>) -> Self {
+        self.observer = Some(observer);
         self
     }
 
-    pub fn with_observer(mut self, observer: Arc<dyn ReviewObserver>) -> Self {
-        self.observer = Some(observer);
+    /// Wire in a shared vector store.
+    #[inline]
+    #[must_use = "builder method: returns the updated dispatcher and does nothing if dropped"]
+    pub fn with_vector_store(mut self, store: Arc<dyn VectorStore>) -> Self {
+        self.vector_store = Some(store);
         self
     }
 }
 
 #[async_trait]
 impl JobDispatcher for InlineDispatcher {
+    #[inline]
     async fn dispatch(&self, job: ReviewJob) {
         run_review_job(
             self.host.as_ref(),
@@ -195,29 +260,42 @@ impl JobDispatcher for InlineDispatcher {
 /// a [`ReviewHistory`] so subsequent commits on the same PR can use
 /// `compare_diff` instead of re-reviewing the whole PR.
 #[derive(Clone)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "ar-gateway (startup) imports this public name; renaming it breaks that dependent"
+)]
 pub struct SpawningDispatcher {
-    host: Arc<dyn ReviewHost>,
-    llm: Arc<LlmRouter>,
-    forgejo_base: Arc<String>,
-    forgejo_token: Arc<String>,
-    history: Arc<dyn ReviewHistory>,
-    learnings: Option<Arc<dyn LearningsStore>>,
-    /// Optional shared vector store for symbol embeddings. When set,
-    /// embeddings persist across reviews (and, when SQLite-backed,
-    /// across gateway restarts) so re-reviews of the same PR don't
-    /// re-embed unchanged symbols. None ⇒ build_review_context_with_store
-    /// constructs a per-call in-memory store as a back-compat default.
-    vector_store: Option<Arc<dyn VectorStore>>,
-    observer: Option<Arc<dyn ReviewObserver>>,
     /// Optional cap on concurrent in-flight reviews. When set, a
     /// burst of webhooks beyond the cap waits in the spawn queue
     /// rather than thundering through the LLM and workspace
     /// tmpdirs simultaneously. None = unlimited (back-compat
     /// default; small deployments and tests don't need a cap).
-    concurrency_limit: Option<Arc<tokio::sync::Semaphore>>,
+    concurrency_limit: Option<Arc<Semaphore>>,
+    /// Forgejo base URL handed to each review job.
+    forgejo_base: Arc<str>,
+    /// Forgejo bot token handed to each review job.
+    forgejo_token: Arc<str>,
+    /// Review history used for same-SHA dedup and incremental diffs.
+    history: Arc<dyn ReviewHistory>,
+    /// Repository host the review reads from and posts to.
+    host: Arc<dyn ReviewHost>,
+    /// Optional learnings store for repository guidance.
+    learnings: Option<Arc<dyn LearningsStore>>,
+    /// Tiered LLM router for the review pipeline.
+    llm: Arc<LlmRouter>,
+    /// Optional metrics sink for review outcomes.
+    observer: Option<Arc<dyn ReviewObserver>>,
+    /// Optional shared vector store for symbol embeddings. When set,
+    /// embeddings persist across reviews (and, when SQLite-backed,
+    /// across gateway restarts) so re-reviews of the same PR don't
+    /// re-embed unchanged symbols. None ⇒ `build_review_context_with_store`
+    /// constructs a per-call in-memory store as a back-compat default.
+    vector_store: Option<Arc<dyn VectorStore>>,
 }
 
 impl SpawningDispatcher {
+    /// Dispatcher over a Forgejo client.
+    #[inline]
     pub fn new(
         forgejo: Arc<ForgejoClient>,
         llm: Arc<LlmRouter>,
@@ -227,6 +305,8 @@ impl SpawningDispatcher {
         Self::new_with_host(forgejo, llm, forgejo_base, forgejo_token)
     }
 
+    /// Dispatcher over any [`ReviewHost`].
+    #[inline]
     pub fn new_with_host(
         host: Arc<dyn ReviewHost>,
         llm: Arc<LlmRouter>,
@@ -234,15 +314,15 @@ impl SpawningDispatcher {
         forgejo_token: impl Into<String>,
     ) -> Self {
         Self {
-            host,
-            llm,
-            forgejo_base: Arc::new(forgejo_base.into()),
-            forgejo_token: Arc::new(forgejo_token.into()),
-            history: Arc::new(InMemoryReviewHistory::new()),
-            learnings: None,
-            vector_store: None,
-            observer: None,
             concurrency_limit: None,
+            forgejo_base: Arc::from(forgejo_base.into()),
+            forgejo_token: Arc::from(forgejo_token.into()),
+            history: Arc::new(InMemoryReviewHistory::new()),
+            host,
+            learnings: None,
+            llm,
+            observer: None,
+            vector_store: None,
         }
     }
 
@@ -256,21 +336,17 @@ impl SpawningDispatcher {
     /// in-flight LLM calls. On a single-tenant box that's fine for
     /// small N; for high-traffic instances or expensive LLMs it
     /// matters.
+    #[inline]
+    #[must_use = "builder method: returns the updated dispatcher and does nothing if dropped"]
     pub fn with_concurrency_limit(mut self, max: usize) -> Self {
-        self.concurrency_limit = Some(Arc::new(tokio::sync::Semaphore::new(max.max(1))));
-        self
-    }
-
-    /// Wire in a metrics observer so review outcomes feed the
-    /// gateway's `/metrics` endpoint. Without one, reviews still
-    /// run but are invisible to Prometheus.
-    pub fn with_observer(mut self, observer: Arc<dyn ReviewObserver>) -> Self {
-        self.observer = Some(observer);
+        self.concurrency_limit = Some(Arc::new(Semaphore::new(max.max(1))));
         self
     }
 
     /// Replace the default in-memory history with a custom one
     /// (e.g. SQLite-backed for persistence across restarts).
+    #[inline]
+    #[must_use = "builder method: returns the updated dispatcher and does nothing if dropped"]
     pub fn with_history(mut self, history: Arc<dyn ReviewHistory>) -> Self {
         self.history = history;
         self
@@ -278,15 +354,29 @@ impl SpawningDispatcher {
 
     /// Wire in a learnings store so remembered guidance gets pulled
     /// into the RAG context for future reviews. When unset,
-    /// build_review_context skips the learnings-retrieval step.
+    /// `build_review_context` skips the learnings-retrieval step.
+    #[inline]
+    #[must_use = "builder method: returns the updated dispatcher and does nothing if dropped"]
     pub fn with_learnings(mut self, learnings: Arc<dyn LearningsStore>) -> Self {
         self.learnings = Some(learnings);
+        self
+    }
+
+    /// Wire in a metrics observer so review outcomes feed the
+    /// gateway's `/metrics` endpoint. Without one, reviews still
+    /// run but are invisible to Prometheus.
+    #[inline]
+    #[must_use = "builder method: returns the updated dispatcher and does nothing if dropped"]
+    pub fn with_observer(mut self, observer: Arc<dyn ReviewObserver>) -> Self {
+        self.observer = Some(observer);
         self
     }
 
     /// Wire in a shared vector store so symbol embeddings persist
     /// across reviews. Without this, every review constructs a
     /// throwaway in-memory store and re-embeds the entire workspace.
+    #[inline]
+    #[must_use = "builder method: returns the updated dispatcher and does nothing if dropped"]
     pub fn with_vector_store(mut self, store: Arc<dyn VectorStore>) -> Self {
         self.vector_store = Some(store);
         self
@@ -295,12 +385,13 @@ impl SpawningDispatcher {
 
 #[async_trait]
 impl JobDispatcher for SpawningDispatcher {
+    #[inline]
     async fn dispatch(&self, job: ReviewJob) {
-        let forgejo = self.host.clone();
-        let llm = self.llm.clone();
-        let base = self.forgejo_base.clone();
-        let token = self.forgejo_token.clone();
-        let history = self.history.clone();
+        let forgejo = Arc::clone(&self.host);
+        let llm = Arc::clone(&self.llm);
+        let base = Arc::clone(&self.forgejo_base);
+        let token = Arc::clone(&self.forgejo_token);
+        let history = Arc::clone(&self.history);
         let learnings = self.learnings.clone();
         let vector_store = self.vector_store.clone();
         let observer = self.observer.clone();
@@ -315,7 +406,7 @@ impl JobDispatcher for SpawningDispatcher {
         let owner_for_status = job.owner.clone();
         let repo_for_status = job.repo.clone();
         let sha_for_status = job.head_sha.clone();
-        let forgejo_for_status = forgejo.clone();
+        let forgejo_for_status = Arc::clone(&forgejo);
         let observer_for_queue = observer.clone();
         let observer_for_panic = observer.clone();
         tokio::spawn(async move {
@@ -335,18 +426,17 @@ impl JobDispatcher for SpawningDispatcher {
                             obs.record(ReviewObservation::QueueWait);
                         }
                     }
-                    match sem.clone().acquire_owned().await {
-                        Ok(p) => Some(p),
-                        Err(_) => {
-                            // Semaphore was closed, which we never
-                            // do. Defensive: log and continue
-                            // without limiting rather than dropping
-                            // the review.
-                            tracing::warn!(
-                                "concurrency semaphore closed; running review without limit"
-                            );
-                            None
-                        }
+                    if let Ok(permit) = Arc::clone(sem).acquire_owned().await {
+                        Some(permit)
+                    } else {
+                        // Semaphore was closed, which we never
+                        // do. Defensive: log and continue
+                        // without limiting rather than dropping
+                        // the review.
+                        tracing::warn!(
+                            "concurrency semaphore closed; running review without limit"
+                        );
+                        None
                     }
                 }
                 None => None,
@@ -366,11 +456,11 @@ impl JobDispatcher for SpawningDispatcher {
                 )
                 .await;
             });
-            if let Err(e) = inner.await {
+            if let Err(err) = inner.await {
                 tracing::error!(
                     repo,
                     pr,
-                    error = %e,
+                    error = %err,
                     "review task panicked or was cancelled"
                 );
                 // Without this observation, a panic mid-review would
@@ -395,7 +485,7 @@ impl JobDispatcher for SpawningDispatcher {
                     description: "auto_review crashed; check logs".into(),
                     context: STATUS_CONTEXT.into(),
                 };
-                let _ = forgejo_for_status
+                if let Err(post_err) = forgejo_for_status
                     .post_commit_status(
                         &owner_for_status,
                         &repo_for_status,
@@ -403,12 +493,54 @@ impl JobDispatcher for SpawningDispatcher {
                         &status,
                     )
                     .await
-                    .inspect_err(|err| {
-                        tracing::warn!(error = %err, "failed to post crash status");
-                    });
+                {
+                    tracing::warn!(error = %post_err, "failed to post crash status");
+                }
             }
         });
     }
+}
+
+/// Errors from cloning the head workspace.
+#[derive(Debug, thiserror::Error)]
+enum WorkspacePrepError {
+    /// The Forgejo API call failed.
+    #[error("forgejo: {0}")]
+    Forgejo(#[from] ar_forgejo::Error),
+    /// The repository host could not supply a clone URL.
+    #[error("host: {0}")]
+    Host(#[from] ar_forge::HostError),
+    /// Cloning or checking out the workspace failed.
+    #[error("workspace: {0}")]
+    Workspace(#[from] WorkspaceError),
+}
+
+/// Result of [`prepare_workspace_context`].
+enum WorkspacePrep {
+    /// The base-branch config sets `enabled: false`; nothing was cloned.
+    DisabledByConfig,
+    /// Review should proceed with this config and context.
+    Ready(WorkspacePrepOutput),
+}
+
+/// Config, context and workspace prepared for a review.
+struct WorkspacePrepOutput {
+    /// Repository config read from the base branch through
+    /// [`load_repo_config_from_base`]; defaults when absent or unreadable.
+    config: RepoConfig,
+    /// The raw PR diff fetched for triage and
+    /// context building. Surfaced back so the review pipeline can
+    /// reuse it as `diff_override` instead of refetching the same
+    /// diff a second time. Empty string when the `get_pr_diff` call
+    /// failed during workspace/context prep (we degrade-but-continue;
+    /// the pipeline will refetch and likely also fail consistently).
+    raw_diff: String,
+    /// Rendered RAG context; empty when none could be built.
+    repo_context: String,
+    /// Held by the orchestrator until the review pipeline finishes
+    /// so the agentic verifier (when enabled) can inspect the
+    /// cloned working tree. `None` when cloning the head failed.
+    workspace: Option<PreparedWorkspace>,
 }
 
 /// Run one review job to completion.
@@ -421,7 +553,19 @@ impl JobDispatcher for SpawningDispatcher {
 /// 5. Post the final success/error commit status.
 ///
 /// Errors are logged and swallowed; the gateway has already returned 202.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "public entry point that ar-cli (commands) and both dispatchers call positionally; \
+              bundling the parameters into a struct changes its signature"
+)]
+#[expect(
+    clippy::cognitive_complexity,
+    clippy::too_many_lines,
+    reason = "the job's ordered early exits (same SHA, PR fetch, triage, disabled config) each \
+              post a status and an observation in a fixed sequence that dashboards rely on; \
+              keeping them in one function keeps that order visible"
+)]
+#[inline]
 pub async fn run_review_job(
     forgejo: &dyn ReviewHost,
     llm: &LlmRouter,
@@ -434,25 +578,25 @@ pub async fn run_review_job(
     job: ReviewJob,
 ) {
     let started_at = Instant::now();
-    let observe = |o: ReviewObservation| {
+    let observe = |observation: ReviewObservation| {
         if let Some(obs) = observer {
-            obs.record(o);
+            obs.record(observation);
         }
     };
     let pr_key = PrKey {
         owner: job.owner.clone(),
-        repo: job.repo.clone(),
         pr_number: job.pr_number,
+        repo: job.repo.clone(),
     };
     let last_reviewed_sha = match history.last_reviewed(&pr_key).await {
         Ok(sha) => sha,
-        Err(e) => {
-            tracing::warn!(error = %e, "review history lookup failed; treating as full review");
+        Err(err) => {
+            tracing::warn!(error = %err, "review history lookup failed; treating as full review");
             None
         }
     };
     let mut incremental_diff: Option<String> = None;
-    if let Some(prev) = &last_reviewed_sha {
+    if let Some(prev) = last_reviewed_sha.as_ref() {
         if prev == &job.head_sha {
             if job.force {
                 tracing::info!(
@@ -497,11 +641,11 @@ pub async fn run_review_job(
         .await
     {
         Ok(pr) => BaseRef::from(&pr.base),
-        Err(e) => {
+        Err(err) => {
             tracing::error!(
                 repo = format!("{}/{}", job.owner, job.repo),
                 pr = job.pr_number,
-                error = %e,
+                error = %err,
                 "failed to fetch pull request; cannot resolve base branch, not reviewing"
             );
             observe(ReviewObservation::Started);
@@ -514,7 +658,7 @@ pub async fn run_review_job(
                 &job,
                 CommitStatusState::Error,
                 truncate_status_description(&format!(
-                    "auto_review failed: could not fetch pull request: {e}"
+                    "auto_review failed: could not fetch pull request: {err}"
                 )),
             )
             .await;
@@ -527,8 +671,8 @@ pub async fn run_review_job(
     // Fetch once for the trivial-file skip check.
     let changed_files = match fetch_changed_files_for_triage(forgejo, &job).await {
         Ok(files) => Some(files),
-        Err(e) => {
-            tracing::warn!(error = %e, "triage file-list failed; proceeding to review");
+        Err(err) => {
+            tracing::warn!(error = %err, "triage file-list failed; proceeding to review");
             None
         }
     };
@@ -588,8 +732,8 @@ pub async fn run_review_job(
     };
     let WorkspacePrepOutput {
         config,
-        repo_context,
         raw_diff,
+        repo_context,
         workspace,
     } = prep;
     let ignored_paths = build_glob_set(&config.ignored_paths);
@@ -601,9 +745,8 @@ pub async fn run_review_job(
     // was prepared (e.g. workspace prep failed) — but log the
     // downgrade so operators who set the flag aren't left wondering
     // why findings stopped being verified against the workspace.
-    let agentic_requested = std::env::var("AR_AGENTIC_VERIFIER")
-        .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
-        .unwrap_or(false);
+    let agentic_requested = env::var("AR_AGENTIC_VERIFIER")
+        .is_ok_and(|value| value == "1" || value.eq_ignore_ascii_case("true"));
     let verify_mode = if agentic_requested && workspace.is_some() {
         VerifyMode::Agentic
     } else {
@@ -617,7 +760,7 @@ pub async fn run_review_job(
         }
         VerifyMode::Simple
     };
-    let workspace_path = workspace.as_ref().map(|w| w.path());
+    let workspace_path = workspace.as_ref().map(PreparedWorkspace::path);
 
     // Fire Started AFTER all early-skip checks (same_sha,
     // trivial_files, disabled_by_config) have passed. Means each
@@ -660,7 +803,7 @@ pub async fn run_review_job(
     })
     .await;
 
-    let final_status = match &result {
+    let final_status = match result.as_ref() {
         Ok(outcome) => {
             tracing::info!(
                 repo = format!("{}/{}", job.owner, job.repo),
@@ -681,21 +824,21 @@ pub async fn run_review_job(
                 context: STATUS_CONTEXT.into(),
             }
         }
-        Err(e) => {
+        Err(err) => {
             tracing::error!(
                 repo = format!("{}/{}", job.owner, job.repo),
                 pr = job.pr_number,
-                error = %e,
+                error = %err,
                 "review failed"
             );
             observe(ReviewObservation::Failed {
                 duration: started_at.elapsed(),
-                error_class: error_class(e),
+                error_class: error_class(err),
             });
             CommitStatus {
-                state: error_state(e),
+                state: error_state(err),
                 target_url: String::new(),
-                description: truncate_status_description(&format!("auto_review failed: {e}")),
+                description: truncate_status_description(&format!("auto_review failed: {err}")),
                 context: STATUS_CONTEXT.into(),
             }
         }
@@ -714,12 +857,12 @@ pub async fn run_review_job(
     //
     // Best-effort: a record failure just means the next review
     // will be a full one (same effective behaviour).
-    if let Ok(outcome) = &result {
-        if let Err(e) = history
+    if let Ok(outcome) = result.as_ref() {
+        if let Err(err) = history
             .record_with_cost(&pr_key, &job.head_sha, outcome.estimated_total_cost_usd)
             .await
         {
-            tracing::warn!(error = %e, "failed to record review history");
+            tracing::warn!(error = %err, "failed to record review history");
         }
     } else {
         tracing::debug!(
@@ -729,41 +872,6 @@ pub async fn run_review_job(
     }
 }
 
-#[derive(Debug, thiserror::Error)]
-enum WorkspacePrepError {
-    #[error("forgejo: {0}")]
-    Forgejo(#[from] ar_forgejo::Error),
-    #[error("host: {0}")]
-    Host(#[from] ar_forge::HostError),
-    #[error("workspace: {0}")]
-    Workspace(#[from] WorkspaceError),
-}
-
-/// Result of [`prepare_workspace_context`].
-enum WorkspacePrep {
-    /// The base-branch config sets `enabled: false`; nothing was cloned.
-    DisabledByConfig,
-    Ready(WorkspacePrepOutput),
-}
-
-struct WorkspacePrepOutput {
-    /// Repository config read from the base branch through
-    /// [`load_repo_config_from_base`]; defaults when absent or unreadable.
-    config: RepoConfig,
-    repo_context: String,
-    /// The raw PR diff fetched for triage and
-    /// context building. Surfaced back so the review pipeline can
-    /// reuse it as `diff_override` instead of refetching the same
-    /// diff a second time. Empty string when the get_pr_diff call
-    /// failed during workspace/context prep (we degrade-but-continue;
-    /// the pipeline will refetch and likely also fail consistently).
-    raw_diff: String,
-    /// Held by the orchestrator until the review pipeline finishes
-    /// so the agentic verifier (when enabled) can inspect the
-    /// cloned working tree. `None` when cloning the head failed.
-    workspace: Option<PreparedWorkspace>,
-}
-
 /// Load the base-branch config and, unless it disables review, clone the
 /// head and build optional RAG context.
 ///
@@ -771,7 +879,16 @@ struct WorkspacePrepOutput {
 /// never read from the head checkout, so a PR cannot disable or narrow its
 /// own review. Clone and context failures degrade to no workspace context
 /// but keep the base-branch config.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "mirrors run_review_job's positional parameters (host, LLM, clone credentials, \
+              stores, job, base ref), which that public fn passes straight through"
+)]
+#[expect(
+    clippy::cognitive_complexity,
+    reason = "the score comes from the tracing macros on each degrade-and-continue branch; the \
+              control flow is three sequential fallbacks"
+)]
 async fn prepare_workspace_context(
     host: &dyn ReviewHost,
     llm: &LlmRouter,
@@ -795,12 +912,12 @@ async fn prepare_workspace_context(
     }
     let workspace = match clone_head_workspace(host, job).await {
         Ok(workspace) => workspace,
-        Err(e) => {
-            tracing::warn!(error = %e, "workspace prep failed; continuing without workspace context");
+        Err(err) => {
+            tracing::warn!(error = %err, "workspace prep failed; continuing without workspace context");
             return WorkspacePrep::Ready(WorkspacePrepOutput {
                 config,
-                repo_context: String::new(),
                 raw_diff: String::new(),
+                repo_context: String::new(),
                 workspace: None,
             });
         }
@@ -808,9 +925,9 @@ async fn prepare_workspace_context(
     // Fetch the diff once for the RAG context build. Failure here just means we
     // skip optional context; the review still proceeds.
     let raw_diff = match fetch_context_diff(host, job).await {
-        Ok(d) => d,
-        Err(e) => {
-            tracing::warn!(error = %e, "diff fetch for context failed; continuing");
+        Ok(diff) => diff,
+        Err(err) => {
+            tracing::warn!(error = %err, "diff fetch for context failed; continuing");
             String::new()
         }
     };
@@ -831,16 +948,16 @@ async fn prepare_workspace_context(
             job,
         )
         .await
-        .unwrap_or_else(|e| {
-            tracing::warn!(error = %e, "RAG context build failed; continuing");
+        .unwrap_or_else(|err| {
+            tracing::warn!(error = %err, "RAG context build failed; continuing");
             String::new()
         })
     };
 
     WorkspacePrep::Ready(WorkspacePrepOutput {
         config,
-        repo_context,
         raw_diff,
+        repo_context,
         workspace: Some(workspace),
     })
 }
@@ -848,7 +965,7 @@ async fn prepare_workspace_context(
 /// Build the RAG context for `job`, retrieving only learnings scoped
 /// to the job's repository.
 async fn job_review_context(
-    workspace_path: &std::path::Path,
+    workspace_path: &Path,
     llm: &LlmRouter,
     raw_diff: &str,
     learnings: Option<&dyn LearningsStore>,
@@ -867,6 +984,7 @@ async fn job_review_context(
     .await
 }
 
+/// Clone the job's repository at its head SHA.
 async fn clone_head_workspace(
     host: &dyn ReviewHost,
     job: &ReviewJob,
@@ -878,6 +996,7 @@ async fn clone_head_workspace(
     Ok(prepare_workspace_from_clone_url(&clone_url, &job.head_sha).await?)
 }
 
+/// Commit-status description summarising a successful review's findings.
 fn review_summary(outcome: &ar_review::ReviewOutcome) -> String {
     if outcome.findings_count == 0 {
         return "auto_review: no findings".into();
@@ -918,6 +1037,8 @@ fn review_summary(outcome: &ar_review::ReviewOutcome) -> String {
     format!("auto_review: {}", parts.join(", "))
 }
 
+/// Diff between the previously reviewed SHA and the job's head, or
+/// `None` (falling back to a full review) when the host cannot supply it.
 async fn fetch_incremental_diff(
     host: &dyn ReviewHost,
     job: &ReviewJob,
@@ -935,13 +1056,13 @@ async fn fetch_incremental_diff(
         .await
     {
         Ok(diff) => Some(diff),
-        Err(e) => {
-            match compare_diff_fallback_level(&e) {
+        Err(err) => {
+            match compare_diff_fallback_level(&err) {
                 tracing::Level::INFO => {
-                    tracing::info!(error = %e, "compare_diff failed; falling back to full diff");
+                    tracing::info!(error = %err, "compare_diff failed; falling back to full diff");
                 }
                 _ => {
-                    tracing::warn!(error = %e, "compare_diff failed; falling back to full diff");
+                    tracing::warn!(error = %err, "compare_diff failed; falling back to full diff");
                 }
             }
             None
@@ -949,6 +1070,7 @@ async fn fetch_incremental_diff(
     }
 }
 
+/// Post a commit status on the job's head SHA; failures are logged only.
 async fn post_review_status(
     host: &dyn ReviewHost,
     job: &ReviewJob,
@@ -961,12 +1083,15 @@ async fn post_review_status(
         description,
         context: STATUS_CONTEXT.into(),
     };
-    let _ = host
+    if let Err(err) = host
         .post_commit_status(&job.owner, &job.repo, &job.head_sha, &status)
         .await
-        .inspect_err(|e| tracing::warn!(error = %e, "failed to post commit status"));
+    {
+        tracing::warn!(error = %err, "failed to post commit status");
+    }
 }
 
+/// Changed-file list used for the trivial-files skip check.
 async fn fetch_changed_files_for_triage(
     host: &dyn ReviewHost,
     job: &ReviewJob,
@@ -975,6 +1100,7 @@ async fn fetch_changed_files_for_triage(
         .await
 }
 
+/// Full PR diff used to build the RAG context.
 async fn fetch_context_diff(
     host: &dyn ReviewHost,
     job: &ReviewJob,
@@ -982,6 +1108,8 @@ async fn fetch_context_diff(
     host.get_pr_diff(&job.owner, &job.repo, job.pr_number).await
 }
 
+/// Log level for a failed compare-diff: `INFO` for the expected
+/// "base commit no longer in the head repository" 404, `WARN` otherwise.
 fn compare_diff_fallback_level(err: &ar_forge::HostError) -> tracing::Level {
     let body = err.message();
     if body.contains("API error 404")
@@ -1000,7 +1128,7 @@ fn compare_diff_fallback_level(err: &ar_forge::HostError) -> tracing::Level {
 /// [`parse_severity_floor`] for the value grammar and defaulting
 /// behaviour.
 fn severity_floor_from_env() -> ar_review::ReviewSeverity {
-    parse_severity_floor(std::env::var("AR_SEVERITY_FLOOR").ok().as_deref())
+    parse_severity_floor(env::var("AR_SEVERITY_FLOOR").ok().as_deref())
 }
 
 /// Parse a `AR_SEVERITY_FLOOR` value. Recognised values:
@@ -1021,12 +1149,11 @@ fn severity_floor_from_env() -> ar_review::ReviewSeverity {
 /// signal-to-noise expectation rather than the typo).
 fn parse_severity_floor(raw: Option<&str>) -> ar_review::ReviewSeverity {
     use ar_review::ReviewSeverity;
-    let normalised = raw.map(|s| s.trim().to_ascii_lowercase());
+    let normalised = raw.map(|value| value.trim().to_ascii_lowercase());
     match normalised.as_deref() {
-        None | Some("") => ReviewSeverity::Warning,
+        None | Some("" | "warning" | "warn") => ReviewSeverity::Warning,
         Some("note") => ReviewSeverity::Note,
-        Some("warning") | Some("warn") => ReviewSeverity::Warning,
-        Some("error") | Some("err") => ReviewSeverity::Error,
+        Some("error" | "err") => ReviewSeverity::Error,
         Some(other) => {
             tracing::warn!(
                 value = other,
@@ -1037,32 +1164,33 @@ fn parse_severity_floor(raw: Option<&str>) -> ar_review::ReviewSeverity {
     }
 }
 
-/// Forgejo's commit-status `description` is capped at 255 chars.
-/// Posting more returns 422 and the user sees no status update at
-/// all — leaving the PR stuck on "Pending" with no operator-visible
-/// signal that the review actually completed (with an error). LLM
-/// errors in particular can dump multi-hundred-char provider response
-/// bodies into the format string. Cap at 240 to leave room for the
-/// status badge UI's own padding and end with an ellipsis so users
-/// know it was truncated.
-const MAX_STATUS_DESCRIPTION: usize = 240;
-
-fn truncate_status_description(s: &str) -> String {
-    if s.len() <= MAX_STATUS_DESCRIPTION {
-        return s.to_string();
-    }
+/// Cap `text` at [`MAX_STATUS_DESCRIPTION`] bytes on a char boundary,
+/// ending with an ellipsis when it was cut.
+fn truncate_status_description(text: &str) -> String {
     // The ellipsis '…' is 3 bytes in UTF-8; reserve room so the
     // total output still fits under MAX_STATUS_DESCRIPTION.
-    const ELLIPSIS_BYTES: usize = '…'.len_utf8();
-    let mut cut = MAX_STATUS_DESCRIPTION.saturating_sub(ELLIPSIS_BYTES);
-    while cut > 0 && !s.is_char_boundary(cut) {
-        cut -= 1;
+    const ELLIPSIS_BYTES: usize = '\u{2026}'.len_utf8();
+    if text.len() <= MAX_STATUS_DESCRIPTION {
+        return text.to_owned();
     }
-    format!("{}…", &s[..cut])
+    let mut cut = MAX_STATUS_DESCRIPTION.saturating_sub(ELLIPSIS_BYTES);
+    while cut > 0 && !text.is_char_boundary(cut) {
+        cut = cut.saturating_sub(1);
+    }
+    // `cut` is a char boundary (0 always is), so `get` cannot miss.
+    let head = text.get(..cut).unwrap_or_default();
+    format!("{head}\u{2026}")
 }
 
+/// Commit-status state for a failed review: `Error` for infrastructure
+/// failures, `Failure` for model failures.
+#[expect(
+    clippy::rest_pattern_accessible_field,
+    reason = "only the variant matters here; spelling each Unhealable field as `_` instead \
+              trips unneeded_field_pattern"
+)]
 fn error_state(err: &ReviewError) -> CommitStatusState {
-    match err {
+    match *err {
         ReviewError::Forgejo(_) | ReviewError::Host(_) | ReviewError::Workspace(_) => {
             CommitStatusState::Error
         }
@@ -1073,8 +1201,13 @@ fn error_state(err: &ReviewError) -> CommitStatusState {
 /// Stable label string for [`ReviewObservation::Failed`]. Used by
 /// the gateway's `/metrics` endpoint to bucket failures so operators
 /// can see `llm` vs `workspace` vs `forgejo` outage rates separately.
+#[expect(
+    clippy::rest_pattern_accessible_field,
+    reason = "only the variant matters here; spelling each Unhealable field as `_` instead \
+              trips unneeded_field_pattern"
+)]
 fn error_class(err: &ReviewError) -> &'static str {
-    match err {
+    match *err {
         ReviewError::Forgejo(_) | ReviewError::Host(_) => "forgejo",
         ReviewError::Workspace(_) => "workspace",
         ReviewError::Llm(_) => "llm",
@@ -1083,14 +1216,55 @@ fn error_class(err: &ReviewError) -> &'static str {
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    clippy::indexing_slicing,
+    reason = "test assertions and fakes: a failed setup step, poisoned lock or unexpected \
+              variant should fail the test where it happens, and indexing follows a length \
+              assertion on the same vector"
+)]
 mod tests {
     use super::*;
+
     use ar_llm::{
         CompleteRequest, CompleteResponse, Error as LlmError, LlmProvider, ModelTier, Router,
     };
+
+    use crate::sqlite_history::SqliteReviewHistory;
+
+    use core::str::from_utf8;
+
+    use std::collections::HashMap;
+
+    use std::fs;
+
+    use std::process::Command;
+
     use std::sync::Mutex;
+
     use wiremock::matchers::{method, path};
+
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const HOSTILE_HEAD_CONFIG: &str = "enabled: false\nignored_paths: [\"**\"]\n";
+
+    const BASE_KEYS_CONFIG: &str = "\
+guidelines: BASE-GUIDELINE
+ignored_paths: [\"docs/**\"]
+pr_metadata_check:
+  enabled: true
+  additional_rules: [\"base rule\"]
+override_approvers: [\"base-maintainer\"]
+";
+
+    const HEAD_KEYS_CONFIG: &str = "\
+guidelines: HEAD-GUIDELINE
+ignored_paths: [\"src/**\"]
+pr_metadata_check: false
+override_approvers: [\"pr-author\"]
+";
 
     struct CannedProvider {
         responses: Mutex<Vec<String>>,
@@ -1098,34 +1272,31 @@ mod tests {
     }
 
     impl CannedProvider {
+        fn first_request_text(&self) -> String {
+            let seen = self.seen.lock().unwrap();
+            seen.first().map_or_default(|req| {
+                req.messages
+                    .iter()
+                    .map(|msg| msg.content.as_str())
+                    .collect::<Vec<_>>()
+                    .join("\n")
+            })
+        }
+
+        fn last_user_prompt(&self) -> Option<String> {
+            let seen = self.seen.lock().unwrap();
+            let req = seen.first()?;
+            req.messages
+                .iter()
+                .find(|msg| matches!(msg.role, ar_llm::Role::User))
+                .map(|msg| msg.content.clone())
+        }
+
         fn new(responses: Vec<&str>) -> Self {
             Self {
                 responses: Mutex::new(responses.into_iter().map(String::from).collect()),
                 seen: Mutex::new(Vec::new()),
             }
-        }
-
-        fn first_request_text(&self) -> String {
-            let seen = self.seen.lock().unwrap();
-            seen.first()
-                .map(|req| {
-                    req.messages
-                        .iter()
-                        .map(|m| m.content.as_str())
-                        .collect::<Vec<_>>()
-                        .join("\n")
-                })
-                .unwrap_or_default()
-        }
-
-        fn last_user_prompt(&self) -> Option<String> {
-            let seen = self.seen.lock().unwrap();
-            seen.first().and_then(|req| {
-                req.messages
-                    .iter()
-                    .find(|m| matches!(m.role, ar_llm::Role::User))
-                    .map(|m| m.content.clone())
-            })
         }
     }
 
@@ -1138,24 +1309,13 @@ mod tests {
                 .lock()
                 .unwrap()
                 .pop()
-                .unwrap_or_else(|| r#"{"summary":"ok","findings":[]}"#.to_string());
+                .unwrap_or_else(|| r#"{"summary":"ok","findings":[]}"#.to_owned());
             Ok(CompleteResponse {
                 content: next,
                 input_tokens: 0,
                 output_tokens: 0,
             })
         }
-    }
-
-    fn test_base_ref() -> BaseRef {
-        BaseRef {
-            name: "trunk".to_string(),
-            sha: "base".to_string(),
-        }
-    }
-
-    fn router_with(provider: Arc<CannedProvider>) -> Router {
-        Router::new().with(ModelTier::Reasoning, provider)
     }
 
     /// Embeds every text to the same direction, so any stored learning
@@ -1174,6 +1334,278 @@ mod tests {
         async fn embed(&self, texts: &[String]) -> Result<Vec<Vec<f32>>, LlmError> {
             Ok(texts.iter().map(|_| vec![1.0, 0.0]).collect())
         }
+    }
+
+    #[derive(Default)]
+    struct RecordingReviewHost {
+        /// Base-branch files served by `get_file_content`, keyed by
+        /// `(ref, path)`. Missing keys are `Ok(None)` (404).
+        base_files: HashMap<(String, String), String>,
+        changed_file_requests: Mutex<Vec<(String, String, u64)>>,
+        clone_url_requests: Mutex<Vec<(String, String)>>,
+        compare_requests: Mutex<Vec<(String, String, String, String)>>,
+        /// When set, `get_file_content` fails with this non-404 error.
+        file_error: Option<String>,
+        file_requests: Mutex<Vec<(String, String)>>,
+        /// Clone URL of a local head repository; `None` serves an
+        /// unreachable URL so workspace prep fails.
+        head_clone_url: Option<String>,
+        pr_diff_requests: Mutex<Vec<(String, String, u64)>>,
+        /// When set, `get_pull_request` fails with this error.
+        pr_fetch_error: Option<String>,
+        pr_fetches: Mutex<usize>,
+        review_requests: Mutex<Vec<(String, String, u64, ar_forge::CreateReviewRequest)>>,
+        status_requests: Mutex<Vec<(String, String, String, CommitStatus)>>,
+    }
+
+    impl RecordingReviewHost {
+        fn with_base_file(mut self, ref_name: &str, path: &str, body: &str) -> Self {
+            self.base_files
+                .insert((ref_name.to_owned(), path.to_owned()), body.to_owned());
+            self
+        }
+
+        fn with_head_clone_url(mut self, url: &str) -> Self {
+            self.head_clone_url = Some(url.to_owned());
+            self
+        }
+    }
+
+    /// A local git repository whose single commit holds `files`, served
+    /// over `file://` so `prepare_workspace_from_clone_url` can clone it.
+    struct HeadRepo {
+        _dir: tempfile::TempDir,
+        sha: String,
+        url: String,
+    }
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        seen: Mutex<Vec<ReviewObservation>>,
+    }
+
+    impl ReviewObserver for RecordingObserver {
+        fn record(&self, observation: ReviewObservation) {
+            self.seen.lock().unwrap().push(observation);
+        }
+    }
+
+    #[async_trait]
+    impl ar_forge::ReviewHost for RecordingReviewHost {
+        async fn clone_url(&self, owner: &str, repo: &str) -> Result<String, ar_forge::HostError> {
+            self.clone_url_requests
+                .lock()
+                .unwrap()
+                .push((owner.to_owned(), repo.to_owned()));
+            Ok(self
+                .head_clone_url
+                .clone()
+                .unwrap_or_else(|| format!("https://example.invalid/{owner}/{repo}.git")))
+        }
+
+        async fn create_review(
+            &self,
+            owner: &str,
+            repo: &str,
+            pr_number: u64,
+            request: &ar_forge::CreateReviewRequest,
+        ) -> Result<ar_forge::CreatedReview, ar_forge::HostError> {
+            self.review_requests.lock().unwrap().push((
+                owner.to_owned(),
+                repo.to_owned(),
+                pr_number,
+                request.clone(),
+            ));
+            Ok(ar_forge::CreatedReview {
+                id: 1,
+                state: "COMMENT".to_owned(),
+            })
+        }
+
+        async fn get_compare_diff(
+            &self,
+            owner: &str,
+            repo: &str,
+            base: &str,
+            head: &str,
+        ) -> Result<String, ar_forge::HostError> {
+            self.compare_requests.lock().unwrap().push((
+                owner.to_owned(),
+                repo.to_owned(),
+                base.to_owned(),
+                head.to_owned(),
+            ));
+            Ok("diff --git a/src/lib.rs b/src/lib.rs\n+new\n".to_owned())
+        }
+
+        async fn get_file_content(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            file_path: &str,
+            ref_: &str,
+        ) -> Result<Option<String>, ar_forge::HostError> {
+            self.file_requests
+                .lock()
+                .unwrap()
+                .push((ref_.to_owned(), file_path.to_owned()));
+            if let Some(message) = self.file_error.as_ref() {
+                return Err(ar_forge::HostError::new(message.clone()));
+            }
+            Ok(self
+                .base_files
+                .get(&(ref_.to_owned(), file_path.to_owned()))
+                .cloned())
+        }
+
+        async fn get_pr_diff(
+            &self,
+            owner: &str,
+            repo: &str,
+            pr_number: u64,
+        ) -> Result<String, ar_forge::HostError> {
+            self.pr_diff_requests.lock().unwrap().push((
+                owner.to_owned(),
+                repo.to_owned(),
+                pr_number,
+            ));
+            Ok("diff --git a/src/lib.rs b/src/lib.rs\n+context\n".to_owned())
+        }
+
+        async fn get_pull_request(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            pr_number: u64,
+        ) -> Result<ar_forge::PullRequestSummary, ar_forge::HostError> {
+            let mut fetches = self.pr_fetches.lock().unwrap();
+            *fetches = fetches.saturating_add(1);
+            drop(fetches);
+            if let Some(message) = self.pr_fetch_error.as_ref() {
+                return Err(ar_forge::HostError::new(message.clone()));
+            }
+            Ok(ar_forge::PullRequestSummary {
+                number: pr_number,
+                title: "title".to_owned(),
+                body: "body".to_owned(),
+                draft: false,
+                state: "open".to_owned(),
+                head: ar_forge::PullRequestRefSummary {
+                    ref_name: "feature".to_owned(),
+                    sha: "head".to_owned(),
+                },
+                base: ar_forge::PullRequestRefSummary {
+                    ref_name: "trunk".to_owned(),
+                    sha: "base".to_owned(),
+                },
+            })
+        }
+
+        async fn list_changed_files(
+            &self,
+            owner: &str,
+            repo: &str,
+            pr_number: u64,
+        ) -> Result<Vec<ar_forge::ChangedFile>, ar_forge::HostError> {
+            self.changed_file_requests.lock().unwrap().push((
+                owner.to_owned(),
+                repo.to_owned(),
+                pr_number,
+            ));
+            Ok(vec![ar_forge::ChangedFile {
+                filename: "src/lib.rs".to_owned(),
+                status: "modified".to_owned(),
+                additions: 1,
+                deletions: 0,
+                changes: 1,
+                patch: None,
+            }])
+        }
+
+        async fn list_pr_review_comments(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+        ) -> Result<Vec<ar_forge::PrReviewComment>, ar_forge::HostError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_pull_review_comments(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+            _review_id: u64,
+        ) -> Result<Vec<ar_forge::PrReviewComment>, ar_forge::HostError> {
+            Ok(Vec::new())
+        }
+
+        async fn list_pull_reviews(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+        ) -> Result<Vec<ar_forge::PullReviewSummary>, ar_forge::HostError> {
+            Ok(Vec::new())
+        }
+
+        async fn post_commit_status(
+            &self,
+            owner: &str,
+            repo: &str,
+            sha: &str,
+            status: &CommitStatus,
+        ) -> Result<(), ar_forge::HostError> {
+            self.status_requests.lock().unwrap().push((
+                owner.to_owned(),
+                repo.to_owned(),
+                sha.to_owned(),
+                status.clone(),
+            ));
+            Ok(())
+        }
+
+        async fn update_pull_request(
+            &self,
+            _owner: &str,
+            _repo: &str,
+            _pr_number: u64,
+            _title: Option<&str>,
+            _body: Option<&str>,
+        ) -> Result<(), ar_forge::HostError> {
+            Ok(())
+        }
+    }
+
+    struct RecordingDispatcher {
+        seen: Mutex<Vec<ReviewJob>>,
+    }
+
+    impl RecordingDispatcher {
+        fn new() -> Self {
+            Self {
+                seen: Mutex::new(Vec::new()),
+            }
+        }
+    }
+
+    #[async_trait]
+    impl JobDispatcher for RecordingDispatcher {
+        async fn dispatch(&self, job: ReviewJob) {
+            self.seen.lock().unwrap().push(job);
+        }
+    }
+
+    fn test_base_ref() -> BaseRef {
+        BaseRef {
+            name: "trunk".to_owned(),
+            sha: "base".to_owned(),
+        }
+    }
+
+    fn router_with(provider: Arc<CannedProvider>) -> Router {
+        Router::new().with(ModelTier::Reasoning, provider)
     }
 
     #[tokio::test]
@@ -1197,10 +1629,10 @@ mod tests {
         let llm = Router::new().with(ModelTier::Embedding, Arc::new(ConstantEmbedder));
         let dir = tempfile::tempdir().unwrap();
         let job_for = |repo: &str| ReviewJob {
-            owner: "Acme".to_string(),
-            repo: repo.to_string(),
+            owner: "Acme".to_owned(),
+            repo: repo.to_owned(),
             pr_number: 1,
-            head_sha: "abc".to_string(),
+            head_sha: "abc".to_owned(),
             pr_title: String::new(),
             pr_body: String::new(),
             force: false,
@@ -1237,11 +1669,11 @@ mod tests {
         let provider = Arc::new(CannedProvider::new(vec![]));
         let llm = router_with(provider);
         let job = ReviewJob {
-            owner: "alice".to_string(),
-            repo: "widgets".to_string(),
+            owner: "alice".to_owned(),
+            repo: "widgets".to_owned(),
             pr_number: 42,
-            head_sha: "not-a-sha".to_string(),
-            pr_title: "title".to_string(),
+            head_sha: "not-a-sha".to_owned(),
+            pr_title: "title".to_owned(),
             pr_body: String::new(),
             force: false,
         };
@@ -1264,51 +1696,8 @@ mod tests {
         );
         assert_eq!(
             host.clone_url_requests.lock().unwrap().as_slice(),
-            &[("alice".to_string(), "widgets".to_string())]
+            &[("alice".to_owned(), "widgets".to_owned())]
         );
-    }
-
-    #[derive(Default)]
-    struct RecordingReviewHost {
-        pr_diff_requests: Mutex<Vec<(String, String, u64)>>,
-        compare_requests: Mutex<Vec<(String, String, String, String)>>,
-        status_requests: Mutex<Vec<(String, String, String, CommitStatus)>>,
-        changed_file_requests: Mutex<Vec<(String, String, u64)>>,
-        clone_url_requests: Mutex<Vec<(String, String)>>,
-        review_requests: Mutex<Vec<(String, String, u64, ar_forge::CreateReviewRequest)>>,
-        /// Clone URL of a local head repository; `None` serves an
-        /// unreachable URL so workspace prep fails.
-        head_clone_url: Option<String>,
-        /// Base-branch files served by `get_file_content`, keyed by
-        /// `(ref, path)`. Missing keys are `Ok(None)` (404).
-        base_files: std::collections::HashMap<(String, String), String>,
-        /// When set, `get_file_content` fails with this non-404 error.
-        file_error: Option<String>,
-        file_requests: Mutex<Vec<(String, String)>>,
-        pr_fetches: Mutex<usize>,
-        /// When set, `get_pull_request` fails with this error.
-        pr_fetch_error: Option<String>,
-    }
-
-    impl RecordingReviewHost {
-        fn with_head_clone_url(mut self, url: &str) -> Self {
-            self.head_clone_url = Some(url.to_string());
-            self
-        }
-
-        fn with_base_file(mut self, ref_name: &str, path: &str, body: &str) -> Self {
-            self.base_files
-                .insert((ref_name.to_string(), path.to_string()), body.to_string());
-            self
-        }
-    }
-
-    /// A local git repository whose single commit holds `files`, served
-    /// over `file://` so `prepare_workspace_from_clone_url` can clone it.
-    struct HeadRepo {
-        _dir: tempfile::TempDir,
-        url: String,
-        sha: String,
     }
 
     fn head_repo_with(files: &[(&str, &str)]) -> HeadRepo {
@@ -1317,7 +1706,7 @@ mod tests {
             // Clear the repository-locating variables git exports to hooks, so
             // this fixture still targets its own tempdir when the suite runs
             // inside a git hook (for example the pre-push `just ci`).
-            let out = std::process::Command::new("git")
+            let out = Command::new("git")
                 .env_remove("GIT_DIR")
                 .env_remove("GIT_WORK_TREE")
                 .env_remove("GIT_INDEX_FILE")
@@ -1343,14 +1732,14 @@ mod tests {
             String::from_utf8(out.stdout).unwrap()
         };
         git(&["init", "-q"]);
-        for (path, body) in files {
+        for &(path, body) in files {
             let full = dir.path().join(path);
-            std::fs::create_dir_all(full.parent().unwrap()).unwrap();
-            std::fs::write(full, body).unwrap();
+            fs::create_dir_all(full.parent().unwrap()).unwrap();
+            fs::write(full, body).unwrap();
         }
         git(&["add", "-A"]);
         git(&["commit", "-q", "-m", "head"]);
-        let sha = git(&["rev-parse", "HEAD"]).trim().to_string();
+        let sha = git(&["rev-parse", "HEAD"]).trim().to_owned();
         let url = format!("file://{}", dir.path().display());
         HeadRepo {
             _dir: dir,
@@ -1361,17 +1750,15 @@ mod tests {
 
     fn job_at(head_sha: &str) -> ReviewJob {
         ReviewJob {
-            owner: "alice".to_string(),
-            repo: "widgets".to_string(),
+            owner: "alice".to_owned(),
+            repo: "widgets".to_owned(),
             pr_number: 42,
-            head_sha: head_sha.to_string(),
-            pr_title: "feat: widgets".to_string(),
-            pr_body: "Adds widgets.".to_string(),
+            head_sha: head_sha.to_owned(),
+            pr_title: "feat: widgets".to_owned(),
+            pr_body: "Adds widgets.".to_owned(),
             force: false,
         }
     }
-
-    const HOSTILE_HEAD_CONFIG: &str = "enabled: false\nignored_paths: [\"**\"]\n";
 
     #[tokio::test]
     async fn hostile_head_config_does_not_disable_or_narrow_review() {
@@ -1381,7 +1768,7 @@ mod tests {
         ]);
         let host = RecordingReviewHost::default().with_head_clone_url(&head.url);
         let provider = Arc::new(CannedProvider::new(vec![]));
-        let llm = router_with(provider.clone());
+        let llm = router_with(Arc::clone(&provider));
 
         run_review_job(
             &host,
@@ -1403,7 +1790,7 @@ mod tests {
         );
         assert_eq!(*host.pr_fetches.lock().unwrap(), 1);
         let statuses = host.status_requests.lock().unwrap();
-        let last = statuses.last().map(|(_, _, _, s)| s.clone()).unwrap();
+        let last = statuses.last().map(|entry| entry.3.clone()).unwrap();
         assert!(
             matches!(
                 last.state,
@@ -1418,15 +1805,8 @@ mod tests {
         );
     }
 
-    #[derive(Default)]
-    struct RecordingObserver {
-        seen: Mutex<Vec<ReviewObservation>>,
-    }
-
-    impl ReviewObserver for RecordingObserver {
-        fn record(&self, observation: ReviewObservation) {
-            self.seen.lock().unwrap().push(observation);
-        }
+    fn as_dyn_observer(observer: &RecordingObserver) -> &dyn ReviewObserver {
+        observer
     }
 
     async fn run_with(
@@ -1444,7 +1824,7 @@ mod tests {
             &InMemoryReviewHistory::new(),
             None,
             None,
-            observer.map(|o| o as &dyn ReviewObserver),
+            observer.map(as_dyn_observer),
             job_at(head_sha),
         )
         .await;
@@ -1471,15 +1851,20 @@ mod tests {
 
         assert!(host.review_requests.lock().unwrap().is_empty());
         let statuses = host.status_requests.lock().unwrap();
-        let last = statuses.last().map(|(_, _, _, s)| s.clone()).unwrap();
+        let last = statuses.last().map(|entry| entry.3.clone()).unwrap();
         assert_eq!(last.state, CommitStatusState::Success);
         assert_eq!(last.description, "auto_review: disabled by repo config");
-        assert!(observer.seen.lock().unwrap().iter().any(|o| matches!(
-            o,
-            ReviewObservation::Skipped {
-                reason: "disabled_by_config"
-            }
-        )));
+        assert!(observer
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|observation| matches!(
+                *observation,
+                ReviewObservation::Skipped {
+                    reason: "disabled_by_config"
+                }
+            )));
     }
 
     #[tokio::test]
@@ -1501,32 +1886,21 @@ mod tests {
 
         assert!(host.review_requests.lock().unwrap().is_empty());
         let statuses = host.status_requests.lock().unwrap();
-        let last = statuses.last().map(|(_, _, _, s)| s.clone()).unwrap();
+        let last = statuses.last().map(|entry| entry.3.clone()).unwrap();
         assert_eq!(last.state, CommitStatusState::Success);
         assert_eq!(last.description, "auto_review: disabled by repo config");
-        assert!(observer.seen.lock().unwrap().iter().any(|o| matches!(
-            o,
-            ReviewObservation::Skipped {
-                reason: "disabled_by_config"
-            }
-        )));
+        assert!(observer
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|observation| matches!(
+                *observation,
+                ReviewObservation::Skipped {
+                    reason: "disabled_by_config"
+                }
+            )));
     }
-
-    const BASE_KEYS_CONFIG: &str = "\
-guidelines: BASE-GUIDELINE
-ignored_paths: [\"docs/**\"]
-pr_metadata_check:
-  enabled: true
-  additional_rules: [\"base rule\"]
-override_approvers: [\"base-maintainer\"]
-";
-
-    const HEAD_KEYS_CONFIG: &str = "\
-guidelines: HEAD-GUIDELINE
-ignored_paths: [\"src/**\"]
-pr_metadata_check: false
-override_approvers: [\"pr-author\"]
-";
 
     #[tokio::test]
     async fn workspace_prep_takes_every_config_key_from_the_base_branch() {
@@ -1555,16 +1929,16 @@ override_approvers: [\"pr-author\"]
             panic!("base config enables review");
         };
         assert!(out.workspace.is_some(), "head was cloned");
-        assert_eq!(out.config.ignored_paths, vec!["docs/**".to_string()]);
+        assert_eq!(out.config.ignored_paths, vec!["docs/**".to_owned()]);
         assert_eq!(out.config.guidelines, "BASE-GUIDELINE");
         assert!(out.config.pr_metadata_check.enabled);
         assert_eq!(
             out.config.pr_metadata_check.additional_rules,
-            vec!["base rule".to_string()]
+            vec!["base rule".to_owned()]
         );
         assert_eq!(
             out.config.override_approvers,
-            vec!["base-maintainer".to_string()]
+            vec!["base-maintainer".to_owned()]
         );
         assert!(!out.config.is_override_approver("pr-author"));
     }
@@ -1580,7 +1954,7 @@ override_approvers: [\"pr-author\"]
             .with_base_file("trunk", ".auto_review.yaml", BASE_KEYS_CONFIG);
         let provider = Arc::new(CannedProvider::new(vec![]));
 
-        run_with(&host, provider.clone(), None, &head.sha).await;
+        run_with(&host, Arc::clone(&provider), None, &head.sha).await;
 
         assert_eq!(host.review_requests.lock().unwrap().len(), 1);
         let text = provider.first_request_text();
@@ -1596,7 +1970,7 @@ override_approvers: [\"pr-author\"]
     #[tokio::test]
     async fn non_404_base_config_fetch_error_still_reviews() {
         let host = RecordingReviewHost {
-            file_error: Some("API error 500: upstream unavailable".to_string()),
+            file_error: Some("API error 500: upstream unavailable".to_owned()),
             ..RecordingReviewHost::default()
         };
 
@@ -1610,7 +1984,7 @@ override_approvers: [\"pr-author\"]
 
         assert_eq!(host.review_requests.lock().unwrap().len(), 1);
         let statuses = host.status_requests.lock().unwrap();
-        let last = statuses.last().map(|(_, _, _, s)| s.clone()).unwrap();
+        let last = statuses.last().map(|entry| entry.3.clone()).unwrap();
         assert_eq!(last.state, CommitStatusState::Success);
     }
 
@@ -1630,16 +2004,21 @@ override_approvers: [\"pr-author\"]
         assert_eq!(
             host.file_requests.lock().unwrap().as_slice(),
             &[
-                ("trunk".to_string(), ".auto_review.yaml".to_string()),
-                ("trunk".to_string(), ".auto_review.yml".to_string()),
+                ("trunk".to_owned(), ".auto_review.yaml".to_owned()),
+                ("trunk".to_owned(), ".auto_review.yml".to_owned()),
             ]
         );
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::rest_pattern_accessible_field,
+        reason = "the assertion pins error_class and ignores the elapsed duration; spelling it \
+                  `duration: _` instead trips unneeded_field_pattern"
+    )]
     async fn pull_request_fetch_failure_posts_error_status_and_skips_review() {
         let host = RecordingReviewHost {
-            pr_fetch_error: Some("API error 502".to_string()),
+            pr_fetch_error: Some("API error 502".to_owned()),
             ..RecordingReviewHost::default()
         };
         let provider = Arc::new(CannedProvider::new(vec![]));
@@ -1647,7 +2026,7 @@ override_approvers: [\"pr-author\"]
 
         run_with(
             &host,
-            provider.clone(),
+            Arc::clone(&provider),
             Some(&observer),
             "0123456789abcdef0123456789abcdef01234567",
         )
@@ -1657,221 +2036,21 @@ override_approvers: [\"pr-author\"]
         assert!(provider.seen.lock().unwrap().is_empty(), "no LLM call");
         assert!(host.file_requests.lock().unwrap().is_empty());
         let statuses = host.status_requests.lock().unwrap();
-        let last = statuses.last().map(|(_, _, _, s)| s.clone()).unwrap();
+        let last = statuses.last().map(|entry| entry.3.clone()).unwrap();
         assert_eq!(last.state, CommitStatusState::Error);
         assert!(last.description.contains("API error 502"), "{last:?}");
-        assert!(observer.seen.lock().unwrap().iter().any(|o| matches!(
-            o,
-            ReviewObservation::Failed {
-                error_class: "forgejo",
-                ..
-            }
-        )));
-    }
-
-    #[async_trait]
-    impl ar_forge::ReviewHost for RecordingReviewHost {
-        async fn clone_url(&self, owner: &str, repo: &str) -> Result<String, ar_forge::HostError> {
-            self.clone_url_requests
-                .lock()
-                .unwrap()
-                .push((owner.to_string(), repo.to_string()));
-            Ok(self
-                .head_clone_url
-                .clone()
-                .unwrap_or_else(|| format!("https://example.invalid/{owner}/{repo}.git")))
-        }
-
-        async fn get_file_content(
-            &self,
-            _owner: &str,
-            _repo: &str,
-            file_path: &str,
-            ref_: &str,
-        ) -> Result<Option<String>, ar_forge::HostError> {
-            self.file_requests
-                .lock()
-                .unwrap()
-                .push((ref_.to_string(), file_path.to_string()));
-            if let Some(message) = &self.file_error {
-                return Err(ar_forge::HostError::new(message.clone()));
-            }
-            Ok(self
-                .base_files
-                .get(&(ref_.to_string(), file_path.to_string()))
-                .cloned())
-        }
-
-        async fn get_pull_request(
-            &self,
-            _owner: &str,
-            _repo: &str,
-            pr_number: u64,
-        ) -> Result<ar_forge::PullRequestSummary, ar_forge::HostError> {
-            *self.pr_fetches.lock().unwrap() += 1;
-            if let Some(message) = &self.pr_fetch_error {
-                return Err(ar_forge::HostError::new(message.clone()));
-            }
-            Ok(ar_forge::PullRequestSummary {
-                number: pr_number,
-                title: "title".to_string(),
-                body: "body".to_string(),
-                draft: false,
-                state: "open".to_string(),
-                head: ar_forge::PullRequestRefSummary {
-                    ref_name: "feature".to_string(),
-                    sha: "head".to_string(),
-                },
-                base: ar_forge::PullRequestRefSummary {
-                    ref_name: "trunk".to_string(),
-                    sha: "base".to_string(),
-                },
-            })
-        }
-
-        async fn get_pr_diff(
-            &self,
-            owner: &str,
-            repo: &str,
-            pr_number: u64,
-        ) -> Result<String, ar_forge::HostError> {
-            self.pr_diff_requests.lock().unwrap().push((
-                owner.to_string(),
-                repo.to_string(),
-                pr_number,
-            ));
-            Ok("diff --git a/src/lib.rs b/src/lib.rs\n+context\n".to_string())
-        }
-
-        async fn get_compare_diff(
-            &self,
-            owner: &str,
-            repo: &str,
-            base: &str,
-            head: &str,
-        ) -> Result<String, ar_forge::HostError> {
-            self.compare_requests.lock().unwrap().push((
-                owner.to_string(),
-                repo.to_string(),
-                base.to_string(),
-                head.to_string(),
-            ));
-            Ok("diff --git a/src/lib.rs b/src/lib.rs\n+new\n".to_string())
-        }
-
-        async fn list_changed_files(
-            &self,
-            owner: &str,
-            repo: &str,
-            pr_number: u64,
-        ) -> Result<Vec<ar_forge::ChangedFile>, ar_forge::HostError> {
-            self.changed_file_requests.lock().unwrap().push((
-                owner.to_string(),
-                repo.to_string(),
-                pr_number,
-            ));
-            Ok(vec![ar_forge::ChangedFile {
-                filename: "src/lib.rs".to_string(),
-                status: "modified".to_string(),
-                additions: 1,
-                deletions: 0,
-                changes: 1,
-                patch: None,
-            }])
-        }
-
-        async fn list_pr_review_comments(
-            &self,
-            _owner: &str,
-            _repo: &str,
-            _pr_number: u64,
-        ) -> Result<Vec<ar_forge::PrReviewComment>, ar_forge::HostError> {
-            Ok(Vec::new())
-        }
-
-        async fn list_pull_reviews(
-            &self,
-            _owner: &str,
-            _repo: &str,
-            _pr_number: u64,
-        ) -> Result<Vec<ar_forge::PullReviewSummary>, ar_forge::HostError> {
-            Ok(Vec::new())
-        }
-
-        async fn list_pull_review_comments(
-            &self,
-            _owner: &str,
-            _repo: &str,
-            _pr_number: u64,
-            _review_id: u64,
-        ) -> Result<Vec<ar_forge::PrReviewComment>, ar_forge::HostError> {
-            Ok(Vec::new())
-        }
-
-        async fn update_pull_request(
-            &self,
-            _owner: &str,
-            _repo: &str,
-            _pr_number: u64,
-            _title: Option<&str>,
-            _body: Option<&str>,
-        ) -> Result<(), ar_forge::HostError> {
-            Ok(())
-        }
-
-        async fn post_commit_status(
-            &self,
-            owner: &str,
-            repo: &str,
-            sha: &str,
-            status: &CommitStatus,
-        ) -> Result<(), ar_forge::HostError> {
-            self.status_requests.lock().unwrap().push((
-                owner.to_string(),
-                repo.to_string(),
-                sha.to_string(),
-                status.clone(),
-            ));
-            Ok(())
-        }
-
-        async fn create_review(
-            &self,
-            owner: &str,
-            repo: &str,
-            pr_number: u64,
-            request: &ar_forge::CreateReviewRequest,
-        ) -> Result<ar_forge::CreatedReview, ar_forge::HostError> {
-            self.review_requests.lock().unwrap().push((
-                owner.to_string(),
-                repo.to_string(),
-                pr_number,
-                request.clone(),
-            ));
-            Ok(ar_forge::CreatedReview {
-                id: 1,
-                state: "COMMENT".to_string(),
-            })
-        }
-    }
-
-    struct RecordingDispatcher {
-        seen: Mutex<Vec<ReviewJob>>,
-    }
-
-    impl RecordingDispatcher {
-        fn new() -> Self {
-            Self {
-                seen: Mutex::new(Vec::new()),
-            }
-        }
-    }
-
-    #[async_trait]
-    impl JobDispatcher for RecordingDispatcher {
-        async fn dispatch(&self, job: ReviewJob) {
-            self.seen.lock().unwrap().push(job);
-        }
+        assert!(observer
+            .seen
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|observation| matches!(
+                *observation,
+                ReviewObservation::Failed {
+                    error_class: "forgejo",
+                    ..
+                }
+            )));
     }
 
     fn sample_event() -> PullRequestEvent {
@@ -1921,8 +2100,8 @@ override_approvers: [\"pr-author\"]
 
     #[tokio::test]
     async fn no_op_dispatcher_does_nothing_and_does_not_panic() {
-        let d = NoOpDispatcher;
-        d.dispatch(ReviewJob::from(&sample_event())).await;
+        let dispatcher = NoOpDispatcher;
+        dispatcher.dispatch(ReviewJob::from(&sample_event())).await;
     }
 
     #[tokio::test]
@@ -1947,10 +2126,10 @@ override_approvers: [\"pr-author\"]
         assert_eq!(
             host.compare_requests.lock().unwrap().as_slice(),
             &[(
-                "alice".to_string(),
-                "widgets".to_string(),
-                "base-sha".to_string(),
-                "head-sha".to_string()
+                "alice".to_owned(),
+                "widgets".to_owned(),
+                "base-sha".to_owned(),
+                "head-sha".to_owned()
             )]
         );
     }
@@ -1979,14 +2158,14 @@ override_approvers: [\"pr-author\"]
         assert_eq!(
             host.status_requests.lock().unwrap().as_slice(),
             &[(
-                "alice".to_string(),
-                "widgets".to_string(),
-                "head-sha".to_string(),
+                "alice".to_owned(),
+                "widgets".to_owned(),
+                "head-sha".to_owned(),
                 CommitStatus {
                     state: CommitStatusState::Pending,
                     target_url: String::new(),
-                    description: "auto_review running".to_string(),
-                    context: STATUS_CONTEXT.to_string(),
+                    description: "auto_review running".to_owned(),
+                    context: STATUS_CONTEXT.to_owned(),
                 }
             )]
         );
@@ -2012,7 +2191,7 @@ override_approvers: [\"pr-author\"]
         assert_eq!(files[0].filename, "src/lib.rs");
         assert_eq!(
             host.changed_file_requests.lock().unwrap().as_slice(),
-            &[("alice".to_string(), "widgets".to_string(), 42)]
+            &[("alice".to_owned(), "widgets".to_owned(), 42)]
         );
     }
 
@@ -2034,10 +2213,16 @@ override_approvers: [\"pr-author\"]
         assert_eq!(diff, "diff --git a/src/lib.rs b/src/lib.rs\n+context\n");
         assert_eq!(
             host.pr_diff_requests.lock().unwrap().as_slice(),
-            &[("alice".to_string(), "widgets".to_string(), 42)]
+            &[("alice".to_owned(), "widgets".to_owned(), 42)]
         );
     }
 
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "json! fixture numbers and float assertion literals take their type from the \
+                  comparison; a literal suffix would trip separated_literal_suffix or \
+                  unseparated_literal_suffix instead"
+    )]
     async fn mount_pull_request(server: &MockServer, head_sha: &str) {
         Mock::given(method("GET"))
             .and(path("/api/v1/repos/o/r/pulls/7"))
@@ -2055,6 +2240,12 @@ override_approvers: [\"pr-author\"]
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "json! fixture numbers and float assertion literals take their type from the \
+                  comparison; a literal suffix would trip separated_literal_suffix or \
+                  unseparated_literal_suffix instead"
+    )]
     async fn run_review_job_passes_previous_sha_to_incremental_review_prompt() {
         let server = MockServer::start().await;
         let previous_sha = "8f3c2d1e9a0b4c5d6e7f8a9b0c1d2e3f4a5b6c7d";
@@ -2095,7 +2286,7 @@ override_approvers: [\"pr-author\"]
         let provider = Arc::new(CannedProvider::new(vec![
             r#"{"summary":"looks fine","findings":[]}"#,
         ]));
-        let llm = router_with(provider.clone());
+        let llm = router_with(Arc::clone(&provider));
         let history = InMemoryReviewHistory::new();
         history
             .record(
@@ -2136,7 +2327,7 @@ override_approvers: [\"pr-author\"]
         assert!(
             prompt.contains("incremental review")
                 && prompt.contains("8f3c2d1")
-                && prompt.contains("Δ since 8f3c2d1:")
+                && prompt.contains("\u{394} since 8f3c2d1:")
                 && prompt.contains("+pub fn added() {}")
                 && prompt.contains("leave `walkthrough` empty when nothing material changed"),
             "orchestrated incremental review should pass previous SHA and compare-diff content into ReviewArgs so the prompt scopes walkthrough guidance to the prior review; prompt was:\n{prompt}",
@@ -2144,6 +2335,12 @@ override_approvers: [\"pr-author\"]
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::default_numeric_fallback,
+        reason = "json! fixture numbers and float assertion literals take their type from the \
+                  comparison; a literal suffix would trip separated_literal_suffix or \
+                  unseparated_literal_suffix instead"
+    )]
     async fn run_review_job_records_review_outcome_cost_in_sqlite_history() {
         let server = MockServer::start().await;
         let previous_sha = "8f3c2d1e9a0b4c5d6e7f8a9b0c1d2e3f4a5b6c7d";
@@ -2188,7 +2385,7 @@ override_approvers: [\"pr-author\"]
 
         let tmp = tempfile::tempdir().expect("tempdir");
         let db_path = tmp.path().join("history.db");
-        let history = crate::sqlite_history::SqliteReviewHistory::open(&db_path)
+        let history = SqliteReviewHistory::open(&db_path)
             .await
             .expect("sqlite history");
         history
@@ -2225,6 +2422,7 @@ override_approvers: [\"pr-author\"]
         .await;
 
         let db_url = format!("sqlite://{}", db_path.display());
+        let pr_number: i64 = 7;
         let pool = sqlx::SqlitePool::connect(&db_url)
             .await
             .expect("open sqlite db for verification");
@@ -2234,7 +2432,7 @@ override_approvers: [\"pr-author\"]
         )
         .bind("o")
         .bind("r")
-        .bind(7_i64)
+        .bind(pr_number)
         .fetch_one(&pool)
         .await
         .expect("read persisted cost");
@@ -2262,15 +2460,16 @@ override_approvers: [\"pr-author\"]
             r#"{"summary":"looks fine","findings":[]}"#,
         ]));
         let llm = Arc::new(router_with(provider));
-        let dispatcher = InlineDispatcher::new_with_host(host.clone(), llm);
+        let dispatcher =
+            InlineDispatcher::new_with_host(Arc::<RecordingReviewHost>::clone(&host), llm);
 
         dispatcher
             .dispatch(ReviewJob {
-                owner: "alice".to_string(),
-                repo: "widgets".to_string(),
+                owner: "alice".to_owned(),
+                repo: "widgets".to_owned(),
                 pr_number: 42,
-                head_sha: "not-a-sha".to_string(),
-                pr_title: "title".to_string(),
+                head_sha: "not-a-sha".to_owned(),
+                pr_title: "title".to_owned(),
                 pr_body: String::new(),
                 force: false,
             })
@@ -2286,7 +2485,7 @@ override_approvers: [\"pr-author\"]
                 .lock()
                 .unwrap()
                 .iter()
-                .any(|(_, _, _, status)| status.state == CommitStatusState::Success),
+                .any(|entry| entry.3.state == CommitStatusState::Success),
             "inline dispatcher should not return before the final success status is posted"
         );
     }
@@ -2296,9 +2495,9 @@ override_approvers: [\"pr-author\"]
         // Defensive: max=0 would deadlock if naively set. The
         // builder clamps to 1 so the bot still makes progress
         // even on pathological config.
+        use alloc::sync::Arc;
         use ar_forgejo::Client as ForgejoClient;
         use ar_llm::Router;
-        use std::sync::Arc;
 
         let forgejo = Arc::new(ForgejoClient::new("http://x", "tok").unwrap());
         let llm = Arc::new(Router::new());
@@ -2323,9 +2522,9 @@ override_approvers: [\"pr-author\"]
         // the spawn proves the serialisation in code — this test
         // focuses on the builder semantics that downstream tests
         // rely on.
+        use alloc::sync::Arc;
         use ar_forgejo::Client as ForgejoClient;
         use ar_llm::Router;
-        use std::sync::Arc;
 
         let forgejo = Arc::new(ForgejoClient::new("http://x", "tok").unwrap());
         let llm = Arc::new(Router::new());
@@ -2336,11 +2535,11 @@ override_approvers: [\"pr-author\"]
         assert_eq!(sem.available_permits(), 2);
 
         // Acquire one manually to simulate a running review.
-        let _permit = sem.clone().acquire_owned().await.unwrap();
+        let _permit = Arc::clone(sem).acquire_owned().await.unwrap();
         assert_eq!(sem.available_permits(), 1);
 
         // Acquire the second.
-        let _permit2 = sem.clone().acquire_owned().await.unwrap();
+        let _permit2 = Arc::clone(sem).acquire_owned().await.unwrap();
         assert_eq!(sem.available_permits(), 0);
         // (A third acquire would block — we don't test that path
         // here, since the timing's flaky; the prod code path
@@ -2349,7 +2548,7 @@ override_approvers: [\"pr-author\"]
 
     fn outcome(errors: usize, warnings: usize, notes: usize) -> ar_review::ReviewOutcome {
         ar_review::ReviewOutcome {
-            findings_count: errors + warnings + notes,
+            findings_count: errors.saturating_add(warnings).saturating_add(notes),
             review_id: 1,
             errors,
             warnings,
@@ -2443,7 +2642,7 @@ override_approvers: [\"pr-author\"]
         );
         let out = truncate_status_description(&long);
         assert!(out.len() <= MAX_STATUS_DESCRIPTION);
-        assert!(out.ends_with('…'));
+        assert!(out.ends_with('\u{2026}'));
         assert!(out.starts_with("auto_review failed:"));
     }
 
@@ -2503,14 +2702,19 @@ override_approvers: [\"pr-author\"]
     }
 
     #[test]
+    #[expect(
+        clippy::assertions_on_result_states,
+        reason = "decoding without error is the property under test, so it stays an assertion \
+                  rather than an unwrap"
+    )]
     fn truncate_status_description_respects_utf8_codepoints() {
         // Multi-byte char near the cut boundary must not be split.
         // Build a string ending in a 4-byte emoji right at the cap.
-        let mut s = "x".repeat(MAX_STATUS_DESCRIPTION - 2);
-        s.push_str("🦀tail"); // 🦀 is 4 bytes; "tail" pushes past the cap
-        let out = truncate_status_description(&s);
+        let mut text = "x".repeat(MAX_STATUS_DESCRIPTION - 2);
+        text.push_str("\u{1f980}tail"); // 🦀 is 4 bytes; "tail" pushes past the cap
+        let out = truncate_status_description(&text);
         // Result must be valid UTF-8 (decode without error).
-        assert!(std::str::from_utf8(out.as_bytes()).is_ok());
-        assert!(out.ends_with('…'));
+        assert!(from_utf8(out.as_bytes()).is_ok());
+        assert!(out.ends_with('\u{2026}'));
     }
 }

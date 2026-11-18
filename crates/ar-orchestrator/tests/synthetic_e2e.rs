@@ -13,6 +13,9 @@
 //! empty findings — see `dispatcher.rs::run_review_job`. So this test
 //! does not need to provide a working clone.
 
+extern crate alloc;
+
+use alloc::sync::Arc;
 use ar_forgejo::Client as ForgejoClient;
 use ar_gateway::{build_router, AppState};
 use ar_llm::{
@@ -23,8 +26,12 @@ use ar_orchestrator::{InMemoryReviewHistory, JobDispatcher, ReviewHistory, Spawn
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use std::sync::{Arc, Mutex};
-use tower::ServiceExt;
+use core::time::Duration;
+use std::sync::Mutex;
+use std::time::Instant;
+use tokio::time::sleep;
+use tower::ServiceExt as _;
+use wiremock::http::Method;
 use wiremock::matchers::{method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
@@ -49,13 +56,18 @@ impl CannedProvider {
 
 #[async_trait]
 impl LlmProvider for CannedProvider {
+    #[expect(
+        clippy::unwrap_used,
+        reason = "the trait fixes the error type to LlmError; a poisoned lock means another test \
+                  thread already panicked, so panicking here is the honest test failure"
+    )]
     async fn complete(&self, _req: CompleteRequest) -> Result<CompleteResponse, LlmError> {
         let next = self
             .responses
             .lock()
             .unwrap()
             .pop()
-            .unwrap_or_else(|| r#"{"summary":"","findings":[]}"#.to_string());
+            .unwrap_or_else(|| r#"{"summary":"","findings":[]}"#.to_owned());
         Ok(CompleteResponse {
             content: next,
             input_tokens: 0,
@@ -65,6 +77,26 @@ impl LlmProvider for CannedProvider {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; \
+              there is no #[cfg(test)] module to place this in"
+)]
+#[expect(
+    clippy::too_many_lines,
+    reason = "one end-to-end scenario: the wiremock fixtures, the dispatch and the bounded poll \
+              for the review POST form a single sequence"
+)]
+#[expect(
+    clippy::default_numeric_fallback,
+    reason = "json! fixture numbers take their type from serde_json; a literal suffix would \
+              trip separated_literal_suffix or unseparated_literal_suffix instead"
+)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "a failed fixture build, request or response should fail this test at that step"
+)]
 async fn ci_endpoint_through_dispatcher_through_pipeline_posts_review() {
     let server = MockServer::start().await;
 
@@ -128,10 +160,10 @@ async fn ci_endpoint_through_dispatcher_through_pipeline_posts_review() {
     let llm_router = Arc::new(LlmRouter::new().with(ModelTier::Reasoning, provider));
 
     let history: Arc<dyn ReviewHistory> = Arc::new(InMemoryReviewHistory::new());
-    let dispatcher = Arc::new(
-        SpawningDispatcher::new(forgejo_client.clone(), llm_router, server.uri(), "tok")
+    let dispatcher: Arc<dyn JobDispatcher> = Arc::new(
+        SpawningDispatcher::new(Arc::clone(&forgejo_client), llm_router, server.uri(), "tok")
             .with_history(history),
-    ) as Arc<dyn JobDispatcher>;
+    );
 
     let app = build_router(
         AppState::new(WEBHOOK_SECRET, dispatcher)
@@ -159,35 +191,34 @@ async fn ci_endpoint_through_dispatcher_through_pipeline_posts_review() {
     // wiremock's request log until the review POST lands or we
     // exhaust the budget. Bounded so a regression hangs the test
     // briefly rather than indefinitely.
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+    let deadline = Instant::now() + Duration::from_secs(5);
     loop {
         let posts = server
             .received_requests()
             .await
             .unwrap_or_default()
             .into_iter()
-            .filter(|r| {
-                r.method == wiremock::http::Method::POST
-                    && r.url.path() == "/api/v1/repos/o/r/pulls/7/reviews"
+            .filter(|request| {
+                request.method == Method::POST
+                    && request.url.path() == "/api/v1/repos/o/r/pulls/7/reviews"
             })
             .count();
         if posts >= 1 {
             break;
         }
-        if std::time::Instant::now() > deadline {
-            panic!(
-                "dispatcher never POSTed the review within 5s; \
-                 received_requests so far: {:?}",
-                server
-                    .received_requests()
-                    .await
-                    .unwrap_or_default()
-                    .into_iter()
-                    .map(|r| format!("{} {}", r.method, r.url.path()))
-                    .collect::<Vec<_>>()
-            );
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+        assert!(
+            Instant::now() <= deadline,
+            "dispatcher never POSTed the review within 5s; \
+             received_requests so far: {:?}",
+            server
+                .received_requests()
+                .await
+                .unwrap_or_default()
+                .into_iter()
+                .map(|request| format!("{} {}", request.method, request.url.path()))
+                .collect::<Vec<_>>()
+        );
+        sleep(Duration::from_millis(50)).await;
     }
 
     let posts = server
@@ -195,9 +226,9 @@ async fn ci_endpoint_through_dispatcher_through_pipeline_posts_review() {
         .await
         .unwrap_or_default()
         .into_iter()
-        .filter(|r| {
-            r.method == wiremock::http::Method::POST
-                && r.url.path() == "/api/v1/repos/o/r/pulls/7/reviews"
+        .filter(|request| {
+            request.method == Method::POST
+                && request.url.path() == "/api/v1/repos/o/r/pulls/7/reviews"
         })
         .count();
     assert_eq!(posts, 1, "expected exactly one review POST");
