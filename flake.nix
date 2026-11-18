@@ -286,6 +286,9 @@
               # and `just actionlint`.
               shellcheck
               actionlint
+              # `promtool` for `just promtool`: checks and unit-tests the
+              # shipped Prometheus rules.
+              prometheus.cli
               openssh
               kubernetes-helm
               pkg-config

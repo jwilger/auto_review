@@ -33,6 +33,13 @@ shellcheck:
 actionlint:
 	actionlint
 
+# Checks the shipped Prometheus rules and runs their promtool unit tests, so
+# an alert expression that can never match fails here instead of staying
+# silent in production.
+promtool:
+	promtool check rules deploy/prometheus/auto_review.rules.yaml
+	promtool test rules deploy/prometheus/auto_review.rules.test.yaml
+
 # Fails on unresolved merge conflict markers in tracked files.
 conflict-markers:
 	status=0; git grep -nE '^(<{7}|>{7}) ' || status=$?; \
@@ -49,4 +56,4 @@ serve:
 watch:
 	AR_GATEWAY_BIND=0.0.0.0:8090 bacon --job gateway-dev
 
-ci: fmt clippy test deny build shellcheck actionlint conflict-markers
+ci: fmt clippy test deny build shellcheck actionlint promtool conflict-markers

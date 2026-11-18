@@ -177,7 +177,7 @@ groups:
       # forge (fetch_failed, timed_out).
       - alert: AutoReviewLocalDiffFallbacks
         expr: |
-          sum(rate(auto_review_local_diff_fallbacks_total[30m]))
+          sum without (reason) (rate(auto_review_local_diff_fallbacks_total[30m]))
             / clamp_min(rate(auto_review_reviews_started_total[30m]), 0.0001)
             > 0.5
         for: 30m
