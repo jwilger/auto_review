@@ -6,7 +6,7 @@ use ar_index::{LearningsStore, VectorStore};
 use ar_llm::Router as LlmRouter;
 use ar_review::{
     build_glob_set, build_review_context_with_store, is_valid_git_sha, load_repo_config_from_base,
-    pr_is_skippable, prepare_workspace_from_clone_url, review_pull_request, BaseRef,
+    pr_is_skippable, prepare_workspace_from_clone_url, review_pull_request, BaseRef, LocalDiff,
     MergeBaseUnavailable, PreparedWorkspace, RepoConfig, ReviewArgs, ReviewError, VerifyMode,
     WorkspaceError,
 };
@@ -1095,7 +1095,7 @@ async fn local_pr_diff(
 ) -> Result<(String, Vec<ar_forge::ChangedFile>), Option<&'static str>> {
     let local = async {
         Ok::<_, WorkspaceError>((
-            workspace.pr_diff().await?,
+            local_diff_text(job, workspace.pr_diff().await?),
             workspace.pr_changed_files().await?,
         ))
     };
@@ -1112,6 +1112,21 @@ async fn local_pr_diff(
             Err(Some(local_diff_fallback_reason(&err)))
         }
     }
+}
+
+/// The text of a diff computed in the job's workspace, after one warning
+/// naming the repository and pull request when git's output was cut at its
+/// read limit (the files after the cut are missing from the review text).
+fn local_diff_text(job: &ReviewJob, diff: LocalDiff) -> String {
+    if diff.truncated {
+        tracing::warn!(
+            repo = format!("{}/{}", job.owner, job.repo),
+            pr = job.pr_number,
+            "local diff cut at its read limit; files after the cut are missing from the review \
+             text, including any listed after ignored paths"
+        );
+    }
+    diff.text
 }
 
 /// Bounded metrics label for why a local diff was unavailable.
@@ -1193,7 +1208,7 @@ async fn incremental_review_diff(
 ) -> Option<String> {
     if let Some(prepared) = workspace {
         match prepared.incremental_diff().await {
-            Ok(diff) => return Some(diff),
+            Ok(diff) => return Some(local_diff_text(job, diff)),
             Err(err) => {
                 tracing::info!(
                     repo = format!("{}/{}", job.owner, job.repo),
@@ -2368,6 +2383,51 @@ the repository instead.\",\"errors\":[{\"resource\":\"PullRequest\",\"field\":\"
                 && warning.contains("pr=42"),
             "{warning}"
         );
+    }
+
+    /// A local diff cut at its read limit drops files from the review text;
+    /// the operator must be able to tell which review lost them.
+    #[test]
+    fn truncated_local_diff_warning_names_the_pull_request() {
+        let (logs, guard) = captured_logs();
+
+        let text = local_diff_text(
+            &job_at("abcdef0123456789abcdef0123456789abcdef01"),
+            LocalDiff {
+                text: "diff --git a/x b/x\n".into(),
+                truncated: true,
+            },
+        );
+        drop(guard);
+
+        assert_eq!(text, "diff --git a/x b/x\n");
+        let output = logs.contents();
+        let warning = output
+            .lines()
+            .find(|line| line.contains("read limit"))
+            .unwrap_or_else(|| panic!("no truncation warning in:\n{output}"));
+        assert!(
+            warning.contains("WARN")
+                && warning.contains("repo=\"alice/widgets\"")
+                && warning.contains("pr=42"),
+            "{warning}"
+        );
+    }
+
+    #[test]
+    fn whole_local_diff_logs_nothing() {
+        let (logs, guard) = captured_logs();
+
+        local_diff_text(
+            &job_at("abcdef0123456789abcdef0123456789abcdef01"),
+            LocalDiff {
+                text: String::new(),
+                truncated: false,
+            },
+        );
+        drop(guard);
+
+        assert_eq!(logs.contents(), "");
     }
 
     #[test]

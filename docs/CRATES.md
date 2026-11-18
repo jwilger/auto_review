@@ -96,7 +96,8 @@ nothing about it: the diff methods return the reason as a `MergeBaseUnavailable`
 `UnrelatedHistories`, `HistoryCap`, `TimedOut`) for the caller to log with its
 repository and pull request.
 
-With a merge base, `PreparedWorkspace::pr_diff()` returns the unified diff from
+With a merge base, `PreparedWorkspace::pr_diff()` returns a `LocalDiff` (its
+`text` and a `truncated` flag) holding the unified diff from
 the merge base to the head, the comparison GitHub and Forgejo show for a pull
 request, so inline-comment line numbers match. It does not depend on a host's
 whole-diff endpoint or its 300-file limit. Binary files appear as
@@ -105,9 +106,11 @@ external diff drivers and textconv filters are disabled. At most
 32 MiB (`LOCAL_DIFF_MAX_BYTES`, crate-private) of diff text is read, cut at a
 line boundary, and git is stopped there, so a huge pull request is never
 buffered in full; `incremental_diff()` has the same bound. The cut comes before
-ignored paths are filtered, so it logs a WARN: files git lists after it, even
-after ignored ones, are missing from the review text, though the changed-file
-list stays complete.
+ignored paths are filtered: files git lists after it, even after ignored ones,
+are missing from the review text, though the changed-file list stays complete.
+The workspace reports the cut as `LocalDiff::truncated` without logging, and
+the `ar-orchestrator` dispatcher logs it once at WARN (`local diff cut at its
+read limit`) with the repository and pull request.
 `PreparedWorkspace::pr_changed_files()` returns the same comparison as
 `ar_forge::ChangedFile` values in the host's status vocabulary (`added`,
 `modified`, `removed`, `renamed`, `copied`, `changed`), binary files with zero

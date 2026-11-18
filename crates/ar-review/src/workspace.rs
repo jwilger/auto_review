@@ -69,6 +69,19 @@ impl From<WorkspaceError> for ReviewError {
     }
 }
 
+/// A diff computed in a [`PreparedWorkspace`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LocalDiff {
+    /// Unified diff text, cut at the last whole line when `truncated`.
+    pub text: String,
+    /// Whether git's output passed the read bound (`LOCAL_DIFF_MAX_BYTES`)
+    /// and was cut: files after the cut are missing from `text`, though the
+    /// changed-file list still names them. The workspace logs nothing about
+    /// it (it knows no repository or pull request); callers log it with
+    /// their own context.
+    pub truncated: bool,
+}
+
 /// A cloned repository on local disk, alive for as long as the value lives.
 #[derive(Debug)]
 pub struct PreparedWorkspace {
@@ -101,17 +114,17 @@ impl PreparedWorkspace {
     ///
     /// At most `LOCAL_DIFF_MAX_BYTES` are read, cut at a line boundary;
     /// git is stopped there, so a huge pull request is never buffered in
-    /// full.
+    /// full. [`LocalDiff::truncated`] reports the cut.
     ///
     /// Errors with [`WorkspaceError::NoMergeBase`] and its reason when the
     /// workspace has no merge base (prepared without a base SHA, or the
     /// bounded history fetch found none).
-    pub async fn pr_diff(&self) -> Result<String, WorkspaceError> {
+    pub async fn pr_diff(&self) -> Result<LocalDiff, WorkspaceError> {
         self.pr_diff_within(LOCAL_DIFF_MAX_BYTES).await
     }
 
     /// [`Self::pr_diff`] read up to `max_bytes`.
-    async fn pr_diff_within(&self, max_bytes: usize) -> Result<String, WorkspaceError> {
+    async fn pr_diff_within(&self, max_bytes: usize) -> Result<LocalDiff, WorkspaceError> {
         let merge_base = self.require_merge_base()?;
         self.diff_to_head(merge_base, merge_base, max_bytes).await
     }
@@ -129,7 +142,7 @@ impl PreparedWorkspace {
     /// with a previous SHA, or the previous commit or either merge base could
     /// not be found within the bounded history fetch (for example after a
     /// force push removed it).
-    pub async fn incremental_diff(&self) -> Result<String, WorkspaceError> {
+    pub async fn incremental_diff(&self) -> Result<LocalDiff, WorkspaceError> {
         let merge_base = self.require_merge_base()?;
         let incremental_base = self
             .incremental_base
@@ -146,8 +159,8 @@ impl PreparedWorkspace {
         from: &str,
         attributes_tree: &str,
         max_bytes: usize,
-    ) -> Result<String, WorkspaceError> {
-        let stdout = git_stdout_bounded_in(
+    ) -> Result<LocalDiff, WorkspaceError> {
+        let (stdout, truncated) = git_stdout_bounded_in(
             self.path(),
             max_bytes,
             &with_attributes_from(
@@ -166,7 +179,10 @@ impl PreparedWorkspace {
             ),
         )
         .await?;
-        Ok(String::from_utf8_lossy(&stdout).into_owned())
+        Ok(LocalDiff {
+            text: String::from_utf8_lossy(&stdout).into_owned(),
+            truncated,
+        })
     }
 
     /// Files the pull request changes, merge base to head, in the host's
@@ -669,14 +685,14 @@ async fn git_stdout_in<S: AsRef<OsStr>>(dir: &Path, args: &[S]) -> Result<Vec<u8
 }
 
 /// Run hermetic git in `dir` and return at most `max_bytes` of its stdout,
-/// cut after the last newline. Once the bound is reached git is killed
-/// rather than left writing output nobody reads, and the truncated output
-/// is returned as success.
+/// cut after the last newline, and whether it was cut. Once the bound is
+/// reached git is killed rather than left writing output nobody reads, and
+/// the truncated output is returned as success.
 async fn git_stdout_bounded_in<S: AsRef<OsStr>>(
     dir: &Path,
     max_bytes: usize,
     args: &[S],
-) -> Result<Vec<u8>, WorkspaceError> {
+) -> Result<(Vec<u8>, bool), WorkspaceError> {
     let mut child = hermetic_git_command()
         .arg("-C")
         .arg(dir)
@@ -710,25 +726,20 @@ async fn git_stdout_bounded_in<S: AsRef<OsStr>>(
         // The cut happens before ignored paths are dropped, so files git
         // lists after an oversized ignored file (vendored code, lockfiles)
         // never reach the model, though the changed-file list stays whole.
-        tracing::warn!(
-            max_bytes,
-            "local diff cut at its read limit; files after the cut are missing from the review \
-             text, including any listed after ignored paths"
-        );
         out.truncate(max_bytes);
         let cut = out
             .iter()
             .rposition(|byte| *byte == b'\n')
             .map_or(0, |newline| newline.saturating_add(1));
         out.truncate(cut);
-        return Ok(out);
+        return Ok((out, true));
     }
     if !status.success() {
         return Err(WorkspaceError::Git(redact_token(&String::from_utf8_lossy(
             &err,
         ))));
     }
-    Ok(out)
+    Ok((out, false))
 }
 
 fn hermetic_git_command() -> Command {
@@ -1379,7 +1390,7 @@ line three of the renamed file\nline four of the renamed file\n";
         let fixture = TempDir::new().unwrap();
         let workspace = diverged_workspace(fixture.path()).await;
 
-        let diff = workspace.pr_diff().await.unwrap();
+        let diff = workspace.pr_diff().await.unwrap().text;
 
         assert!(
             diff.contains("diff --git a/README.md b/README.md") && diff.contains("+feature line"),
@@ -1396,7 +1407,7 @@ line three of the renamed file\nline four of the renamed file\n";
         let fixture = TempDir::new().unwrap();
         let workspace = diverged_workspace(fixture.path()).await;
 
-        let diff = workspace.pr_diff().await.unwrap();
+        let diff = workspace.pr_diff().await.unwrap().text;
 
         assert!(
             diff.contains("Binary files /dev/null and b/logo.png differ"),
@@ -1418,6 +1429,9 @@ line three of the renamed file\nline four of the renamed file\n";
 
         let bounded = workspace.pr_diff_within(80).await.unwrap();
 
+        assert!(!full.truncated, "the whole diff fits the default bound");
+        assert!(bounded.truncated, "the cut is reported to the caller");
+        let (bounded, full) = (bounded.text, full.text);
         assert!(bounded.len() <= 80, "{} bytes: {bounded:?}", bounded.len());
         assert!(
             bounded.ends_with('\n') && full.starts_with(&bounded),
@@ -1430,7 +1444,7 @@ line three of the renamed file\nline four of the renamed file\n";
         let fixture = TempDir::new().unwrap();
         let workspace = diverged_workspace(fixture.path()).await;
 
-        let diff = workspace.pr_diff().await.unwrap();
+        let diff = workspace.pr_diff().await.unwrap().text;
 
         assert!(
             diff.contains("diff --git a/old_name.txt b/new_name.txt")
@@ -1480,7 +1494,7 @@ line three of the renamed file\nline four of the renamed file\n";
     async fn findings_on_the_local_diff_map_to_the_renamed_path_and_drop_off_diff_paths() {
         let fixture = TempDir::new().unwrap();
         let workspace = diverged_workspace(fixture.path()).await;
-        let diff = workspace.pr_diff().await.unwrap();
+        let diff = workspace.pr_diff().await.unwrap().text;
         let line = head_line_of_added(&diff, "new_name.txt", RENAMED_ADDED_LINE)
             .unwrap_or_else(|| panic!("renamed file must carry a hunk, got:\n{diff}"));
         let head_text = fs::read_to_string(workspace.path().join("new_name.txt")).unwrap();
@@ -1530,7 +1544,7 @@ line three of the renamed file\nline four of the renamed file\n";
         let fixture = TempDir::new().unwrap();
         let workspace = diverged_workspace(fixture.path()).await;
 
-        let diff = workspace.pr_diff().await.unwrap();
+        let diff = workspace.pr_diff().await.unwrap().text;
 
         assert!(
             diff.contains("+hidden feature change"),
@@ -1599,7 +1613,7 @@ line three of the renamed file\nline four of the renamed file\n";
         .await
         .unwrap();
 
-        let diff = workspace.incremental_diff().await.unwrap();
+        let diff = workspace.incremental_diff().await.unwrap().text;
 
         assert!(
             diff.contains("+hidden feature change"),
