@@ -37,6 +37,10 @@ while host-neutral code migrates to the common crate.
 
 `Router::with_inflight_limit(n)` caps simultaneous provider calls across the
 router and all its clones (`AR_LLM_MAX_INFLIGHT` in the gateway).
+`OpenAiProvider::with_omit_temperature(true)` drops `temperature` from every
+chat-completions body whatever the caller set, for OpenAI reasoning models that
+reject a non-default temperature. The gateway, `agentcore serve`, `review once`
+and `bench run` set it from `LLM_OMIT_TEMPERATURE`.
 
 ## `ar-prompts` review contract
 

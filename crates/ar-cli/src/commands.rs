@@ -113,8 +113,12 @@ fn build_agentcore_serve_config(
                 .context("agentcore serve Forgejo mode requires --token")?;
             let forgejo =
                 Arc::new(Client::new(forgejo_url, token).context("build Forgejo client")?);
-            let llm =
-                build_reasoning_llm(llm_base_url, args.llm_api_key.as_deref(), &args.llm_model)?;
+            let llm = build_reasoning_llm(
+                llm_base_url,
+                args.llm_api_key.as_deref(),
+                &args.llm_model,
+                args.llm_omit_temperature,
+            )?;
             let host: Arc<dyn ReviewHost> = forgejo.clone();
             let mut dispatcher = InlineDispatcher::new_with_host(host, llm.clone());
             let chat_learnings = learnings
@@ -145,8 +149,12 @@ fn build_agentcore_serve_config(
             let private_key = normalize_pem_from_env(private_key);
             let signer = ar_github::GitHubAppJwt::from_rsa_pem(app_id, private_key.as_bytes())
                 .context("build GitHub App JWT signer")?;
-            let llm =
-                build_reasoning_llm(llm_base_url, args.llm_api_key.as_deref(), &args.llm_model)?;
+            let llm = build_reasoning_llm(
+                llm_base_url,
+                args.llm_api_key.as_deref(),
+                &args.llm_model,
+                args.llm_omit_temperature,
+            )?;
             Some(Arc::new(GitHubAgentcoreSemanticReviewHandler {
                 api_url: args.github_api_url,
                 signer,
@@ -168,14 +176,19 @@ fn build_agentcore_serve_config(
     })
 }
 
+/// Build a router with only the reasoning tier. `omit_temperature`
+/// carries `--llm-omit-temperature` / `LLM_OMIT_TEMPERATURE`, which
+/// `OpenAI` reasoning models need because they reject `temperature`.
 fn build_reasoning_llm(
     llm_base_url: &str,
     llm_api_key: Option<&str>,
     llm_model: &str,
+    omit_temperature: bool,
 ) -> Result<Arc<LlmRouter>> {
     let provider = Arc::new(
         OpenAiProvider::new(llm_base_url, llm_api_key, llm_model)
-            .context("build reasoning LLM provider")?,
+            .context("build reasoning LLM provider")?
+            .with_omit_temperature(omit_temperature),
     );
     Ok(Arc::new(
         LlmRouter::new().with(ModelTier::Reasoning, provider),
@@ -517,15 +530,12 @@ pub async fn review_once(args: ReviewOnceArgs) -> Result<()> {
         return print_dry_run_prompt(&forgejo, &args, &pr.head.sha, &pr.title, &pr.body).await;
     }
 
-    let provider = Arc::new(
-        OpenAiProvider::new(
-            &args.llm_base_url,
-            args.llm_api_key.as_deref(),
-            &args.llm_model,
-        )
-        .context("build LLM provider")?,
-    );
-    let llm = Arc::new(LlmRouter::new().with(ModelTier::Reasoning, provider));
+    let llm = build_reasoning_llm(
+        &args.llm_base_url,
+        args.llm_api_key.as_deref(),
+        &args.llm_model,
+        args.llm_omit_temperature,
+    )?;
 
     let job = ReviewJob {
         owner: args.owner.clone(),
@@ -1778,6 +1788,50 @@ mod tests {
     use wiremock::matchers::{body_string_contains, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
 
+    /// Send one `temperature: Some(0.0)` reasoning call through `llm` and
+    /// return the chat-completions body the mock captured.
+    async fn reasoning_chat_body(server: &MockServer, llm: &LlmRouter) -> serde_json::Value {
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "ok"}}]
+            })))
+            .mount(server)
+            .await;
+        llm.complete(
+            ModelTier::Reasoning,
+            ar_llm::CompleteRequest {
+                messages: vec![ar_llm::Message::user("x")],
+                temperature: Some(0.0),
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("completion");
+        let requests = server.received_requests().await.expect("recording");
+        serde_json::from_slice(&requests.first().expect("one request").body).expect("json body")
+    }
+
+    #[tokio::test]
+    async fn reasoning_llm_omits_temperature_when_configured() {
+        let server = MockServer::start().await;
+        let llm = build_reasoning_llm(&server.uri(), None, "gpt-5.1", true).expect("router");
+        let body = reasoning_chat_body(&server, &llm).await;
+        assert!(body.get("temperature").is_none(), "{body}");
+    }
+
+    #[tokio::test]
+    async fn reasoning_llm_keeps_caller_temperature_by_default() {
+        let server = MockServer::start().await;
+        let llm = build_reasoning_llm(&server.uri(), None, "qwen2.5", false).expect("router");
+        let body = reasoning_chat_body(&server, &llm).await;
+        assert_eq!(
+            body.get("temperature"),
+            Some(&serde_json::json!(0.0)),
+            "{body}"
+        );
+    }
+
     #[test]
     fn agentcore_serve_config_uses_forgejo_runtime_inputs_for_handler() {
         let config = build_agentcore_serve_config(
@@ -1791,6 +1845,7 @@ mod tests {
                 llm_base_url: Some("https://llm.example/v1".to_string()),
                 llm_api_key: None,
                 llm_model: "review-model".to_string(),
+                llm_omit_temperature: false,
                 idempotency_dynamodb_table: None,
                 idempotency_ttl_secs: 86_400,
                 history_dynamodb_table: None,
@@ -1822,6 +1877,7 @@ mod tests {
                 llm_base_url: Some("https://llm.example/v1".to_string()),
                 llm_api_key: None,
                 llm_model: "review-model".to_string(),
+                llm_omit_temperature: false,
                 idempotency_dynamodb_table: None,
                 idempotency_ttl_secs: 86_400,
                 history_dynamodb_table: None,
@@ -1861,6 +1917,7 @@ mod tests {
                 llm_base_url: Some("https://llm.example/v1".to_string()),
                 llm_api_key: None,
                 llm_model: "review-model".to_string(),
+                llm_omit_temperature: false,
                 idempotency_dynamodb_table: None,
                 idempotency_ttl_secs: 86_400,
                 history_dynamodb_table: None,
@@ -1922,6 +1979,7 @@ mod tests {
                 llm_base_url: Some("https://llm.example/v1".to_string()),
                 llm_api_key: None,
                 llm_model: "review-model".to_string(),
+                llm_omit_temperature: false,
                 idempotency_dynamodb_table: None,
                 idempotency_ttl_secs: 86_400,
                 history_dynamodb_table: None,
@@ -2013,6 +2071,7 @@ mod tests {
                 llm_base_url: Some("https://llm.example/v1".to_string()),
                 llm_api_key: None,
                 llm_model: "review-model".to_string(),
+                llm_omit_temperature: false,
                 idempotency_dynamodb_table: Some("agentcore-idempotency".to_string()),
                 idempotency_ttl_secs: 900,
                 history_dynamodb_table: None,
@@ -2043,6 +2102,7 @@ mod tests {
                 llm_base_url: Some("https://llm.example/v1".to_string()),
                 llm_api_key: None,
                 llm_model: "review-model".to_string(),
+                llm_omit_temperature: false,
                 idempotency_dynamodb_table: None,
                 idempotency_ttl_secs: 86_400,
                 history_dynamodb_table: Some("agentcore-history".to_string()),
@@ -2073,6 +2133,7 @@ mod tests {
                 llm_base_url: Some("https://llm.example/v1".to_string()),
                 llm_api_key: None,
                 llm_model: "review-model".to_string(),
+                llm_omit_temperature: false,
                 idempotency_dynamodb_table: None,
                 idempotency_ttl_secs: 86_400,
                 history_dynamodb_table: None,

@@ -343,13 +343,15 @@ fn build_router(args: &BenchArgs) -> Result<LlmRouter> {
             args.llm_api_key.as_deref(),
             &args.llm_model,
         )
-        .context("build reasoning provider")?,
+        .context("build reasoning provider")?
+        .with_omit_temperature(args.llm_omit_temperature),
     );
     let mut router = LlmRouter::new().with(ModelTier::Reasoning, reasoning);
     if let Some(cheap_model) = &args.llm_cheap_model {
         let cheap = Arc::new(
             OpenAiProvider::new(&args.llm_base_url, args.llm_api_key.as_deref(), cheap_model)
-                .context("build cheap provider")?,
+                .context("build cheap provider")?
+                .with_omit_temperature(args.llm_omit_temperature),
         );
         router = router.with(ModelTier::Cheap, cheap);
     }
@@ -1127,10 +1129,49 @@ mod tests {
             llm_base_url: llm_base_url.into(),
             llm_api_key: None,
             llm_model: llm_model.into(),
+            llm_omit_temperature: false,
             llm_cheap_model: None,
             json: true,
             baseline: None,
             fail_on_regression: false,
+        }
+    }
+
+    #[tokio::test]
+    async fn build_router_omits_temperature_on_reasoning_and_cheap_tiers() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let server = MockServer::start().await;
+        Mock::given(method("POST"))
+            .and(path("/v1/chat/completions"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "choices": [{"message": {"content": "ok"}}]
+            })))
+            .mount(&server)
+            .await;
+        let mut args = args_with(&server.uri(), "gpt-5.1");
+        args.llm_cheap_model = Some("gpt-5.1-mini".into());
+        args.llm_omit_temperature = true;
+        let router = build_router(&args).expect("router");
+        for tier in [ModelTier::Reasoning, ModelTier::Cheap] {
+            router
+                .complete(
+                    tier,
+                    ar_llm::CompleteRequest {
+                        messages: vec![ar_llm::Message::user("x")],
+                        temperature: Some(0.0),
+                        ..Default::default()
+                    },
+                )
+                .await
+                .expect("completion");
+        }
+        let requests = server.received_requests().await.expect("recording");
+        assert_eq!(requests.len(), 2);
+        for request in requests {
+            let body: serde_json::Value = serde_json::from_slice(&request.body).expect("json");
+            assert!(body.get("temperature").is_none(), "{body}");
         }
     }
 

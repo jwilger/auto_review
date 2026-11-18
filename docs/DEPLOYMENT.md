@@ -27,6 +27,8 @@ WEBHOOK_SECRET=<openssl rand -hex 32>
 AR_CI_REVIEW_TOKEN=<openssl rand -hex 32>
 LLM_BASE_URL=http://ollama.example.internal:11434
 LLM_REASONING_MODEL=qwen2.5-coder:32b
+# Set to true for OpenAI reasoning models (gpt-5.x, gpt-6.x, o-series).
+# LLM_OMIT_TEMPERATURE=true
 
 # Optional explicit persistence paths. If unset, the gateway chooses SQLite
 # paths under its state directory; use :memory: only for volatile evaluation.
@@ -97,8 +99,17 @@ AGENTCORE_HISTORY_DYNAMODB_TABLE=auto-review-agentcore-history
 AGENTCORE_LEARNINGS_DYNAMODB_TABLE=auto-review-agentcore-learnings
 ```
 
+`LLM_OMIT_TEMPERATURE` (boolean, default `false`; accepts true/false, yes/no,
+on/off, 1/0) stops every LLM tier from sending `temperature` on chat requests.
+Set it to `true` when any tier points at an OpenAI reasoning model (the
+`gpt-5.x` and `gpt-6.x` families and the `o`-series): those models accept only
+the default temperature and reject the request, so every review fails without
+it. Leave it unset for Ollama and `gpt-4.x` so reviews keep the deterministic
+`temperature: 0.0`. An unrecognised value stops the gateway, the AgentCore
+runtime and the CLI at startup with an error naming the variable.
+
 Forgejo AgentCore review uses `FORGEJO_BASE_URL`, `AR_FORGEJO_TOKEN`, and
-`LLM_BASE_URL`. GitHub AgentCore review uses GitHub App credentials:
+`LLM_BASE_URL`; both modes also honour `LLM_OMIT_TEMPERATURE`. GitHub AgentCore review uses GitHub App credentials:
 `GITHUB_API_URL` (optional, defaults to `https://api.github.com`),
 `GITHUB_APP_ID`, `GITHUB_APP_PRIVATE_KEY`, and `LLM_BASE_URL`. For GitHub, pass
 the repository installation id in each CI invocation payload as
