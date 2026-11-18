@@ -2,7 +2,7 @@ name: CI
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened]
+    types: [opened, synchronize, reopened, ready_for_review]
 
 permissions:
   contents: read
@@ -179,9 +179,38 @@ jobs:
       - name: Run nix flake check
         run: nix develop .#ci --command just flake-check
 
-  # NOTE: there is no `semantic-review` job yet because no auto_review
-  # deployment is wired up to review this repository. A deployment would add
-  # the job shown in deploy/agentcore/github-actions-oidc.yml.
+  # Semantic review runs only after every deterministic check passes
+  # (ADR-0012). It is not a required check: a reviewer outage must not block
+  # merges. Until the gateway URL and token are configured, and on fork PRs
+  # (which get no secrets), it finishes with one notice and makes no request.
+  semantic-review:
+    name: Semantic review
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    needs: [fmt, clippy, test, deny, build, advisories, shellcheck, actionlint, conflict-markers, flake-check]
+    if: ${{ github.event.pull_request.draft == false && github.event.pull_request.base.ref == 'main' }}
+    permissions:
+      contents: read
+    steps:
+      - name: Check auto_review configuration
+        id: config
+        env:
+          AUTO_REVIEW_GATEWAY_URL: ${{ vars.AUTO_REVIEW_GATEWAY_URL }}
+          AUTO_REVIEW_ACTION_TOKEN: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
+        run: |
+          if [ -n "$AUTO_REVIEW_GATEWAY_URL" ] && [ -n "$AUTO_REVIEW_ACTION_TOKEN" ]; then
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+            echo "::notice::auto_review is not configured (AUTO_REVIEW_GATEWAY_URL or AUTO_REVIEW_ACTION_TOKEN unset); skipping semantic review."
+          fi
+
+      - name: Request auto_review semantic review
+        if: ${{ steps.config.outputs.configured == 'true' }}
+        uses: jwilger/auto_review/deploy/github-action@37f7893cd56e51dbd2e9d01f4c665bf2671630bd # v1.5.0
+        with:
+          gateway-url: ${{ vars.AUTO_REVIEW_GATEWAY_URL }}
+          action-token: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
 
   pr-artifact-build:
     name: Build PR artifacts (no token)
