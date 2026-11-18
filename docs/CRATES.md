@@ -81,8 +81,8 @@ fields. The review event and severity floor are derived from `severity` only;
 
 ## `ar-review` local pull-request diff
 
-`prepare_workspace_from_clone_url_with_base(clone_url, head_sha, base_sha)`
-clones the head like `prepare_workspace_from_clone_url`, then, before the
+`prepare_workspace_from_clone_url(clone_url, head_sha, base_sha,
+previous_sha)` clones the head. With `Some(base_sha)` it then, before the
 credential-bearing `origin` remote is removed, fetches the base commit and
 deepens both tips in the bounded steps of `MERGE_BASE_DEEPEN_STEPS` (64, 256
 and 680 commits, together `MERGE_BASE_HISTORY_CAP`, 1000 commits) until
@@ -110,8 +110,7 @@ base both return `WorkspaceError::Git`. The caller still applies
 `ar_review::is_valid_git_sha` is the same hex check, exported so callers can
 decide before cloning whether a base SHA is usable.
 
-`prepare_workspace_from_clone_url_with_previous(clone_url, head_sha, base_sha,
-previous_sha)` does the same and, once the merge base is found, also fetches
+With `Some(previous_sha)` as well, once the merge base is found, it also fetches
 the commit an earlier review covered, with the same validation and bounded
 deepening. `PreparedWorkspace::incremental_diff()` then returns the diff from
 the merge base of that commit and the head to the head, the host's
@@ -127,8 +126,8 @@ has it: `ReviewJob::from(&PullRequestEvent)` and the gateway's `/reviews/ci`
 endpoint fill it; chat `re-review`, the poller, the CLI and AgentCore leave it
 `None`. `run_review_job` uses it, or else the base SHA of the pull request it
 fetches, to prepare the workspace with
-`prepare_workspace_from_clone_url_with_base` (a non-hex base clones the head
-without a merge base). With a merge base, the full review's diff and
+`prepare_workspace_from_clone_url` (a non-hex base clones the head without a
+merge base). With a merge base, the full review's diff and
 changed-file list come from `PreparedWorkspace::pr_diff()` and
 `pr_changed_files()`: the RAG context and `review_pull_request` both use that
 diff (`ReviewArgs::diff_override`) and file list
@@ -136,8 +135,8 @@ diff (`ReviewArgs::diff_override`) and file list
 pipeline's `list_changed_files` are not called. The pre-clone trivial-files
 triage still reads the host's changed-file list. Without a merge base, or when
 the local git commands fail, the review fetches the host's diff and file list
-as before. Incremental reviews prepare the workspace with
-`prepare_workspace_from_clone_url_with_previous` and take their diff from
+as before. Incremental reviews also pass the previously reviewed commit to
+`prepare_workspace_from_clone_url` and take their diff from
 `PreparedWorkspace::incremental_diff()`, so the host's compare endpoint and its
 size limit are not used. Without a workspace, or when the previous commit is
 not in it, they fall back to `ReviewHost::get_compare_diff`, and when that fails

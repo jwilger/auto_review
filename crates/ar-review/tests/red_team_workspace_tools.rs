@@ -221,10 +221,14 @@ async fn read_file_on_prepared_workspace_git_config_exposes_no_clone_url() {
         ],
     );
 
-    let workspace =
-        prepare_workspace_from_clone_url(&format!("file://{}", bare.display()), &head_sha)
-            .await
-            .unwrap();
+    let workspace = prepare_workspace_from_clone_url(
+        &format!("file://{}", bare.display()),
+        &head_sha,
+        None,
+        None,
+    )
+    .await
+    .unwrap();
 
     let seen = match read_file(workspace.path(), ".git/config", None, None, 64 * 1024) {
         Ok(content) => content.content,

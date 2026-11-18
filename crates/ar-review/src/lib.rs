@@ -46,7 +46,6 @@ pub use trusted_files::{load_repo_config_from_base, BaseRef, LoadedRepoConfig};
 pub use verify::verify_findings;
 pub use workspace::{
     build_clone_url, is_valid_git_sha, prepare_workspace, prepare_workspace_from_clone_url,
-    prepare_workspace_from_clone_url_with_base, prepare_workspace_from_clone_url_with_previous,
-    PreparedWorkspace, WorkspaceError, MERGE_BASE_DEEPEN_STEPS,
+    PreparedWorkspace, WorkspaceError, MERGE_BASE_DEEPEN_STEPS, MERGE_BASE_HISTORY_CAP,
 };
 pub use workspace_tools::{read_file, search, ReadResult, SearchHit, WorkspaceToolError};

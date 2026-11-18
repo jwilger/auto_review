@@ -7,7 +7,7 @@
 
 use crate::error::ReviewError;
 use ar_forge::ChangedFile;
-use std::{env, ffi::OsStr, path::Path};
+use std::{collections::HashMap, env, ffi::OsStr, path::Path};
 use tempfile::TempDir;
 use tokio::process::Command;
 use url::Url;
@@ -74,7 +74,7 @@ impl PreparedWorkspace {
     /// the previously reviewed commit is pull-request content.
     ///
     /// Errors when the workspace was not prepared through
-    /// [`prepare_workspace_from_clone_url_with_previous`], or the previous
+    /// [`prepare_workspace_from_clone_url`] with a previous SHA, or the previous
     /// commit or either merge base could not be found within the bounded
     /// history fetch (for example after a force push removed it).
     pub async fn incremental_diff(&self) -> Result<String, WorkspaceError> {
@@ -154,14 +154,13 @@ impl PreparedWorkspace {
             &attributes,
         )
         .await?;
-        let counts = parse_numstat_z(&numstat);
+        // Keyed by path so a pull request with thousands of files is matched
+        // in linear time.
+        let counts: HashMap<String, (u32, u32)> = parse_numstat_z(&numstat).into_iter().collect();
         Ok(parse_name_status_z(&name_status)
             .into_iter()
             .map(|(status, filename, previous_filename)| {
-                let (additions, deletions) = counts
-                    .iter()
-                    .find(|(path, _)| *path == filename)
-                    .map_or((0, 0), |(_, lines)| *lines);
+                let (additions, deletions) = counts.get(&filename).copied().unwrap_or((0, 0));
                 ChangedFile {
                     additions,
                     changes: additions.saturating_add(deletions),
@@ -221,7 +220,7 @@ pub async fn prepare_workspace(
     head_sha: &str,
 ) -> Result<PreparedWorkspace, WorkspaceError> {
     let url = build_clone_url(base, owner, repo, token)?;
-    prepare_workspace_from_clone_url(&url, head_sha).await
+    prepare_workspace_from_clone_url(&url, head_sha, None, None).await
 }
 
 /// Clone an already-authenticated repository URL at `head_sha`.
@@ -230,53 +229,30 @@ pub async fn prepare_workspace(
 /// clone URL/auth material, while workspace preparation keeps the same hermetic
 /// git execution and SHA validation.
 ///
-/// The `origin` remote is removed right after checkout so the workspace
-/// `.git/config` holds no credential-bearing URL. Any further fetch from the
-/// clone source must happen before that removal.
+/// With `base_sha`, also fetch enough of the base's history to find the
+/// pull request's merge base, so [`PreparedWorkspace::pr_diff`] can compute
+/// the diff the host shows for the pull request without the host's
+/// whole-diff endpoint. With `previous_sha` (the commit an earlier review
+/// covered) as well, fetch that commit the same way, so
+/// [`PreparedWorkspace::incremental_diff`] can show only what was pushed
+/// since without the host's compare endpoint. The previous commit is only
+/// fetched once the pull request's merge base was found.
+///
+/// Every SHA is validated before git runs. History is fetched in the
+/// bounded steps of [`MERGE_BASE_DEEPEN_STEPS`]. When a commit cannot be fetched
+/// or no merge base appears within those bounds, the workspace is still
+/// returned and the matching diff method errors with the reason, so callers
+/// keep the checkout for context and fall back to the host's diff.
+///
+/// The `origin` remote is removed right after these fetches so the
+/// workspace `.git/config` holds no credential-bearing URL.
 pub async fn prepare_workspace_from_clone_url(
     clone_url: &str,
     head_sha: &str,
+    base_sha: Option<&str>,
+    previous_sha: Option<&str>,
 ) -> Result<PreparedWorkspace, WorkspaceError> {
-    clone_workspace(clone_url, head_sha, None, None).await
-}
-
-/// Clone an already-authenticated repository URL at `head_sha` and also
-/// fetch enough of `base_sha`'s history to find the pull request's merge
-/// base, so [`PreparedWorkspace::pr_diff`] can compute the diff the host
-/// shows for the pull request without the host's whole-diff endpoint.
-///
-/// Both SHAs are validated before git runs. The base history is fetched
-/// before the credential-bearing `origin` remote is removed, deepening in
-/// the bounded steps of [`MERGE_BASE_DEEPEN_STEPS`]. When the base cannot be
-/// fetched or no merge base appears within that bound, the workspace is
-/// still returned with [`PreparedWorkspace::merge_base`] `None`, so callers
-/// keep the checkout for context and fall back to the host's diff.
-pub async fn prepare_workspace_from_clone_url_with_base(
-    clone_url: &str,
-    head_sha: &str,
-    base_sha: &str,
-) -> Result<PreparedWorkspace, WorkspaceError> {
-    clone_workspace(clone_url, head_sha, Some(base_sha), None).await
-}
-
-/// Like [`prepare_workspace_from_clone_url_with_base`], and also fetch the
-/// commit an earlier review covered (`previous_sha`), so
-/// [`PreparedWorkspace::incremental_diff`] can show only what was pushed
-/// since without the host's compare endpoint.
-///
-/// All three SHAs are validated before git runs. The previous commit is
-/// fetched with the same bounded deepening as the base, and only when the
-/// pull request's merge base was found. When it cannot be fetched (a force
-/// push removed it) or no merge base with the head appears within the
-/// bound, the workspace is still returned and `incremental_diff` errors,
-/// so callers fall back to the host or to a full review.
-pub async fn prepare_workspace_from_clone_url_with_previous(
-    clone_url: &str,
-    head_sha: &str,
-    base_sha: &str,
-    previous_sha: &str,
-) -> Result<PreparedWorkspace, WorkspaceError> {
-    clone_workspace(clone_url, head_sha, Some(base_sha), Some(previous_sha)).await
+    clone_workspace(clone_url, head_sha, base_sha, previous_sha).await
 }
 
 /// The most extra history, in commits behind each tip, a review fetches
@@ -716,6 +692,8 @@ mod tests {
         let err = prepare_workspace_from_clone_url(
             "https://oauth2:tok@forgejo.example.com/alice/widgets.git",
             "--upload-pack=evil",
+            None,
+            None,
         )
         .await
         .expect_err("must reject");
@@ -975,7 +953,7 @@ mod tests {
         let fixture = TempDir::new().unwrap();
         let (clone_url, head_sha) = bare_repo_with_one_commit(fixture.path()).await;
 
-        let workspace = prepare_workspace_from_clone_url(&clone_url, &head_sha)
+        let workspace = prepare_workspace_from_clone_url(&clone_url, &head_sha, None, None)
             .await
             .unwrap();
 
@@ -1121,10 +1099,11 @@ line three of the renamed file\nline four of the renamed file\n";
         let fixture = TempDir::new().unwrap();
         let repo = diverged_repo(fixture.path()).await;
 
-        let workspace = prepare_workspace_from_clone_url_with_base(
+        let workspace = prepare_workspace_from_clone_url(
             &repo.clone_url,
             &repo.head_sha,
-            &repo.base_sha,
+            Some(&repo.base_sha),
+            None,
         )
         .await
         .unwrap();
@@ -1135,9 +1114,14 @@ line three of the renamed file\nline four of the renamed file\n";
     /// Prepare a workspace for the [`diverged_repo`] fixture.
     async fn diverged_workspace(root: &Path) -> PreparedWorkspace {
         let repo = diverged_repo(root).await;
-        prepare_workspace_from_clone_url_with_base(&repo.clone_url, &repo.head_sha, &repo.base_sha)
-            .await
-            .unwrap()
+        prepare_workspace_from_clone_url(
+            &repo.clone_url,
+            &repo.head_sha,
+            Some(&repo.base_sha),
+            None,
+        )
+        .await
+        .unwrap()
     }
 
     #[tokio::test]
@@ -1323,11 +1307,11 @@ line three of the renamed file\nline four of the renamed file\n";
     async fn incremental_diff_holds_only_the_commits_after_the_previous_review() {
         let fixture = TempDir::new().unwrap();
         let repo = diverged_repo(fixture.path()).await;
-        let workspace = prepare_workspace_from_clone_url_with_previous(
+        let workspace = prepare_workspace_from_clone_url(
             &repo.clone_url,
             &repo.head_sha,
-            &repo.base_sha,
-            &repo.reviewed_sha,
+            Some(&repo.base_sha),
+            Some(&repo.reviewed_sha),
         )
         .await
         .unwrap();
@@ -1345,39 +1329,48 @@ line three of the renamed file\nline four of the renamed file\n";
         );
     }
 
+    /// Values that must never reach git argv as a base or previous SHA:
+    /// an option-shaped value and a branch name (C3).
+    const NON_SHA_VALUES: [&str; 2] = ["--upload-pack=evil", "main"];
+
     #[tokio::test]
     async fn prepare_workspace_with_previous_rejects_non_sha_previous_before_invoking_git() {
-        let err = prepare_workspace_from_clone_url_with_previous(
-            "https://oauth2:tok@forgejo.example.com/alice/widgets.git",
-            "deadbeef",
-            "cafef00d",
-            "--upload-pack=evil",
-        )
-        .await
-        .expect_err("must reject");
+        for value in NON_SHA_VALUES {
+            let err = prepare_workspace_from_clone_url(
+                "https://oauth2:tok@forgejo.example.com/alice/widgets.git",
+                "deadbeef",
+                Some("cafef00d"),
+                Some(value),
+            )
+            .await
+            .expect_err("must reject");
 
-        assert!(
-            err.to_string()
-                .contains("previous_sha \"--upload-pack=evil\" is not a hex commit SHA"),
-            "unexpected error: {err}"
-        );
+            assert!(
+                err.to_string()
+                    .contains(&format!("previous_sha {value:?} is not a hex commit SHA")),
+                "unexpected error for {value:?}: {err}"
+            );
+        }
     }
 
     #[tokio::test]
     async fn prepare_workspace_with_base_rejects_non_sha_base_before_invoking_git() {
-        let err = prepare_workspace_from_clone_url_with_base(
-            "https://oauth2:tok@forgejo.example.com/alice/widgets.git",
-            "deadbeef",
-            "--upload-pack=evil",
-        )
-        .await
-        .expect_err("must reject");
+        for value in NON_SHA_VALUES {
+            let err = prepare_workspace_from_clone_url(
+                "https://oauth2:tok@forgejo.example.com/alice/widgets.git",
+                "deadbeef",
+                Some(value),
+                None,
+            )
+            .await
+            .expect_err("must reject");
 
-        assert!(
-            err.to_string()
-                .contains("base_sha \"--upload-pack=evil\" is not a hex commit SHA"),
-            "unexpected error: {err}"
-        );
+            assert!(
+                err.to_string()
+                    .contains(&format!("base_sha {value:?} is not a hex commit SHA")),
+                "unexpected error for {value:?}: {err}"
+            );
+        }
     }
 
     #[test]
@@ -1450,7 +1443,7 @@ line three of the renamed file\nline four of the renamed file\n";
         let clone_url = format!("file://{}", bare.display());
 
         let workspace =
-            prepare_workspace_from_clone_url_with_base(&clone_url, &head_sha, &base_sha)
+            prepare_workspace_from_clone_url(&clone_url, &head_sha, Some(&base_sha), None)
                 .await
                 .unwrap();
 
@@ -1504,7 +1497,7 @@ C100\0src.rs\0copy.rs\0T\0link\0";
     async fn pr_diff_without_a_merge_base_is_an_error() {
         let fixture = TempDir::new().unwrap();
         let (clone_url, head_sha) = bare_repo_with_one_commit(fixture.path()).await;
-        let workspace = prepare_workspace_from_clone_url(&clone_url, &head_sha)
+        let workspace = prepare_workspace_from_clone_url(&clone_url, &head_sha, None, None)
             .await
             .unwrap();
 

@@ -6,8 +6,7 @@ use ar_index::{LearningsStore, VectorStore};
 use ar_llm::Router as LlmRouter;
 use ar_review::{
     build_glob_set, build_review_context_with_store, is_valid_git_sha, load_repo_config_from_base,
-    pr_is_skippable, prepare_workspace_from_clone_url, prepare_workspace_from_clone_url_with_base,
-    prepare_workspace_from_clone_url_with_previous, review_pull_request, BaseRef,
+    pr_is_skippable, prepare_workspace_from_clone_url, review_pull_request, BaseRef,
     PreparedWorkspace, RepoConfig, ReviewArgs, ReviewError, VerifyMode, WorkspaceError,
 };
 use async_trait::async_trait;
@@ -1042,27 +1041,17 @@ async fn clone_head_workspace(
         .clone_url(&job.owner, &job.repo)
         .await
         .map_err(WorkspacePrepError::Host)?;
-    if is_valid_git_sha(base_sha) {
-        if let Some(previous_sha) = incremental_from.filter(|sha| is_valid_git_sha(sha)) {
-            return Ok(prepare_workspace_from_clone_url_with_previous(
-                &clone_url,
-                &job.head_sha,
-                base_sha,
-                previous_sha,
-            )
-            .await?);
-        }
-        return Ok(
-            prepare_workspace_from_clone_url_with_base(&clone_url, &job.head_sha, base_sha).await?,
+    let base = Some(base_sha).filter(|sha| is_valid_git_sha(sha));
+    if base.is_none() {
+        tracing::warn!(
+            repo = format!("{}/{}", job.owner, job.repo),
+            pr = job.pr_number,
+            base_sha,
+            "pull request base is not a commit SHA; cloning the head without its merge base"
         );
     }
-    tracing::warn!(
-        repo = format!("{}/{}", job.owner, job.repo),
-        pr = job.pr_number,
-        base_sha,
-        "pull request base is not a commit SHA; cloning the head without its merge base"
-    );
-    Ok(prepare_workspace_from_clone_url(&clone_url, &job.head_sha).await?)
+    let previous = incremental_from.filter(|sha| is_valid_git_sha(sha));
+    Ok(prepare_workspace_from_clone_url(&clone_url, &job.head_sha, base, previous).await?)
 }
 
 /// The pull request's diff and changed files computed in `workspace`,
