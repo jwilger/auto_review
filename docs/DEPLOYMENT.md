@@ -190,7 +190,9 @@ option, and every review then falls back to the host's diff API, which on
 GitHub cannot return a diff for pull requests over 300 files without the
 per-file patch fallback. Debian 12 (git 2.39) and Ubuntu 22.04 (git 2.34) ship
 older versions; install a newer git (for example from backports or Nix) on
-those hosts. Check with `git --version` as the service user.
+those hosts. Check with `git --version` as the service user. The gateway logs a
+startup WARN, and `auto-review ops doctor` reports its `git` check as WARN,
+when the git it finds is older than 2.42.
 
 ## systemd direct-host service
 

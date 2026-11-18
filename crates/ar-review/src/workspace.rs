@@ -86,7 +86,8 @@ impl PreparedWorkspace {
     /// The merge base of the pull request's base and head commits, when
     /// the workspace was prepared with a base SHA and the merge base was
     /// found within the bounded history fetch.
-    pub fn merge_base(&self) -> Option<&str> {
+    #[cfg(test)]
+    fn merge_base(&self) -> Option<&str> {
         self.merge_base.as_deref().ok()
     }
 
@@ -98,7 +99,7 @@ impl PreparedWorkspace {
     /// `Binary files ... differ` line, never with its content. External
     /// diff drivers and textconv filters are disabled.
     ///
-    /// At most [`LOCAL_DIFF_MAX_BYTES`] are read, cut at a line boundary;
+    /// At most `LOCAL_DIFF_MAX_BYTES` are read, cut at a line boundary;
     /// git is stopped there, so a huge pull request is never buffered in
     /// full.
     ///
@@ -279,6 +280,32 @@ pub async fn prepare_workspace(
     prepare_workspace_from_clone_url(&url, head_sha, None, None).await
 }
 
+/// The most diff text, in bytes, read from git for one local pull request
+/// or incremental diff: 320 times the 100 kB the model sees
+/// (`DEFAULT_MAX_DIFF_BYTES`), leaving room for ignored paths
+/// (`filter_diff_paths`) to be dropped before `cap_diff` applies, while a
+/// pull request adding hundreds of MB of text is never buffered in full.
+pub(crate) const LOCAL_DIFF_MAX_BYTES: usize = 32 * 1024 * 1024;
+
+/// The most extra history, in commits behind each tip, a review fetches
+/// while looking for a merge base. It bounds the clone, so a pull request
+/// against a huge-history repository (or unrelated histories) cannot stall
+/// a review or turn the shallow clone into a full one.
+pub(crate) const MERGE_BASE_HISTORY_CAP: u32 = 1000;
+
+/// How many more commits each deepening round fetches behind the head and
+/// base while looking for their merge base. Small first steps keep the
+/// common case (a recent fork point) cheap; the steps sum to
+/// `MERGE_BASE_HISTORY_CAP`.
+pub(crate) const MERGE_BASE_DEEPEN_STEPS: &[u32] = &[64, 256, MERGE_BASE_HISTORY_CAP - 64 - 256];
+
+/// The longest a review spends fetching history to find one merge base (the
+/// pull request's, and again the previously reviewed commit's for an
+/// incremental review). On expiry the running git process is killed and the
+/// review falls back to the host's diff, so a stalled forge or a slow
+/// monorepo fetch cannot hold a review in `pending`.
+pub(crate) const MERGE_BASE_FETCH_TIMEOUT: Duration = Duration::from_secs(120);
+
 /// Clone an already-authenticated repository URL at `head_sha`.
 ///
 /// This is the provider-neutral clone seam: host adapters prepare their own
@@ -295,8 +322,8 @@ pub async fn prepare_workspace(
 /// fetched once the pull request's merge base was found.
 ///
 /// Every SHA is validated before git runs. History is fetched in the
-/// bounded steps of [`MERGE_BASE_DEEPEN_STEPS`] within
-/// [`MERGE_BASE_FETCH_TIMEOUT`] per commit. When a commit cannot be fetched
+/// bounded steps of `MERGE_BASE_DEEPEN_STEPS` within
+/// `MERGE_BASE_FETCH_TIMEOUT` per commit. When a commit cannot be fetched
 /// or no merge base appears within those bounds, the workspace is still
 /// returned and the matching diff method errors with the reason, so callers
 /// keep the checkout for context and fall back to the host's diff.
@@ -304,41 +331,6 @@ pub async fn prepare_workspace(
 /// The `origin` remote is removed right after these fetches so the
 /// workspace `.git/config` holds no credential-bearing URL.
 pub async fn prepare_workspace_from_clone_url(
-    clone_url: &str,
-    head_sha: &str,
-    base_sha: Option<&str>,
-    previous_sha: Option<&str>,
-) -> Result<PreparedWorkspace, WorkspaceError> {
-    clone_workspace(clone_url, head_sha, base_sha, previous_sha).await
-}
-
-/// The most diff text, in bytes, read from git for one local pull request
-/// or incremental diff: 320 times the 100 kB the model sees
-/// (`DEFAULT_MAX_DIFF_BYTES`), leaving room for ignored paths
-/// (`filter_diff_paths`) to be dropped before `cap_diff` applies, while a
-/// pull request adding hundreds of MB of text is never buffered in full.
-pub const LOCAL_DIFF_MAX_BYTES: usize = 32 * 1024 * 1024;
-
-/// The most extra history, in commits behind each tip, a review fetches
-/// while looking for a merge base. It bounds the clone, so a pull request
-/// against a huge-history repository (or unrelated histories) cannot stall
-/// a review or turn the shallow clone into a full one.
-pub const MERGE_BASE_HISTORY_CAP: u32 = 1000;
-
-/// How many more commits each deepening round fetches behind the head and
-/// base while looking for their merge base. Small first steps keep the
-/// common case (a recent fork point) cheap; the steps sum to
-/// [`MERGE_BASE_HISTORY_CAP`].
-pub const MERGE_BASE_DEEPEN_STEPS: &[u32] = &[64, 256, 680];
-
-/// The longest a review spends fetching history to find one merge base (the
-/// pull request's, and again the previously reviewed commit's for an
-/// incremental review). On expiry the running git process is killed and the
-/// review falls back to the host's diff, so a stalled forge or a slow
-/// monorepo fetch cannot hold a review in `pending`.
-pub const MERGE_BASE_FETCH_TIMEOUT: Duration = Duration::from_secs(120);
-
-async fn clone_workspace(
     clone_url: &str,
     head_sha: &str,
     base_sha: Option<&str>,
@@ -568,6 +560,44 @@ fn with_attributes_from(tree: &str, args: &[&str]) -> Vec<String> {
         .collect()
 }
 
+/// The oldest git, as `(major, minor)`, the local pull request diff runs on:
+/// it passes the global `--attr-source` option, which git 2.42 added.
+const MIN_LOCAL_DIFF_GIT_VERSION: (u32, u32) = (2, 42);
+
+/// Check `git --version` output against git 2.42 (`MIN_LOCAL_DIFF_GIT_VERSION`) for
+/// startup and `doctor` probes: `None` when the git is new enough, otherwise
+/// an operator warning naming the requirement and the host-diff fallback.
+/// Output with no readable version also warns, because it cannot be shown
+/// to meet the requirement.
+pub fn local_diff_git_version_warning(version_output: &str) -> Option<String> {
+    let (min_major, min_minor) = MIN_LOCAL_DIFF_GIT_VERSION;
+    let consequence = "the local pull request diff fails on the unknown option, so every review \
+                       falls back to the host's diff, which GitHub refuses for pull requests \
+                       over 300 files";
+    match parse_git_version(version_output) {
+        Some(version) if version >= MIN_LOCAL_DIFF_GIT_VERSION => None,
+        Some((major, minor)) => Some(format!(
+            "git {major}.{minor} is older than {min_major}.{min_minor}, which `--attr-source` \
+             needs: {consequence}. Upgrade git to {min_major}.{min_minor} or newer."
+        )),
+        None => Some(format!(
+            "no version in `git --version` output {:?}; git {min_major}.{min_minor} or newer \
+             is needed for `--attr-source`, and without it {consequence}.",
+            version_output.trim()
+        )),
+    }
+}
+
+/// `(major, minor)` from `git --version` output such as `git version
+/// 2.39.5` or `git version 2.42.0.windows.1`.
+fn parse_git_version(version_output: &str) -> Option<(u32, u32)> {
+    let version = version_output.trim().strip_prefix("git version ")?;
+    let mut numbers = version.split(|c: char| !c.is_ascii_digit());
+    let major = numbers.next()?.parse().ok()?;
+    let minor = numbers.next()?.parse().ok()?;
+    Some((major, minor))
+}
+
 /// Whether the clone at `path` still has a shallow history boundary.
 async fn is_shallow(path: &Path) -> bool {
     git_stdout_in(path, &["rev-parse", "--is-shallow-repository"])
@@ -651,6 +681,14 @@ async fn git_stdout_bounded_in<S: AsRef<OsStr>>(
     stderr_read?;
     let status = child.wait().await?;
     if out.len() > max_bytes {
+        // The cut happens before ignored paths are dropped, so files git
+        // lists after an oversized ignored file (vendored code, lockfiles)
+        // never reach the model, though the changed-file list stays whole.
+        tracing::warn!(
+            max_bytes,
+            "local diff cut at its read limit; files after the cut are missing from the review \
+             text, including any listed after ignored paths"
+        );
         out.truncate(max_bytes);
         let cut = out
             .iter()
@@ -730,6 +768,35 @@ mod tests {
     use std::fs;
 
     static ENV_LOCK: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
+    #[test]
+    fn git_older_than_2_42_warns_with_the_requirement_and_the_fallback() {
+        let warning = local_diff_git_version_warning("git version 2.39.5\n")
+            .expect("git 2.39 cannot run the local diff");
+        assert!(warning.contains("2.39"), "{warning}");
+        assert!(warning.contains("2.42"), "{warning}");
+        assert!(warning.contains("host's diff"), "{warning}");
+    }
+
+    #[test]
+    fn git_2_42_or_newer_needs_no_warning() {
+        for output in [
+            "git version 2.42.0\n",
+            "git version 2.47.1 (Apple Git-154)",
+            "git version 2.45.2.windows.1",
+            "git version 3.0.0",
+        ] {
+            assert_eq!(local_diff_git_version_warning(output), None, "{output}");
+        }
+    }
+
+    #[test]
+    fn git_version_output_without_a_version_warns() {
+        let warning = local_diff_git_version_warning("not git at all")
+            .expect("an unreadable version cannot be shown to meet 2.42");
+        assert!(warning.contains("not git at all"), "{warning}");
+        assert!(warning.contains("2.42"), "{warning}");
+    }
 
     #[test]
     fn clone_url_uses_oauth2_userinfo() {
@@ -1377,11 +1444,14 @@ line three of the renamed file\nline four of the renamed file\n";
 
     /// Issue #260 C12: a finding on a changed line of the locally diffed
     /// renamed file maps to the new path and the head-side line, exactly as
-    /// for the host's diff, and a finding on a file the pull request never
-    /// changed (one only the base branch touched after the fork point) is
-    /// not posted inline.
+    /// for the host's diff, and a finding on a path off the diff (a file only
+    /// the base branch touched after the fork point) is not posted inline.
+    ///
+    /// Only off-diff paths are covered: `mapping.rs` has no hunk-range check,
+    /// so a finding on an unchanged line of a changed file is still posted
+    /// inline, the same for the local and the host diff as before #260.
     #[tokio::test]
-    async fn findings_on_the_local_diff_map_to_the_renamed_path_and_head_line() {
+    async fn findings_on_the_local_diff_map_to_the_renamed_path_and_drop_off_diff_paths() {
         let fixture = TempDir::new().unwrap();
         let workspace = diverged_workspace(fixture.path()).await;
         let diff = workspace.pr_diff().await.unwrap();

@@ -45,8 +45,7 @@ pub use triage::{classify, pr_is_skippable, FileClass};
 pub use trusted_files::{load_repo_config_from_base, BaseRef, LoadedRepoConfig};
 pub use verify::verify_findings;
 pub use workspace::{
-    build_clone_url, is_valid_git_sha, prepare_workspace, prepare_workspace_from_clone_url,
-    MergeBaseUnavailable, PreparedWorkspace, WorkspaceError, LOCAL_DIFF_MAX_BYTES,
-    MERGE_BASE_DEEPEN_STEPS, MERGE_BASE_FETCH_TIMEOUT, MERGE_BASE_HISTORY_CAP,
+    build_clone_url, is_valid_git_sha, local_diff_git_version_warning, prepare_workspace,
+    prepare_workspace_from_clone_url, MergeBaseUnavailable, PreparedWorkspace, WorkspaceError,
 };
 pub use workspace_tools::{read_file, search, ReadResult, SearchHit, WorkspaceToolError};

@@ -185,6 +185,7 @@ dependencies = [
  "ar-index",
  "ar-llm",
  "ar-orchestrator",
+ "ar-review",
  "async-trait",
  "axum",
  "hex",

@@ -33,7 +33,7 @@ maintenance.
 
 | Command | Purpose |
 |---|---|
-| `ops doctor` | Probes Forgejo PAT validity, LLM reachability/model availability, git availability, secret strength, and runtime isolation posture. |
+| `ops doctor` | Probes Forgejo PAT validity, LLM reachability/model availability, git availability (warning when git is older than 2.42, which the local pull request diff needs), secret strength, and runtime isolation posture. |
 | `webhook test` | Sends an HMAC-signed test event to a running gateway. |
 | `ops status` | Reads `/version`, `/info`, and `/metrics` for a one-screen live snapshot. |
 
