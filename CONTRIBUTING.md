@@ -74,6 +74,7 @@ it can merge:
 | Dependency advisories | `just advisories` (`cargo deny check advisories`); `.github/workflows/advisories.yml` also runs it daily against `main` so new advisories surface without a code change |
 | Shellcheck | `just shellcheck` on `scripts/release` |
 | Actionlint | `just actionlint` on `.github/workflows/` |
+| Promtool | `just promtool`: `promtool check rules` and the promtool unit tests (`deploy/prometheus/auto_review.rules.test.yaml`) of the Prometheus rules in `deploy/prometheus/auto_review.rules.yaml` |
 | Conflict markers | `just conflict-markers`, which fails on unresolved merge conflict markers in tracked files |
 | Nix flake check | `just flake-check`, which runs the Nix packaging, NixOS module and OCI image contract checks |
 | Analyze (rust), Analyze (actions) | CodeQL analysis of the Rust code and the workflows (`.github/workflows/codeql.yml`) |
