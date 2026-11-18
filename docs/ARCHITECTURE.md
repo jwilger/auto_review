@@ -159,16 +159,18 @@ Components receive only the workspace capability they need:
   clone URL through `ReviewHost`; Forgejo keeps its existing token helper while
   GitHub uses installation-token auth material. Given the pull request's base
   SHA, workspace preparation also fetches a bounded amount of base and head
-  history to find the merge base, so the pull-request diff and changed-file
+  history (in commits and in time) to find the merge base, so the
+  pull-request diff and changed-file
   list can be computed locally instead of through a host's size-limited diff
   endpoint. That local diff reads `.gitattributes` from the merge base, never
-  the head checkout. `run_review_job` takes the base SHA from the `ReviewJob`
+  the head checkout, through git's `--attr-source` option, which git older
+  than 2.42 rejects (the review then uses the host's diff). `run_review_job` takes the base SHA from the `ReviewJob`
   when the intake supplied it, otherwise from the pull request it fetched, and
   full reviews use the local diff and changed-file list for both RAG context
   and review generation, so neither the host's whole-diff endpoint nor its
   changed-file list is read. Ignored paths and the diff byte cap still apply
-  before the model sees it. Without a merge base the review uses the host's
-  diff as before. Incremental reviews also fetch the previously reviewed
+  before the model sees it. Without a merge base the review logs why, with
+  the repository and pull request, and uses the host's diff as before. Incremental reviews also fetch the previously reviewed
   commit into the workspace and diff only what was pushed since, locally
   first, then through the host's compare endpoint, then as a full review when
   the previous commit is gone.
