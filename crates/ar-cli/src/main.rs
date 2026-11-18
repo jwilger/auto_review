@@ -1,9 +1,16 @@
-use anyhow::Result;
-use clap::Parser;
+//! `auto-review` operator CLI entrypoint.
 
+extern crate alloc;
+
+/// `bench run`: fixture-replay benchmark harness.
 mod bench;
+/// Clap definitions for every subcommand, flag and env binding.
 mod cli;
+/// Implementations of the non-bench subcommands.
 mod commands;
+
+use anyhow::Result;
+use clap::Parser as _;
 
 use cli::{
     AgentcoreCommand, AuthCommand, BenchCommand, Cli, Command, ConfigCommand, HistoryCommand,
@@ -26,6 +33,11 @@ async fn main() -> Result<()> {
         .init();
 
     match cli.command {
+        #[expect(
+            clippy::unreachable,
+            reason = "the gateway command returns above, before CLI tracing init, because the \
+                      gateway installs its own subscriber; this arm only keeps the match exhaustive"
+        )]
         Command::Gateway(_) => unreachable!("gateway command returned before CLI tracing init"),
         Command::Agentcore(AgentcoreCommand::Serve(args)) => commands::agentcore_serve(args).await,
         Command::Auth(AuthCommand::Init(args)) => commands::init(args).await,
@@ -35,7 +47,7 @@ async fn main() -> Result<()> {
             commands::unregister_webhook(args).await
         }
         Command::Webhook(WebhookCommand::Test(args)) => commands::test_webhook(args).await,
-        Command::Config(ConfigCommand::Validate(args)) => commands::validate_config(args),
+        Command::Config(ConfigCommand::Validate(args)) => commands::validate_config(&args),
         Command::Review(ReviewCommand::Once(args)) => commands::review_once(args).await,
         Command::Bench(BenchCommand::Run(args)) => bench::run(args).await,
         Command::Ops(OpsCommand::Doctor(args)) => commands::doctor(args).await,

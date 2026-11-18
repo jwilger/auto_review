@@ -1,5 +1,17 @@
-use clap::{Parser, Subcommand};
+//! Clap definitions for the `auto-review` CLI: subcommands, flags, env
+//! bindings and their value parsers.
 
+use ar_index::{LearningsFilter, RepoScope};
+use clap::{Parser, Subcommand};
+use std::path::PathBuf;
+
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(Parser, Debug)]
 #[command(
     name = "auto-review",
@@ -11,6 +23,21 @@ pub struct Cli {
     pub command: Command,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[expect(
+    clippy::doc_markdown,
+    reason = "clap prints these doc comments verbatim as --help text, so Markdown backticks or <> around URLs would show up in the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(Subcommand, Debug)]
 pub enum Command {
     /// Gateway lifecycle commands.
@@ -53,6 +80,13 @@ pub enum Command {
     Learnings(LearningsCommand),
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct GatewayArgs {
     /// Run the gateway directly with only application-level controls.
@@ -60,12 +94,34 @@ pub struct GatewayArgs {
     pub bare: bool,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(Subcommand, Debug)]
 pub enum AgentcoreCommand {
     /// Serve the AgentCore-compatible runtime HTTP API.
     Serve(AgentcoreServeArgs),
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[expect(
+    clippy::doc_markdown,
+    reason = "clap prints these doc comments verbatim as --help text, so Markdown backticks or <> around URLs would show up in the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct AgentcoreServeArgs {
     /// Address for the AgentCore runtime HTTP server.
@@ -154,6 +210,17 @@ pub struct AgentcoreServeArgs {
     pub learnings_dynamodb_table: Option<String>,
 }
 
+#[expect(
+    clippy::doc_markdown,
+    reason = "clap prints these doc comments verbatim as --help text, so Markdown backticks or <> around URLs would show up in the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(Subcommand, Debug)]
 pub enum AuthCommand {
     /// Mint a personal access token for the auto_review bot user.
@@ -164,6 +231,17 @@ pub enum AuthCommand {
     Init(InitArgs),
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(Subcommand, Debug)]
 pub enum WebhookCommand {
     /// Register a webhook on a repository so PR events flow to the
@@ -191,6 +269,13 @@ pub enum WebhookCommand {
     Test(TestWebhookArgs),
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(Subcommand, Debug)]
 pub enum ConfigCommand {
     /// Validate one or more `.auto_review.yaml` configuration files.
@@ -201,6 +286,13 @@ pub enum ConfigCommand {
     Validate(ValidateConfigArgs),
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(Subcommand, Debug)]
 pub enum ReviewCommand {
     /// Run a one-shot reasoning-path review against a specific PR. No
@@ -210,6 +302,13 @@ pub enum ReviewCommand {
     Once(ReviewOnceArgs),
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(Subcommand, Debug)]
 pub enum BenchCommand {
     /// Replay one or more PR fixtures through the LLM-review step
@@ -220,6 +319,13 @@ pub enum BenchCommand {
     Run(BenchArgs),
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(Subcommand, Debug)]
 pub enum OpsCommand {
     /// Probe outbound dependencies (Forgejo API, LLM provider) and
@@ -237,6 +343,21 @@ pub enum OpsCommand {
     Status(StatusArgs),
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[expect(
+    clippy::doc_markdown,
+    reason = "clap prints these doc comments verbatim as --help text, so Markdown backticks or <> around URLs would show up in the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(Subcommand, Debug)]
 pub enum HistoryCommand {
     /// Clear the persistent review-history record for a single
@@ -256,6 +377,17 @@ pub enum HistoryCommand {
     Purge(PurgeHistoryArgs),
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(Subcommand, Debug)]
 pub enum LearningsCommand {
     /// List every learning stored in the persistent
@@ -275,6 +407,21 @@ pub enum LearningsCommand {
     Forget(ForgetLearningArgs),
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[expect(
+    clippy::doc_markdown,
+    reason = "clap prints these doc comments verbatim as --help text, so Markdown backticks or <> around URLs would show up in the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct InitArgs {
     /// Base URL of your Forgejo instance, e.g. https://git.example.com.
@@ -299,6 +446,17 @@ pub struct InitArgs {
     pub scopes: Vec<String>,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct ReviewOnceArgs {
     #[arg(long, env = "FORGEJO_BASE_URL")]
@@ -349,12 +507,23 @@ pub struct ReviewOnceArgs {
     pub dry_run: bool,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct ListLearningsArgs {
     /// Path to the gateway's SQLite learnings database. Reads
     /// `AR_LEARNINGS_DB` by default.
     #[arg(long, env = "AR_LEARNINGS_DB")]
-    pub learnings_db: std::path::PathBuf,
+    pub learnings_db: PathBuf,
 
     /// Emit the result as one JSON object per line for piping
     /// into `jq`. Otherwise renders a human-readable table.
@@ -364,7 +533,7 @@ pub struct ListLearningsArgs {
     /// Only list learnings scoped to this repository, given as
     /// `owner/repo`. Matching is case-insensitive.
     #[arg(long, value_name = "OWNER/REPO", value_parser = parse_repo_scope)]
-    pub repo: Option<ar_index::RepoScope>,
+    pub repo: Option<RepoScope>,
 
     /// Only list legacy learnings that have no repository. These are
     /// excluded from review retrieval.
@@ -375,32 +544,49 @@ pub struct ListLearningsArgs {
 impl ListLearningsArgs {
     /// The store filter the flags select. With neither flag every
     /// learning is listed.
-    pub fn filter(&self) -> ar_index::LearningsFilter {
-        match (&self.repo, self.unscoped) {
-            (Some(scope), _) => ar_index::LearningsFilter::Repo(scope.clone()),
-            (None, true) => ar_index::LearningsFilter::Unscoped,
-            (None, false) => ar_index::LearningsFilter::All,
+    pub fn filter(&self) -> LearningsFilter {
+        match (self.repo.as_ref(), self.unscoped) {
+            (Some(scope), _) => LearningsFilter::Repo(scope.clone()),
+            (None, true) => LearningsFilter::Unscoped,
+            (None, false) => LearningsFilter::All,
         }
     }
 }
 
-fn parse_repo_scope(value: &str) -> Result<ar_index::RepoScope, String> {
-    ar_index::RepoScope::parse(value.trim())
-        .ok_or_else(|| format!("expected owner/repo, got {value:?}"))
-}
-
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct ForgetLearningArgs {
     /// Path to the gateway's SQLite learnings database. Reads
     /// `AR_LEARNINGS_DB` by default.
     #[arg(long, env = "AR_LEARNINGS_DB")]
-    pub learnings_db: std::path::PathBuf,
+    pub learnings_db: PathBuf,
 
     /// Learning id, as printed by `learnings list`.
     #[arg(long)]
     pub id: u64,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct PurgeHistoryArgs {
     /// Path to the gateway's SQLite review-history database.
@@ -408,7 +594,7 @@ pub struct PurgeHistoryArgs {
     /// gateway uses, so an operator on the gateway host runs
     /// with just `--older-than-days N`.
     #[arg(long, env = "AR_HISTORY_DB")]
-    pub history_db: std::path::PathBuf,
+    pub history_db: PathBuf,
 
     /// Drop rows whose `updated_at` is older than this many
     /// days. 90 is a reasonable default for repos where
@@ -424,6 +610,17 @@ pub struct PurgeHistoryArgs {
     pub dry_run: bool,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct ResetPrArgs {
     /// Path to the gateway's SQLite review-history database.
@@ -431,7 +628,7 @@ pub struct ResetPrArgs {
     /// gateway uses, so operators can run this with no args
     /// when both processes share the env.
     #[arg(long, env = "AR_HISTORY_DB")]
-    pub history_db: std::path::PathBuf,
+    pub history_db: PathBuf,
 
     #[arg(long)]
     pub owner: String,
@@ -445,6 +642,13 @@ pub struct ResetPrArgs {
     pub pr: u64,
 }
 
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct StatusArgs {
     /// Gateway URL the status request goes to. Same value as
@@ -463,6 +667,17 @@ pub struct StatusArgs {
     pub timeout_secs: u64,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct DoctorArgs {
     /// Forgejo base URL. When set, `doctor` calls
@@ -511,6 +726,21 @@ pub struct DoctorArgs {
     pub timeout_secs: u64,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[expect(
+    clippy::doc_markdown,
+    reason = "clap prints these doc comments verbatim as --help text, so Markdown backticks or <> around URLs would show up in the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct TestWebhookArgs {
     /// Gateway URL the webhook should be POSTed to. The path
@@ -537,12 +767,23 @@ pub struct TestWebhookArgs {
     pub timeout_secs: u64,
 }
 
+#[expect(
+    clippy::doc_markdown,
+    reason = "clap prints these doc comments verbatim as --help text, so Markdown backticks or <> around URLs would show up in the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct ValidateConfigArgs {
     /// One or more `.auto_review.yaml` paths (or directories
     /// containing such files).
     #[arg(required = true)]
-    pub paths: Vec<std::path::PathBuf>,
+    pub paths: Vec<PathBuf>,
 
     /// Reject unknown top-level keys. Catches typos like
     /// `enabld:` (missing `e`) that the runtime loader silently
@@ -553,13 +794,24 @@ pub struct ValidateConfigArgs {
     pub strict: bool,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct BenchArgs {
     /// One or more fixture file paths or directories. Each fixture is
     /// a JSON file with the shape documented in `docs/BENCHMARKS.md`.
     /// When a directory is given, every `*.json` file in it is loaded.
     #[arg(required = true)]
-    pub fixtures: Vec<std::path::PathBuf>,
+    pub fixtures: Vec<PathBuf>,
 
     #[arg(long, env = "LLM_BASE_URL")]
     pub llm_base_url: String,
@@ -603,7 +855,7 @@ pub struct BenchArgs {
     /// deltas — precision, recall, success rate, mean/p99 latency,
     /// total findings — are printed alongside the aggregate.
     #[arg(long)]
-    pub baseline: Option<std::path::PathBuf>,
+    pub baseline: Option<PathBuf>,
 
     /// When set with `--baseline`, exit non-zero on a regression:
     /// precision or recall drops by > 5 percentage points, or p99
@@ -613,6 +865,17 @@ pub struct BenchArgs {
     pub fail_on_regression: bool,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct ListWebhooksArgs {
     #[arg(long, env = "FORGEJO_BASE_URL")]
@@ -633,6 +896,17 @@ pub struct ListWebhooksArgs {
     pub json: bool,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct UnregisterWebhookArgs {
     #[arg(long, env = "FORGEJO_BASE_URL")]
@@ -661,6 +935,21 @@ pub struct UnregisterWebhookArgs {
     pub match_url: Option<String>,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "clap lists subcommands and flags in --help in declaration order; sorting them alphabetically would reorder the CLI's help output"
+)]
+#[expect(
+    clippy::doc_markdown,
+    reason = "clap prints these doc comments verbatim as --help text, so Markdown backticks or <> around URLs would show up in the CLI's help output"
+)]
+#[cfg_attr(
+    not(test),
+    expect(
+        clippy::missing_docs_in_private_items,
+        reason = "clap derive turns doc comments on this item and its fields into --help text; adding docs here would change the CLI's help output"
+    )
+)]
 #[derive(clap::Args, Debug)]
 pub struct RegisterWebhookArgs {
     #[arg(long, env = "FORGEJO_BASE_URL")]
@@ -685,6 +974,7 @@ pub struct RegisterWebhookArgs {
     pub webhook_secret: String,
 }
 
+/// Scopes `auth init` requests when `--scopes` is not given.
 fn default_scopes() -> Vec<String> {
     vec![
         "write:repository".into(),
@@ -705,11 +995,32 @@ fn parse_llm_omit_temperature(raw: &str) -> Result<bool, String> {
     }
 }
 
+/// Parse `--repo` as an `owner/repo` learning scope.
+fn parse_repo_scope(value: &str) -> Result<RepoScope, String> {
+    RepoScope::parse(value.trim()).ok_or_else(|| format!("expected owner/repo, got {value:?}"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use clap::Parser;
+    use clap::error::ErrorKind;
 
+    #[expect(
+        clippy::assert_is_empty,
+        reason = "test code: the assertion stays as written; it checks emptiness without pinning the exact contents"
+    )]
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn init_parses_minimum_args() {
         let cli = Cli::try_parse_from([
@@ -723,17 +1034,29 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Auth(AuthCommand::Init(a)) => {
-                assert_eq!(a.forgejo_url, "https://x.example");
-                assert_eq!(a.username, "bot");
-                assert!(a.password.is_none());
-                assert_eq!(a.token_name, "auto_review");
-                assert!(!a.scopes.is_empty());
+            Command::Auth(AuthCommand::Init(parsed)) => {
+                assert_eq!(parsed.forgejo_url, "https://x.example");
+                assert_eq!(parsed.username, "bot");
+                assert!(parsed.password.is_none());
+                assert_eq!(parsed.token_name, "auto_review");
+                assert!(!parsed.scopes.is_empty());
             }
             _ => panic!("expected Init"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn init_accepts_password_and_custom_scopes() {
         let cli = Cli::try_parse_from([
@@ -751,14 +1074,26 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Auth(AuthCommand::Init(a)) => {
-                assert_eq!(a.password.as_deref(), Some("p"));
-                assert_eq!(a.scopes, vec!["write:repository", "read:user"]);
+            Command::Auth(AuthCommand::Init(parsed)) => {
+                assert_eq!(parsed.password.as_deref(), Some("p"));
+                assert_eq!(parsed.scopes, vec!["write:repository", "read:user"]);
             }
             _ => panic!("expected Init"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn register_webhook_requires_all_args() {
         let cli = Cli::try_parse_from([
@@ -780,15 +1115,27 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Webhook(WebhookCommand::Register(a)) => {
-                assert_eq!(a.owner, "o");
-                assert_eq!(a.repo, "r");
-                assert_eq!(a.gateway_url, "https://g.example");
+            Command::Webhook(WebhookCommand::Register(parsed)) => {
+                assert_eq!(parsed.owner, "o");
+                assert_eq!(parsed.repo, "r");
+                assert_eq!(parsed.gateway_url, "https://g.example");
             }
             _ => panic!("expected RegisterWebhook"),
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test helper: it returns the parse Result for the caller to inspect, and a parse into the wrong subcommand is a test failure, not an error to return"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     fn review_once_with(extra: &[&str]) -> Result<ReviewOnceArgs, clap::Error> {
         let mut argv = vec![
             "auto-review",
@@ -809,11 +1156,15 @@ mod tests {
         ];
         argv.extend_from_slice(extra);
         match Cli::try_parse_from(argv)?.command {
-            Command::Review(ReviewCommand::Once(a)) => Ok(a),
+            Command::Review(ReviewCommand::Once(parsed)) => Ok(parsed),
             other => panic!("expected ReviewOnce, got {other:?}"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
     #[test]
     fn llm_omit_temperature_flag_accepts_bool_vocabulary() {
         assert!(
@@ -833,14 +1184,30 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
     #[test]
     fn llm_omit_temperature_flag_rejects_garbage_naming_the_flag() {
         let err = review_once_with(&["--llm-omit-temperature=maybe"])
             .expect_err("garbage must not parse");
-        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
         assert!(err.to_string().contains("--llm-omit-temperature"), "{err}");
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn bare_llm_omit_temperature_does_not_swallow_bench_fixture_path() {
         let cli = Cli::try_parse_from([
@@ -854,20 +1221,21 @@ mod tests {
         ])
         .expect("bare flag followed by a fixture path parses");
         match cli.command {
-            Command::Bench(BenchCommand::Run(a)) => {
-                assert!(a.llm_omit_temperature);
-                assert_eq!(
-                    a.fixtures,
-                    vec![std::path::PathBuf::from("fixtures/x.json")]
-                );
+            Command::Bench(BenchCommand::Run(parsed)) => {
+                assert!(parsed.llm_omit_temperature);
+                assert_eq!(parsed.fixtures, vec![PathBuf::from("fixtures/x.json")]);
             }
             other => panic!("expected BenchRun, got {other:?}"),
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
     #[test]
     fn llm_omit_temperature_is_on_every_provider_building_command() {
-        use clap::CommandFactory;
+        use clap::CommandFactory as _;
 
         let cmd = Cli::command();
         for path in [["agentcore", "serve"], ["review", "once"], ["bench", "run"]] {
@@ -877,16 +1245,28 @@ mod tests {
                 .unwrap_or_else(|| panic!("missing subcommand {path:?}"));
             let arg = sub
                 .get_arguments()
-                .find(|a| a.get_id() == "llm_omit_temperature")
+                .find(|arg| arg.get_id() == "llm_omit_temperature")
                 .unwrap_or_else(|| panic!("{path:?} lacks --llm-omit-temperature"));
             assert_eq!(
-                arg.get_env().and_then(|e| e.to_str()),
+                arg.get_env().and_then(|value| value.to_str()),
                 Some("LLM_OMIT_TEMPERATURE"),
                 "{path:?}"
             );
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn review_once_parses_required_args() {
         let cli = Cli::try_parse_from([
@@ -912,18 +1292,30 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Review(ReviewCommand::Once(a)) => {
-                assert_eq!(a.owner, "alice");
-                assert_eq!(a.repo, "widgets");
-                assert_eq!(a.pr, 42);
-                assert_eq!(a.llm_base_url, "http://localhost:11434");
-                assert_eq!(a.llm_model, "qwen2.5-coder:32b");
-                assert_eq!(a.llm_api_key.as_deref(), Some("test-key"));
+            Command::Review(ReviewCommand::Once(parsed)) => {
+                assert_eq!(parsed.owner, "alice");
+                assert_eq!(parsed.repo, "widgets");
+                assert_eq!(parsed.pr, 42);
+                assert_eq!(parsed.llm_base_url, "http://localhost:11434");
+                assert_eq!(parsed.llm_model, "qwen2.5-coder:32b");
+                assert_eq!(parsed.llm_api_key.as_deref(), Some("test-key"));
             }
             _ => panic!("expected ReviewOnce"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn list_webhooks_required_args() {
         let cli = Cli::try_parse_from([
@@ -941,15 +1333,27 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Webhook(WebhookCommand::List(a)) => {
-                assert_eq!(a.owner, "alice");
-                assert_eq!(a.repo, "widgets");
-                assert!(!a.json);
+            Command::Webhook(WebhookCommand::List(parsed)) => {
+                assert_eq!(parsed.owner, "alice");
+                assert_eq!(parsed.repo, "widgets");
+                assert!(!parsed.json);
             }
             _ => panic!("expected ListWebhooks"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn unregister_webhook_accepts_id_or_match_url_but_not_both() {
         // --id is allowed
@@ -970,9 +1374,9 @@ mod tests {
         ])
         .expect("parse with --id");
         match by_id.command {
-            Command::Webhook(WebhookCommand::Unregister(a)) => {
-                assert_eq!(a.id, Some(7));
-                assert!(a.match_url.is_none());
+            Command::Webhook(WebhookCommand::Unregister(parsed)) => {
+                assert_eq!(parsed.id, Some(7));
+                assert!(parsed.match_url.is_none());
             }
             _ => panic!("expected UnregisterWebhook"),
         }
@@ -995,9 +1399,9 @@ mod tests {
         ])
         .expect("parse with --match-url");
         match by_match.command {
-            Command::Webhook(WebhookCommand::Unregister(a)) => {
-                assert!(a.id.is_none());
-                assert_eq!(a.match_url.as_deref(), Some("reviewer.example.com"));
+            Command::Webhook(WebhookCommand::Unregister(parsed)) => {
+                assert!(parsed.id.is_none());
+                assert_eq!(parsed.match_url.as_deref(), Some("reviewer.example.com"));
             }
             _ => panic!("expected UnregisterWebhook"),
         }
@@ -1026,6 +1430,18 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn list_learnings_required_args() {
         let cli = Cli::try_parse_from([
@@ -1037,17 +1453,29 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Learnings(LearningsCommand::List(a)) => {
+            Command::Learnings(LearningsCommand::List(parsed)) => {
                 assert_eq!(
-                    a.learnings_db.to_string_lossy(),
+                    parsed.learnings_db.to_string_lossy(),
                     "/var/lib/auto_review/learnings.db"
                 );
-                assert!(!a.json);
+                assert!(!parsed.json);
             }
             _ => panic!("expected ListLearnings"),
         }
     }
 
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::panic_in_result_fn,
+        reason = "test helper: it returns the parse Result for the caller to inspect, and a parse into the wrong subcommand is a test failure, not an error to return"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     fn parse_list_learnings(extra: &[&str]) -> Result<ListLearningsArgs, clap::Error> {
         let mut argv = vec![
             "auto-review",
@@ -1058,11 +1486,15 @@ mod tests {
         ];
         argv.extend_from_slice(extra);
         match Cli::try_parse_from(argv)?.command {
-            Command::Learnings(LearningsCommand::List(a)) => Ok(a),
+            Command::Learnings(LearningsCommand::List(parsed)) => Ok(parsed),
             other => panic!("expected ListLearnings, got {other:?}"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
     #[test]
     fn list_learnings_repo_flag_filters_to_the_lowercased_repository() {
         let args = parse_list_learnings(&["--repo", "Acme/Widget"]).expect("parse");
@@ -1072,31 +1504,59 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
     #[test]
     fn list_learnings_unscoped_flag_filters_to_unscoped_learnings() {
         let args = parse_list_learnings(&["--unscoped"]).expect("parse");
         assert_eq!(args.filter(), ar_index::LearningsFilter::Unscoped);
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
     #[test]
     fn list_learnings_lists_every_learning_by_default() {
         let args = parse_list_learnings(&[]).expect("parse");
         assert_eq!(args.filter(), ar_index::LearningsFilter::All);
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
     #[test]
     fn list_learnings_rejects_repo_and_unscoped_together() {
         let err = parse_list_learnings(&["--repo", "acme/widget", "--unscoped"])
             .expect_err("--repo and --unscoped must conflict");
-        assert_eq!(err.kind(), clap::error::ErrorKind::ArgumentConflict);
+        assert_eq!(err.kind(), ErrorKind::ArgumentConflict);
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
     #[test]
     fn list_learnings_rejects_repo_without_owner() {
         let err = parse_list_learnings(&["--repo", "widget"]).expect_err("needs owner/repo");
-        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
+        assert_eq!(err.kind(), ErrorKind::ValueValidation);
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn forget_learning_required_args() {
         let cli = Cli::try_parse_from([
@@ -1110,13 +1570,25 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Learnings(LearningsCommand::Forget(a)) => {
-                assert_eq!(a.id, 42);
+            Command::Learnings(LearningsCommand::Forget(parsed)) => {
+                assert_eq!(parsed.id, 42);
             }
             _ => panic!("expected ForgetLearning"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn purge_history_required_args() {
         let cli = Cli::try_parse_from([
@@ -1130,14 +1602,26 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::History(HistoryCommand::Purge(a)) => {
-                assert_eq!(a.older_than_days, 90);
-                assert!(!a.dry_run);
+            Command::History(HistoryCommand::Purge(parsed)) => {
+                assert_eq!(parsed.older_than_days, 90);
+                assert!(!parsed.dry_run);
             }
             _ => panic!("expected PurgeHistory"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn purge_history_dry_run_flag() {
         let cli = Cli::try_parse_from([
@@ -1152,11 +1636,23 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::History(HistoryCommand::Purge(a)) => assert!(a.dry_run),
+            Command::History(HistoryCommand::Purge(parsed)) => assert!(parsed.dry_run),
             _ => panic!("expected PurgeHistory"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn reset_pr_required_args() {
         let cli = Cli::try_parse_from([
@@ -1174,19 +1670,31 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::History(HistoryCommand::ResetPr(a)) => {
+            Command::History(HistoryCommand::ResetPr(parsed)) => {
                 assert_eq!(
-                    a.history_db.to_string_lossy(),
+                    parsed.history_db.to_string_lossy(),
                     "/var/lib/auto_review/review_history.db"
                 );
-                assert_eq!(a.owner, "alice");
-                assert_eq!(a.repo, "widgets");
-                assert_eq!(a.pr, 42);
+                assert_eq!(parsed.owner, "alice");
+                assert_eq!(parsed.repo, "widgets");
+                assert_eq!(parsed.pr, 42);
             }
             _ => panic!("expected ResetPr"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn status_required_args() {
         let cli = Cli::try_parse_from([
@@ -1198,30 +1706,54 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Ops(OpsCommand::Status(a)) => {
-                assert_eq!(a.gateway_url, "https://reviewer.example.com");
-                assert!(!a.json);
-                assert_eq!(a.timeout_secs, 10);
+            Command::Ops(OpsCommand::Status(parsed)) => {
+                assert_eq!(parsed.gateway_url, "https://reviewer.example.com");
+                assert!(!parsed.json);
+                assert_eq!(parsed.timeout_secs, 10);
             }
             _ => panic!("expected Status"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn doctor_with_no_args_skips_all_checks() {
         let cli = Cli::try_parse_from(["auto-review", "ops", "doctor"]).expect("parse");
         match cli.command {
-            Command::Ops(OpsCommand::Doctor(a)) => {
+            Command::Ops(OpsCommand::Doctor(parsed)) => {
                 // Optional fields may be populated from the operator's
                 // environment by clap's `env = ...` support. This parse
                 // test only verifies the grouped command shape and the
                 // argument default that is independent of process env.
-                assert_eq!(a.timeout_secs, 10);
+                assert_eq!(parsed.timeout_secs, 10);
             }
             _ => panic!("expected Doctor"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn doctor_with_full_args() {
         let cli = Cli::try_parse_from([
@@ -1241,16 +1773,35 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Ops(OpsCommand::Doctor(a)) => {
-                assert_eq!(a.forgejo_url.as_deref(), Some("https://forge.example"));
-                assert_eq!(a.token.as_deref(), Some("tok"));
-                assert_eq!(a.llm_base_url.as_deref(), Some("http://localhost:11434"));
-                assert_eq!(a.timeout_secs, 30);
+            Command::Ops(OpsCommand::Doctor(parsed)) => {
+                assert_eq!(parsed.forgejo_url.as_deref(), Some("https://forge.example"));
+                assert_eq!(parsed.token.as_deref(), Some("tok"));
+                assert_eq!(
+                    parsed.llm_base_url.as_deref(),
+                    Some("http://localhost:11434")
+                );
+                assert_eq!(parsed.timeout_secs, 30);
             }
             _ => panic!("expected Doctor"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::redundant_test_prefix,
+        reason = "test_webhook names the `webhook test` subcommand under test, not a test-function prefix"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn test_webhook_required_args() {
         let cli = Cli::try_parse_from([
@@ -1264,16 +1815,32 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Webhook(WebhookCommand::Test(a)) => {
-                assert_eq!(a.gateway_url, "http://localhost:8080");
-                assert_eq!(a.webhook_secret, "s");
-                assert_eq!(a.event, "ping");
-                assert_eq!(a.timeout_secs, 10);
+            Command::Webhook(WebhookCommand::Test(parsed)) => {
+                assert_eq!(parsed.gateway_url, "http://localhost:8080");
+                assert_eq!(parsed.webhook_secret, "s");
+                assert_eq!(parsed.event, "ping");
+                assert_eq!(parsed.timeout_secs, 10);
             }
             _ => panic!("expected TestWebhook"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::redundant_test_prefix,
+        reason = "test_webhook names the `webhook test` subcommand under test, not a test-function prefix"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn test_webhook_with_pr_event() {
         let cli = Cli::try_parse_from([
@@ -1291,14 +1858,26 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Webhook(WebhookCommand::Test(a)) => {
-                assert_eq!(a.event, "pull_request");
-                assert_eq!(a.timeout_secs, 30);
+            Command::Webhook(WebhookCommand::Test(parsed)) => {
+                assert_eq!(parsed.event, "pull_request");
+                assert_eq!(parsed.timeout_secs, 30);
             }
             _ => panic!("expected TestWebhook"),
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn validate_config_accepts_multiple_paths() {
         let cli = Cli::try_parse_from([
@@ -1310,13 +1889,17 @@ mod tests {
         ])
         .expect("parse");
         match cli.command {
-            Command::Config(ConfigCommand::Validate(a)) => {
-                assert_eq!(a.paths.len(), 2);
+            Command::Config(ConfigCommand::Validate(parsed)) => {
+                assert_eq!(parsed.paths.len(), 2);
             }
             _ => panic!("expected ValidateConfig"),
         }
     }
 
+    #[expect(
+        clippy::assertions_on_result_states,
+        reason = "test code: the assertion only checks that the call fails and stays as written; the error value is not part of the contract under test"
+    )]
     #[test]
     fn validate_config_requires_at_least_one_path() {
         let res = Cli::try_parse_from(["auto-review", "config", "validate"]);
@@ -1325,7 +1908,7 @@ mod tests {
 
     #[test]
     fn public_cli_uses_auto_review_binary_and_grouped_domain_commands() {
-        use clap::CommandFactory;
+        use clap::CommandFactory as _;
 
         let cmd = Cli::command();
         let expected_groups = [
@@ -1386,6 +1969,18 @@ mod tests {
         );
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn agentcore_serve_parses_bind_address() {
         let cli = Cli::try_parse_from([
@@ -1405,6 +2000,18 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn agentcore_serve_parses_forgejo_review_runtime_inputs() {
         let cli = Cli::try_parse_from([
@@ -1433,6 +2040,18 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn agentcore_serve_parses_github_app_review_runtime_inputs() {
         let cli = Cli::try_parse_from([
@@ -1464,6 +2083,18 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn agentcore_serve_parses_dynamodb_idempotency_inputs() {
         let cli = Cli::try_parse_from([
@@ -1489,6 +2120,18 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn agentcore_serve_parses_dynamodb_history_inputs() {
         let cli = Cli::try_parse_from([
@@ -1511,6 +2154,18 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "test code: a failed setup, parse or call step must fail this test at once with the expect message"
+    )]
+    #[expect(
+        clippy::panic,
+        reason = "test code: panicking is how this test reports an unexpected variant or outcome"
+    )]
+    #[expect(
+        clippy::wildcard_enum_match_arm,
+        reason = "test code: the test checks for one variant, and every other variant, including future ones, is a failure"
+    )]
     #[test]
     fn agentcore_serve_parses_dynamodb_learnings_inputs() {
         let cli = Cli::try_parse_from([
@@ -1575,6 +2230,10 @@ mod tests {
         assert!(failures.is_empty(), "{}", failures.join("\n"));
     }
 
+    #[expect(
+        clippy::assertions_on_result_states,
+        reason = "test code: the assertion only checks that the call fails and stays as written; the error value is not part of the contract under test"
+    )]
     #[test]
     fn missing_required_arg_is_an_error() {
         let res = Cli::try_parse_from([
