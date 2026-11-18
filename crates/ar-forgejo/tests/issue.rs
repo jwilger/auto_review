@@ -5,12 +5,20 @@ use ar_forgejo::Client;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[expect(
+    clippy::expect_used,
+    reason = "a mock-server client that fails to build should abort the calling test at setup"
+)]
 async fn mock_host() -> (MockServer, Client) {
     let server = MockServer::start().await;
     let client = Client::new(&server.uri(), "test-token").expect("client");
     (server, client)
 }
 
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "every caller passes a freshly built json! value; taking a reference would edit each call site without changing the fixture"
+)]
 fn issue_json(pull_request: serde_json::Value) -> serde_json::Value {
     serde_json::json!({
         "id": 991,
@@ -24,6 +32,18 @@ fn issue_json(pull_request: serde_json::Value) -> serde_json::Value {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::str_to_string,
+    reason = "the expected IssueSummary in the assertion builds its strings with to_string and stays as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn get_issue_maps_every_field_on_200() {
     let (server, client) = mock_host().await;
     Mock::given(method("GET"))
@@ -51,6 +71,14 @@ async fn get_issue_maps_every_field_on_200() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn get_issue_marks_pull_requests() {
     let (server, client) = mock_host().await;
     Mock::given(method("GET"))
@@ -73,6 +101,18 @@ async fn get_issue_marks_pull_requests() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::str_to_string,
+    reason = "the expected IssueSummary in the assertion builds its strings with to_string and stays as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn get_issue_without_pull_request_field_is_not_a_pull_request() {
     let (server, client) = mock_host().await;
     let mut body = issue_json(serde_json::Value::Null);
@@ -98,6 +138,14 @@ async fn get_issue_without_pull_request_field_is_not_a_pull_request() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn get_issue_returns_none_on_404() {
     let (server, client) = mock_host().await;
     Mock::given(method("GET"))
@@ -118,6 +166,18 @@ async fn get_issue_returns_none_on_404() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::non_ascii_literal,
+    reason = "the fixture needs a literal multi-byte `é` and the assertion the `…` marker to exercise the UTF-8 boundary cap; escaping them would edit the test"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn get_issue_caps_non_404_error_body_on_a_char_boundary() {
     let (server, client) = mock_host().await;
     // 1023 ASCII bytes, then a two-byte character spanning bytes 1023..1025.
@@ -143,6 +203,14 @@ async fn get_issue_caps_non_404_error_body_on_a_char_boundary() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn get_issue_treats_other_4xx_as_errors() {
     let (server, client) = mock_host().await;
     Mock::given(method("GET"))

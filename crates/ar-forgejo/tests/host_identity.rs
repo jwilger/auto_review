@@ -6,6 +6,10 @@ use serde_json::json;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
+#[expect(
+    clippy::expect_used,
+    reason = "a mock-server client that fails to build should abort the calling test at setup"
+)]
 async fn capabilities_for_server_version(version: &str) -> HostCapabilities {
     let forgejo = MockServer::start().await;
     Mock::given(method("GET"))
@@ -28,6 +32,10 @@ async fn capabilities_for_server_version(version: &str) -> HostCapabilities {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn forgejo_15_supports_nothing() {
     assert_eq!(
         capabilities_for_server_version("15.0.1").await,
@@ -36,6 +44,10 @@ async fn forgejo_15_supports_nothing() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn forgejo_16_supports_multi_line_comments_only() {
     assert_eq!(
         capabilities_for_server_version("16.0.7").await,
@@ -47,6 +59,10 @@ async fn forgejo_16_supports_multi_line_comments_only() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn forgejo_17_dev_build_supports_multi_line_comments_only() {
     assert_eq!(
         capabilities_for_server_version("17.0.0-100-2254cb0+gitea-1.22.0").await,
@@ -58,6 +74,10 @@ async fn forgejo_17_dev_build_supports_multi_line_comments_only() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn forgejo_18_supports_everything() {
     assert_eq!(
         capabilities_for_server_version("18.0.0").await,
@@ -66,6 +86,10 @@ async fn forgejo_18_supports_everything() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn garbage_version_supports_nothing() {
     assert_eq!(
         capabilities_for_server_version("garbage").await,
@@ -74,6 +98,14 @@ async fn garbage_version_supports_nothing() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn failed_version_probe_supports_nothing_and_is_retried() {
     let forgejo = MockServer::start().await;
     Mock::given(method("GET"))
@@ -97,6 +129,10 @@ async fn failed_version_probe_supports_nothing_and_is_retried() {
     assert_eq!(client.capabilities().await, HostCapabilities::all());
 }
 
+#[expect(
+    clippy::default_numeric_fallback,
+    reason = "serde_json::json! numbers here are untyped JSON wire values in the mocked Forgejo payload; type suffixes would edit the fixture without changing the bytes sent"
+)]
 async fn mount_user(forgejo: &MockServer, expected_calls: u64) {
     Mock::given(method("GET"))
         .and(path("/api/v1/user"))
@@ -111,6 +147,14 @@ async fn mount_user(forgejo: &MockServer, expected_calls: u64) {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn bot_login_comes_from_authenticated_user_once() {
     let forgejo = MockServer::start().await;
     mount_user(&forgejo, 1).await;
@@ -126,6 +170,14 @@ async fn bot_login_comes_from_authenticated_user_once() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn seeded_bot_login_skips_user_lookup() {
     let forgejo = MockServer::start().await;
     mount_user(&forgejo, 0).await;
@@ -139,6 +191,14 @@ async fn seeded_bot_login_skips_user_lookup() {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::expect_used,
+    reason = "a failed request, decode or setup step should fail this test at the named step; the asserted values stay as written"
+)]
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
 async fn failed_user_lookup_is_an_error() {
     let forgejo = MockServer::start().await;
     Mock::given(method("GET"))
