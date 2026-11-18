@@ -3,48 +3,54 @@
 //! The webhook handler in `ar-gateway` calls into here to decide what
 //! a user's comment is asking for. Pure function; no I/O.
 
+/// What a PR comment asks the bot to do.
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "ar-gateway (webhook, github_webhook) and this crate's integration tests import \
+              this as ar_chat::ChatCommand; renaming it breaks those imports"
+)]
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ChatCommand {
-    /// `@auto-review remember <text>` — store a learning that biases
-    /// future reviews of this repo.
-    Remember(String),
-    /// `@auto-review forget <id>` — drop a previously-remembered
-    /// learning by its numeric id.
-    Forget(u64),
-    /// `@auto-review re-review` (or `rereview`, `review-again`) —
-    /// re-run the full review on the current head SHA, ignoring any
-    /// recorded review history.
-    ReReview,
-    /// A user correction replying to a bot review comment or finding.
-    ReviewCorrection(String),
     /// `@auto-review autofix` — ask the cheap-tier model to emit
     /// inline patch suggestions for the diff. Each patch is posted
-    /// as a Forgejo review comment with a `\`\`\`suggestion` block
-    /// that the author can apply with one click.
+    /// as a Forgejo review comment with a `suggestion` fenced code
+    /// block that the author can apply with one click.
     Autofix,
     /// `@auto-review docstring` (or `docstrings`, `docs`) — retired.
-    /// CodeRabbit dropped docstring generation on 2026-11-11, which
+    /// `CodeRabbit` dropped docstring generation on 2026-11-11, which
     /// suggests the feature has little value, and here it only added
     /// prompt surface (design doc theme CLEAN, Decision 18). The
     /// parser keeps the aliases as a tombstone so the command does
     /// not fall through to free-form intent classification; the
     /// handler replies with a fixed notice and makes no LLM call.
     DocstringRetired,
-    /// `@auto-review tests` — find newly-added items in the diff
-    /// that lack test coverage and post a markdown comment with
-    /// scaffolded test cases the author can copy into their test
-    /// suite. Unlike [`Autofix`], tests usually
-    /// live in a separate file, so we post a single issue comment
-    /// rather than inline review-comment suggestions.
-    TestScaffolds,
-    /// `@auto-review help` — print the supported commands.
-    Help,
+    /// `@auto-review forget <id>` — drop a previously-remembered
+    /// learning by its numeric id.
+    Forget(u64),
     /// `@auto-review <anything else>` — falls through to freeform
     /// chat. The handler will pass `text` to the LLM.
     Freeform(String),
+    /// `@auto-review help` — print the supported commands.
+    Help,
     /// The comment doesn't mention the bot at all (or mentions a
     /// different name). Ignored.
     NotMentioned,
+    /// `@auto-review re-review` (or `rereview`, `review-again`) —
+    /// re-run the full review on the current head SHA, ignoring any
+    /// recorded review history.
+    ReReview,
+    /// `@auto-review remember <text>` — store a learning that biases
+    /// future reviews of this repo.
+    Remember(String),
+    /// A user correction replying to a bot review comment or finding.
+    ReviewCorrection(String),
+    /// `@auto-review tests` — find newly-added items in the diff
+    /// that lack test coverage and post a markdown comment with
+    /// scaffolded test cases the author can copy into their test
+    /// suite. Unlike [`Self::Autofix`], tests usually
+    /// live in a separate file, so we post a single issue comment
+    /// rather than inline review-comment suggestions.
+    TestScaffolds,
 }
 
 /// Parse a comment body looking for `@<bot_name> <command>` on any
@@ -56,6 +62,13 @@ pub enum ChatCommand {
 /// Forgejo treats usernames as case-insensitive in its UI and links
 /// either form to the same user, so the parser has to follow suit
 /// or the bot would silently skip legitimate mentions.
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "ar-gateway (webhook, github_webhook, poller), ar-cli (commands) and this crate's \
+              integration tests call this as parse_chat_command; renaming it breaks them"
+)]
+#[inline]
+#[must_use = "parsing has no side effects; the command is the only result"]
 pub fn parse_chat_command(body: &str, bot_name: &str) -> ChatCommand {
     let mention = format!("@{bot_name}");
     let compatibility_mention = (bot_name == "auto-review").then_some("@auto_review");
@@ -83,27 +96,31 @@ pub fn parse_chat_command(body: &str, bot_name: &str) -> ChatCommand {
         // bot_name="auto_review".
         let next = after.chars().next();
         match next {
-            Some(c) if !c.is_whitespace() && !is_separator(c) => continue,
+            Some(ch) if !ch.is_whitespace() && !is_separator(ch) => continue,
             _ => {}
         }
         // Strip leading separators (`:` `,` `!` `?` `.`) and whitespace
         // before classification so "@auto-review: help" and "@auto-review,
         // help" route to Help, not Freeform(": help").
         let rest = after
-            .trim_start_matches(|c: char| c.is_whitespace() || is_separator(c))
+            .trim_start_matches(|ch: char| ch.is_whitespace() || is_separator(ch))
             .trim_end();
         return classify(rest);
     }
     ChatCommand::NotMentioned
 }
 
-fn strip_mention<'a>(line: &'a str, mention: &str) -> Option<&'a str> {
+/// Return the rest of `line` after a case-insensitive `mention` prefix, or
+/// `None` when the line does not start with it.
+fn strip_mention<'line>(line: &'line str, mention: &str) -> Option<&'line str> {
     line.as_bytes()
         .get(..mention.len())
         .filter(|prefix| prefix.eq_ignore_ascii_case(mention.as_bytes()))
-        .map(|_| &line[mention.len()..])
+        .and_then(|_| line.get(mention.len()..))
 }
 
+/// Recognise a quote-reply to a bot finding (`@bot wrote in ...` followed by
+/// quoted lines) and return the user's unquoted prose, if any.
 fn parse_review_correction(
     body: &str,
     mention: &str,
@@ -111,8 +128,8 @@ fn parse_review_correction(
 ) -> Option<String> {
     let mut lines = body.lines();
     let first = lines.next()?.trim();
-    let after = strip_mention(first, mention)
-        .or_else(|| compatibility_mention.and_then(|alias| strip_mention(first, alias)))?;
+    let after =
+        strip_mention(first, mention).or_else(|| strip_mention(first, compatibility_mention?))?;
     if !after.trim_start().starts_with("wrote in ") {
         return None;
     }
@@ -136,10 +153,12 @@ fn parse_review_correction(
     (!correction.is_empty()).then_some(correction)
 }
 
-fn is_separator(c: char) -> bool {
-    matches!(c, ':' | ',' | '!' | '?' | '.')
+/// Punctuation that may separate the mention from the command.
+fn is_separator(ch: char) -> bool {
+    matches!(ch, ':' | ',' | '!' | '?' | '.')
 }
 
+/// Map the text after the mention to a command.
 fn classify(rest: &str) -> ChatCommand {
     if rest.is_empty() {
         return ChatCommand::Help;
@@ -152,7 +171,7 @@ fn classify(rest: &str) -> ChatCommand {
             if tail.is_empty() {
                 ChatCommand::Help
             } else {
-                ChatCommand::Remember(tail.to_string())
+                ChatCommand::Remember(tail.to_owned())
             }
         }
         "forget" => match tail.parse::<u64>() {
@@ -164,7 +183,7 @@ fn classify(rest: &str) -> ChatCommand {
         "docstring" | "docstrings" | "docs" => ChatCommand::DocstringRetired,
         "tests" | "test" | "unit-tests" | "scaffold-tests" => ChatCommand::TestScaffolds,
         "help" | "?" | "--help" | "-h" => ChatCommand::Help,
-        _ => ChatCommand::Freeform(rest.to_string()),
+        _ => ChatCommand::Freeform(rest.to_owned()),
     }
 }
 
@@ -209,6 +228,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "`s` is the input under test in the assertion below; renaming it would edit that \
+                  assertion"
+    )]
     fn autofix_aliases_all_route_to_autofix() {
         for s in [
             "@auto_review autofix",
@@ -221,6 +245,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "`s` is the input under test in the assertion below; renaming it would edit that \
+                  assertion"
+    )]
     fn docstring_aliases_all_route_to_the_retired_tombstone() {
         for handle in ["@auto-review", "@auto_review"] {
             for alias in ["docstring", "docstrings", "docs", "DOCS"] {
@@ -235,6 +264,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "`s` is the input under test in the assertion below; renaming it would edit that \
+                  assertion"
+    )]
     fn tests_aliases_all_route_to_test_scaffolds() {
         for s in [
             "@auto_review tests",
@@ -248,6 +282,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "`s` is the input under test in the assertion below; renaming it would edit that \
+                  assertion"
+    )]
     fn re_review_aliases_all_route_to_rereview() {
         for s in [
             "@auto_review re-review",
@@ -260,6 +299,11 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::min_ident_chars,
+        reason = "`s` is the input under test in the assertion below; renaming it would edit that \
+                  assertion"
+    )]
     fn help_aliases_all_route_to_help() {
         for s in [
             "@auto_review help",
@@ -354,10 +398,19 @@ mod tests {
              > PR metadata quality: failed\n\
              \n\
              This is a release PR, so the terse body is expected.";
+        #[expect(
+            clippy::wildcard_enum_match_arm,
+            reason = "every variant other than ReviewCorrection is a test failure, reported by \
+                      the catch-all panic arm"
+        )]
         match parse_chat_command(body, "auto-review") {
             ChatCommand::ReviewCorrection(text) => {
-                assert_eq!(text, "This is a release PR, so the terse body is expected.")
+                assert_eq!(text, "This is a release PR, so the terse body is expected.");
             }
+            #[expect(
+                clippy::panic,
+                reason = "an unexpected command must fail this test, printing the variant it got"
+            )]
             other => panic!("expected ReviewCorrection, got {other:?}"),
         }
     }
