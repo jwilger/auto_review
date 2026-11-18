@@ -220,6 +220,7 @@ const INNER_GATEWAY_ENV_ALLOWLIST: &[&str] = &[
     "LLM_EMBEDDING_MODEL",
     "LLM_EMBEDDING_BASE_URL",
     "LLM_EMBEDDING_API_KEY",
+    "LLM_OMIT_TEMPERATURE",
     "AR_EMBED_INPUT_CAP_BYTES",
     "AR_EMBED_BATCH_SIZE",
     "AR_EMBED_NUM_CTX",
@@ -1325,9 +1326,19 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     let bot_login = bot_identity.login;
     let bot_name = bot_identity.name;
 
+    // Read once and applied to every tier: OpenAI reasoning models
+    // reject any non-default temperature, so operators pointing at them
+    // set LLM_OMIT_TEMPERATURE=true.
+    let omit_temperature =
+        parse_llm_omit_temperature(read_non_empty_env("LLM_OMIT_TEMPERATURE").as_deref())?;
+    if omit_temperature {
+        tracing::info!("LLM_OMIT_TEMPERATURE set; chat requests omit temperature");
+    }
+
     let reasoning_provider = Arc::new(
         OpenAiProvider::new(&llm_base, llm_api_key.as_deref(), &reasoning_model)
-            .context("reasoning LLM provider")?,
+            .context("reasoning LLM provider")?
+            .with_omit_temperature(omit_temperature),
     );
     let mut router = LlmRouter::new().with(ModelTier::Reasoning, reasoning_provider);
 
@@ -1342,7 +1353,9 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         let embed_key = read_non_empty_env("LLM_EMBEDDING_API_KEY").or_else(|| llm_api_key.clone());
         let mut provider = OpenAiProvider::new(&embed_base, embed_key.as_deref(), &embedding_model)
             .context("embedding LLM provider")?;
-        provider = provider.with_embedding_model(&embedding_model);
+        provider = provider
+            .with_embedding_model(&embedding_model)
+            .with_omit_temperature(omit_temperature);
         // For Ollama-backed embedders, explicitly send options.num_ctx
         // so a bigger byte cap doesn't get silently truncated by the
         // server's default 2048. Ignored by hosted OpenAI.
@@ -1365,7 +1378,8 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         let cheap_key = read_non_empty_env("LLM_CHEAP_API_KEY").or_else(|| llm_api_key.clone());
         let provider = Arc::new(
             OpenAiProvider::new(&cheap_base, cheap_key.as_deref(), &cheap_model)
-                .context("cheap LLM provider")?,
+                .context("cheap LLM provider")?
+                .with_omit_temperature(omit_temperature),
         );
         router = router.with(ModelTier::Cheap, provider);
         tracing::info!(model = %cheap_model, "cheap tier configured");
@@ -1930,6 +1944,22 @@ fn read_non_empty_env(name: &str) -> Option<String> {
         }
         Ok(v) => Some(v),
         Err(_) => None,
+    }
+}
+
+/// Parse `LLM_OMIT_TEMPERATURE` (already read through
+/// [`read_non_empty_env`], so `None` means unset or blank). Uses the
+/// `AR_GATEWAY_BARE` vocabulary. Unlike [`parse_env`], an unrecognised
+/// value fails startup: silently keeping `temperature` would make every
+/// review fail against `OpenAI` reasoning models.
+fn parse_llm_omit_temperature(raw: Option<&str>) -> Result<bool> {
+    match raw.map(str::trim).map(str::to_ascii_lowercase) {
+        None => Ok(false),
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => Ok(true),
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => Ok(false),
+        Some(_) => anyhow::bail!(
+            "LLM_OMIT_TEMPERATURE has an unrecognized value; use true/false, yes/no, on/off, or 1/0"
+        ),
     }
 }
 
@@ -2928,6 +2958,7 @@ mod tests {
             "/tmp/unpackaged-youki",
         );
         source.insert("AR_GATEWAY_BARE", "true");
+        source.insert("LLM_OMIT_TEMPERATURE", "true");
 
         let process_env = inner_gateway_process_env_from_lookup(|name| {
             Ok(source.get(name).map(|value| (*value).to_string()))
@@ -2951,6 +2982,11 @@ mod tests {
 
         assert_eq!(env.get("AR_GATEWAY_BIND"), Some(&"127.0.0.1:9090"));
         assert_eq!(env.get("LLM_REASONING_MODEL"), Some(&"qwen-test-model"));
+        assert_eq!(
+            env.get("LLM_OMIT_TEMPERATURE"),
+            Some(&"true"),
+            "the inner gateway builds the providers, so it must see LLM_OMIT_TEMPERATURE"
+        );
         assert_eq!(
             env.get("LLM_API_KEY"),
             Some(&"llm-api-key-value-that-must-not-leak")
@@ -2978,6 +3014,20 @@ mod tests {
                 && !rendered.contains("ambient-token-must-not-propagate")
                 && !rendered.contains("/tmp/unpackaged-youki"),
             "staged allowlist must not contain unrelated ambient values: {rendered}"
+        );
+    }
+
+    #[test]
+    fn llm_omit_temperature_accepts_bare_vocabulary_and_rejects_garbage() {
+        assert!(parse_llm_omit_temperature(Some(" YES ")).expect("truthy value parses"));
+        assert!(!parse_llm_omit_temperature(Some("off")).expect("falsy value parses"));
+        assert!(!parse_llm_omit_temperature(None).expect("unset means false"));
+        let message = parse_llm_omit_temperature(Some("maybe"))
+            .expect_err("garbage must fail startup")
+            .to_string();
+        assert!(
+            message.contains("LLM_OMIT_TEMPERATURE") && message.contains("on/off"),
+            "error must name the variable and the accepted values: {message}"
         );
     }
 
