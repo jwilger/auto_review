@@ -328,9 +328,11 @@ _Mitigation:_ Token scoped to the minimum the bot needs
 documents this scoping. The token is loaded from the process
 environment only and is never logged. The orchestrator log redactor
 (`workspace::redact_token`) strips the token from any URL we log.
-The clone remote is removed after checkout, so the workspace
-`.git/config` that the LLM `read_file` tool can reach holds no
-credential-bearing URL.
+The clone remote is removed after checkout and after the bounded
+fetches of the base and previously reviewed commits (whether they
+find a merge base, fail, or are killed by their time budget), so no
+file under the workspace `.git` that the LLM `read_file` tool can
+reach holds the credential-bearing URL.
 _Residual risk:_ a stolen token has the bot's full repo write
 access until rotated. Operators should rotate periodically; the
 `init` flow makes minting a new one cheap.
@@ -632,7 +634,14 @@ threat-model claims fail CI when a regression slips in:
   T4 (LLM tool calls escape workspace): symlink escape, chained
   symlinks, empty paths, pathological regex; and T5 (clone credential
   absent from workspace `.git/config`:
-  `read_file_on_prepared_workspace_git_config_exposes_no_clone_url`).
+  `read_file_on_prepared_workspace_git_config_exposes_no_clone_url`;
+  absent from every `.git` file after the merge-base fetch sequence,
+  whether it succeeds or fails:
+  `merge_base_fetches_leave_no_clone_credential_in_the_git_dir`,
+  `failed_merge_base_lookups_leave_no_clone_credential_in_the_git_dir`,
+  and, for a fetch killed by its time budget, the
+  `timed_out_merge_base_fetch_leaves_no_clone_credential_in_the_git_dir`
+  unit test in `crates/ar-review/src/workspace.rs`).
 - `crates/ar-gateway/src/webhook.rs` HMAC unit tests — cover T2
   (webhook forgery: missing-signature, wrong-secret, malformed
   hex).

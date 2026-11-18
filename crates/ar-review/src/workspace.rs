@@ -336,6 +336,25 @@ pub async fn prepare_workspace_from_clone_url(
     base_sha: Option<&str>,
     previous_sha: Option<&str>,
 ) -> Result<PreparedWorkspace, WorkspaceError> {
+    prepare_workspace_with_fetch_budget(
+        clone_url,
+        head_sha,
+        base_sha,
+        previous_sha,
+        MERGE_BASE_FETCH_TIMEOUT,
+    )
+    .await
+}
+
+/// [`prepare_workspace_from_clone_url`] with `fetch_budget` bounding each
+/// merge-base lookup instead of `MERGE_BASE_FETCH_TIMEOUT`.
+async fn prepare_workspace_with_fetch_budget(
+    clone_url: &str,
+    head_sha: &str,
+    base_sha: Option<&str>,
+    previous_sha: Option<&str>,
+    fetch_budget: Duration,
+) -> Result<PreparedWorkspace, WorkspaceError> {
     // Defence in depth: head_sha is interpolated into git argv
     // (`git fetch origin <sha>`, `git checkout <sha>`) and git
     // accepts intermingled `--option`-style args after positional
@@ -381,7 +400,7 @@ pub async fn prepare_workspace_from_clone_url(
                 head_sha,
                 base_sha,
                 MERGE_BASE_DEEPEN_STEPS,
-                MERGE_BASE_FETCH_TIMEOUT,
+                fetch_budget,
             )
             .await
         }
@@ -398,7 +417,7 @@ pub async fn prepare_workspace_from_clone_url(
                 head_sha,
                 previous_sha,
                 MERGE_BASE_DEEPEN_STEPS,
-                MERGE_BASE_FETCH_TIMEOUT,
+                fetch_budget,
             )
             .await
         }
@@ -1767,6 +1786,55 @@ line three of the renamed file\nline four of the renamed file\n";
             timed_out,
             Err(MergeBaseUnavailable::TimedOut(std::time::Duration::ZERO))
         );
+    }
+
+    /// A merge-base fetch killed by its time budget still leaves no clone
+    /// credential anywhere under `.git`, where the LLM `read_file` tool can
+    /// reach it (T5; the other fetch paths are covered in
+    /// `tests/red_team_workspace_tools.rs`).
+    #[tokio::test]
+    async fn timed_out_merge_base_fetch_leaves_no_clone_credential_in_the_git_dir() {
+        const SENTINEL: &str = "SENTINEL-bot-credential";
+        let fixture = TempDir::new().unwrap();
+        let repo = diverged_repo(fixture.path()).await;
+        let credentialed_url =
+            repo.clone_url
+                .replacen("file://", &format!("file://oauth2:{SENTINEL}@localhost"), 1);
+
+        let workspace = prepare_workspace_with_fetch_budget(
+            &credentialed_url,
+            &repo.head_sha,
+            Some(&repo.base_sha),
+            Some(&repo.reviewed_sha),
+            std::time::Duration::ZERO,
+        )
+        .await
+        .unwrap();
+
+        assert!(matches!(
+            workspace.pr_diff().await,
+            Err(WorkspaceError::NoMergeBase(MergeBaseUnavailable::TimedOut(
+                _
+            )))
+        ));
+        let mut pending = vec![workspace.path().join(".git")];
+        while let Some(dir) = pending.pop() {
+            for entry in fs::read_dir(&dir).unwrap() {
+                let entry = entry.unwrap();
+                if entry.file_type().unwrap().is_dir() {
+                    pending.push(entry.path());
+                    continue;
+                }
+                let bytes = fs::read(entry.path()).unwrap();
+                assert!(
+                    !bytes
+                        .windows(SENTINEL.len())
+                        .any(|window| window == SENTINEL.as_bytes()),
+                    "clone credential left in {}",
+                    entry.path().display()
+                );
+            }
+        }
     }
 
     #[tokio::test]
