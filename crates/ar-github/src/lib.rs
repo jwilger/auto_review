@@ -876,10 +876,19 @@ impl Client {
 
     /// Fetch a pull request's unified diff.
     ///
+    /// GitHub refuses the diff media type with `406 too_large` for a pull
+    /// request over its diff limits (300 files, or too many lines or
+    /// bytes). The diff is then assembled from the per-file `patch` fields
+    /// of `pulls/{n}/files` (see [`Self::list_pull_request_files`]); a file
+    /// GitHub sends no patch for (binary, or too large) appears as a
+    /// header-only entry, so it still counts as changed but carries no
+    /// content.
+    ///
     /// # Errors
     ///
     /// Returns an error when the request fails or GitHub answers with a
-    /// non-success status.
+    /// non-success status (other than the `too_large` refusal, when the
+    /// file list is fetched instead and its errors are returned).
     #[inline]
     pub async fn get_pull_request_diff(
         &self,
@@ -889,12 +898,22 @@ impl Client {
         installation_token: &str,
     ) -> Result<String, Error> {
         let url = self.url(&format!("repos/{owner}/{repo}/pulls/{pull_number}"))?;
-        self.get_text_with_installation_token(
-            url,
-            installation_token,
-            HeaderValue::from_static("application/vnd.github.v3.diff"),
-        )
-        .await
+        match self
+            .get_text_with_installation_token(
+                url,
+                installation_token,
+                HeaderValue::from_static("application/vnd.github.v3.diff"),
+            )
+            .await
+        {
+            Err(error) if is_diff_too_large(&error) => {
+                let files = self
+                    .list_pull_request_files(owner, repo, pull_number, installation_token)
+                    .await?;
+                Ok(diff_from_file_patches(&files))
+            }
+            other => other,
+        }
     }
 
     /// Fetch the repository's HTTPS `clone_url`. The REST API host is not
@@ -1143,6 +1162,38 @@ impl Client {
                 "repos/{owner}/{repo}/issues/{pull_number}/comments?page={page}&per_page=100"
             ))?;
             let chunk: Vec<ar_forge::PrReviewComment> = self
+                .get_with_installation_token(url, installation_token)
+                .await?;
+            let chunk_len = chunk.len();
+            all.extend(chunk);
+            if chunk_len < 100 {
+                break;
+            }
+        }
+        Ok(all)
+    }
+
+    /// List every file a pull request changes with its `patch` and, for a
+    /// rename, its previous path, up to 30 pages of 100 (GitHub's own cap is
+    /// 3000 files).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a request fails, GitHub answers with a
+    /// non-success status, or a page does not decode.
+    async fn list_pull_request_files(
+        &self,
+        owner: &str,
+        repo: &str,
+        pull_number: u64,
+        installation_token: &str,
+    ) -> Result<Vec<PullRequestFile>, Error> {
+        let mut all = Vec::new();
+        for page in 1..=MAX_LIST_PAGES {
+            let url = self.url(&format!(
+                "repos/{owner}/{repo}/pulls/{pull_number}/files?page={page}&per_page=100"
+            ))?;
+            let chunk: Vec<PullRequestFile> = self
                 .get_with_installation_token(url, installation_token)
                 .await?;
             let chunk_len = chunk.len();
@@ -1638,6 +1689,23 @@ struct InstallationTokenCacheKey {
     request: InstallationTokenRequest,
 }
 
+/// The fields of one `pulls/{n}/files` entry that the diff fallback needs.
+#[derive(Debug, Deserialize)]
+struct PullRequestFile {
+    /// Path on the head side.
+    filename: String,
+    /// Unified-diff hunks; absent for binary files and files too large for
+    /// GitHub to diff.
+    #[serde(default)]
+    patch: Option<String>,
+    /// Path on the base side, for a renamed file.
+    #[serde(default)]
+    previous_filename: Option<String>,
+    /// `added`, `removed`, `modified`, `renamed`, `copied`, `changed` or
+    /// `unchanged`.
+    status: String,
+}
+
 /// Build an authenticated HTTPS clone URL for `owner/repo` under `base_url`.
 ///
 /// # Errors
@@ -1707,6 +1775,51 @@ fn cap_for_error(body: &str) -> String {
     format!("{kept}...[truncated]")
 }
 
+/// Assemble a unified diff from `pulls/{n}/files` entries: a
+/// `diff --git` header per file, rename lines for a renamed file, and the
+/// file's hunks when GitHub sent a patch. A file without a patch keeps only
+/// its header, so it still counts as changed without any content.
+fn diff_from_file_patches(files: &[PullRequestFile]) -> String {
+    let mut diff = String::new();
+    for file in files {
+        let old_path = file.previous_filename.as_deref().unwrap_or(&file.filename);
+        diff.push_str("diff --git a/");
+        diff.push_str(old_path);
+        diff.push_str(" b/");
+        diff.push_str(&file.filename);
+        diff.push('\n');
+        if file.previous_filename.is_some() {
+            diff.push_str("rename from ");
+            diff.push_str(old_path);
+            diff.push_str("\nrename to ");
+            diff.push_str(&file.filename);
+            diff.push('\n');
+        }
+        let Some(patch) = file.patch.as_deref().filter(|patch| !patch.is_empty()) else {
+            continue;
+        };
+        if file.status == "added" {
+            diff.push_str("--- /dev/null\n");
+        } else {
+            diff.push_str("--- a/");
+            diff.push_str(old_path);
+            diff.push('\n');
+        }
+        if file.status == "removed" {
+            diff.push_str("+++ /dev/null\n");
+        } else {
+            diff.push_str("+++ b/");
+            diff.push_str(&file.filename);
+            diff.push('\n');
+        }
+        diff.push_str(patch);
+        if !patch.ends_with('\n') {
+            diff.push('\n');
+        }
+    }
+    diff
+}
+
 /// The review body with every inline comment appended, for the retry after
 /// GitHub refuses to anchor an inline comment.
 fn fold_inline_comments_into_body(request: &ar_forge::CreateReviewRequest) -> String {
@@ -1732,6 +1845,13 @@ fn fold_inline_comments_into_body(request: &ar_forge::CreateReviewRequest) -> St
 /// keeping its `Display` text as the message.
 fn host_error(error: &Error) -> ar_forge::HostError {
     ar_forge::HostError::new(error.to_string())
+}
+
+/// Whether `error` is GitHub refusing a diff media type because the diff is
+/// over its size limits: `406` with the `too_large` error code, for too
+/// many files, lines or bytes alike.
+fn is_diff_too_large(error: &Error) -> bool {
+    matches!(error, Error::Api { status: 406, body } if body.contains("too_large"))
 }
 
 /// Map GitHub review states onto the provider-neutral vocabulary
@@ -1765,4 +1885,54 @@ fn truncate_chars(text: &str, max_chars: usize) -> String {
     let mut truncated: String = text.chars().take(max_chars.saturating_sub(1)).collect();
     truncated.push('\u{2026}');
     truncated
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn file(filename: &str, status: &str, patch: Option<&str>) -> PullRequestFile {
+        PullRequestFile {
+            filename: filename.to_owned(),
+            patch: patch.map(str::to_owned),
+            previous_filename: None,
+            status: status.to_owned(),
+        }
+    }
+
+    #[test]
+    fn diff_from_file_patches_marks_added_and_removed_sides_as_dev_null() {
+        let diff = diff_from_file_patches(&[
+            file("new.rs", "added", Some("@@ -0,0 +1 @@\n+fresh")),
+            file("gone.rs", "removed", Some("@@ -1 +0,0 @@\n-stale")),
+        ]);
+
+        assert_eq!(
+            diff,
+            "diff --git a/new.rs b/new.rs\n--- /dev/null\n+++ b/new.rs\n@@ -0,0 +1 @@\n+fresh\n\
+             diff --git a/gone.rs b/gone.rs\n--- a/gone.rs\n+++ /dev/null\n@@ -1 +0,0 @@\n-stale\n"
+        );
+    }
+
+    #[test]
+    fn diff_from_file_patches_keeps_only_the_header_for_a_file_without_a_patch() {
+        let diff = diff_from_file_patches(&[file("logo.png", "added", None)]);
+
+        assert_eq!(diff, "diff --git a/logo.png b/logo.png\n");
+    }
+
+    #[test]
+    fn is_diff_too_large_needs_both_the_406_status_and_the_too_large_code() {
+        let api = |status: u16, body: &str| Error::Api {
+            status,
+            body: body.to_owned(),
+        };
+
+        assert!(is_diff_too_large(&api(
+            406,
+            r#"{"errors":[{"code":"too_large"}]}"#
+        )));
+        assert!(!is_diff_too_large(&api(406, "Not Acceptable")));
+        assert!(!is_diff_too_large(&api(422, "too_large")));
+    }
 }

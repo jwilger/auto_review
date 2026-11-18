@@ -175,3 +175,59 @@ async fn authenticated_app_reports_bot_login_from_slug() -> TestResult {
     assert_eq!(app.bot_login(), "auto-review[bot]");
     Ok(())
 }
+
+#[expect(
+    clippy::tests_outside_test_module,
+    reason = "files under tests/ are separate integration-test crates built only by cargo test; a #[cfg(test)] module wrapper would add nothing"
+)]
+#[expect(
+    clippy::panic_in_result_fn,
+    reason = "the test reports setup and request failures through `?` and its checks through the assertions, which stay as written"
+)]
+#[tokio::test]
+async fn app_review_host_get_pr_diff_assembles_per_file_patches_when_the_diff_is_too_large(
+) -> TestResult {
+    let github = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/app/installations/77/access_tokens"))
+        .respond_with(ResponseTemplate::new(201).set_body_json(json!({
+            "token": "ghs_installation",
+            "expires_at": "2099-01-01T00:00:00Z"
+        })))
+        .mount(&github)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/pulls/7"))
+        .and(header("accept", "application/vnd.github.v3.diff"))
+        .respond_with(ResponseTemplate::new(406).set_body_string(
+            r#"{"message":"Sorry, the diff exceeded the maximum number of lines (20000)","errors":[{"resource":"PullRequest","field":"diff","code":"too_large"}],"status":"406"}"#,
+        ))
+        .expect(1)
+        .mount(&github)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/repos/owner/repo/pulls/7/files"))
+        .and(header("authorization", "Bearer ghs_installation"))
+        .respond_with(ResponseTemplate::new(200).set_body_json(json!([
+            {"filename": "src/lib.rs", "status": "modified", "patch": "@@ -1 +1 @@\n-old\n+new"},
+            {"filename": "assets/big.bin", "status": "added"}
+        ])))
+        .expect(1)
+        .mount(&github)
+        .await;
+    let app_host = AppReviewHost::new(app_client(&github.uri())?);
+    app_host.remember_installation("owner", "repo", 77).await;
+    let host: &dyn ar_forge::ReviewHost = &app_host;
+
+    let diff = host.get_pr_diff("owner", "repo", 7).await?;
+
+    assert!(
+        diff.contains("diff --git a/src/lib.rs b/src/lib.rs\n") && diff.contains("+new\n"),
+        "{diff}"
+    );
+    assert!(
+        diff.contains("diff --git a/assets/big.bin b/assets/big.bin\n"),
+        "{diff}"
+    );
+    Ok(())
+}
