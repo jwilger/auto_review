@@ -1,6 +1,8 @@
 # Contributing
 
-Thanks for considering a contribution to `auto_review`.
+Thanks for considering a contribution to `auto_review`. See
+[Engineering standards](docs/engineering.md) for what changes must satisfy,
+what we prefer, and what evidence to bring to review.
 
 ## Development setup
 
@@ -105,14 +107,20 @@ gh label create factory:approved \
   --description 'maintainer approval for the factory to merge' --color 0E8A16
 ```
 
-After those checks pass, the `Semantic review` job in
-`.github/workflows/ci.yml` asks an auto_review gateway to review the pull
-request through the published auto_review action
-(`deploy/github-action`). It runs for non-draft pull requests into `main`.
-It is not a required check and is not in the ruleset, so a reviewer outage
-never blocks a merge. Until both settings below are present (and on pull
-requests from forks, which get no secrets) it finishes successfully with one
-notice and sends no request. It needs:
+For non-draft pull requests into `main`, the `Semantic review` job waits for
+its verification jobs in `.github/workflows/ci.yml` before requesting a review
+through the published action (`deploy/github-action`). CodeQL runs in a
+separate workflow: it is required for merging but is not a prerequisite of
+this job. A failed or skipped `Semantic review` check does not block merging;
+the ruleset still requires existing review threads to be resolved.
+
+The reviewer reads the project's [rubric](.auto_review.yaml) from the PR's
+base branch. A change to it takes effect after merge; validate it locally
+with `auto-review config validate --strict .auto_review.yaml`.
+
+Until both settings below are present (and on pull requests from forks,
+which get no secrets) the job finishes successfully with one notice and
+sends no request. It needs:
 
 - Repository variable `AUTO_REVIEW_GATEWAY_URL`: the gateway's base URL.
 - Repository secret `AUTO_REVIEW_ACTION_TOKEN`: the bearer token matching

@@ -1,0 +1,28 @@
+# Semantic review guidance only. Keep this summary aligned with
+# docs/engineering.md. The reviewer reads this file from the PR's base branch.
+guidelines: |
+  An actionable finding points to a changed line, identifies the applicable
+  engineering rule, and explains a concrete consequence. A preference alone
+  is not a defect. Describe missing evidence as such, not as proof of failure.
+
+  User-visible behavior changes require regression coverage through the
+  affected public interface: for example, a CLI command, gateway route, or
+  published action. Tests assert observable outcomes, including relevant
+  denials and failures. When startup or packaging changes, prefer a test of
+  the shipped process to a test of the already-wired router. When a threat
+  mitigation or its expected behavior changes, update the matching regression
+  listed in the test map in docs/THREAT-MODEL.md.
+
+  Untrusted inputs are validated before use; parsing is not authorization.
+  Repository review instructions come from the base branch, never the PR head.
+  Structured model review output must pass closed-schema validation before
+  it becomes findings. Review workspace tools stay read-only and confined to
+  the clone. The review runtime never executes repository-controlled commands,
+  tools, or scripts.
+
+  Shared orchestration stays forge-neutral; provider-specific behavior belongs
+  behind ReviewHost or at the adapter boundary. Prefer distinct types for
+  values with different roles, pure decisions, and I/O at the edges. New Rust
+  crates inherit workspace lints; lint exceptions are narrow and have a reason.
+  Architecture decisions add or supersede an ADR and update docs/ARCHITECTURE.md
+  rather than rewriting settled ADRs.
