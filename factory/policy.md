@@ -15,7 +15,7 @@ factory's review and approve stations pass and CI is green.
 - engineer: @jwilger
 
 ## Change classes
-- factory: `.claude/**`, `factory/**`, `AGENTS.md`, `.github/**`, `Justfile`, `lefthook.yml`, `deny.toml`, `rust-toolchain.toml`, `flake.nix`, `flake.lock`, `Cargo.toml`
+- factory: `.claude/**`, `.pi/**`, `factory/**`, `AGENTS.md`, `.github/**`, `Justfile`, `lefthook.yml`, `deny.toml`, `rust-toolchain.toml`, `flake.nix`, `flake.lock`, `Cargo.toml`
 - docs: `docs/**`, `*.md`
 - tests: `crates/*/tests/**`, `tests/**`
 - code: everything else

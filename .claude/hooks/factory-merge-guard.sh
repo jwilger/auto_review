@@ -44,7 +44,7 @@ files=$(gh pr view "$pr" --json files --jq '.files[].path') \
   || deny "could not read the files of pull request #$pr."
 
 # Keep in step with the `factory` class in factory/policy.md.
-factory_re='^(\.claude/|factory/|\.github/|AGENTS\.md$|Justfile$|lefthook\.yml$|deny\.toml$|rust-toolchain\.toml$|flake\.nix$|flake\.lock$|Cargo\.toml$)'
+factory_re='^(\.claude/|\.pi/|factory/|\.github/|AGENTS\.md$|Justfile$|lefthook\.yml$|deny\.toml$|rust-toolchain\.toml$|flake\.nix$|flake\.lock$|Cargo\.toml$)'
 hits=$(grep -E "$factory_re" <<<"$files" || true)
 if [[ -n "$hits" ]]; then
   deny "pull request #$pr changes factory paths, which the maintainer merges:
