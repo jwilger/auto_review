@@ -39,3 +39,6 @@ tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
 wiremock.workspace = true
 tempfile = "3"
+
+[lints]
+workspace = true

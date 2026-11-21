@@ -1,13 +1,26 @@
+#![expect(
+    clippy::tests_outside_test_module,
+    reason = "this integration target is already a test harness"
+)]
+#![expect(
+    clippy::expect_used,
+    reason = "fixtures and in-process request plumbing must succeed"
+)]
+
+extern crate alloc;
+
+use alloc::sync::Arc;
 use ar_forgejo::Client as ForgejoClient;
 use ar_gateway::{build_router, AppState};
 use ar_orchestrator::{JobDispatcher, ReviewJob};
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use http_body_util::BodyExt;
+use http_body_util::BodyExt as _;
 use std::io;
-use std::sync::{Arc, Mutex};
-use tower::ServiceExt;
+use std::sync::Mutex;
+use tower::ServiceExt as _;
+use tracing::subscriber;
 use tracing_subscriber::fmt::MakeWriter;
 use wiremock::matchers::{header, method, path};
 use wiremock::{Mock, MockServer, ResponseTemplate};
@@ -42,12 +55,12 @@ impl CapturedLogs {
     }
 }
 
-impl<'a> MakeWriter<'a> for CapturedLogs {
+impl<'writer> MakeWriter<'writer> for CapturedLogs {
     type Writer = CapturedLogWriter;
 
-    fn make_writer(&'a self) -> Self::Writer {
+    fn make_writer(&'writer self) -> Self::Writer {
         CapturedLogWriter {
-            bytes: self.bytes.clone(),
+            bytes: Arc::clone(&self.bytes),
         }
     }
 }
@@ -57,13 +70,17 @@ struct CapturedLogWriter {
 }
 
 impl io::Write for CapturedLogWriter {
+    fn flush(&mut self) -> io::Result<()> {
+        Ok(())
+    }
+
+    #[expect(
+        clippy::unwrap_in_result,
+        reason = "a poisoned capture buffer is a test fixture failure"
+    )]
     fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
         self.bytes.lock().expect("log lock").extend_from_slice(buf);
         Ok(buf.len())
-    }
-
-    fn flush(&mut self) -> io::Result<()> {
-        Ok(())
     }
 }
 
@@ -86,10 +103,11 @@ async fn unauthorized_ci_review_response_and_logs_do_not_leak_action_tokens() {
     let forgejo_token = "forgejo-token-must-not-be-used";
 
     let forgejo = MockServer::start().await;
+    let pr_number: i32 = 42;
     Mock::given(method("GET"))
         .and(path("/api/v1/repos/o/r/pulls/42"))
         .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-            "number": 42,
+            "number": pr_number,
             "title": "must not be fetched",
             "body": "unauthorized requests stop before Forgejo",
             "head": {"ref": "topic", "sha": "deadbeef"},
@@ -101,9 +119,9 @@ async fn unauthorized_ci_review_response_and_logs_do_not_leak_action_tokens() {
 
     let recorder = Arc::new(RecordingDispatcher::default());
     let client = Arc::new(ForgejoClient::new(&forgejo.uri(), forgejo_token).expect("client"));
+    let dispatcher: Arc<dyn JobDispatcher> = Arc::<RecordingDispatcher>::clone(&recorder);
     let app = build_router(
-        AppState::new("webhook-secret", recorder.clone() as Arc<dyn JobDispatcher>)
-            .with_ci_review_endpoint(expected_token, client),
+        AppState::new("webhook-secret", dispatcher).with_ci_review_endpoint(expected_token, client),
     );
     let logs = CapturedLogs::default();
     let subscriber = tracing_subscriber::fmt()
@@ -111,7 +129,7 @@ async fn unauthorized_ci_review_response_and_logs_do_not_leak_action_tokens() {
         .with_ansi(false)
         .without_time()
         .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let _guard = subscriber::set_default(subscriber);
 
     let req = Request::post("/reviews/ci")
         .header("authorization", format!("Bearer {rejected_token}"))
@@ -157,9 +175,9 @@ async fn forgejo_failure_ci_review_response_and_logs_do_not_leak_upstream_secret
 
     let recorder = Arc::new(RecordingDispatcher::default());
     let client = Arc::new(ForgejoClient::new(&forgejo.uri(), forgejo_token).expect("client"));
+    let dispatcher: Arc<dyn JobDispatcher> = Arc::<RecordingDispatcher>::clone(&recorder);
     let app = build_router(
-        AppState::new("webhook-secret", recorder.clone() as Arc<dyn JobDispatcher>)
-            .with_ci_review_endpoint(action_token, client),
+        AppState::new("webhook-secret", dispatcher).with_ci_review_endpoint(action_token, client),
     );
     let logs = CapturedLogs::default();
     let subscriber = tracing_subscriber::fmt()
@@ -167,7 +185,7 @@ async fn forgejo_failure_ci_review_response_and_logs_do_not_leak_upstream_secret
         .with_ansi(false)
         .without_time()
         .finish();
-    let _guard = tracing::subscriber::set_default(subscriber);
+    let _guard = subscriber::set_default(subscriber);
 
     let req = Request::post("/reviews/ci")
         .header("authorization", format!("Bearer {action_token}"))

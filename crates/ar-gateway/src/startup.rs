@@ -7,177 +7,43 @@ use crate::{
     build_router, AppState, ChatDeps, GatewayInfo, GitHubChatDeps, GitHubDeps, ReadinessProbe,
     RuntimeIsolationPostureInfo,
 };
-use anyhow::{Context, Result};
+use alloc::{fmt, sync::Arc};
+use anyhow::{Context as _, Result};
 use ar_forgejo::Client as ForgejoClient;
 use ar_index::{
-    InMemoryLearningsStore, InMemoryVectorStore, SqliteLearningsStore, SqliteVectorStore,
-    VectorStore,
+    InMemoryLearningsStore, InMemoryVectorStore, LearningsStore, SqliteLearningsStore,
+    SqliteVectorStore, VectorStore,
 };
 use ar_llm::{ModelTier, OpenAiProvider, Router as LlmRouter};
 use ar_orchestrator::review_history::{InMemoryReviewHistory, ReviewHistory};
 use ar_orchestrator::sqlite_history::SqliteReviewHistory;
 use ar_orchestrator::{NoOpDispatcher, SpawningDispatcher};
-use std::collections::HashMap;
-use std::env;
-use std::fmt;
-use std::fs;
-use std::path::{Component, Path, PathBuf};
-use std::process::Command as ProcessCommand;
-use std::sync::Arc;
-use std::time::Duration;
-use tokio::net::TcpListener;
-use tokio::sync::Mutex;
+use core::{
+    result::Result as StdResult,
+    str::FromStr,
+    sync::atomic::{AtomicU64, Ordering},
+    time::Duration,
+};
+#[cfg(unix)]
+use std::os::unix::fs::symlink;
+use std::{
+    collections::HashMap,
+    env, fs, io,
+    path::{Component, Path, PathBuf},
+    process::{self, Command as ProcessCommand},
+    time::{SystemTime, UNIX_EPOCH},
+};
+#[cfg(unix)]
+use tokio::signal::unix::{signal as unix_signal, SignalKind};
+use tokio::{net::TcpListener, process::Command as AsyncCommand, signal, sync::Mutex};
 
-#[derive(Clone, Copy)]
-struct GatewayStartupEnvValues<'a> {
-    bind: Option<&'a str>,
-    webhook_secret: Option<&'a str>,
-    forgejo_base_url: Option<&'a str>,
-    ar_forgejo_token: Option<&'a str>,
-    llm_base_url: Option<&'a str>,
-    llm_reasoning_model: Option<&'a str>,
-    github: GitHubStartupEnvValues<'a>,
-}
-
-#[derive(Clone, Copy, Default)]
-struct GitHubStartupEnvValues<'a> {
-    app_id: Option<&'a str>,
-    private_key: Option<&'a str>,
-    webhook_secret: Option<&'a str>,
-    api_url: Option<&'a str>,
-}
-
-impl GitHubStartupEnvValues<'_> {
-    fn any_set(&self) -> bool {
-        self.app_id.is_some() || self.private_key.is_some() || self.webhook_secret.is_some()
-    }
-}
-
-#[derive(Debug)]
-struct GatewayStartupConfig {
-    bind: String,
-    /// Forgejo provider. Required unless a GitHub App is configured.
-    forgejo: Option<ForgejoStartupConfig>,
-    github: Option<GitHubStartupConfig>,
-    llm_base_url: String,
-    llm_reasoning_model: String,
-}
-
-#[derive(Debug)]
-struct ForgejoStartupConfig {
-    webhook_secret: String,
-    base_url: String,
-    token: String,
-}
-
-#[derive(Debug)]
-struct GitHubStartupConfig {
-    app_id: u64,
-    private_key: String,
-    webhook_secret: String,
-    api_url: String,
-}
-
+/// The default API root for GitHub App requests.
 const DEFAULT_GITHUB_API_URL: &str = "https://api.github.com";
 
-#[derive(Clone, Copy)]
-struct BotIdentityEnvValues<'a> {
-    login: Option<&'a str>,
-    name: Option<&'a str>,
-}
-
-#[derive(Debug, PartialEq, Eq)]
-struct EffectiveBotIdentity {
-    login: String,
-    name: String,
-}
-
-#[derive(Debug)]
-pub struct StartupOptions {
-    pub bare: bool,
-}
-
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
-enum GatewayLaunchOutcome {
-    ContinueInProcess,
-    #[allow(dead_code)]
-    OuterLauncherFinished,
-}
-
-#[derive(Clone, Copy)]
-struct GatewayLauncherEnvValues<'a> {
-    bare: Option<&'a str>,
-    external_isolation: Option<&'a str>,
-}
-
-#[derive(Debug)]
-struct OciSetupDiagnostic {
-    _detail: String,
-}
-
-#[derive(Debug)]
-struct RuntimeIsolationPostureInput<'a> {
-    bare: Option<&'a str>,
-    external_isolation: Option<&'a str>,
-    oci_setup_diagnostic: Option<OciSetupDiagnostic>,
-    target_os: &'a str,
-}
-
-#[derive(Debug, Eq, PartialEq)]
-enum RuntimeIsolationPostureKind {
-    OciDefault,
-    ExternalContainer,
-    ExplicitBare,
-    OciSetupFailure,
-    UnsupportedPlatform,
-}
-
-#[derive(Debug)]
-struct RuntimeIsolationPosture {
-    kind: RuntimeIsolationPostureKind,
-    operator_label: String,
-    operator_detail: String,
-}
-
-impl From<RuntimeIsolationPosture> for RuntimeIsolationPostureInfo {
-    fn from(posture: RuntimeIsolationPosture) -> Self {
-        Self {
-            kind: match posture.kind {
-                RuntimeIsolationPostureKind::OciDefault => "oci_default",
-                RuntimeIsolationPostureKind::ExternalContainer => "external_container",
-                RuntimeIsolationPostureKind::ExplicitBare => "explicit_bare",
-                RuntimeIsolationPostureKind::OciSetupFailure => "oci_setup_failed",
-                RuntimeIsolationPostureKind::UnsupportedPlatform => "unsupported_platform",
-            },
-            label: posture.operator_label,
-            detail: posture.operator_detail,
-        }
-    }
-}
-
-#[derive(Clone, Copy, Debug)]
-struct EmbeddedOciGatewayInputs<'a> {
-    bundle_path: &'a Path,
-    runtime_path: &'a Path,
-}
-
-#[derive(Clone, Copy, Debug)]
-#[allow(dead_code)]
-struct EmbeddedOciGatewayEnvValues<'a> {
-    bundle_path: Option<&'a str>,
-    runtime_path: Option<&'a str>,
-}
-
-#[derive(Debug)]
-struct PackagedOciRuntimeCommand {
-    program: PathBuf,
-    args: Vec<PathBuf>,
-    clear_ambient_env: bool,
-    env: Vec<(String, String)>,
-}
-
+/// Prefix of a bundle or runtime installed in the Nix store.
 const PACKAGED_NIX_STORE_PREFIX: &str = "/nix/store";
 
+/// Defaults passed to the inner gateway process.
 const STATIC_INNER_GATEWAY_ENV: &[(&str, &str)] = &[
     ("SSL_CERT_FILE", "/etc/ssl/certs/ca-bundle.crt"),
     ("PATH", "/bin"),
@@ -186,6 +52,7 @@ const STATIC_INNER_GATEWAY_ENV: &[(&str, &str)] = &[
     ("RUST_LOG", "info,ar_gateway=debug"),
 ];
 
+/// Environment settings required for every inner gateway process.
 const REQUIRED_INNER_GATEWAY_ENV: &[&str] = &["LLM_BASE_URL"];
 
 /// Required when the Forgejo provider is in use (any Forgejo variable set,
@@ -200,6 +67,7 @@ const REQUIRED_GITHUB_INNER_GATEWAY_ENV: &[&str] = &[
     "GITHUB_WEBHOOK_SECRET",
 ];
 
+/// Outer environment settings eligible for forwarding to the inner gateway.
 const INNER_GATEWAY_ENV_ALLOWLIST: &[&str] = &[
     "AR_GATEWAY_BIND",
     "WEBHOOK_SECRET",
@@ -242,50 +110,244 @@ const INNER_GATEWAY_ENV_ALLOWLIST: &[&str] = &[
     "RUST_LOG",
 ];
 
+/// Outer environment settings eligible for forwarding to the runtime itself.
 const OCI_RUNTIME_ENV_ALLOWLIST: &[&str] = &["DBUS_SESSION_BUS_ADDRESS", "XDG_RUNTIME_DIR"];
 
+/// Raw environment values used to resolve the gateway configuration.
+#[derive(Clone, Copy)]
+struct GatewayStartupEnvValues<'env> {
+    /// Forgejo API token.
+    ar_forgejo_token: Option<&'env str>,
+    /// Listener address override.
+    bind: Option<&'env str>,
+    /// Forgejo API base URL.
+    forgejo_base_url: Option<&'env str>,
+    /// GitHub App configuration inputs.
+    github: GitHubStartupEnvValues<'env>,
+    /// Reasoning provider base URL.
+    llm_base_url: Option<&'env str>,
+    /// Reasoning model override.
+    llm_reasoning_model: Option<&'env str>,
+    /// Shared secret for Forgejo webhooks.
+    webhook_secret: Option<&'env str>,
+}
+
+/// Raw GitHub App environment values.
+#[derive(Clone, Copy, Default)]
+struct GitHubStartupEnvValues<'env> {
+    /// GitHub API base URL override.
+    api_url: Option<&'env str>,
+    /// GitHub App identifier as supplied in the environment.
+    app_id: Option<&'env str>,
+    /// GitHub App signing key in PEM format.
+    private_key: Option<&'env str>,
+    /// Shared secret for GitHub webhooks.
+    webhook_secret: Option<&'env str>,
+}
+
+impl GitHubStartupEnvValues<'_> {
+    /// Report whether any required GitHub App setting was supplied.
+    fn any_set(&self) -> bool {
+        self.app_id.is_some() || self.private_key.is_some() || self.webhook_secret.is_some()
+    }
+}
+
+/// Validated gateway settings.
+#[derive(Debug)]
+struct GatewayStartupConfig {
+    /// HTTP listener address.
+    bind: String,
+    /// Forgejo provider. Required unless a GitHub App is configured.
+    forgejo: Option<ForgejoStartupConfig>,
+    /// GitHub App provider, if configured.
+    github: Option<GitHubStartupConfig>,
+    /// Reasoning provider base URL.
+    llm_base_url: String,
+    /// Model used for the reasoning tier.
+    llm_reasoning_model: String,
+}
+
+/// Validated Forgejo connection and webhook settings.
+#[derive(Debug)]
+struct ForgejoStartupConfig {
+    /// Forgejo API base URL.
+    base_url: String,
+    /// Forgejo API token.
+    token: String,
+    /// Shared secret for Forgejo webhooks.
+    webhook_secret: String,
+}
+
+/// Validated GitHub App connection and webhook settings.
+#[derive(Debug)]
+struct GitHubStartupConfig {
+    /// GitHub API base URL.
+    api_url: String,
+    /// GitHub App identifier.
+    app_id: u64,
+    /// GitHub App signing key in PEM format.
+    private_key: String,
+    /// Shared secret for GitHub webhooks.
+    webhook_secret: String,
+}
+
+/// Optional environment overrides for the Forgejo bot identity.
+#[derive(Clone, Copy)]
+struct BotIdentityEnvValues<'env> {
+    /// Login used for self-message detection.
+    login: Option<&'env str>,
+    /// Name used to recognize mentions.
+    name: Option<&'env str>,
+}
+
+/// Bot identity used by the gateway and chat handlers.
+#[derive(Debug, PartialEq, Eq)]
+struct EffectiveBotIdentity {
+    /// Login used for self-message detection.
+    login: String,
+    /// Name used to recognize mentions.
+    name: String,
+}
+
+/// Command-line options for gateway startup.
+#[derive(Debug)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "Preserve external construction with a struct literal"
+)]
+pub struct StartupOptions {
+    /// Run directly on the host instead of invoking the packaged launcher.
+    pub bare: bool,
+}
+
+/// Result of launcher selection and any outer runtime invocation.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GatewayLaunchOutcome {
+    /// Start the server in this process.
+    ContinueInProcess,
+    /// The outer process has already run the gateway through its runtime.
+    OuterLauncherFinished,
+}
+
+/// Raw environment markers used for launcher selection.
+#[derive(Clone, Copy)]
+struct GatewayLauncherEnvValues<'env> {
+    /// Explicit request to skip the packaged launcher.
+    bare: Option<&'env str>,
+    /// Marker for a process already running in an external container.
+    external_isolation: Option<&'env str>,
+}
+
+/// An error from preparing or running the packaged OCI gateway.
+#[derive(Debug)]
+struct OciSetupDiagnostic {
+    /// Original setup detail, sanitized before display.
+    _detail: String,
+}
+
+/// Inputs for reporting how the gateway is isolated at runtime.
+#[derive(Debug)]
+struct RuntimeIsolationPostureInput<'env> {
+    /// Explicit bare-mode marker.
+    bare: Option<&'env str>,
+    /// Marker set by an enclosing container.
+    external_isolation: Option<&'env str>,
+    /// Failure from OCI setup, if any.
+    oci_setup_diagnostic: Option<OciSetupDiagnostic>,
+    /// Target platform used to determine OCI support.
+    target_os: &'env str,
+}
+
+/// The selected runtime isolation posture or reason it is unavailable.
+#[derive(Debug, Eq, PartialEq)]
+enum RuntimeIsolationPostureKind {
+    /// Bare mode was explicitly requested.
+    ExplicitBare,
+    /// An enclosing container provides isolation.
+    ExternalContainer,
+    /// The packaged OCI launcher is the default on this platform.
+    OciDefault,
+    /// The packaged OCI environment could not be prepared.
+    OciSetupFailure,
+    /// The platform does not support the packaged launcher.
+    UnsupportedPlatform,
+}
+
+/// Machine-readable and operator-facing descriptions of isolation.
+#[derive(Debug)]
+struct RuntimeIsolationPosture {
+    /// Classification used by the gateway's info response.
+    kind: RuntimeIsolationPostureKind,
+    /// Explanation suitable for operator output.
+    operator_detail: String,
+    /// Short operator-facing label.
+    operator_label: String,
+}
+
+impl From<RuntimeIsolationPosture> for RuntimeIsolationPostureInfo {
+    #[inline]
+    fn from(posture: RuntimeIsolationPosture) -> Self {
+        Self {
+            kind: match posture.kind {
+                RuntimeIsolationPostureKind::OciDefault => "oci_default",
+                RuntimeIsolationPostureKind::ExternalContainer => "external_container",
+                RuntimeIsolationPostureKind::ExplicitBare => "explicit_bare",
+                RuntimeIsolationPostureKind::OciSetupFailure => "oci_setup_failed",
+                RuntimeIsolationPostureKind::UnsupportedPlatform => "unsupported_platform",
+            },
+            label: posture.operator_label,
+            detail: posture.operator_detail,
+        }
+    }
+}
+
+/// Paths supplied to the packaged launcher.
+#[derive(Clone, Copy, Debug)]
+struct EmbeddedOciGatewayInputs<'paths> {
+    /// Path to the packaged bundle.
+    bundle_path: &'paths Path,
+    /// Path to the packaged runtime executable.
+    runtime_path: &'paths Path,
+}
+
+/// Raw launcher paths supplied by the packaging wrapper.
+#[derive(Clone, Copy, Debug)]
+struct EmbeddedOciGatewayEnvValues<'env> {
+    /// Bundle path from the wrapper environment.
+    bundle_path: Option<&'env str>,
+    /// Runtime executable path from the wrapper environment.
+    runtime_path: Option<&'env str>,
+}
+
+/// Command prepared for the outer OCI runtime process.
+#[derive(Debug)]
+struct PackagedOciRuntimeCommand {
+    /// Runtime command-line arguments.
+    args: Vec<PathBuf>,
+    /// Whether to clear inherited environment variables.
+    clear_ambient_env: bool,
+    /// Environment variables to set for the runtime process.
+    env: Vec<(String, String)>,
+    /// Path to the runtime executable.
+    program: PathBuf,
+}
+
 impl OciSetupDiagnostic {
+    /// Capture a setup error before sanitizing it for display.
     fn new(detail: impl Into<String>) -> Self {
         Self {
             _detail: detail.into(),
         }
     }
 
+    /// Render the detail suitable for operator-facing output.
+    #[expect(
+        clippy::used_underscore_binding,
+        reason = "Preserve the field name in derived debug output"
+    )]
     fn public_detail(&self) -> String {
         sanitize_oci_setup_detail(&self._detail)
     }
-}
-
-fn sanitize_oci_setup_detail(detail: &str) -> String {
-    redact_run_secrets_path_suffix(detail)
-        .replace("secret-bearing", "[redacted]")
-        .replace("ar-token", "[redacted]")
-}
-
-fn redact_run_secrets_path_suffix(detail: &str) -> String {
-    const SECRET_PATH_PREFIX: &str = "/run/secrets/";
-    let mut sanitized = String::with_capacity(detail.len());
-    let mut cursor = 0;
-
-    while let Some(relative_start) = detail[cursor..].find(SECRET_PATH_PREFIX) {
-        let start = cursor + relative_start;
-        sanitized.push_str(&detail[cursor..start]);
-
-        let mut end = start + SECRET_PATH_PREFIX.len();
-        while end < detail.len() {
-            let byte = detail.as_bytes()[end];
-            if byte.is_ascii_whitespace() || matches!(byte, b';' | b',' | b')' | b']' | b'}') {
-                break;
-            }
-            end += 1;
-        }
-
-        sanitized.push_str("[redacted]");
-        cursor = end;
-    }
-
-    sanitized.push_str(&detail[cursor..]);
-    sanitized
 }
 
 impl fmt::Display for OciSetupDiagnostic {
@@ -294,751 +356,13 @@ impl fmt::Display for OciSetupDiagnostic {
     }
 }
 
-fn select_gateway_launcher(
-    values: GatewayLauncherEnvValues<'_>,
-    prepare_oci: impl FnOnce() -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic>,
-) -> Result<GatewayLaunchOutcome> {
-    if values.external_isolation == Some("container") {
-        tracing::info!(
-            "external container isolation marker detected; embedded OCI launcher skipped because this process is already expected to run inside the packaged container boundary"
-        );
-        return Ok(GatewayLaunchOutcome::ContinueInProcess);
-    }
-
-    let use_oci = match values.bare.map(str::trim).map(str::to_ascii_lowercase) {
-        None => true,
-        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => false,
-        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => true,
-        Some(_) => anyhow::bail!(
-            "AR_GATEWAY_BARE has an unrecognized value; use true/false, yes/no, on/off, or 1/0"
-        ),
-    };
-
-    if use_oci {
-        prepare_oci().map_err(|diagnostic| {
-            anyhow::anyhow!(
-                "OCI gateway launcher setup failed: {diagnostic}; set AR_GATEWAY_BARE (or pass --bare) to opt out"
-            )
-        })
-    } else {
-        tracing::warn!("{}", explicit_bare_gateway_mode_warning());
-        Ok(GatewayLaunchOutcome::ContinueInProcess)
-    }
-}
-
-fn explicit_bare_gateway_mode_warning() -> &'static str {
-    "Warning: bare gateway mode selected; only application-level controls are active, not container-equivalent isolation."
-}
-
-fn classify_runtime_isolation_posture(
-    input: RuntimeIsolationPostureInput<'_>,
-) -> Result<RuntimeIsolationPosture> {
-    if input.target_os != "linux" {
-        return Ok(RuntimeIsolationPosture {
-            kind: RuntimeIsolationPostureKind::UnsupportedPlatform,
-            operator_label: "unsupported platform".to_string(),
-            operator_detail:
-                "Embedded OCI isolation is unavailable on this platform; run in bare mode or provide external isolation."
-                    .to_string(),
-        });
-    }
-
-    if input.external_isolation == Some("container") {
-        return Ok(RuntimeIsolationPosture {
-            kind: RuntimeIsolationPostureKind::ExternalContainer,
-            operator_label: "external container isolation".to_string(),
-            operator_detail: "Gateway is already inside an externally provided container boundary."
-                .to_string(),
-        });
-    }
-
-    let use_oci = match input.bare.map(str::trim).map(str::to_ascii_lowercase) {
-        None => true,
-        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => false,
-        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => true,
-        Some(_) => anyhow::bail!(
-            "AR_GATEWAY_BARE has an unrecognized value; use true/false, yes/no, on/off, or 1/0"
-        ),
-    };
-
-    if !use_oci {
-        return Ok(RuntimeIsolationPosture {
-            kind: RuntimeIsolationPostureKind::ExplicitBare,
-            operator_label: "bare gateway mode".to_string(),
-            operator_detail: explicit_bare_gateway_mode_warning().to_string(),
-        });
-    }
-
-    if let Some(diagnostic) = input.oci_setup_diagnostic {
-        return Ok(RuntimeIsolationPosture {
-            kind: RuntimeIsolationPostureKind::OciSetupFailure,
-            operator_label: "OCI setup failed".to_string(),
-            operator_detail: format!(
-                "OCI setup failed: {diagnostic}; set AR_GATEWAY_BARE to opt out"
-            ),
-        });
-    }
-
-    Ok(RuntimeIsolationPosture {
-        kind: RuntimeIsolationPostureKind::OciDefault,
-        operator_label: "packaged OCI container isolation".to_string(),
-        operator_detail: "Gateway uses embedded OCI container-equivalent isolation by default."
-            .to_string(),
-    })
-}
-
-fn select_gateway_launcher_for_startup_options(
-    options: StartupOptions,
-    values: GatewayLauncherEnvValues<'_>,
-    prepare_oci: impl FnOnce() -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic>,
-) -> Result<GatewayLaunchOutcome> {
-    let bare = if options.bare {
-        Some("true")
-    } else {
-        values.bare
-    };
-
-    select_gateway_launcher(
-        GatewayLauncherEnvValues {
-            bare,
-            external_isolation: values.external_isolation,
-        },
-        prepare_oci,
-    )
-}
-
-fn prepare_embedded_oci_gateway_with_inputs(
-    inputs: EmbeddedOciGatewayInputs<'_>,
-    launch: impl FnOnce(
-        EmbeddedOciGatewayInputs<'_>,
-    ) -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic>,
-) -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic> {
-    validate_packaged_oci_input_paths(inputs)?;
-
-    launch(inputs)
-}
-
-fn validate_packaged_oci_input_paths(
-    inputs: EmbeddedOciGatewayInputs<'_>,
-) -> std::result::Result<(), OciSetupDiagnostic> {
-    validate_packaged_path_shape("bundle", inputs.bundle_path)?;
-    validate_packaged_path_shape("runtime", inputs.runtime_path)?;
-
-    if inputs.bundle_path.starts_with(PACKAGED_NIX_STORE_PREFIX)
-        && inputs.runtime_path.starts_with(PACKAGED_NIX_STORE_PREFIX)
-    {
-        return Ok(());
-    }
-
-    if let Some(release_root) = portable_release_root_for_bundle(inputs.bundle_path) {
-        let runtime_launcher = release_root.join("bin").join("youki");
-        if inputs.runtime_path == runtime_launcher {
-            return Ok(());
-        }
-    }
-
-    Err(OciSetupDiagnostic::new(
-        "packaged OCI bundle and runtime paths must be package-resolved under /nix/store or a matching portable release root",
-    ))
-}
-
-fn portable_release_root_for_bundle(bundle_path: &Path) -> Option<&Path> {
-    let nix_dir = bundle_path.ancestors().find_map(|ancestor| {
-        let nix_dir = ancestor.parent()?;
-        (ancestor.file_name().is_some_and(|name| name == "store")
-            && nix_dir.file_name().is_some_and(|name| name == "nix"))
-        .then_some(nix_dir)
-    })?;
-
-    let release_root = nix_dir.parent()?;
-    (release_root != Path::new("/")).then_some(release_root)
-}
-
-fn validate_packaged_path_shape(
-    kind: &str,
-    path: &Path,
-) -> std::result::Result<(), OciSetupDiagnostic> {
-    if path.as_os_str().is_empty() {
-        return Err(OciSetupDiagnostic::new(format!(
-            "packaged OCI {kind} path is missing or empty"
-        )));
-    }
-
-    if !path.is_absolute() {
-        return Err(OciSetupDiagnostic::new(format!(
-            "packaged OCI {kind} path must be absolute and package-resolved under {PACKAGED_NIX_STORE_PREFIX}"
-        )));
-    }
-
-    if path
-        .components()
-        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
-    {
-        return Err(OciSetupDiagnostic::new(format!(
-            "packaged OCI {kind} path must not contain traversal components"
-        )));
-    }
-
-    Ok(())
-}
-
-fn prepare_embedded_oci_gateway_from_env_values(
-    values: EmbeddedOciGatewayEnvValues<'_>,
-    launch: impl FnOnce(
-        EmbeddedOciGatewayInputs<'_>,
-    ) -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic>,
-) -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic> {
-    let bundle_path = values.bundle_path.ok_or_else(|| {
-        OciSetupDiagnostic::new("AR_GATEWAY_EMBEDDED_OCI_BUNDLE_PATH is required")
-    })?;
-    let runtime_path = values.runtime_path.ok_or_else(|| {
-        OciSetupDiagnostic::new("AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH is required")
-    })?;
-
-    prepare_embedded_oci_gateway_with_inputs(
-        EmbeddedOciGatewayInputs {
-            bundle_path: Path::new(bundle_path),
-            runtime_path: Path::new(runtime_path),
-        },
-        launch,
-    )
-}
-
-fn read_env_var_for_oci(name: &str) -> std::result::Result<Option<String>, OciSetupDiagnostic> {
-    match env::var(name) {
-        Ok(value) => Ok(Some(value)),
-        Err(env::VarError::NotPresent) => Ok(None),
-        Err(env::VarError::NotUnicode(_)) => Err(OciSetupDiagnostic::new(format!(
-            "{name} contains invalid Unicode and cannot be used for embedded OCI setup"
-        ))),
-    }
-}
-
-fn inner_gateway_process_env_from_lookup(
-    mut lookup: impl FnMut(&str) -> std::result::Result<Option<String>, OciSetupDiagnostic>,
-) -> std::result::Result<Vec<(String, String)>, OciSetupDiagnostic> {
-    let mut process_env = STATIC_INNER_GATEWAY_ENV
-        .iter()
-        .map(|(name, value)| ((*name).to_string(), (*value).to_string()))
-        .collect::<Vec<_>>();
-
-    let mut staged = Vec::new();
-    for name in INNER_GATEWAY_ENV_ALLOWLIST {
-        let value = lookup(name)?.filter(|value| !value.trim().is_empty());
-        if let Some(value) = value {
-            staged.push(*name);
-            set_process_env_entry(&mut process_env, name, value);
-        }
-    }
-
-    let is_staged = |name: &str| staged.contains(&name);
-    let github_requested = REQUIRED_GITHUB_INNER_GATEWAY_ENV
-        .iter()
-        .any(|name| is_staged(name));
-    let forgejo_requested =
-        is_staged("FORGEJO_BASE_URL") || is_staged("AR_FORGEJO_TOKEN") || !github_requested;
-    let mut required: Vec<&str> = REQUIRED_INNER_GATEWAY_ENV.to_vec();
-    if forgejo_requested {
-        required.extend_from_slice(REQUIRED_FORGEJO_INNER_GATEWAY_ENV);
-    }
-    if github_requested {
-        required.extend_from_slice(REQUIRED_GITHUB_INNER_GATEWAY_ENV);
-    }
-    if let Some(name) = INNER_GATEWAY_ENV_ALLOWLIST
-        .iter()
-        .find(|name| required.contains(name) && !is_staged(name))
-    {
-        return Err(OciSetupDiagnostic::new(format!(
-            "{name} is required for staged OCI inner gateway config"
-        )));
-    }
-
-    set_process_env_entry(
-        &mut process_env,
-        "AR_GATEWAY_EXTERNAL_ISOLATION",
-        "container".to_string(),
-    );
-
-    Ok(process_env)
-}
-
-fn set_process_env_entry(process_env: &mut Vec<(String, String)>, name: &str, value: String) {
-    if let Some((_, existing_value)) = process_env
-        .iter_mut()
-        .find(|(existing_name, _)| existing_name == name)
-    {
-        *existing_value = value;
-    } else {
-        process_env.push((name.to_string(), value));
-    }
-}
-
-fn staged_oci_config_with_process_env(
-    mut config: serde_json::Value,
-    process_env: &[(String, String)],
-) -> std::result::Result<serde_json::Value, OciSetupDiagnostic> {
-    let Some(process) = config
-        .get_mut("process")
-        .and_then(serde_json::Value::as_object_mut)
-    else {
-        return Err(OciSetupDiagnostic::new(
-            "packaged OCI config is missing a process object",
-        ));
-    };
-
-    process.insert(
-        "env".to_string(),
-        serde_json::Value::Array(
-            process_env
-                .iter()
-                .map(|(name, value)| serde_json::Value::String(format!("{name}={value}")))
-                .collect(),
-        ),
-    );
-
-    Ok(config)
-}
-
-#[cfg(unix)]
-fn staged_oci_config_with_outer_rootless_mapping_ids(
-    mut config: serde_json::Value,
-    staged_bundle: &Path,
-) -> std::result::Result<serde_json::Value, OciSetupDiagnostic> {
-    use std::os::unix::fs::MetadataExt;
-
-    let metadata = fs::metadata(staged_bundle).map_err(|error| {
-        OciSetupDiagnostic::new(format!(
-            "staged OCI bundle metadata could not be read: {}",
-            error.kind()
-        ))
-    })?;
-
-    rewrite_oci_mapping_host_ids(&mut config, "uidMappings", metadata.uid());
-    rewrite_oci_mapping_host_ids(&mut config, "gidMappings", metadata.gid());
-
-    Ok(config)
-}
-
-#[cfg(not(unix))]
-fn staged_oci_config_with_outer_rootless_mapping_ids(
-    _config: serde_json::Value,
-    _staged_bundle: &Path,
-) -> std::result::Result<serde_json::Value, OciSetupDiagnostic> {
-    Err(OciSetupDiagnostic::new(
-        "embedded OCI gateway launcher requires Unix rootless mapping staging",
-    ))
-}
-
-fn rewrite_oci_mapping_host_ids(config: &mut serde_json::Value, mapping_name: &str, host_id: u32) {
-    if let Some(mappings) = config
-        .get_mut("linux")
-        .and_then(|linux| linux.get_mut(mapping_name))
-        .and_then(serde_json::Value::as_array_mut)
-    {
-        for mapping in mappings {
-            if let Some(mapping) = mapping.as_object_mut() {
-                mapping.insert("hostID".to_string(), serde_json::Value::from(host_id));
-            }
-        }
-    }
-}
-
-fn stage_embedded_oci_gateway_bundle_at_path(
-    packaged_bundle: &Path,
-    staged_bundle: &Path,
-    process_env: &[(String, String)],
-) -> std::result::Result<PathBuf, OciSetupDiagnostic> {
-    stage_embedded_oci_gateway_bundle_at_path_with_config_writer(
-        packaged_bundle,
-        staged_bundle,
-        process_env,
-        |path, contents| fs::write(path, contents),
-    )
-}
-
-fn stage_embedded_oci_gateway_bundle_at_path_with_config_writer(
-    packaged_bundle: &Path,
-    staged_bundle: &Path,
-    process_env: &[(String, String)],
-    config_writer: impl FnOnce(&Path, Vec<u8>) -> std::io::Result<()>,
-) -> std::result::Result<PathBuf, OciSetupDiagnostic> {
-    let packaged_rootfs = packaged_bundle.join("rootfs");
-    if !packaged_rootfs.is_dir() {
-        return Err(OciSetupDiagnostic::new(
-            "packaged OCI bundle rootfs is missing",
-        ));
-    }
-
-    fs::create_dir(staged_bundle).map_err(|error| {
-        OciSetupDiagnostic::new(format!(
-            "staged OCI bundle directory could not be created: {}",
-            error.kind()
-        ))
-    })?;
-    let stage_result = (|| {
-        restrict_stage_directory(staged_bundle)?;
-        link_packaged_rootfs(&packaged_rootfs, &staged_bundle.join("rootfs"))?;
-
-        let packaged_config =
-            fs::read_to_string(packaged_bundle.join("config.json")).map_err(|error| {
-                OciSetupDiagnostic::new(format!(
-                    "packaged OCI config could not be read: {}",
-                    error.kind()
-                ))
-            })?;
-        let config = serde_json::from_str::<serde_json::Value>(&packaged_config)
-            .map_err(|_error| OciSetupDiagnostic::new("packaged OCI config could not be parsed"))?;
-        let staged_config = staged_oci_config_with_process_env(config, process_env)?;
-        let staged_config =
-            staged_oci_config_with_outer_rootless_mapping_ids(staged_config, staged_bundle)?;
-        let staged_config = serde_json::to_vec_pretty(&staged_config).map_err(|_error| {
-            OciSetupDiagnostic::new("staged OCI config could not be serialized")
-        })?;
-
-        config_writer(&staged_bundle.join("config.json"), staged_config).map_err(|error| {
-            OciSetupDiagnostic::new(format!(
-                "staged OCI config could not be written: {}",
-                error.kind()
-            ))
-        })?;
-
-        Ok::<(), OciSetupDiagnostic>(())
-    })();
-
-    if let Err(diagnostic) = stage_result {
-        if let Err(error) = remove_staged_oci_bundle(staged_bundle) {
-            tracing::warn!(
-                error_kind = ?error.kind(),
-                "failed to clean staged OCI bundle after setup failure"
-            );
-        }
-        return Err(diagnostic);
-    }
-
-    Ok(staged_bundle.to_path_buf())
-}
-
-#[cfg(unix)]
-fn restrict_stage_directory(path: &Path) -> std::result::Result<(), OciSetupDiagnostic> {
-    use std::os::unix::fs::PermissionsExt;
-
-    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
-        OciSetupDiagnostic::new(format!(
-            "staged OCI bundle permissions could not be restricted: {}",
-            error.kind()
-        ))
-    })
-}
-
-#[cfg(not(unix))]
-fn restrict_stage_directory(_path: &Path) -> std::result::Result<(), OciSetupDiagnostic> {
-    Err(OciSetupDiagnostic::new(
-        "embedded OCI gateway launcher requires Unix staging permissions",
-    ))
-}
-
-#[cfg(unix)]
-fn link_packaged_rootfs(
-    source: &Path,
-    destination: &Path,
-) -> std::result::Result<(), OciSetupDiagnostic> {
-    fs::create_dir(destination).map_err(|error| {
-        OciSetupDiagnostic::new(format!(
-            "packaged OCI rootfs could not be materialized into staged bundle: {}",
-            error.kind()
-        ))
-    })?;
-    copy_packaged_rootfs_contents(source, destination)?;
-    copy_directory_permissions(source, destination)
-}
-
-#[cfg(unix)]
-fn copy_packaged_rootfs_contents(
-    source: &Path,
-    destination: &Path,
-) -> std::result::Result<(), OciSetupDiagnostic> {
-    let entries = fs::read_dir(source).map_err(|error| {
-        OciSetupDiagnostic::new(format!(
-            "packaged OCI rootfs could not be materialized into staged bundle: {}",
-            error.kind()
-        ))
-    })?;
-
-    for entry in entries {
-        let entry = entry.map_err(|error| {
-            OciSetupDiagnostic::new(format!(
-                "packaged OCI rootfs could not be materialized into staged bundle: {}",
-                error.kind()
-            ))
-        })?;
-        let source_path = entry.path();
-        let destination_path = destination.join(entry.file_name());
-        let file_type = entry.file_type().map_err(|error| {
-            OciSetupDiagnostic::new(format!(
-                "packaged OCI rootfs could not be materialized into staged bundle: {}",
-                error.kind()
-            ))
-        })?;
-
-        if file_type.is_dir() {
-            fs::create_dir(&destination_path).map_err(|error| {
-                OciSetupDiagnostic::new(format!(
-                    "packaged OCI rootfs could not be materialized into staged bundle: {}",
-                    error.kind()
-                ))
-            })?;
-            copy_packaged_rootfs_contents(&source_path, &destination_path)?;
-            copy_directory_permissions(&source_path, &destination_path)?;
-        } else if file_type.is_symlink() {
-            let target = fs::read_link(&source_path).map_err(|error| {
-                OciSetupDiagnostic::new(format!(
-                    "packaged OCI rootfs could not be materialized into staged bundle: {}",
-                    error.kind()
-                ))
-            })?;
-            std::os::unix::fs::symlink(target, &destination_path).map_err(|error| {
-                OciSetupDiagnostic::new(format!(
-                    "packaged OCI rootfs could not be materialized into staged bundle: {}",
-                    error.kind()
-                ))
-            })?;
-        } else {
-            fs::copy(&source_path, &destination_path).map_err(|error| {
-                OciSetupDiagnostic::new(format!(
-                    "packaged OCI rootfs could not be materialized into staged bundle: {}",
-                    error.kind()
-                ))
-            })?;
-        }
-    }
-
-    Ok(())
-}
-
-#[cfg(unix)]
-fn copy_directory_permissions(
-    source: &Path,
-    destination: &Path,
-) -> std::result::Result<(), OciSetupDiagnostic> {
-    let permissions = fs::metadata(source)
-        .map_err(|error| {
-            OciSetupDiagnostic::new(format!(
-                "packaged OCI rootfs permissions could not be read: {}",
-                error.kind()
-            ))
-        })?
-        .permissions();
-
-    fs::set_permissions(destination, permissions).map_err(|error| {
-        OciSetupDiagnostic::new(format!(
-            "packaged OCI rootfs permissions could not be materialized into staged bundle: {}",
-            error.kind()
-        ))
-    })
-}
-
-#[cfg(not(unix))]
-fn link_packaged_rootfs(
-    _source: &Path,
-    _destination: &Path,
-) -> std::result::Result<(), OciSetupDiagnostic> {
-    Err(OciSetupDiagnostic::new(
-        "embedded OCI gateway launcher requires Unix rootfs staging",
-    ))
-}
-
-fn unique_oci_stage_bundle_path() -> PathBuf {
-    let timestamp = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-
-    env::temp_dir().join(format!(
-        "auto-review-oci-bundle-{}-{timestamp}",
-        std::process::id()
-    ))
-}
-
-fn unique_packaged_oci_container_id() -> PathBuf {
-    static LAUNCH_SEQUENCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-
-    let sequence = LAUNCH_SEQUENCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let launch_entropy = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map(|duration| duration.as_nanos())
-        .unwrap_or(0);
-    PathBuf::from(format!(
-        "auto-review-gateway-{}-{launch_entropy}-{sequence}",
-        std::process::id()
-    ))
-}
-
-fn stage_embedded_oci_gateway_bundle(
-    packaged_bundle: &Path,
-    process_env: &[(String, String)],
-) -> std::result::Result<PathBuf, OciSetupDiagnostic> {
-    stage_embedded_oci_gateway_bundle_at_path(
-        packaged_bundle,
-        &unique_oci_stage_bundle_path(),
-        process_env,
-    )
-}
-
-fn build_packaged_oci_runtime_command(
-    runtime_path: &Path,
-    bundle_path: &Path,
-) -> PackagedOciRuntimeCommand {
-    PackagedOciRuntimeCommand {
-        program: runtime_path.to_path_buf(),
-        args: vec![
-            PathBuf::from("run"),
-            PathBuf::from("--bundle"),
-            bundle_path.to_path_buf(),
-            unique_packaged_oci_container_id(),
-        ],
-        clear_ambient_env: true,
-        env: oci_runtime_env_from_outer_process(),
-    }
-}
-
-fn oci_runtime_env_from_outer_process() -> Vec<(String, String)> {
-    OCI_RUNTIME_ENV_ALLOWLIST
-        .iter()
-        .filter_map(|name| {
-            env::var(name)
-                .ok()
-                .filter(|value| !value.trim().is_empty())
-                .map(|value| ((*name).to_string(), value))
-        })
-        .collect()
-}
-
-fn execute_packaged_oci_runtime_with_executor(
-    inputs: EmbeddedOciGatewayInputs<'_>,
-    executor: impl FnOnce(PackagedOciRuntimeCommand) -> std::result::Result<(), OciSetupDiagnostic>,
-) -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic> {
-    executor(build_packaged_oci_runtime_command(
-        inputs.runtime_path,
-        inputs.bundle_path,
-    ))
-    .map_err(|diagnostic| {
-        OciSetupDiagnostic::new(format!(
-            "packaged OCI runtime failed while starting the inner gateway: {}",
-            diagnostic.public_detail()
-        ))
-    })?;
-
-    Ok(GatewayLaunchOutcome::OuterLauncherFinished)
-}
-
-fn execute_packaged_oci_runtime_with_staged_bundle(
-    inputs: EmbeddedOciGatewayInputs<'_>,
-    process_env: &[(String, String)],
-    executor: impl FnOnce(PackagedOciRuntimeCommand) -> std::result::Result<(), OciSetupDiagnostic>,
-) -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic> {
-    let staged_bundle = stage_embedded_oci_gateway_bundle(inputs.bundle_path, process_env)?;
-    let outcome = execute_packaged_oci_runtime_with_executor(
-        EmbeddedOciGatewayInputs {
-            bundle_path: &staged_bundle,
-            runtime_path: inputs.runtime_path,
-        },
-        executor,
-    );
-
-    if let Err(error) = remove_staged_oci_bundle(&staged_bundle) {
-        tracing::warn!(
-            error = %error.kind(),
-            "staged OCI bundle cleanup failed after runtime exit"
-        );
-    }
-
-    outcome
-}
-
-#[cfg(unix)]
-fn remove_staged_oci_bundle(path: &Path) -> std::io::Result<()> {
-    make_directory_tree_owner_accessible(path)?;
-    fs::remove_dir_all(path)
-}
-
-#[cfg(unix)]
-fn make_directory_tree_owner_accessible(path: &Path) -> std::io::Result<()> {
-    use std::os::unix::fs::PermissionsExt;
-
-    let metadata = fs::symlink_metadata(path)?;
-    if !metadata.file_type().is_dir() {
-        return Ok(());
-    }
-
-    let mut permissions = metadata.permissions();
-    permissions.set_mode(permissions.mode() | 0o700);
-    fs::set_permissions(path, permissions)?;
-
-    for entry in fs::read_dir(path)? {
-        make_directory_tree_owner_accessible(&entry?.path())?;
-    }
-
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn remove_staged_oci_bundle(path: &Path) -> std::io::Result<()> {
-    fs::remove_dir_all(path)
-}
-
-fn run_packaged_oci_runtime_command(
-    command: PackagedOciRuntimeCommand,
-) -> std::result::Result<(), OciSetupDiagnostic> {
-    let mut process = ProcessCommand::new(&command.program);
-    process.args(&command.args);
-
-    if command.clear_ambient_env {
-        process.env_clear();
-    }
-    process.envs(command.env);
-
-    let status = process.status().map_err(|error| {
-        OciSetupDiagnostic::new(format!(
-            "packaged OCI runtime could not be started: {}",
-            error.kind()
-        ))
-    })?;
-
-    if status.success() {
-        Ok(())
-    } else {
-        Err(OciSetupDiagnostic::new(format!(
-            "packaged OCI runtime exited before starting the inner gateway: {status}"
-        )))
-    }
-}
-
-fn prepare_embedded_oci_gateway() -> std::result::Result<GatewayLaunchOutcome, OciSetupDiagnostic> {
-    let bundle_path = read_env_var_for_oci("AR_GATEWAY_EMBEDDED_OCI_BUNDLE_PATH")?;
-    let runtime_path = read_env_var_for_oci("AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH")?;
-    let process_env = inner_gateway_process_env_from_lookup(read_env_var_for_oci)?;
-
-    prepare_embedded_oci_gateway_from_env_values(
-        EmbeddedOciGatewayEnvValues {
-            bundle_path: bundle_path.as_deref(),
-            runtime_path: runtime_path.as_deref(),
-        },
-        |inputs| {
-            execute_packaged_oci_runtime_with_staged_bundle(
-                inputs,
-                &process_env,
-                run_packaged_oci_runtime_command,
-            )
-        },
-    )
-}
-
 impl GatewayStartupConfig {
+    /// Validate environment values and resolve default startup settings.
     fn from_env_values(values: GatewayStartupEnvValues<'_>) -> Result<Self> {
         let llm_reasoning_model = values
             .llm_reasoning_model
             .unwrap_or("qwen2.5-coder:32b")
-            .to_string();
+            .to_owned();
 
         if llm_reasoning_model.trim().is_empty() {
             anyhow::bail!(
@@ -1069,12 +393,12 @@ impl GatewayStartupConfig {
                 app_id,
                 // Env files commonly carry PEMs on one line with `\n` escapes.
                 private_key: private_key.replace("\\n", "\n"),
-                webhook_secret: webhook_secret.to_string(),
+                webhook_secret: webhook_secret.to_owned(),
                 api_url: values
                     .github
                     .api_url
                     .unwrap_or(DEFAULT_GITHUB_API_URL)
-                    .to_string(),
+                    .to_owned(),
             })
         } else {
             None
@@ -1090,54 +414,873 @@ impl GatewayStartupConfig {
                 webhook_secret: values
                     .webhook_secret
                     .context("WEBHOOK_SECRET is required")?
-                    .to_string(),
+                    .to_owned(),
                 base_url: values
                     .forgejo_base_url
                     .context("FORGEJO_BASE_URL is required")?
-                    .to_string(),
+                    .to_owned(),
                 token: values
                     .ar_forgejo_token
                     .context("AR_FORGEJO_TOKEN is required")?
-                    .to_string(),
+                    .to_owned(),
             })
         } else {
             None
         };
 
         Ok(Self {
-            bind: values.bind.unwrap_or("0.0.0.0:8080").to_string(),
+            bind: values.bind.unwrap_or("0.0.0.0:8080").to_owned(),
             forgejo,
             github,
             llm_base_url: values
                 .llm_base_url
                 .context("LLM_BASE_URL is required")?
-                .to_string(),
+                .to_owned(),
             llm_reasoning_model,
         })
     }
 }
 
+/// Remove sensitive details from the launcher error presented to operators.
+fn sanitize_oci_setup_detail(detail: &str) -> String {
+    redact_run_secrets_path_suffix(detail)
+        .replace("secret-bearing", "[redacted]")
+        .replace("ar-token", "[redacted]")
+}
+
+/// Redact secret path suffixes from an OCI setup diagnostic.
+#[expect(
+    clippy::arithmetic_side_effects,
+    clippy::indexing_slicing,
+    clippy::string_slice,
+    reason = "Offsets stay within the string and slices end at ASCII delimiters or the string boundary"
+)]
+fn redact_run_secrets_path_suffix(detail: &str) -> String {
+    const SECRET_PATH_PREFIX: &str = "/run/secrets/";
+    let mut sanitized = String::with_capacity(detail.len());
+    let mut cursor = 0;
+
+    while let Some(relative_start) = detail[cursor..].find(SECRET_PATH_PREFIX) {
+        let start = cursor + relative_start;
+        sanitized.push_str(&detail[cursor..start]);
+
+        let mut end = start + SECRET_PATH_PREFIX.len();
+        while end < detail.len() {
+            let byte = detail.as_bytes()[end];
+            if byte.is_ascii_whitespace() || matches!(byte, b';' | b',' | b')' | b']' | b'}') {
+                break;
+            }
+            end += 1;
+        }
+
+        sanitized.push_str("[redacted]");
+        cursor = end;
+    }
+
+    sanitized.push_str(&detail[cursor..]);
+    sanitized
+}
+
+/// Select the startup mode using the environment markers and OCI preparation result.
+fn select_gateway_launcher(
+    values: GatewayLauncherEnvValues<'_>,
+    prepare_oci: impl FnOnce() -> StdResult<GatewayLaunchOutcome, OciSetupDiagnostic>,
+) -> Result<GatewayLaunchOutcome> {
+    if values.external_isolation == Some("container") {
+        tracing::info!(
+            "external container isolation marker detected; embedded OCI launcher skipped because this process is already expected to run inside the packaged container boundary"
+        );
+        return Ok(GatewayLaunchOutcome::ContinueInProcess);
+    }
+
+    let use_oci = match values.bare.map(str::trim).map(str::to_ascii_lowercase) {
+        None => true,
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => false,
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => true,
+        Some(_) => anyhow::bail!(
+            "AR_GATEWAY_BARE has an unrecognized value; use true/false, yes/no, on/off, or 1/0"
+        ),
+    };
+
+    if use_oci {
+        prepare_oci().map_err(|diagnostic| {
+            anyhow::anyhow!(
+                "OCI gateway launcher setup failed: {diagnostic}; set AR_GATEWAY_BARE (or pass --bare) to opt out"
+            )
+        })
+    } else {
+        tracing::warn!("{}", explicit_bare_gateway_mode_warning());
+        Ok(GatewayLaunchOutcome::ContinueInProcess)
+    }
+}
+
+/// Return the warning shown when bare mode is explicitly requested.
+fn explicit_bare_gateway_mode_warning() -> &'static str {
+    "Warning: bare gateway mode selected; only application-level controls are active, not container-equivalent isolation."
+}
+
+/// Derive the isolation posture and its operator-facing explanation.
+fn classify_runtime_isolation_posture(
+    input: RuntimeIsolationPostureInput<'_>,
+) -> Result<RuntimeIsolationPosture> {
+    if input.target_os != "linux" {
+        return Ok(RuntimeIsolationPosture {
+            kind: RuntimeIsolationPostureKind::UnsupportedPlatform,
+            operator_label: "unsupported platform".to_owned(),
+            operator_detail:
+                "Embedded OCI isolation is unavailable on this platform; run in bare mode or provide external isolation.".to_owned(),
+        });
+    }
+
+    if input.external_isolation == Some("container") {
+        return Ok(RuntimeIsolationPosture {
+            kind: RuntimeIsolationPostureKind::ExternalContainer,
+            operator_label: "external container isolation".to_owned(),
+            operator_detail: "Gateway is already inside an externally provided container boundary."
+                .to_owned(),
+        });
+    }
+
+    let use_oci = match input.bare.map(str::trim).map(str::to_ascii_lowercase) {
+        None => true,
+        Some(value) if matches!(value.as_str(), "1" | "true" | "yes" | "on") => false,
+        Some(value) if matches!(value.as_str(), "0" | "false" | "no" | "off") => true,
+        Some(_) => anyhow::bail!(
+            "AR_GATEWAY_BARE has an unrecognized value; use true/false, yes/no, on/off, or 1/0"
+        ),
+    };
+
+    if !use_oci {
+        return Ok(RuntimeIsolationPosture {
+            kind: RuntimeIsolationPostureKind::ExplicitBare,
+            operator_label: "bare gateway mode".to_owned(),
+            operator_detail: explicit_bare_gateway_mode_warning().to_owned(),
+        });
+    }
+
+    if let Some(diagnostic) = input.oci_setup_diagnostic {
+        return Ok(RuntimeIsolationPosture {
+            kind: RuntimeIsolationPostureKind::OciSetupFailure,
+            operator_label: "OCI setup failed".to_owned(),
+            operator_detail: format!(
+                "OCI setup failed: {diagnostic}; set AR_GATEWAY_BARE to opt out"
+            ),
+        });
+    }
+
+    Ok(RuntimeIsolationPosture {
+        kind: RuntimeIsolationPostureKind::OciDefault,
+        operator_label: "packaged OCI container isolation".to_owned(),
+        operator_detail: "Gateway uses embedded OCI container-equivalent isolation by default."
+            .to_owned(),
+    })
+}
+
+/// Combine the CLI startup options with the environment to choose a launcher.
+#[expect(
+    clippy::needless_pass_by_value,
+    reason = "Launcher selection owns the startup options supplied by callers"
+)]
+fn select_gateway_launcher_for_startup_options(
+    options: StartupOptions,
+    values: GatewayLauncherEnvValues<'_>,
+    prepare_oci: impl FnOnce() -> StdResult<GatewayLaunchOutcome, OciSetupDiagnostic>,
+) -> Result<GatewayLaunchOutcome> {
+    let bare = if options.bare {
+        Some("true")
+    } else {
+        values.bare
+    };
+
+    select_gateway_launcher(
+        GatewayLauncherEnvValues {
+            bare,
+            external_isolation: values.external_isolation,
+        },
+        prepare_oci,
+    )
+}
+
+/// Validate the packaged inputs before invoking the launcher.
+fn prepare_embedded_oci_gateway_with_inputs(
+    inputs: EmbeddedOciGatewayInputs<'_>,
+    launch: impl FnOnce(
+        EmbeddedOciGatewayInputs<'_>,
+    ) -> StdResult<GatewayLaunchOutcome, OciSetupDiagnostic>,
+) -> StdResult<GatewayLaunchOutcome, OciSetupDiagnostic> {
+    validate_packaged_oci_input_paths(inputs)?;
+
+    launch(inputs)
+}
+
+/// Check that both OCI inputs match an expected packaging layout.
+fn validate_packaged_oci_input_paths(
+    inputs: EmbeddedOciGatewayInputs<'_>,
+) -> StdResult<(), OciSetupDiagnostic> {
+    validate_packaged_path_shape("bundle", inputs.bundle_path)?;
+    validate_packaged_path_shape("runtime", inputs.runtime_path)?;
+
+    if inputs.bundle_path.starts_with(PACKAGED_NIX_STORE_PREFIX)
+        && inputs.runtime_path.starts_with(PACKAGED_NIX_STORE_PREFIX)
+    {
+        return Ok(());
+    }
+
+    if let Some(release_root) = portable_release_root_for_bundle(inputs.bundle_path) {
+        let runtime_launcher = release_root.join("bin").join("youki");
+        if inputs.runtime_path == runtime_launcher {
+            return Ok(());
+        }
+    }
+
+    Err(OciSetupDiagnostic::new(
+        "packaged OCI bundle and runtime paths must be package-resolved under /nix/store or a matching portable release root",
+    ))
+}
+
+/// Get the portable release root from its packaged bundle path.
+fn portable_release_root_for_bundle(bundle_path: &Path) -> Option<&Path> {
+    let nix_dir = bundle_path.ancestors().find_map(|ancestor| {
+        let nix_dir = ancestor.parent()?;
+        (ancestor.file_name().is_some_and(|name| name == "store")
+            && nix_dir.file_name().is_some_and(|name| name == "nix"))
+        .then_some(nix_dir)
+    })?;
+
+    let release_root = nix_dir.parent()?;
+    (release_root != Path::new("/")).then_some(release_root)
+}
+
+/// Validate a packaged input's path shape.
+fn validate_packaged_path_shape(kind: &str, path: &Path) -> StdResult<(), OciSetupDiagnostic> {
+    if path.as_os_str().is_empty() {
+        return Err(OciSetupDiagnostic::new(format!(
+            "packaged OCI {kind} path is missing or empty"
+        )));
+    }
+
+    if !path.is_absolute() {
+        return Err(OciSetupDiagnostic::new(format!(
+            "packaged OCI {kind} path must be absolute and package-resolved under {PACKAGED_NIX_STORE_PREFIX}"
+        )));
+    }
+
+    if path
+        .components()
+        .any(|component| matches!(component, Component::ParentDir | Component::CurDir))
+    {
+        return Err(OciSetupDiagnostic::new(format!(
+            "packaged OCI {kind} path must not contain traversal components"
+        )));
+    }
+
+    Ok(())
+}
+
+/// Resolve the wrapper-provided bundle and runtime paths and launch with them.
+fn prepare_embedded_oci_gateway_from_env_values(
+    values: EmbeddedOciGatewayEnvValues<'_>,
+    launch: impl FnOnce(
+        EmbeddedOciGatewayInputs<'_>,
+    ) -> StdResult<GatewayLaunchOutcome, OciSetupDiagnostic>,
+) -> StdResult<GatewayLaunchOutcome, OciSetupDiagnostic> {
+    let bundle_path = values.bundle_path.ok_or_else(|| {
+        OciSetupDiagnostic::new("AR_GATEWAY_EMBEDDED_OCI_BUNDLE_PATH is required")
+    })?;
+    let runtime_path = values.runtime_path.ok_or_else(|| {
+        OciSetupDiagnostic::new("AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH is required")
+    })?;
+
+    prepare_embedded_oci_gateway_with_inputs(
+        EmbeddedOciGatewayInputs {
+            bundle_path: Path::new(bundle_path),
+            runtime_path: Path::new(runtime_path),
+        },
+        launch,
+    )
+}
+
+/// Read an environment value for OCI setup, reporting invalid Unicode.
+fn read_env_var_for_oci(name: &str) -> StdResult<Option<String>, OciSetupDiagnostic> {
+    match env::var(name) {
+        Ok(value) => Ok(Some(value)),
+        Err(env::VarError::NotPresent) => Ok(None),
+        Err(env::VarError::NotUnicode(_)) => Err(OciSetupDiagnostic::new(format!(
+            "{name} contains invalid Unicode and cannot be used for embedded OCI setup"
+        ))),
+    }
+}
+
+/// Build the inner gateway environment from defaults and allowed outer values.
+fn inner_gateway_process_env_from_lookup(
+    mut lookup: impl FnMut(&str) -> StdResult<Option<String>, OciSetupDiagnostic>,
+) -> StdResult<Vec<(String, String)>, OciSetupDiagnostic> {
+    let mut process_env = STATIC_INNER_GATEWAY_ENV
+        .iter()
+        .map(|&(name, value)| (name.to_owned(), value.to_owned()))
+        .collect::<Vec<_>>();
+
+    let mut staged = Vec::new();
+    for name in INNER_GATEWAY_ENV_ALLOWLIST {
+        let configured_value = lookup(name)?.filter(|value| !value.trim().is_empty());
+        if let Some(value) = configured_value {
+            staged.push(*name);
+            set_process_env_entry(&mut process_env, name, value);
+        }
+    }
+
+    let is_staged = |name: &str| staged.contains(&name);
+    let github_requested = REQUIRED_GITHUB_INNER_GATEWAY_ENV
+        .iter()
+        .any(|name| is_staged(name));
+    let forgejo_requested =
+        is_staged("FORGEJO_BASE_URL") || is_staged("AR_FORGEJO_TOKEN") || !github_requested;
+    let mut required: Vec<&str> = REQUIRED_INNER_GATEWAY_ENV.to_vec();
+    if forgejo_requested {
+        required.extend_from_slice(REQUIRED_FORGEJO_INNER_GATEWAY_ENV);
+    }
+    if github_requested {
+        required.extend_from_slice(REQUIRED_GITHUB_INNER_GATEWAY_ENV);
+    }
+    if let Some(name) = INNER_GATEWAY_ENV_ALLOWLIST
+        .iter()
+        .find(|name| required.contains(name) && !is_staged(name))
+    {
+        return Err(OciSetupDiagnostic::new(format!(
+            "{name} is required for staged OCI inner gateway config"
+        )));
+    }
+
+    set_process_env_entry(
+        &mut process_env,
+        "AR_GATEWAY_EXTERNAL_ISOLATION",
+        "container".to_owned(),
+    );
+
+    Ok(process_env)
+}
+
+/// Update an existing environment entry or append it if absent.
+fn set_process_env_entry(process_env: &mut Vec<(String, String)>, name: &str, value: String) {
+    if let Some(&mut (_, ref mut existing_value)) =
+        process_env.iter_mut().find(|entry| entry.0 == name)
+    {
+        *existing_value = value;
+    } else {
+        process_env.push((name.to_owned(), value));
+    }
+}
+
+/// Set the inner process environment in the staged OCI config.
+fn staged_oci_config_with_process_env(
+    mut config: serde_json::Value,
+    process_env: &[(String, String)],
+) -> StdResult<serde_json::Value, OciSetupDiagnostic> {
+    let Some(process) = config
+        .get_mut("process")
+        .and_then(serde_json::Value::as_object_mut)
+    else {
+        return Err(OciSetupDiagnostic::new(
+            "packaged OCI config is missing a process object",
+        ));
+    };
+
+    process.insert(
+        "env".to_owned(),
+        serde_json::Value::Array(
+            process_env
+                .iter()
+                .map(|entry| serde_json::Value::String(format!("{}={}", entry.0, entry.1)))
+                .collect(),
+        ),
+    );
+
+    Ok(config)
+}
+
+/// Map rootless container IDs to the owner of the newly staged directory.
+#[cfg(unix)]
+fn staged_oci_config_with_outer_rootless_mapping_ids(
+    mut config: serde_json::Value,
+    staged_bundle: &Path,
+) -> StdResult<serde_json::Value, OciSetupDiagnostic> {
+    use std::os::unix::fs::MetadataExt as _;
+
+    let metadata = fs::metadata(staged_bundle).map_err(|error| {
+        OciSetupDiagnostic::new(format!(
+            "staged OCI bundle metadata could not be read: {}",
+            error.kind()
+        ))
+    })?;
+
+    rewrite_oci_mapping_host_ids(&mut config, "uidMappings", metadata.uid());
+    rewrite_oci_mapping_host_ids(&mut config, "gidMappings", metadata.gid());
+
+    Ok(config)
+}
+
+/// Report that OCI ID mapping cannot be staged on this platform.
+#[cfg(not(unix))]
+fn staged_oci_config_with_outer_rootless_mapping_ids(
+    _config: serde_json::Value,
+    _staged_bundle: &Path,
+) -> StdResult<serde_json::Value, OciSetupDiagnostic> {
+    Err(OciSetupDiagnostic::new(
+        "embedded OCI gateway launcher requires Unix rootless mapping staging",
+    ))
+}
+
+/// Replace host IDs in the named mapping array when it is present.
+fn rewrite_oci_mapping_host_ids(config: &mut serde_json::Value, mapping_name: &str, host_id: u32) {
+    if let Some(mappings) = config
+        .get_mut("linux")
+        .and_then(|linux| linux.get_mut(mapping_name))
+        .and_then(serde_json::Value::as_array_mut)
+    {
+        for mapping in mappings {
+            if let Some(mapping_object) = mapping.as_object_mut() {
+                mapping_object.insert("hostID".to_owned(), serde_json::Value::from(host_id));
+            }
+        }
+    }
+}
+
+/// Prepare an isolated bundle at the specified stage path.
+fn stage_embedded_oci_gateway_bundle_at_path(
+    packaged_bundle: &Path,
+    staged_bundle: &Path,
+    process_env: &[(String, String)],
+) -> StdResult<PathBuf, OciSetupDiagnostic> {
+    stage_embedded_oci_gateway_bundle_at_path_with_config_writer(
+        packaged_bundle,
+        staged_bundle,
+        process_env,
+        |path, contents| fs::write(path, contents),
+    )
+}
+
+/// Prepare an isolated bundle using the supplied writer for its config.
+#[expect(
+    clippy::create_dir,
+    reason = "Staging must fail if the bundle directory already exists or its parent is missing"
+)]
+fn stage_embedded_oci_gateway_bundle_at_path_with_config_writer(
+    packaged_bundle: &Path,
+    staged_bundle: &Path,
+    process_env: &[(String, String)],
+    config_writer: impl FnOnce(&Path, Vec<u8>) -> io::Result<()>,
+) -> StdResult<PathBuf, OciSetupDiagnostic> {
+    let packaged_rootfs = packaged_bundle.join("rootfs");
+    if !packaged_rootfs.is_dir() {
+        return Err(OciSetupDiagnostic::new(
+            "packaged OCI bundle rootfs is missing",
+        ));
+    }
+
+    fs::create_dir(staged_bundle).map_err(|error| {
+        OciSetupDiagnostic::new(format!(
+            "staged OCI bundle directory could not be created: {}",
+            error.kind()
+        ))
+    })?;
+    let stage_result = (|| {
+        restrict_stage_directory(staged_bundle)?;
+        link_packaged_rootfs(&packaged_rootfs, &staged_bundle.join("rootfs"))?;
+
+        let packaged_config =
+            fs::read_to_string(packaged_bundle.join("config.json")).map_err(|error| {
+                OciSetupDiagnostic::new(format!(
+                    "packaged OCI config could not be read: {}",
+                    error.kind()
+                ))
+            })?;
+        let config = serde_json::from_str::<serde_json::Value>(&packaged_config)
+            .map_err(|_error| OciSetupDiagnostic::new("packaged OCI config could not be parsed"))?;
+        let config_with_env = staged_oci_config_with_process_env(config, process_env)?;
+        let mapped_config =
+            staged_oci_config_with_outer_rootless_mapping_ids(config_with_env, staged_bundle)?;
+        let config_bytes = serde_json::to_vec_pretty(&mapped_config).map_err(|_error| {
+            OciSetupDiagnostic::new("staged OCI config could not be serialized")
+        })?;
+
+        config_writer(&staged_bundle.join("config.json"), config_bytes).map_err(|error| {
+            OciSetupDiagnostic::new(format!(
+                "staged OCI config could not be written: {}",
+                error.kind()
+            ))
+        })?;
+
+        Ok::<(), OciSetupDiagnostic>(())
+    })();
+
+    if let Err(diagnostic) = stage_result {
+        if let Err(error) = remove_staged_oci_bundle(staged_bundle) {
+            tracing::warn!(
+                error_kind = ?error.kind(),
+                "failed to clean staged OCI bundle after setup failure"
+            );
+        }
+        return Err(diagnostic);
+    }
+
+    Ok(staged_bundle.to_path_buf())
+}
+
+/// Limit access to the stage directory to its owner.
+#[cfg(unix)]
+fn restrict_stage_directory(path: &Path) -> StdResult<(), OciSetupDiagnostic> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    fs::set_permissions(path, fs::Permissions::from_mode(0o700)).map_err(|error| {
+        OciSetupDiagnostic::new(format!(
+            "staged OCI bundle permissions could not be restricted: {}",
+            error.kind()
+        ))
+    })
+}
+
+/// Report that the launcher cannot set Unix staging permissions on this platform.
+#[cfg(not(unix))]
+fn restrict_stage_directory(_path: &Path) -> StdResult<(), OciSetupDiagnostic> {
+    Err(OciSetupDiagnostic::new(
+        "embedded OCI gateway launcher requires Unix staging permissions",
+    ))
+}
+
+/// Materialize the packaged root filesystem in the stage directory.
+#[cfg(unix)]
+#[expect(
+    clippy::create_dir,
+    reason = "The staged bundle already exists; materialize a new rootfs and reject an existing destination"
+)]
+fn link_packaged_rootfs(source: &Path, destination: &Path) -> StdResult<(), OciSetupDiagnostic> {
+    fs::create_dir(destination).map_err(|error| {
+        OciSetupDiagnostic::new(format!(
+            "packaged OCI rootfs could not be materialized into staged bundle: {}",
+            error.kind()
+        ))
+    })?;
+    copy_packaged_rootfs_contents(source, destination)?;
+    copy_directory_permissions(source, destination)
+}
+
+/// Recursively copy the contents of the packaged root filesystem.
+#[cfg(unix)]
+#[expect(
+    clippy::create_dir,
+    reason = "Copy one level at a time and fail if a child directory already exists"
+)]
+fn copy_packaged_rootfs_contents(
+    source: &Path,
+    destination: &Path,
+) -> StdResult<(), OciSetupDiagnostic> {
+    let entries = fs::read_dir(source).map_err(|error| {
+        OciSetupDiagnostic::new(format!(
+            "packaged OCI rootfs could not be materialized into staged bundle: {}",
+            error.kind()
+        ))
+    })?;
+
+    for entry_result in entries {
+        let entry = entry_result.map_err(|error| {
+            OciSetupDiagnostic::new(format!(
+                "packaged OCI rootfs could not be materialized into staged bundle: {}",
+                error.kind()
+            ))
+        })?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        let file_type = entry.file_type().map_err(|error| {
+            OciSetupDiagnostic::new(format!(
+                "packaged OCI rootfs could not be materialized into staged bundle: {}",
+                error.kind()
+            ))
+        })?;
+
+        if file_type.is_dir() {
+            fs::create_dir(&destination_path).map_err(|error| {
+                OciSetupDiagnostic::new(format!(
+                    "packaged OCI rootfs could not be materialized into staged bundle: {}",
+                    error.kind()
+                ))
+            })?;
+            copy_packaged_rootfs_contents(&source_path, &destination_path)?;
+            copy_directory_permissions(&source_path, &destination_path)?;
+        } else if file_type.is_symlink() {
+            let target = fs::read_link(&source_path).map_err(|error| {
+                OciSetupDiagnostic::new(format!(
+                    "packaged OCI rootfs could not be materialized into staged bundle: {}",
+                    error.kind()
+                ))
+            })?;
+            symlink(target, &destination_path).map_err(|error| {
+                OciSetupDiagnostic::new(format!(
+                    "packaged OCI rootfs could not be materialized into staged bundle: {}",
+                    error.kind()
+                ))
+            })?;
+        } else {
+            fs::copy(&source_path, &destination_path).map_err(|error| {
+                OciSetupDiagnostic::new(format!(
+                    "packaged OCI rootfs could not be materialized into staged bundle: {}",
+                    error.kind()
+                ))
+            })?;
+        }
+    }
+
+    Ok(())
+}
+
+/// Apply the packaged directory permissions to the staged copy.
+#[cfg(unix)]
+fn copy_directory_permissions(
+    source: &Path,
+    destination: &Path,
+) -> StdResult<(), OciSetupDiagnostic> {
+    let permissions = fs::metadata(source)
+        .map_err(|error| {
+            OciSetupDiagnostic::new(format!(
+                "packaged OCI rootfs permissions could not be read: {}",
+                error.kind()
+            ))
+        })?
+        .permissions();
+
+    fs::set_permissions(destination, permissions).map_err(|error| {
+        OciSetupDiagnostic::new(format!(
+            "packaged OCI rootfs permissions could not be materialized into staged bundle: {}",
+            error.kind()
+        ))
+    })
+}
+
+/// Report that the launcher cannot stage a root filesystem on this platform.
+#[cfg(not(unix))]
+fn link_packaged_rootfs(_source: &Path, _destination: &Path) -> StdResult<(), OciSetupDiagnostic> {
+    Err(OciSetupDiagnostic::new(
+        "embedded OCI gateway launcher requires Unix rootfs staging",
+    ))
+}
+
+/// Construct a per-launch path for staging the OCI bundle.
+fn unique_oci_stage_bundle_path() -> PathBuf {
+    let timestamp = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+
+    env::temp_dir().join(format!(
+        "auto-review-oci-bundle-{}-{timestamp}",
+        process::id()
+    ))
+}
+
+/// Construct a distinct runtime container identifier for this launch.
+fn unique_packaged_oci_container_id() -> PathBuf {
+    static LAUNCH_SEQUENCE: AtomicU64 = AtomicU64::new(0);
+
+    let sequence = LAUNCH_SEQUENCE.fetch_add(1, Ordering::Relaxed);
+    let launch_entropy = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |duration| duration.as_nanos());
+    PathBuf::from(format!(
+        "auto-review-gateway-{}-{launch_entropy}-{sequence}",
+        process::id()
+    ))
+}
+
+/// Stage the OCI bundle at a newly generated path.
+fn stage_embedded_oci_gateway_bundle(
+    packaged_bundle: &Path,
+    process_env: &[(String, String)],
+) -> StdResult<PathBuf, OciSetupDiagnostic> {
+    stage_embedded_oci_gateway_bundle_at_path(
+        packaged_bundle,
+        &unique_oci_stage_bundle_path(),
+        process_env,
+    )
+}
+
+/// Build the runtime invocation for the staged bundle.
+fn build_packaged_oci_runtime_command(
+    runtime_path: &Path,
+    bundle_path: &Path,
+) -> PackagedOciRuntimeCommand {
+    PackagedOciRuntimeCommand {
+        program: runtime_path.to_path_buf(),
+        args: vec![
+            PathBuf::from("run"),
+            PathBuf::from("--bundle"),
+            bundle_path.to_path_buf(),
+            unique_packaged_oci_container_id(),
+        ],
+        clear_ambient_env: true,
+        env: oci_runtime_env_from_outer_process(),
+    }
+}
+
+/// Collect outer environment entries needed by the OCI runtime.
+fn oci_runtime_env_from_outer_process() -> Vec<(String, String)> {
+    OCI_RUNTIME_ENV_ALLOWLIST
+        .iter()
+        .filter_map(|name| {
+            env::var(name)
+                .ok()
+                .filter(|value| !value.trim().is_empty())
+                .map(|value| ((*name).to_owned(), value))
+        })
+        .collect()
+}
+
+/// Stage and run the packaged gateway using the supplied executor.
+fn execute_packaged_oci_runtime_with_executor(
+    inputs: EmbeddedOciGatewayInputs<'_>,
+    executor: impl FnOnce(PackagedOciRuntimeCommand) -> StdResult<(), OciSetupDiagnostic>,
+) -> StdResult<GatewayLaunchOutcome, OciSetupDiagnostic> {
+    executor(build_packaged_oci_runtime_command(
+        inputs.runtime_path,
+        inputs.bundle_path,
+    ))
+    .map_err(|diagnostic| {
+        OciSetupDiagnostic::new(format!(
+            "packaged OCI runtime failed while starting the inner gateway: {}",
+            diagnostic.public_detail()
+        ))
+    })?;
+
+    Ok(GatewayLaunchOutcome::OuterLauncherFinished)
+}
+
+/// Run the staged bundle and remove it when the executor returns.
+fn execute_packaged_oci_runtime_with_staged_bundle(
+    inputs: EmbeddedOciGatewayInputs<'_>,
+    process_env: &[(String, String)],
+    executor: impl FnOnce(PackagedOciRuntimeCommand) -> StdResult<(), OciSetupDiagnostic>,
+) -> StdResult<GatewayLaunchOutcome, OciSetupDiagnostic> {
+    let staged_bundle = stage_embedded_oci_gateway_bundle(inputs.bundle_path, process_env)?;
+    let outcome = execute_packaged_oci_runtime_with_executor(
+        EmbeddedOciGatewayInputs {
+            bundle_path: &staged_bundle,
+            runtime_path: inputs.runtime_path,
+        },
+        executor,
+    );
+
+    if let Err(error) = remove_staged_oci_bundle(&staged_bundle) {
+        tracing::warn!(
+            error = %error.kind(),
+            "staged OCI bundle cleanup failed after runtime exit"
+        );
+    }
+
+    outcome
+}
+
+/// Restore owner access before removing the staged bundle.
+#[cfg(unix)]
+fn remove_staged_oci_bundle(path: &Path) -> io::Result<()> {
+    make_directory_tree_owner_accessible(path)?;
+    fs::remove_dir_all(path)
+}
+
+/// Restore owner access to directories so bundle cleanup can traverse them.
+#[cfg(unix)]
+fn make_directory_tree_owner_accessible(path: &Path) -> io::Result<()> {
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() {
+        return Ok(());
+    }
+
+    let mut permissions = metadata.permissions();
+    permissions.set_mode(permissions.mode() | 0o700);
+    fs::set_permissions(path, permissions)?;
+
+    for entry in fs::read_dir(path)? {
+        make_directory_tree_owner_accessible(&entry?.path())?;
+    }
+
+    Ok(())
+}
+
+/// Remove the staged bundle on non-Unix platforms.
+#[cfg(not(unix))]
+fn remove_staged_oci_bundle(path: &Path) -> io::Result<()> {
+    fs::remove_dir_all(path)
+}
+
+/// Run the prepared command and require the runtime to exit successfully.
+fn run_packaged_oci_runtime_command(
+    command: PackagedOciRuntimeCommand,
+) -> StdResult<(), OciSetupDiagnostic> {
+    let mut process = ProcessCommand::new(&command.program);
+    process.args(&command.args);
+
+    if command.clear_ambient_env {
+        process.env_clear();
+    }
+    process.envs(command.env);
+
+    let status = process.status().map_err(|error| {
+        OciSetupDiagnostic::new(format!(
+            "packaged OCI runtime could not be started: {}",
+            error.kind()
+        ))
+    })?;
+
+    if status.success() {
+        Ok(())
+    } else {
+        Err(OciSetupDiagnostic::new(format!(
+            "packaged OCI runtime exited before starting the inner gateway: {status}"
+        )))
+    }
+}
+
+/// Resolve OCI launcher paths and run the packaged gateway.
+fn prepare_embedded_oci_gateway() -> StdResult<GatewayLaunchOutcome, OciSetupDiagnostic> {
+    let bundle_path = read_env_var_for_oci("AR_GATEWAY_EMBEDDED_OCI_BUNDLE_PATH")?;
+    let runtime_path = read_env_var_for_oci("AR_GATEWAY_EMBEDDED_OCI_RUNTIME_PATH")?;
+    let process_env = inner_gateway_process_env_from_lookup(read_env_var_for_oci)?;
+
+    prepare_embedded_oci_gateway_from_env_values(
+        EmbeddedOciGatewayEnvValues {
+            bundle_path: bundle_path.as_deref(),
+            runtime_path: runtime_path.as_deref(),
+        },
+        |inputs| {
+            execute_packaged_oci_runtime_with_staged_bundle(
+                inputs,
+                &process_env,
+                run_packaged_oci_runtime_command,
+            )
+        },
+    )
+}
+
+/// Resolve Forgejo bot identity overrides and defaults.
 fn resolve_bot_identity(values: BotIdentityEnvValues<'_>) -> Result<EffectiveBotIdentity> {
     let bot_login = match values.login {
-        Some(v) if v.trim().is_empty() => {
+        Some(login) if login.trim().is_empty() => {
             anyhow::bail!(
                 "AR_BOT_LOGIN is set to an empty/whitespace value; \
                  unset it to take the default (`auto-review`) or set \
                  the bot's actual Forgejo login"
             );
         }
-        Some(v) => v.to_string(),
-        None => "auto-review".to_string(),
+        Some(login) => login.to_owned(),
+        None => "auto-review".to_owned(),
     };
     let bot_name = match values.name {
-        Some(v) if v.trim().is_empty() => {
+        Some(name) if name.trim().is_empty() => {
             anyhow::bail!(
                 "AR_BOT_NAME is set to an empty/whitespace value; \
                  unset it to inherit AR_BOT_LOGIN or set the @-handle \
                  users mention"
             );
         }
-        Some(v) => v.to_string(),
+        Some(name) => name.to_owned(),
         None => bot_login.clone(),
     };
 
@@ -1178,17 +1321,17 @@ fn github_review_host(client: ar_github::Client, bot_login: &str) -> Arc<ar_gith
 fn resolve_github_bot_identity(
     login_override: Option<&str>,
     name_override: Option<&str>,
-    app: Option<&ar_github::AppInfo>,
+    app_info: Option<&ar_github::AppInfo>,
 ) -> Result<EffectiveBotIdentity> {
-    let login = match (login_override, app) {
-        (Some(login), _) => login.trim().to_string(),
+    let login = match (login_override, app_info) {
+        (Some(login), _) => login.trim().to_owned(),
         (None, Some(app)) => app.bot_login(),
         (None, None) => anyhow::bail!("GITHUB_BOT_LOGIN is required when GET /app is skipped"),
     };
-    let name = match (name_override, app) {
-        (Some(name), _) => name.trim().trim_start_matches('@').to_string(),
+    let name = match (name_override, app_info) {
+        (Some(name), _) => name.trim().trim_start_matches('@').to_owned(),
         (None, Some(app)) => app.slug.clone(),
-        (None, None) => login.trim_end_matches("[bot]").to_string(),
+        (None, None) => login.trim_end_matches("[bot]").to_owned(),
     };
     if login.is_empty() || name.is_empty() {
         anyhow::bail!("GITHUB_BOT_LOGIN and GITHUB_BOT_NAME must not be empty");
@@ -1196,8 +1339,19 @@ fn resolve_github_bot_identity(
     Ok(EffectiveBotIdentity { login, name })
 }
 
+/// Start the gateway using the process environment and run until shutdown.
+///
+/// # Errors
+/// Returns an error if launcher setup, gateway configuration, dependency
+/// initialization, listener binding, or serving fails.
+#[inline]
+#[expect(
+    clippy::cognitive_complexity,
+    clippy::too_many_lines,
+    reason = "Keep startup resource creation, provider wiring, and shutdown in their existing order"
+)]
 pub async fn run_from_env(options: StartupOptions) -> Result<()> {
-    tracing_subscriber::fmt()
+    let _subscriber_init = tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_default_env()
                 .unwrap_or_else(|_| tracing_subscriber::EnvFilter::new("info,ar_gateway=debug")),
@@ -1251,11 +1405,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     // "No such file or directory" io error. Don't bail — the
     // gateway should still serve /healthz and /metrics for
     // operators investigating; reviews just fail loudly per-PR.
-    match tokio::process::Command::new("git")
-        .arg("--version")
-        .output()
-        .await
-    {
+    match AsyncCommand::new("git").arg("--version").output().await {
         Ok(out) if out.status.success() => {
             log_git_version(&String::from_utf8_lossy(&out.stdout));
         }
@@ -1265,9 +1415,9 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
                 "git --version exited non-zero; reviews will fail at the clone phase"
             );
         }
-        Err(e) => {
+        Err(error) => {
             tracing::warn!(
-                error = %e,
+                error = %error,
                 "git not found in PATH; every review will fail at prepare_workspace. \
                  Install git or add it to PATH."
             );
@@ -1278,17 +1428,23 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     // HMAC-SHA256 with a short shared key is brute-forceable. Warn at
     // startup rather than at first verify so operators see this in
     // their first log scrape, not a production failure window.
-    for (name, secret) in [
+    for (name, configured_secret) in [
         (
             "WEBHOOK_SECRET",
-            startup_config.forgejo.as_ref().map(|f| &f.webhook_secret),
+            startup_config
+                .forgejo
+                .as_ref()
+                .map(|config| &config.webhook_secret),
         ),
         (
             "GITHUB_WEBHOOK_SECRET",
-            startup_config.github.as_ref().map(|g| &g.webhook_secret),
+            startup_config
+                .github
+                .as_ref()
+                .map(|config| &config.webhook_secret),
         ),
     ] {
-        if let Some(secret) = secret.filter(|secret| secret.len() < 16) {
+        if let Some(secret) = configured_secret.filter(|candidate| candidate.len() < 16) {
             tracing::warn!(
                 env = name,
                 length = secret.len(),
@@ -1313,7 +1469,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     // every `@` and fire on every PR thread mention, also bad.
     let bot_login_env = env::var("AR_BOT_LOGIN").ok();
     let bot_name_env = env::var("AR_BOT_NAME").ok();
-    let (bot_identity, forgejo) = startup_bot_identity_and_forgejo_host(
+    let (bot_identity, forgejo_host) = startup_bot_identity_and_forgejo_host(
         BotIdentityEnvValues {
             login: bot_login_env.as_deref(),
             name: bot_name_env.as_deref(),
@@ -1360,8 +1516,8 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
             provider = provider.with_embed_num_ctx(num_ctx);
             tracing::info!(num_ctx, "embedding num_ctx override enabled");
         }
-        let provider = Arc::new(provider);
-        router = router.with(ModelTier::Embedding, provider);
+        let embedding_provider = Arc::new(provider);
+        router = router.with(ModelTier::Embedding, embedding_provider);
         tracing::info!(model = %embedding_model, "embedding tier configured; RAG enabled");
     } else {
         tracing::info!("LLM_EMBEDDING_MODEL not set; RAG disabled");
@@ -1403,25 +1559,22 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         env::var("AR_LEARNINGS_DB").ok().as_deref(),
         &default_state_path("learnings.db"),
     );
-    let (learnings, learnings_info) = match &learnings_backing {
+    let (learnings, learnings_info): (Arc<dyn LearningsStore>, _) = match learnings_backing {
         DbBacking::Sqlite(path) => {
-            ensure_parent_dir(path).with_context(|| {
+            ensure_parent_dir(&path).with_context(|| {
                 format!("create parent dir for learnings db at {}", path.display())
             })?;
-            let store = SqliteLearningsStore::open(path)
+            let store = SqliteLearningsStore::open(&path)
                 .await
                 .with_context(|| format!("open learnings db at {}", path.display()))?;
             tracing::info!(path = %path.display(), "learnings store: SQLite (persistent)");
-            (
-                Arc::new(store) as Arc<dyn ar_index::LearningsStore>,
-                format!("sqlite:{}", path.display()),
-            )
+            (Arc::new(store), format!("sqlite:{}", path.display()))
         }
         DbBacking::InMemory => {
             tracing::info!("learnings store: in-memory (AR_LEARNINGS_DB=:memory: opt-out)");
             (
-                Arc::new(InMemoryLearningsStore::new()) as Arc<dyn ar_index::LearningsStore>,
-                "in-memory".to_string(),
+                Arc::new(InMemoryLearningsStore::new()),
+                "in-memory".to_owned(),
             )
         }
     };
@@ -1437,25 +1590,22 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         env::var("AR_HISTORY_DB").ok().as_deref(),
         &default_state_path("history.db"),
     );
-    let (history, history_info) = match &history_backing {
+    let (history, history_info): (Arc<dyn ReviewHistory>, _) = match history_backing {
         DbBacking::Sqlite(path) => {
-            ensure_parent_dir(path).with_context(|| {
+            ensure_parent_dir(&path).with_context(|| {
                 format!("create parent dir for history db at {}", path.display())
             })?;
-            let store = SqliteReviewHistory::open(path)
+            let store = SqliteReviewHistory::open(&path)
                 .await
                 .with_context(|| format!("open history db at {}", path.display()))?;
             tracing::info!(path = %path.display(), "review history: SQLite (persistent)");
-            (
-                Arc::new(store) as Arc<dyn ReviewHistory>,
-                format!("sqlite:{}", path.display()),
-            )
+            (Arc::new(store), format!("sqlite:{}", path.display()))
         }
         DbBacking::InMemory => {
             tracing::info!("review history: in-memory (AR_HISTORY_DB=:memory: opt-out)");
             (
-                Arc::new(InMemoryReviewHistory::new()) as Arc<dyn ReviewHistory>,
-                "in-memory".to_string(),
+                Arc::new(InMemoryReviewHistory::new()),
+                "in-memory".to_owned(),
             )
         }
     };
@@ -1471,26 +1621,20 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         env::var("AR_VECTOR_DB").ok().as_deref(),
         &default_state_path("vector.db"),
     );
-    let (vector_store, vector_info) = match &vector_backing {
+    let (vector_store, vector_info): (Arc<dyn VectorStore>, _) = match vector_backing {
         DbBacking::Sqlite(path) => {
-            ensure_parent_dir(path).with_context(|| {
+            ensure_parent_dir(&path).with_context(|| {
                 format!("create parent dir for vector db at {}", path.display())
             })?;
-            let store = SqliteVectorStore::open(path)
+            let store = SqliteVectorStore::open(&path)
                 .await
                 .with_context(|| format!("open vector db at {}", path.display()))?;
             tracing::info!(path = %path.display(), "vector store: SQLite (persistent)");
-            (
-                Arc::new(store) as Arc<dyn VectorStore>,
-                format!("sqlite:{}", path.display()),
-            )
+            (Arc::new(store), format!("sqlite:{}", path.display()))
         }
         DbBacking::InMemory => {
             tracing::info!("vector store: in-memory (AR_VECTOR_DB=:memory: opt-out)");
-            (
-                Arc::new(InMemoryVectorStore::new()) as Arc<dyn VectorStore>,
-                "in-memory".to_string(),
-            )
+            (Arc::new(InMemoryVectorStore::new()), "in-memory".to_owned())
         }
     };
 
@@ -1512,19 +1656,16 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         tracing::info!("webhook delivery dedup: disabled (AR_DEDUP_CAPACITY=0)");
         (None, "disabled".into())
     } else {
-        match &dedup_backing {
+        match dedup_backing {
             DbBacking::Sqlite(path) => {
-                ensure_parent_dir(path).with_context(|| {
+                ensure_parent_dir(&path).with_context(|| {
                     format!("create parent dir for dedup db at {}", path.display())
                 })?;
-                let store = SqliteDeliveries::open(path)
+                let store = SqliteDeliveries::open(&path)
                     .await
                     .with_context(|| format!("open dedup db at {}", path.display()))?;
                 tracing::info!(path = %path.display(), "webhook delivery dedup: SQLite (persistent)");
-                (
-                    Some(Arc::new(store) as Arc<dyn DeliveryDedup>),
-                    format!("sqlite:{}", path.display()),
-                )
+                (Some(Arc::new(store)), format!("sqlite:{}", path.display()))
             }
             DbBacking::InMemory => {
                 let store = RecentDeliveries::new(dedup_capacity);
@@ -1533,7 +1674,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
                     "webhook delivery dedup: in-memory LRU (AR_DEDUP_DB=:memory: opt-out)"
                 );
                 (
-                    Some(Arc::new(store) as Arc<dyn DeliveryDedup>),
+                    Some(Arc::new(store)),
                     format!("in-memory(capacity={dedup_capacity})"),
                 )
             }
@@ -1542,7 +1683,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
 
     let metrics = Arc::new(Metrics::new());
     let observer: Arc<dyn ar_orchestrator::ReviewObserver> =
-        Arc::new(MetricsObserver::new(metrics.clone()));
+        Arc::new(MetricsObserver::new(Arc::clone(&metrics)));
 
     // Optional concurrency cap on in-flight reviews, applied to each
     // provider's dispatcher. Without this, a burst of N PRs spawns N
@@ -1554,22 +1695,22 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         tracing::info!(max, "review concurrency cap enabled (per provider)");
     }
     let with_shared_review_state = |builder: SpawningDispatcher| {
-        let builder = builder
-            .with_history(history.clone())
-            .with_learnings(learnings.clone())
-            .with_vector_store(vector_store.clone())
-            .with_observer(observer.clone());
+        let configured_builder = builder
+            .with_history(Arc::clone(&history))
+            .with_learnings(Arc::clone(&learnings))
+            .with_vector_store(Arc::clone(&vector_store))
+            .with_observer(Arc::clone(&observer));
         match review_concurrency {
-            Some(max) => builder.with_concurrency_limit(max),
-            None => builder,
+            Some(max) => configured_builder.with_concurrency_limit(max),
+            None => configured_builder,
         }
     };
 
-    let forgejo_dispatcher = match (forgejo.as_ref(), forgejo_config.as_ref()) {
+    let forgejo_dispatcher = match (forgejo_host.as_ref(), forgejo_config.as_ref()) {
         (Some(forgejo), Some(config)) => {
             Some(Arc::new(with_shared_review_state(SpawningDispatcher::new(
-                forgejo.clone(),
-                llm_router.clone(),
+                Arc::clone(forgejo),
+                Arc::clone(&llm_router),
                 config.base_url.clone(),
                 config.token.clone(),
             ))))
@@ -1586,20 +1727,21 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         parse_env::<u64>("AR_POLL_INTERVAL_SECS").unwrap_or(DEFAULT_POLL_INTERVAL.as_secs());
     let chat_comment_cursors: SharedCommentCursors = Arc::new(Mutex::new(HashMap::new()));
     let mut poller_enabled = false;
-    match (forgejo.as_ref(), forgejo_dispatcher.as_ref()) {
+    match (forgejo_host.as_ref(), forgejo_dispatcher.as_ref()) {
         (Some(forgejo), Some(dispatcher)) if poll_interval_secs > 0 => {
-            let dispatcher_dyn: Arc<dyn ar_orchestrator::JobDispatcher> = dispatcher.clone();
+            let dispatcher_dyn: Arc<dyn ar_orchestrator::JobDispatcher> =
+                Arc::<SpawningDispatcher>::clone(dispatcher);
             ChatPoller::new(
-                forgejo.clone(),
-                llm_router.clone(),
-                learnings.clone(),
-                history.clone(),
+                Arc::clone(forgejo),
+                Arc::clone(&llm_router),
+                Arc::clone(&learnings),
+                Arc::clone(&history),
                 dispatcher_dyn,
                 bot_login.clone(),
                 bot_name.clone(),
             )
-            .with_cursors(chat_comment_cursors.clone())
-            .with_metrics(metrics.clone())
+            .with_cursors(Arc::clone(&chat_comment_cursors))
+            .with_metrics(Arc::clone(&metrics))
             .spawn(Duration::from_secs(poll_interval_secs));
             poller_enabled = true;
             tracing::info!(
@@ -1636,11 +1778,12 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
                 app.as_ref(),
             )?;
             let host = github_review_host(client, &identity.login);
-            let host_dyn: Arc<dyn ar_forge::ReviewHost> = host.clone();
+            let host_dyn: Arc<dyn ar_forge::ReviewHost> =
+                Arc::<ar_github::AppReviewHost>::clone(&host);
             let dispatcher: Arc<dyn ar_orchestrator::JobDispatcher> =
                 Arc::new(with_shared_review_state(SpawningDispatcher::new_with_host(
                     host_dyn,
-                    llm_router.clone(),
+                    Arc::clone(&llm_router),
                     "",
                     "",
                 )));
@@ -1654,8 +1797,8 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
                 GitHubDeps::new(config.webhook_secret.clone(), host, dispatcher)
                     .with_bot_identity(identity.login, identity.name)
                     .with_chat(GitHubChatDeps {
-                        llm: llm_router.clone(),
-                        learnings: learnings.clone(),
+                        llm: Arc::clone(&llm_router),
+                        learnings: Arc::clone(&learnings),
                     }),
             )
         }
@@ -1667,14 +1810,14 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     // k8s probe schedules can lengthen it to avoid hammering the forge.
     let readiness_ttl =
         Duration::from_secs(parse_env::<u64>("AR_READINESS_TTL_SECS").unwrap_or(10));
-    let readiness = match (forgejo.as_ref(), github_deps.as_ref()) {
+    let readiness_probe = match (forgejo_host.as_ref(), github_deps.as_ref()) {
         (Some(forgejo), Some(github)) => Some(
-            ReadinessProbe::with_ttl(forgejo.clone(), readiness_ttl)
-                .and_github(github.host.clone()),
+            ReadinessProbe::with_ttl(Arc::clone(forgejo), readiness_ttl)
+                .and_github(Arc::clone(&github.host)),
         ),
-        (Some(forgejo), None) => Some(ReadinessProbe::with_ttl(forgejo.clone(), readiness_ttl)),
+        (Some(forgejo), None) => Some(ReadinessProbe::with_ttl(Arc::clone(forgejo), readiness_ttl)),
         (None, Some(github)) => Some(ReadinessProbe::github_with_ttl(
-            github.host.clone(),
+            Arc::clone(&github.host),
             readiness_ttl,
         )),
         (None, None) => None,
@@ -1696,7 +1839,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     );
 
     let mut providers = Vec::new();
-    if forgejo.is_some() {
+    if forgejo_host.is_some() {
         providers.push("forgejo");
     }
     if github_deps.is_some() {
@@ -1727,7 +1870,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         },
         reasoning_model: reasoning_model.clone(),
         poller_enabled,
-        readiness_enabled: readiness.is_some(),
+        readiness_enabled: readiness_probe.is_some(),
         providers,
         runtime_isolation,
     });
@@ -1740,21 +1883,20 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     };
     let forgejo_secret = forgejo_config
         .as_ref()
-        .map(|config| config.webhook_secret.clone())
-        .unwrap_or_default();
+        .map_or_default(|config| config.webhook_secret.clone());
     let mut state = AppState::new(forgejo_secret, forgejo_dispatcher_dyn)
         .with_bot_identity(bot_login, bot_name)
         .with_metrics(metrics)
         .with_chat_comment_cursors(chat_comment_cursors)
         .with_info(info);
-    if let Some(forgejo) = forgejo.as_ref() {
+    if let Some(forgejo) = forgejo_host.as_ref() {
         state = state.with_chat(ChatDeps {
-            forgejo: forgejo.clone(),
-            llm: llm_router.clone(),
-            learnings: learnings.clone(),
+            forgejo: Arc::clone(forgejo),
+            llm: Arc::clone(&llm_router),
+            learnings: Arc::clone(&learnings),
         });
     }
-    if let Some(readiness) = readiness {
+    if let Some(readiness) = readiness_probe {
         state = state.with_readiness(readiness);
     }
     if let Some(github) = github_deps {
@@ -1763,8 +1905,8 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
 
     if let Some(action_token) = validate_ci_review_token(read_non_empty_env("AR_CI_REVIEW_TOKEN"))?
     {
-        state = match forgejo.as_ref() {
-            Some(forgejo) => state.with_ci_review_endpoint(action_token, forgejo.clone()),
+        state = match forgejo_host.as_ref() {
+            Some(forgejo) => state.with_ci_review_endpoint(action_token, Arc::clone(forgejo)),
             None => state.with_ci_review_token(action_token),
         };
         tracing::info!("CI review endpoint enabled at POST /reviews/ci");
@@ -1795,8 +1937,8 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
     // Forgejo instance are tens of req/s and a burst around 30 —
     // legitimate Forgejo traffic is well under that.
     let rate_per_sec = parse_env::<u32>("AR_WEBHOOK_RATE_PER_SEC");
-    let burst = parse_env::<u32>("AR_WEBHOOK_BURST");
-    match (rate_per_sec, burst) {
+    let configured_burst = parse_env::<u32>("AR_WEBHOOK_BURST");
+    match (rate_per_sec, configured_burst) {
         (Some(rate), Some(burst)) => {
             let bucket = Arc::new(TokenBucket::new(burst, rate));
             state = state.with_webhook_rate_limit(bucket);
@@ -1809,13 +1951,13 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         (Some(_), None) => {
             tracing::warn!(
                 "AR_WEBHOOK_RATE_PER_SEC is set but AR_WEBHOOK_BURST is not; \
-                 rate limiter requires both — DISABLED. Set both or unset both."
+                 rate limiter requires both \u{2014} DISABLED. Set both or unset both."
             );
         }
         (None, Some(_)) => {
             tracing::warn!(
                 "AR_WEBHOOK_BURST is set but AR_WEBHOOK_RATE_PER_SEC is not; \
-                 rate limiter requires both — DISABLED. Set both or unset both."
+                 rate limiter requires both \u{2014} DISABLED. Set both or unset both."
             );
         }
         (None, None) => {} // intentional: no rate limit
@@ -1866,7 +2008,7 @@ async fn warn_on_unscoped_learnings(store: &dyn ar_index::LearningsStore) {
 /// continue running after the listener drains, since they're not
 /// joined on. The tokio runtime drops them when `main` returns.
 /// This is best-effort by design — adding a join set across the
-/// dispatcher boundary would mean threading a CancellationToken
+/// dispatcher boundary would mean threading a `CancellationToken`
 /// through every spawned activity, which is more machinery than
 /// the single-tenant deploy needs. Operators wanting zero data
 /// loss should drain via the systemd `ExecStop=` hook with a
@@ -1874,21 +2016,20 @@ async fn warn_on_unscoped_learnings(store: &dyn ar_index::LearningsStore) {
 /// reach their commit-status post.
 async fn shutdown_signal() {
     let ctrl_c = async {
-        if let Err(e) = tokio::signal::ctrl_c().await {
-            tracing::warn!(error = %e, "ctrl_c handler failed; shutdown trigger disabled");
+        if let Err(error) = signal::ctrl_c().await {
+            tracing::warn!(error = %error, "ctrl_c handler failed; shutdown trigger disabled");
         }
     };
 
     #[cfg(unix)]
     let terminate = async {
-        let mut term =
-            match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate()) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!(error = %e, "SIGTERM handler init failed");
-                    return;
-                }
-            };
+        let mut term = match unix_signal(SignalKind::terminate()) {
+            Ok(signal) => signal,
+            Err(error) => {
+                tracing::warn!(error = %error, "SIGTERM handler init failed");
+                return;
+            }
+        };
         term.recv().await;
     };
 
@@ -1896,20 +2037,15 @@ async fn shutdown_signal() {
     let terminate = std::future::pending::<()>();
 
     tokio::select! {
-        _ = ctrl_c => {
+        () = ctrl_c => {
             tracing::info!("received SIGINT; draining listener");
         }
-        _ = terminate => {
+        () = terminate => {
             tracing::info!("received SIGTERM; draining listener");
         }
     }
 }
 
-/// Read an env var, treating both "unset" and "empty / whitespace-only"
-/// as `None`. Most operator-facing env vars take a meaningful default
-/// when unset; an explicit empty assignment (`FOO=`) is almost always
-/// a misconfiguration that should fall through to the same default
-/// rather than silently producing a broken empty string.
 /// Compute the per-store XDG default sqlite path for `filename`. Thin
 /// wrapper around the pure [`compose_state_path`] so unit tests don't
 /// have to mutate the process env.
@@ -1923,23 +2059,28 @@ fn default_state_path(filename: &str) -> PathBuf {
 /// SQLite stores' `open()` would otherwise fail with a confusing
 /// "unable to open database file" on first run when the XDG state
 /// dir is missing. `create_dir_all` is idempotent.
-fn ensure_parent_dir(path: &Path) -> std::io::Result<()> {
+fn ensure_parent_dir(path: &Path) -> io::Result<()> {
     if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent)?;
+        fs::create_dir_all(parent)?;
     }
     Ok(())
 }
 
+/// Read an env var, treating both "unset" and "empty / whitespace-only"
+/// as `None`. Most operator-facing env vars take a meaningful default
+/// when unset; an explicit empty assignment (`FOO=`) is almost always
+/// a misconfiguration that should fall through to the same default
+/// rather than silently producing a broken empty string.
 fn read_non_empty_env(name: &str) -> Option<String> {
     match env::var(name) {
-        Ok(v) if v.trim().is_empty() => {
+        Ok(value) if value.trim().is_empty() => {
             tracing::warn!(
                 env = name,
                 "env var set to an empty/whitespace value; treating as unset"
             );
             None
         }
-        Ok(v) => Some(v),
+        Ok(value) => Some(value),
         Err(_) => None,
     }
 }
@@ -1960,11 +2101,12 @@ fn parse_llm_omit_temperature(raw: Option<&str>) -> Result<bool> {
     }
 }
 
+/// Trim an optional CI action token and reject invalid configured values.
 fn validate_ci_review_token(raw: Option<String>) -> Result<Option<String>> {
-    let Some(token) = raw else {
+    let Some(raw_token) = raw else {
         return Ok(None);
     };
-    let token = token.trim().to_string();
+    let token = raw_token.trim().to_owned();
     if token.is_empty() {
         return Ok(None);
     }
@@ -1983,17 +2125,17 @@ fn validate_ci_review_token(raw: Option<String>) -> Result<Option<String>> {
 /// effect. This warn-and-fall-through variant surfaces the typo.
 fn parse_env<T>(name: &str) -> Option<T>
 where
-    T: std::str::FromStr,
-    <T as std::str::FromStr>::Err: std::fmt::Display,
+    T: FromStr,
+    <T as FromStr>::Err: fmt::Display,
 {
     let raw = read_non_empty_env(name)?;
     match raw.parse::<T>() {
-        Ok(v) => Some(v),
-        Err(e) => {
+        Ok(value) => Some(value),
+        Err(error) => {
             tracing::warn!(
                 env = name,
                 value = %raw,
-                error = %e,
+                error = %error,
                 "env var set to an unparseable value; using the built-in default"
             );
             None
@@ -2014,8 +2156,31 @@ fn log_git_version(version_output: &str) {
 
 #[cfg(test)]
 mod tests {
+    #![expect(
+        clippy::expect_used,
+        clippy::indexing_slicing,
+        clippy::panic,
+        clippy::unwrap_used,
+        clippy::unreachable,
+        reason = "Fixture setup and exact-shape assertions intentionally fail fast on unexpected results"
+    )]
+    #![expect(
+        clippy::create_dir,
+        reason = "Fixture parents already exist; fail if a directory was unexpectedly created before setup"
+    )]
+    #![expect(
+        clippy::arbitrary_source_item_ordering,
+        reason = "Keep startup tests and their supporting fixtures grouped by behavior"
+    )]
+
     use super::*;
-    use std::sync::{Arc, Mutex};
+    use alloc::sync::Arc;
+    use core::cell::{Cell, RefCell};
+    use std::sync::Mutex;
+    use tracing::field::{Field, Visit};
+    use tracing::span::{Attributes, Id, Record};
+    use tracing::subscriber::{set_default, with_default};
+    use wiremock::matchers::{method, path};
 
     /// Events logged by [`log_git_version`] for `version_output`.
     fn capture_git_version_log(version_output: &str) -> Vec<CapturedEvent> {
@@ -2023,7 +2188,7 @@ mod tests {
         let subscriber = CapturingSubscriber {
             events: Arc::clone(&events),
         };
-        tracing::subscriber::with_default(subscriber, || log_git_version(version_output));
+        with_default(subscriber, || log_git_version(version_output));
         let captured = events.lock().unwrap().clone();
         captured
     }
@@ -2060,8 +2225,8 @@ mod tests {
         fn field(&self, name: &str) -> Option<&str> {
             self.fields
                 .iter()
-                .find(|(n, _)| n == name)
-                .map(|(_, v)| v.as_str())
+                .find(|entry| entry.0 == name)
+                .map(|entry| entry.1.as_str())
         }
     }
 
@@ -2077,7 +2242,7 @@ mod tests {
             .lock()
             .unwrap()
             .iter()
-            .filter_map(|event| event.field("message").map(str::to_string))
+            .filter_map(|event| event.field("message").map(str::to_owned))
             .collect()
     }
 
@@ -2086,13 +2251,13 @@ mod tests {
             true
         }
 
-        fn new_span(&self, _span: &tracing::span::Attributes<'_>) -> tracing::span::Id {
-            tracing::span::Id::from_u64(1)
+        fn new_span(&self, _span: &Attributes<'_>) -> Id {
+            Id::from_u64(1)
         }
 
-        fn record(&self, _span: &tracing::span::Id, _values: &tracing::span::Record<'_>) {}
+        fn record(&self, _span: &Id, _values: &Record<'_>) {}
 
-        fn record_follows_from(&self, _span: &tracing::span::Id, _follows: &tracing::span::Id) {}
+        fn record_follows_from(&self, _span: &Id, _follows: &Id) {}
 
         fn event(&self, event: &tracing::Event<'_>) {
             let mut visitor = FieldVisitor::default();
@@ -2103,9 +2268,9 @@ mod tests {
             });
         }
 
-        fn enter(&self, _span: &tracing::span::Id) {}
+        fn enter(&self, _span: &Id) {}
 
-        fn exit(&self, _span: &tracing::span::Id) {}
+        fn exit(&self, _span: &Id) {}
     }
 
     #[derive(Default)]
@@ -2113,33 +2278,34 @@ mod tests {
         fields: Vec<(String, String)>,
     }
 
-    impl tracing::field::Visit for FieldVisitor {
-        fn record_u64(&mut self, field: &tracing::field::Field, value: u64) {
+    impl Visit for FieldVisitor {
+        fn record_u64(&mut self, field: &Field, value: u64) {
             self.fields
-                .push((field.name().to_string(), value.to_string()));
+                .push((field.name().to_owned(), value.to_string()));
         }
 
-        fn record_str(&mut self, field: &tracing::field::Field, value: &str) {
+        fn record_str(&mut self, field: &Field, value: &str) {
             self.fields
-                .push((field.name().to_string(), value.to_string()));
+                .push((field.name().to_owned(), value.to_owned()));
         }
 
-        fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        fn record_debug(&mut self, field: &Field, value: &dyn fmt::Debug) {
             self.fields.push((
-                field.name().to_string(),
-                format!("{value:?}").trim_matches('"').to_string(),
+                field.name().to_owned(),
+                format!("{value:?}").trim_matches('"').to_owned(),
             ));
         }
     }
 
     #[tokio::test]
     async fn gateway_github_host_is_seeded_with_the_startup_bot_login() {
+        let app_id: i32 = 1;
         let github = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/app"))
+        wiremock::Mock::given(method("GET"))
+            .and(path("/app"))
             .respond_with(
                 wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "id": 1, "slug": "looked-up" })),
+                    .set_body_json(serde_json::json!({ "id": app_id, "slug": "looked-up" })),
             )
             .expect(0)
             .mount(&github)
@@ -2156,20 +2322,21 @@ mod tests {
 
     #[tokio::test]
     async fn ar_bot_login_wins_over_user_lookup_on_the_gateway_forgejo_host() {
+        let user_id: i32 = 7;
         let forgejo = wiremock::MockServer::start().await;
-        wiremock::Mock::given(wiremock::matchers::method("GET"))
-            .and(wiremock::matchers::path("/api/v1/user"))
+        wiremock::Mock::given(method("GET"))
+            .and(path("/api/v1/user"))
             .respond_with(
                 wiremock::ResponseTemplate::new(200)
-                    .set_body_json(serde_json::json!({ "id": 7, "login": "token-owner" })),
+                    .set_body_json(serde_json::json!({ "id": user_id, "login": "token-owner" })),
             )
             .expect(0)
             .mount(&forgejo)
             .await;
         let config = ForgejoStartupConfig {
-            webhook_secret: "secret".to_string(),
+            webhook_secret: "secret".to_owned(),
             base_url: forgejo.uri(),
-            token: "tok".to_string(),
+            token: "tok".to_owned(),
         };
 
         let (identity, host) = startup_bot_identity_and_forgejo_host(
@@ -2180,9 +2347,9 @@ mod tests {
             Some(&config),
         )
         .expect("startup");
-        let host = host.expect("forgejo host");
+        let forgejo_host = host.expect("forgejo host");
 
-        let login = ar_forge::ReviewHost::bot_login(host.as_ref())
+        let login = ar_forge::ReviewHost::bot_login(forgejo_host.as_ref())
             .await
             .expect("seeded login");
 
@@ -2195,7 +2362,7 @@ mod tests {
     /// A learnings store whose only job is to answer
     /// `list(Unscoped)` with a fixed count, or fail.
     struct UnscopedCountStore {
-        unscoped: Option<usize>,
+        unscoped: Option<u64>,
     }
 
     #[async_trait::async_trait]
@@ -2220,7 +2387,7 @@ mod tests {
             let count = self
                 .unscoped
                 .ok_or_else(|| ar_index::LearningsError::Storage("disk on fire".into()))?;
-            Ok((0..count as u64)
+            Ok((0..count)
                 .map(|id| ar_index::LearningRecord {
                     id,
                     text: format!("legacy {id}"),
@@ -2251,12 +2418,12 @@ mod tests {
         }
     }
 
-    async fn capture_unscoped_learnings_log(unscoped: Option<usize>) -> Vec<CapturedEvent> {
+    async fn capture_unscoped_learnings_log(unscoped: Option<u64>) -> Vec<CapturedEvent> {
         let events = Arc::new(Mutex::new(Vec::new()));
         let subscriber = CapturingSubscriber {
             events: Arc::clone(&events),
         };
-        let _guard = tracing::subscriber::set_default(subscriber);
+        let _guard = set_default(subscriber);
         warn_on_unscoped_learnings(&UnscopedCountStore { unscoped }).await;
         let captured = events.lock().unwrap().clone();
         captured
@@ -2337,7 +2504,7 @@ mod tests {
     #[test]
     fn ci_review_token_unset_empty_or_whitespace_disables_endpoint() {
         for raw in [None, Some(""), Some("   \t\n  ")] {
-            let validated = validate_ci_review_token(raw.map(str::to_string));
+            let validated = validate_ci_review_token(raw.map(str::to_owned));
 
             assert!(
                 matches!(validated, Ok(None)),
@@ -2358,7 +2525,7 @@ mod tests {
     #[test]
     fn ci_review_token_rejects_short_non_empty_value() {
         let rejected_token = "abc123-value";
-        let err = validate_ci_review_token(Some(rejected_token.to_string())).unwrap_err();
+        let err = validate_ci_review_token(Some(rejected_token.to_owned())).unwrap_err();
         let message = err.to_string();
 
         assert!(
@@ -2398,8 +2565,8 @@ mod tests {
     fn github_bot_identity_defaults_to_app_slug_and_honors_overrides() {
         let app = ar_github::AppInfo {
             id: 1,
-            slug: "acme-review".to_string(),
-            name: "Acme Review".to_string(),
+            slug: "acme-review".to_owned(),
+            name: "Acme Review".to_owned(),
         };
 
         let defaults = resolve_github_bot_identity(None, None, Some(&app)).unwrap();
@@ -2515,7 +2682,7 @@ mod tests {
         ]);
 
         let process_env = inner_gateway_process_env_from_lookup(|name| {
-            Ok(source.get(name).map(|value| (*value).to_string()))
+            Ok(source.get(name).map(|value| (*value).to_owned()))
         })
         .unwrap_or_else(|diagnostic| {
             panic!("GitHub-only env should stage inner gateway env: {diagnostic:?}")
@@ -2661,7 +2828,7 @@ mod tests {
 
     #[test]
     fn embedded_oci_gateway_with_packaged_inputs_returns_finished_after_fake_launcher_success() {
-        let launched = std::cell::Cell::new(false);
+        let launched = Cell::new(false);
         let packaged_inputs = EmbeddedOciGatewayInputs {
             bundle_path: Path::new("/nix/store/test-ar-gateway-embedded-oci-rootfs"),
             runtime_path: Path::new("/nix/store/test-embedded-youki-runtime"),
@@ -2685,7 +2852,7 @@ mod tests {
 
     #[test]
     fn embedded_oci_gateway_accepts_portable_release_root_relocated_bundle_and_launcher() {
-        let launched = std::cell::Cell::new(false);
+        let launched = Cell::new(false);
         let portable_inputs = EmbeddedOciGatewayInputs {
             bundle_path: Path::new("/tmp/extracted/nix/store/test-ar-gateway-embedded-oci-rootfs"),
             runtime_path: Path::new("/tmp/extracted/bin/youki"),
@@ -2718,7 +2885,7 @@ mod tests {
             bundle_path: Some(bundle_path.to_str().unwrap()),
             runtime_path: Some(runtime_path.to_str().unwrap()),
         };
-        let launched = std::cell::Cell::new(false);
+        let launched = Cell::new(false);
 
         let outcome = prepare_embedded_oci_gateway_from_env_values(env_values, |inputs| {
             launched.set(true);
@@ -2969,14 +3136,14 @@ mod tests {
     fn process_env_map(entries: &[(String, String)]) -> HashMap<&str, &str> {
         entries
             .iter()
-            .map(|(name, value)| (name.as_str(), value.as_str()))
+            .map(|entry| (entry.0.as_str(), entry.1.as_str()))
             .collect::<HashMap<_, _>>()
     }
 
     fn assert_runtime_env_is_limited_to_rootless_session_allowlist(env: &[(String, String)]) {
-        for (name, _value) in env {
+        for entry in env {
             assert!(
-                OCI_RUNTIME_ENV_ALLOWLIST.contains(&name.as_str()),
+                OCI_RUNTIME_ENV_ALLOWLIST.contains(&entry.0.as_str()),
                 "OCI runtime env may only contain rootless session allowlist entries, got: {env:?}"
             );
         }
@@ -3000,7 +3167,7 @@ mod tests {
         source.insert("LLM_OMIT_TEMPERATURE", "true");
 
         let process_env = inner_gateway_process_env_from_lookup(|name| {
-            Ok(source.get(name).map(|value| (*value).to_string()))
+            Ok(source.get(name).map(|value| (*value).to_owned()))
         })
         .unwrap_or_else(|diagnostic| {
             panic!("complete required env source should stage inner gateway env: {diagnostic:?}")
@@ -3077,7 +3244,7 @@ mod tests {
         source.insert("AWS_SECRET_ACCESS_KEY", "ambient-aws-secret-must-not-leak");
 
         let diagnostic = inner_gateway_process_env_from_lookup(|name| {
-            Ok(source.get(name).map(|value| (*value).to_string()))
+            Ok(source.get(name).map(|value| (*value).to_owned()))
         })
         .unwrap_err();
         let message = format!("{diagnostic:?}");
@@ -3104,7 +3271,7 @@ mod tests {
             "ambient-aws-secret-must-not-propagate",
         );
         let process_env = inner_gateway_process_env_from_lookup(|name| {
-            Ok(source.get(name).map(|value| (*value).to_string()))
+            Ok(source.get(name).map(|value| (*value).to_owned()))
         })
         .unwrap();
 
@@ -3129,7 +3296,7 @@ mod tests {
             .as_array()
             .unwrap()
             .iter()
-            .map(|entry| entry.as_str().unwrap().to_string())
+            .map(|entry| entry.as_str().unwrap().to_owned())
             .collect::<Vec<_>>();
         let rendered = format!("{env_entries:?}");
 
@@ -3153,83 +3320,91 @@ mod tests {
 
     #[test]
     fn staged_oci_config_rewrites_rootless_mapping_host_ids() {
-        use std::os::unix::fs::MetadataExt;
+        use std::os::unix::fs::MetadataExt as _;
 
         let process_env = inner_gateway_process_env_from_lookup(|name| {
             Ok(required_inner_gateway_env_source()
                 .get(name)
-                .map(|value| (*value).to_string()))
+                .map(|value| (*value).to_owned()))
         })
         .unwrap();
         let packaged_bundle = tempfile::tempdir().unwrap();
-        std::fs::create_dir(packaged_bundle.path().join("rootfs")).unwrap();
-        let outer_metadata = std::fs::metadata(packaged_bundle.path()).unwrap();
+        fs::create_dir(packaged_bundle.path().join("rootfs")).unwrap();
+        let outer_metadata = fs::metadata(packaged_bundle.path()).unwrap();
         let outer_uid = outer_metadata.uid();
-        let outer_gid = outer_metadata.gid();
-        std::fs::write(
+        let outer_group_id = outer_metadata.gid();
+        let container_id: i32 = 0xFFFC;
+        let mapping_size: i32 = 1;
+        fs::write(
             packaged_bundle.path().join("config.json"),
             serde_json::json!({
                 "ociVersion": "1.0.2",
                 "process": { "env": [] },
                 "root": { "path": "rootfs", "readonly": true },
                 "linux": {
-                    "uidMappings": [{ "containerID": 65532, "hostID": 65532, "size": 1 }],
-                    "gidMappings": [{ "containerID": 65532, "hostID": 65532, "size": 1 }]
+                    "uidMappings": [{ "containerID": container_id, "hostID": container_id, "size": mapping_size }],
+                    "gidMappings": [{ "containerID": container_id, "hostID": container_id, "size": mapping_size }]
                 }
             })
             .to_string(),
         )
         .unwrap();
         let stage_parent = tempfile::tempdir().unwrap();
-        let stage_bundle = stage_parent.path().join("auto-review-oci-stage");
+        let stage_destination = stage_parent.path().join("auto-review-oci-stage");
 
         let staged_bundle = stage_embedded_oci_gateway_bundle_at_path(
             packaged_bundle.path(),
-            &stage_bundle,
+            &stage_destination,
             &process_env,
         )
         .unwrap_or_else(|diagnostic| panic!("staged config should be produced: {diagnostic:?}"));
-        let staged_config = std::fs::read_to_string(staged_bundle.join("config.json")).unwrap();
+        let staged_config = fs::read_to_string(staged_bundle.join("config.json")).unwrap();
         let staged: serde_json::Value = serde_json::from_str(&staged_config).unwrap();
 
-        assert_eq!(staged["linux"]["uidMappings"][0]["containerID"], 65532);
+        assert_eq!(
+            staged["linux"]["uidMappings"][0]["containerID"],
+            container_id
+        );
         assert_eq!(staged["linux"]["uidMappings"][0]["hostID"], outer_uid);
-        assert_eq!(staged["linux"]["gidMappings"][0]["containerID"], 65532);
-        assert_eq!(staged["linux"]["gidMappings"][0]["hostID"], outer_gid);
+        assert_eq!(
+            staged["linux"]["gidMappings"][0]["containerID"],
+            container_id
+        );
+        assert_eq!(staged["linux"]["gidMappings"][0]["hostID"], outer_group_id);
     }
 
     #[test]
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep bundle setup and all assertions in one staging scenario"
+    )]
     fn staged_oci_bundle_materializes_config_and_runtime_command_points_at_stage() {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::PermissionsExt as _;
 
         let mut source = required_inner_gateway_env_source();
         source.insert("LLM_API_KEY", "llm-api-key-value-that-must-not-leak");
         let process_env = inner_gateway_process_env_from_lookup(|name| {
-            Ok(source.get(name).map(|value| (*value).to_string()))
+            Ok(source.get(name).map(|value| (*value).to_owned()))
         })
         .unwrap();
         let packaged_bundle = tempfile::tempdir().unwrap();
         let packaged_rootfs = packaged_bundle.path().join("rootfs");
-        std::fs::create_dir(&packaged_rootfs).unwrap();
-        std::fs::create_dir_all(packaged_rootfs.join("etc/auto-review")).unwrap();
+        fs::create_dir(&packaged_rootfs).unwrap();
+        fs::create_dir_all(packaged_rootfs.join("etc/auto-review")).unwrap();
         let packaged_restrictive_dir = packaged_rootfs.join("etc/auto-review/restrictive-sentinel");
-        std::fs::create_dir(&packaged_restrictive_dir).unwrap();
-        std::fs::write(
+        fs::create_dir(&packaged_restrictive_dir).unwrap();
+        fs::write(
             packaged_restrictive_dir.join("child-sentinel.txt"),
             "packaged restrictive child\n",
         )
         .unwrap();
-        std::fs::set_permissions(
-            &packaged_restrictive_dir,
-            std::fs::Permissions::from_mode(0o555),
-        )
-        .unwrap();
-        std::fs::write(
+        fs::set_permissions(&packaged_restrictive_dir, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::write(
             packaged_rootfs.join("etc/auto-review/rootfs-sentinel.txt"),
             "packaged rootfs sentinel\n",
         )
         .unwrap();
-        std::fs::write(
+        fs::write(
             packaged_bundle.path().join("config.json"),
             serde_json::json!({
                 "ociVersion": "1.0.2",
@@ -3240,16 +3415,16 @@ mod tests {
         )
         .unwrap();
         let stage_parent = tempfile::tempdir().unwrap();
-        let stage_bundle = stage_parent.path().join("auto-review-oci-stage");
+        let stage_destination = stage_parent.path().join("auto-review-oci-stage");
 
         let staged_bundle = stage_embedded_oci_gateway_bundle_at_path(
             packaged_bundle.path(),
-            &stage_bundle,
+            &stage_destination,
             &process_env,
         )
         .unwrap_or_else(|diagnostic| panic!("staged bundle should be created: {diagnostic:?}"));
 
-        assert_eq!(staged_bundle, stage_bundle);
+        assert_eq!(staged_bundle, stage_destination);
         assert!(
             staged_bundle.join("config.json").is_file(),
             "staged bundle must contain generated config.json"
@@ -3258,22 +3433,19 @@ mod tests {
             staged_bundle.join("rootfs").exists(),
             "staged bundle must contain or link the packaged rootfs"
         );
-        let staged_rootfs_metadata =
-            std::fs::symlink_metadata(staged_bundle.join("rootfs")).unwrap();
+        let staged_rootfs_metadata = fs::symlink_metadata(staged_bundle.join("rootfs")).unwrap();
         assert!(
             staged_rootfs_metadata.is_dir() && !staged_rootfs_metadata.file_type().is_symlink(),
             "staged rootfs must be an ephemeral writable directory, not a symlink to the packaged rootfs"
         );
         assert_eq!(
-            std::fs::read_to_string(
-                staged_bundle.join("rootfs/etc/auto-review/rootfs-sentinel.txt")
-            )
-            .unwrap(),
+            fs::read_to_string(staged_bundle.join("rootfs/etc/auto-review/rootfs-sentinel.txt"))
+                .unwrap(),
             "packaged rootfs sentinel\n",
             "staged rootfs must contain packaged sentinel content"
         );
         assert_eq!(
-            std::fs::read_to_string(
+            fs::read_to_string(
                 staged_bundle
                     .join("rootfs/etc/auto-review/restrictive-sentinel/child-sentinel.txt")
             )
@@ -3281,13 +3453,13 @@ mod tests {
             "packaged restrictive child\n",
             "staged restrictive directory must contain packaged child content"
         );
-        let packaged_restrictive_mode = std::fs::metadata(&packaged_restrictive_dir)
+        let packaged_restrictive_mode = fs::metadata(&packaged_restrictive_dir)
             .unwrap()
             .permissions()
             .mode()
             & 0o777;
         let staged_restrictive_mode =
-            std::fs::metadata(staged_bundle.join("rootfs/etc/auto-review/restrictive-sentinel"))
+            fs::metadata(staged_bundle.join("rootfs/etc/auto-review/restrictive-sentinel"))
                 .unwrap()
                 .permissions()
                 .mode()
@@ -3296,7 +3468,7 @@ mod tests {
             staged_restrictive_mode, packaged_restrictive_mode,
             "staged rootfs directory modes must preserve packaged permission constraints"
         );
-        let staged_config = std::fs::read_to_string(staged_bundle.join("config.json")).unwrap();
+        let staged_config = fs::read_to_string(staged_bundle.join("config.json")).unwrap();
         assert!(staged_config.contains("WEBHOOK_SECRET=webhook-secret-value-that-must-not-leak"));
         assert!(!staged_config.contains("UNRELATED_TOKEN"));
 
@@ -3329,11 +3501,11 @@ mod tests {
         let process_env = inner_gateway_process_env_from_lookup(|name| {
             Ok(required_inner_gateway_env_source()
                 .get(name)
-                .map(|value| (*value).to_string()))
+                .map(|value| (*value).to_owned()))
         })
         .unwrap();
         let packaged_bundle = tempfile::tempdir().unwrap();
-        std::fs::create_dir(packaged_bundle.path().join("rootfs")).unwrap();
+        fs::create_dir(packaged_bundle.path().join("rootfs")).unwrap();
         let stage_parent = tempfile::tempdir().unwrap();
         let staged_bundle = stage_parent
             .path()
@@ -3368,12 +3540,12 @@ mod tests {
         let process_env = inner_gateway_process_env_from_lookup(|name| {
             Ok(required_inner_gateway_env_source()
                 .get(name)
-                .map(|value| (*value).to_string()))
+                .map(|value| (*value).to_owned()))
         })
         .unwrap();
         let packaged_bundle = tempfile::tempdir().unwrap();
-        std::fs::create_dir(packaged_bundle.path().join("rootfs")).unwrap();
-        std::fs::write(
+        fs::create_dir(packaged_bundle.path().join("rootfs")).unwrap();
+        fs::write(
             packaged_bundle.path().join("config.json"),
             serde_json::json!({
                 "ociVersion": "1.0.2",
@@ -3393,14 +3565,14 @@ mod tests {
             &staged_bundle,
             &process_env,
             |_path, _bytes| {
-                Err(std::io::Error::other(
+                Err(io::Error::other(
                     "write denied for /run/secrets/ar-token at stage-dir-secret-path-that-must-not-leak",
                 ))
             },
         )
         .unwrap_err();
 
-        let public = diagnostic.public_detail().to_string();
+        let public = diagnostic.public_detail();
         assert!(
             !public.contains("/run/secrets/ar-token")
                 && !public.contains("stage-dir-secret-path-that-must-not-leak"),
@@ -3417,12 +3589,12 @@ mod tests {
         let process_env = inner_gateway_process_env_from_lookup(|name| {
             Ok(required_inner_gateway_env_source()
                 .get(name)
-                .map(|value| (*value).to_string()))
+                .map(|value| (*value).to_owned()))
         })
         .unwrap();
         let packaged_bundle = tempfile::tempdir().unwrap();
-        std::fs::create_dir(packaged_bundle.path().join("rootfs")).unwrap();
-        std::fs::write(
+        fs::create_dir(packaged_bundle.path().join("rootfs")).unwrap();
+        fs::write(
             packaged_bundle.path().join("config.json"),
             serde_json::json!({
                 "ociVersion": "1.0.2",
@@ -3442,15 +3614,15 @@ mod tests {
             &staged_bundle,
             &process_env,
             |path, _bytes| {
-                std::fs::write(path, "WEBHOOK_SECRET=partial-secret-that-must-be-removed")?;
-                Err(std::io::Error::other(
+                fs::write(path, "WEBHOOK_SECRET=partial-secret-that-must-be-removed")?;
+                Err(io::Error::other(
                     "partial write failed for /run/secrets/ar-token",
                 ))
             },
         )
         .unwrap_err();
 
-        let public = diagnostic.public_detail().to_string();
+        let public = diagnostic.public_detail();
         assert!(
             !public.contains("/run/secrets/ar-token")
                 && !public.contains("partial-secret-that-must-be-removed"),
@@ -3488,16 +3660,10 @@ mod tests {
         };
         let mut observed_commands = Vec::new();
 
-        for _ in 0..2 {
+        let launch_attempts: usize = 2;
+        for _ in 0..launch_attempts {
             let outcome = execute_packaged_oci_runtime_with_executor(packaged_inputs, |command| {
-                observed_commands.push((
-                    command.program.to_path_buf(),
-                    command
-                        .args
-                        .iter()
-                        .map(|arg| arg.to_path_buf())
-                        .collect::<Vec<_>>(),
-                ));
+                observed_commands.push((command.program.clone(), command.args.clone()));
 
                 Ok(())
             })
@@ -3515,7 +3681,8 @@ mod tests {
         let first_args = &observed_commands[0].1;
         let second_args = &observed_commands[1].1;
 
-        for (observed_runtime, observed_args) in &observed_commands {
+        for observed in &observed_commands {
+            let (observed_runtime, observed_args) = (&observed.0, &observed.1);
             assert_eq!(
                 observed_runtime.as_path(),
                 packaged_inputs.runtime_path,
@@ -3571,26 +3738,22 @@ mod tests {
     #[test]
     fn packaged_oci_runtime_with_staged_bundle_removes_secret_config_after_restrictive_rootfs_success(
     ) {
-        use std::os::unix::fs::PermissionsExt;
+        use std::os::unix::fs::PermissionsExt as _;
 
         let mut source = required_inner_gateway_env_source();
         source.insert("LLM_API_KEY", "llm-api-key-value-that-must-not-leak");
         let process_env = inner_gateway_process_env_from_lookup(|name| {
-            Ok(source.get(name).map(|value| (*value).to_string()))
+            Ok(source.get(name).map(|value| (*value).to_owned()))
         })
         .unwrap();
         let packaged_bundle = tempfile::tempdir().unwrap();
         let packaged_rootfs = packaged_bundle.path().join("rootfs");
-        std::fs::create_dir(&packaged_rootfs).unwrap();
+        fs::create_dir(&packaged_rootfs).unwrap();
         let packaged_restrictive_dir = packaged_rootfs.join("restrictive-non-empty");
-        std::fs::create_dir(&packaged_restrictive_dir).unwrap();
-        std::fs::write(packaged_restrictive_dir.join("child.txt"), "child\n").unwrap();
-        std::fs::set_permissions(
-            &packaged_restrictive_dir,
-            std::fs::Permissions::from_mode(0o555),
-        )
-        .unwrap();
-        std::fs::write(
+        fs::create_dir(&packaged_restrictive_dir).unwrap();
+        fs::write(packaged_restrictive_dir.join("child.txt"), "child\n").unwrap();
+        fs::set_permissions(&packaged_restrictive_dir, fs::Permissions::from_mode(0o555)).unwrap();
+        fs::write(
             packaged_bundle.path().join("config.json"),
             serde_json::json!({
                 "ociVersion": "1.0.2",
@@ -3604,12 +3767,12 @@ mod tests {
             bundle_path: packaged_bundle.path(),
             runtime_path: Path::new("/nix/store/test-embedded-youki-runtime/bin/youki"),
         };
-        let observed_staged_bundle = std::cell::RefCell::new(None::<PathBuf>);
+        let observed_staged_bundle = RefCell::new(None::<PathBuf>);
 
         let outcome =
             execute_packaged_oci_runtime_with_staged_bundle(inputs, &process_env, |command| {
                 let staged_bundle = command.args[2].clone();
-                let staged_config = std::fs::read_to_string(staged_bundle.join("config.json"))
+                let staged_config = fs::read_to_string(staged_bundle.join("config.json"))
                     .unwrap_or_else(|error| {
                         panic!(
                             "fake executor should see staged secret-bearing config.json: {error}"
@@ -3627,7 +3790,7 @@ mod tests {
                     "staged rootfs should contain the restrictive non-empty directory child"
                 );
                 assert_eq!(
-                    std::fs::metadata(staged_bundle.join("rootfs/restrictive-non-empty"))
+                    fs::metadata(staged_bundle.join("rootfs/restrictive-non-empty"))
                         .unwrap()
                         .permissions()
                         .mode()
@@ -3642,11 +3805,7 @@ mod tests {
             .unwrap_or_else(|diagnostic| {
                 panic!("successful fake OCI runtime should finish outer launcher: {diagnostic:?}")
             });
-        std::fs::set_permissions(
-            &packaged_restrictive_dir,
-            std::fs::Permissions::from_mode(0o755),
-        )
-        .unwrap();
+        fs::set_permissions(&packaged_restrictive_dir, fs::Permissions::from_mode(0o755)).unwrap();
 
         assert_eq!(outcome, GatewayLaunchOutcome::OuterLauncherFinished);
         let staged_bundle = observed_staged_bundle
@@ -3759,7 +3918,7 @@ mod tests {
             events: Arc::clone(&captured),
         };
 
-        tracing::subscriber::with_default(subscriber, || {
+        with_default(subscriber, || {
             select_gateway_launcher(
                 GatewayLauncherEnvValues {
                     bare: Some("true"),
@@ -3839,7 +3998,7 @@ mod tests {
             events: Arc::clone(&captured),
         };
 
-        let outcome = tracing::subscriber::with_default(subscriber, || {
+        let outcome = with_default(subscriber, || {
             select_gateway_launcher(
                 GatewayLauncherEnvValues {
                     bare: None,

@@ -13,7 +13,14 @@
 //! Both files are embedded with `include_str!` so the test also runs inside
 //! the Nix build sandbox, where `flake.nix` ships them into the source tree.
 
-use std::collections::BTreeSet;
+#![expect(
+    clippy::tests_outside_test_module,
+    reason = "this integration target is already a test harness"
+)]
+
+extern crate alloc;
+
+use alloc::collections::BTreeSet;
 
 use ar_gateway::metrics::Metrics;
 
@@ -30,12 +37,17 @@ const STRIPPED_SUFFIXES: [&str; 3] = ["_bucket", "_sum", "_count"];
 /// Characters that may continue a Prometheus metric or recording-rule name.
 /// Used to make sure a match is a whole token, not part of a longer
 /// identifier.
-fn is_name_char(c: char) -> bool {
-    c.is_ascii_alphanumeric() || c == '_' || c == ':'
+fn is_name_char(character: char) -> bool {
+    character.is_ascii_alphanumeric() || character == '_' || character == ':'
 }
 
 /// Collect every whole token in `text` that starts with `prefix` and continues
 /// with at least one character accepted by `body`.
+#[expect(
+    clippy::string_slice,
+    clippy::arithmetic_side_effects,
+    reason = "match offsets and summed UTF-8 character widths are in bounds and on character boundaries"
+)]
 fn scan_tokens(text: &str, prefix: &str, body: impl Fn(char) -> bool) -> BTreeSet<String> {
     let mut found = BTreeSet::new();
     for (start, _) in text.match_indices(prefix) {
@@ -46,7 +58,7 @@ fn scan_tokens(text: &str, prefix: &str, body: impl Fn(char) -> bool) -> BTreeSe
         let rest = &text[start + prefix.len()..];
         let body_len: usize = rest
             .chars()
-            .take_while(|c| body(*c))
+            .take_while(|character| body(*character))
             .map(char::len_utf8)
             .sum();
         if body_len == 0 {
@@ -65,15 +77,18 @@ fn scan_tokens(text: &str, prefix: &str, body: impl Fn(char) -> bool) -> BTreeSe
 
 /// Every `auto_review_[a-z0-9_]+` metric token in `text`.
 fn metric_names(text: &str) -> BTreeSet<String> {
-    scan_tokens(text, METRIC_PREFIX, |c| {
-        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'
+    scan_tokens(text, METRIC_PREFIX, |character| {
+        character.is_ascii_lowercase() || character.is_ascii_digit() || character == '_'
     })
 }
 
 /// Every `auto_review:[a-z0-9_:]+` recording-rule token in `text`.
 fn recording_rule_names(text: &str) -> BTreeSet<String> {
-    scan_tokens(text, RECORDING_RULE_PREFIX, |c| {
-        c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_' || c == ':'
+    scan_tokens(text, RECORDING_RULE_PREFIX, |character| {
+        character.is_ascii_lowercase()
+            || character.is_ascii_digit()
+            || character == '_'
+            || character == ':'
     })
 }
 
@@ -96,10 +111,11 @@ fn exposed_names(exposition: &str) -> BTreeSet<String> {
         } else if line.starts_with('#') {
             None
         } else {
-            line.split(|c: char| c == '{' || c.is_whitespace()).next()
+            line.split(|character: char| character == '{' || character.is_whitespace())
+                .next()
         };
-        if let Some(name) = name.filter(|n| !n.is_empty()) {
-            names.insert(normalize(name).to_owned());
+        if let Some(non_empty) = name.filter(|candidate| !candidate.is_empty()) {
+            names.insert(normalize(non_empty).to_owned());
         }
     }
     names
@@ -112,13 +128,13 @@ fn defined_recording_rules(rules: &str) -> BTreeSet<String> {
         .lines()
         .filter_map(|line| {
             let trimmed = line.trim_start();
-            let trimmed = trimmed.strip_prefix("- ").unwrap_or(trimmed);
-            trimmed.strip_prefix("record:")
+            let entry = trimmed.strip_prefix("- ").unwrap_or(trimmed);
+            entry.strip_prefix("record:")
         })
         .map(|value| {
             value
                 .trim()
-                .trim_matches(|c| c == '"' || c == '\'')
+                .trim_matches(|character| character == '"' || character == '\'')
                 .to_owned()
         })
         .collect()
@@ -164,11 +180,12 @@ fn dashboard_recording_rules_are_defined_in_rules_file() {
     );
 }
 
+#[cfg(test)]
 mod scanner {
     use super::*;
 
     fn set(names: &[&str]) -> BTreeSet<String> {
-        names.iter().map(|n| (*n).to_owned()).collect()
+        names.iter().map(|name| (*name).to_owned()).collect()
     }
 
     #[test]

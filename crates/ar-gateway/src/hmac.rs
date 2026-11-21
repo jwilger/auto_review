@@ -3,13 +3,22 @@
 //! Forgejo sends `X-Forgejo-Signature` as a hex-encoded HMAC-SHA256 digest
 //! of the raw request body, keyed by the configured webhook secret.
 
-use ::hmac::{Hmac, KeyInit, Mac};
+use ::hmac::{Hmac, KeyInit as _, Mac as _};
 use sha2::Sha256;
-use subtle::ConstantTimeEq;
+use subtle::ConstantTimeEq as _;
 
+/// HMAC implementation used to check Forgejo signatures.
 type HmacSha256 = Hmac<Sha256>;
 
 #[derive(Debug, thiserror::Error)]
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "keep the public error type name"
+)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "preserve public enum discriminants"
+)]
 pub enum HmacError {
     #[error("missing signature header")]
     Missing,
@@ -24,6 +33,16 @@ pub enum HmacError {
 /// Verify a hex-encoded HMAC-SHA256 signature against the given body.
 ///
 /// Returns `Ok(())` iff the signature is valid. Comparison is constant-time.
+///
+/// # Errors
+///
+/// Returns [`HmacError`] if the secret cannot initialize the MAC, the
+/// signature is not hex, or the decoded signature does not match.
+#[inline]
+#[expect(
+    clippy::map_err_ignore,
+    reason = "expose the existing payload-free error variants"
+)]
 pub fn verify(secret: &str, body: &[u8], signature_hex: &str) -> Result<(), HmacError> {
     let mut mac =
         HmacSha256::new_from_slice(secret.as_bytes()).map_err(|_| HmacError::InvalidSecret)?;
@@ -44,6 +63,7 @@ pub fn verify(secret: &str, body: &[u8], signature_hex: &str) -> Result<(), Hmac
 mod tests {
     use super::*;
 
+    #[expect(clippy::unwrap_used, reason = "test fixture construction must succeed")]
     fn sign(secret: &str, body: &[u8]) -> String {
         let mut mac = HmacSha256::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(body);
@@ -51,6 +71,10 @@ mod tests {
     }
 
     #[test]
+    #[expect(
+        clippy::assertions_on_result_states,
+        reason = "the assertion only needs to check successful verification"
+    )]
     fn valid_signature_passes() {
         let body = br#"{"action":"opened"}"#;
         let sig = sign("s3cret", body);

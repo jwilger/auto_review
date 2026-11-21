@@ -1,13 +1,20 @@
+#![expect(
+    clippy::tests_outside_test_module,
+    reason = "this integration target is already a test harness"
+)]
+
+extern crate alloc;
+
+use alloc::sync::Arc;
 use ar_gateway::poller::{claim_chat_comment, SharedCommentCursors};
 use ar_orchestrator::review_history::PrKey;
 use std::collections::HashMap;
-use std::sync::Arc;
 use tokio::sync::Mutex;
 
 fn pr_key(owner: &str, repo: &str, pr_number: u64) -> PrKey {
     PrKey {
-        owner: owner.to_string(),
-        repo: repo.to_string(),
+        owner: owner.to_owned(),
+        repo: repo.to_owned(),
         pr_number,
     }
 }

@@ -1,9 +1,13 @@
 //! Resolve env-var-driven storage backings.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Concrete backing chosen for a per-store env var.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "preserve public enum discriminants"
+)]
 pub enum DbBacking {
     Sqlite(PathBuf),
     InMemory,
@@ -18,27 +22,25 @@ pub enum DbBacking {
 ///   * `xdg_state_home` (when `Some` and non-empty)
 ///   * `home/.local/state` (when `home` is `Some`)
 ///   * `.` (last-ditch fallback so this never panics)
+#[inline]
+#[must_use = "this function only composes a path"]
 pub fn compose_state_path(
-    xdg_state_home: Option<&std::path::Path>,
-    home: Option<&std::path::Path>,
+    xdg_state_home: Option<&Path>,
+    home: Option<&Path>,
     filename: &str,
 ) -> PathBuf {
-    let base: PathBuf = if let Some(p) = xdg_state_home.filter(|p| !p.as_os_str().is_empty()) {
-        p.to_path_buf()
-    } else if let Some(h) = home {
-        let mut p = h.to_path_buf();
-        p.push(".local/state");
-        p
+    let base = if let Some(state) = xdg_state_home.filter(|state| !state.as_os_str().is_empty()) {
+        state.to_path_buf()
+    } else if let Some(home_path) = home {
+        home_path.join(".local/state")
     } else {
         PathBuf::from(".")
     };
-    let mut path = base;
-    path.push("auto_review");
-    path.push(filename);
-    path
+    base.join("auto_review").join(filename)
 }
 
-pub fn resolve_db_backing(env_value: Option<&str>, default_path: &std::path::Path) -> DbBacking {
+#[inline]
+pub fn resolve_db_backing(env_value: Option<&str>, default_path: &Path) -> DbBacking {
     match env_value.map(str::trim) {
         Some(":memory:") => DbBacking::InMemory,
         Some(path) if !path.is_empty() => DbBacking::Sqlite(PathBuf::from(path)),
@@ -80,8 +82,8 @@ mod tests {
     #[test]
     fn compose_state_path_uses_xdg_state_home_when_present() {
         let path = compose_state_path(
-            Some(std::path::Path::new("/var/lib/state")),
-            Some(std::path::Path::new("/home/alice")),
+            Some(Path::new("/var/lib/state")),
+            Some(Path::new("/home/alice")),
             "learnings.db",
         );
         assert_eq!(
@@ -92,11 +94,7 @@ mod tests {
 
     #[test]
     fn compose_state_path_falls_back_to_home_dot_local_state() {
-        let path = compose_state_path(
-            None,
-            Some(std::path::Path::new("/home/alice")),
-            "history.db",
-        );
+        let path = compose_state_path(None, Some(Path::new("/home/alice")), "history.db");
         assert_eq!(
             path,
             PathBuf::from("/home/alice/.local/state/auto_review/history.db"),
@@ -109,8 +107,8 @@ mod tests {
         // an empty value should not become `/auto_review/...` at the
         // filesystem root.
         let path = compose_state_path(
-            Some(std::path::Path::new("")),
-            Some(std::path::Path::new("/home/alice")),
+            Some(Path::new("")),
+            Some(Path::new("/home/alice")),
             "vector.db",
         );
         assert_eq!(

@@ -1,3 +1,13 @@
+#![cfg_attr(
+    unix,
+    expect(
+        clippy::tests_outside_test_module,
+        clippy::unwrap_used,
+        clippy::expect_used,
+        reason = "Unix integration fixtures must initialize successfully and surface the expected startup errors"
+    )
+)]
+
 use ar_gateway::{run_from_env, StartupOptions};
 use std::env;
 use std::ffi::OsString;
@@ -9,7 +19,7 @@ static ENV_LOCK: Mutex<()> = Mutex::const_new(());
 #[cfg(unix)]
 #[tokio::test]
 async fn packaged_oci_runtime_passes_rootless_session_env_without_secret_like_ambient_env() {
-    use std::os::unix::fs::PermissionsExt;
+    use std::os::unix::fs::PermissionsExt as _;
 
     let _guard = ENV_LOCK.lock().await;
     let names = [
@@ -85,7 +95,7 @@ async fn packaged_oci_runtime_passes_rootless_session_env_without_secret_like_am
 #[cfg(unix)]
 #[tokio::test]
 async fn embedded_oci_gateway_reports_non_unicode_packaged_path_env_as_invalid() {
-    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::ffi::OsStringExt as _;
 
     let _guard = ENV_LOCK.lock().await;
     let names = [
@@ -143,7 +153,7 @@ async fn embedded_oci_gateway_reports_non_unicode_packaged_path_env_as_invalid()
 #[cfg(unix)]
 #[tokio::test]
 async fn embedded_oci_gateway_reports_non_unicode_inner_env_as_invalid() {
-    use std::os::unix::ffi::OsStringExt;
+    use std::os::unix::ffi::OsStringExt as _;
 
     let _guard = ENV_LOCK.lock().await;
     let names = [
@@ -203,8 +213,8 @@ async fn embedded_oci_gateway_reports_non_unicode_inner_env_as_invalid() {
 }
 
 fn restore_env<const N: usize>(saved: [(&str, Option<OsString>); N]) {
-    for (name, value) in saved {
-        if let Some(value) = value {
+    for (name, original_value) in saved {
+        if let Some(value) = original_value {
             env::set_var(name, value);
         } else {
             env::remove_var(name);

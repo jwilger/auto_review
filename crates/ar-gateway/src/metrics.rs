@@ -9,16 +9,18 @@
 //! ordering. We don't need stronger guarantees because the values
 //! are advisory, not load-bearing.
 
+use alloc::sync::Arc;
 use ar_orchestrator::{ReviewObservation, ReviewObserver};
-use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::Arc;
+use core::fmt::Write as _;
+use core::sync::atomic::{AtomicU64, Ordering};
+use core::time::Duration;
 
 /// Bucket bounds (in seconds) for the review-duration histogram.
 /// Tuned for review work: most fast on cached PRs, long-tail
 /// reaching minutes on big diffs with cloud LLMs. Operators wanting
 /// a different distribution can derive their own from the raw
 /// `review_duration_ms_sum + reviews_completed_count` pair.
-const DURATION_BUCKETS_SECS: &[f64] = &[1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0];
+const DURATION_BUCKETS_SECS: [f64; 8] = [1.0, 5.0, 15.0, 30.0, 60.0, 120.0, 300.0, 600.0];
 
 /// `reason` label values of `auto_review_local_diff_fallbacks_total`, in
 /// render order. The orchestrator's `ReviewObservation::LocalDiffFallback`
@@ -33,6 +35,14 @@ const LOCAL_DIFF_FALLBACK_REASONS: [&str; 7] = [
     "unknown",
 ];
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "Group counters by webhook intake, review outcomes, polling, and histogram"
+)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "Preserve public scalar counters while keeping bucket arrays internal"
+)]
 #[derive(Default)]
 pub struct Metrics {
     pub webhooks_pull_request: AtomicU64,
@@ -90,7 +100,7 @@ pub struct Metrics {
     /// Full reviews that used the host's diff because the local merge-base
     /// diff was unavailable, one counter per `LOCAL_DIFF_FALLBACK_REASONS`
     /// entry. Rendered as one labelled family.
-    local_diff_fallbacks: [AtomicU64; 7],
+    local_diff_fallbacks: [AtomicU64; LOCAL_DIFF_FALLBACK_REASONS.len()],
 
     // Poller counters: track the background ChatPoller's progress
     // so operators can see whether inline-thread mentions are being
@@ -108,14 +118,21 @@ pub struct Metrics {
     /// (Prometheus convention), so the last bucket equals
     /// `reviews_completed_count` and a `+Inf` line is emitted on
     /// scrape. Indexed by position in `DURATION_BUCKETS_SECS`.
-    duration_buckets: [AtomicU64; 8],
+    duration_buckets: [AtomicU64; DURATION_BUCKETS_SECS.len()],
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "Keep recording methods grouped by event source and exposition helpers by scrape order"
+)]
 impl Metrics {
+    #[inline]
+    #[must_use = "Keep the returned metrics instance to record or render counters"]
     pub fn new() -> Self {
         Self::default()
     }
 
+    #[inline]
     pub fn record_event(&self, event: &str) {
         let counter = match event {
             "pull_request" => &self.webhooks_pull_request,
@@ -126,41 +143,50 @@ impl Metrics {
         counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_signature_failure(&self) {
         self.webhook_signature_failures
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_payload_failure(&self) {
         self.webhook_payload_failures
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_rate_limited(&self) {
         self.webhook_rate_limited.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_duplicate(&self) {
         self.webhook_duplicates.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_job_dispatched(&self) {
         self.jobs_dispatched.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_chat_command(&self) {
         self.chat_commands_received.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_chat_unconfigured(&self) {
         self.chat_handler_unconfigured
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_review_started(&self) {
         self.reviews_started.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_review_succeeded(
         &self,
         duration_ms: u64,
@@ -178,6 +204,7 @@ impl Metrics {
         self.bucket_duration(duration_ms);
     }
 
+    #[inline]
     pub fn record_review_failed(&self, duration_ms: u64, error_class: &str) {
         let counter = match error_class {
             "forgejo" => &self.reviews_failed_forgejo,
@@ -188,7 +215,7 @@ impl Metrics {
             other => {
                 tracing::warn!(
                     error_class = other,
-                    "unknown review failure class; routing to reviews_failed_unknown — \
+                    "unknown review failure class; routing to reviews_failed_unknown \u{2014} \
                      update the metrics map to track this class explicitly"
                 );
                 &self.reviews_failed_unknown
@@ -205,54 +232,64 @@ impl Metrics {
     /// observed duration. Cumulative-bucket convention per the
     /// Prometheus exposition format.
     fn bucket_duration(&self, duration_ms: u64) {
-        let secs = duration_ms as f64 / 1000.0;
-        for (i, &bound) in DURATION_BUCKETS_SECS.iter().enumerate() {
+        let secs = millis_to_seconds(duration_ms);
+        for (&bound, counter) in DURATION_BUCKETS_SECS.iter().zip(&self.duration_buckets) {
             if secs <= bound {
-                self.duration_buckets[i].fetch_add(1, Ordering::Relaxed);
+                counter.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 
+    #[inline]
     pub fn record_poll_cycle(&self) {
         self.poll_cycles.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_poll_history_failure(&self) {
         self.poll_history_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_poll_pr_failure(&self) {
         self.poll_pr_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_poll_mention_dispatched(&self) {
         self.poll_mentions_dispatched
             .fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_poll_chat_failure(&self) {
         self.poll_chat_failures.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_review_queue_wait(&self) {
         self.review_queue_waits.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_local_diff_fallback(&self, reason: &str) {
-        let index = LOCAL_DIFF_FALLBACK_REASONS
+        let [.., unknown_counter] = self.local_diff_fallbacks.each_ref();
+        let counter = LOCAL_DIFF_FALLBACK_REASONS
             .iter()
-            .position(|known| *known == reason && *known != "unknown")
+            .zip(&self.local_diff_fallbacks)
+            .find_map(|(&known, counter)| (known == reason && known != "unknown").then_some(counter))
             .unwrap_or_else(|| {
                 tracing::warn!(
                     reason,
-                    "unknown local diff fallback reason; counting it as reason=\"unknown\" — \
+                    "unknown local diff fallback reason; counting it as reason=\"unknown\" \u{2014} \
                      update the metrics map to track this reason explicitly"
                 );
-                LOCAL_DIFF_FALLBACK_REASONS.len() - 1
+                unknown_counter
             });
-        self.local_diff_fallbacks[index].fetch_add(1, Ordering::Relaxed);
+        counter.fetch_add(1, Ordering::Relaxed);
     }
 
+    #[inline]
     pub fn record_review_skipped(&self, reason: &str) {
         let counter = match reason {
             "same_sha" => &self.reviews_skipped_same_sha,
@@ -261,7 +298,7 @@ impl Metrics {
             other => {
                 tracing::warn!(
                     reason = other,
-                    "unknown skip reason; routing to reviews_skipped_unknown — \
+                    "unknown skip reason; routing to reviews_skipped_unknown \u{2014} \
                      update the metrics map to track this reason explicitly"
                 );
                 &self.reviews_skipped_unknown
@@ -274,6 +311,12 @@ impl Metrics {
     /// One `# HELP` and `# TYPE` line per metric, then a single
     /// sample line. We don't emit `_created` timestamps; scrapers
     /// don't need them for counters.
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep the ordered scalar metric registry together"
+    )]
+    #[inline]
+    #[must_use = "The scrape body is returned, not written to an external sink"]
     pub fn render(&self) -> String {
         let mut out = String::with_capacity(1024);
         let metrics: &[(&str, &str, &AtomicU64)] = &[
@@ -443,7 +486,7 @@ impl Metrics {
                 &self.poll_chat_failures,
             ),
         ];
-        for (name, help, counter) in metrics {
+        for &(name, help, counter) in metrics {
             out.push_str("# HELP ");
             out.push_str(name);
             out.push(' ');
@@ -476,10 +519,12 @@ impl Metrics {
             .iter()
             .zip(&self.local_diff_fallbacks)
         {
-            out.push_str(&format!(
-                "auto_review_local_diff_fallbacks_total{{reason=\"{reason}\"}} {}\n",
+            // Writing these primitive values to a String cannot fail.
+            let _write_result = writeln!(
+                out,
+                "auto_review_local_diff_fallbacks_total{{reason=\"{reason}\"}} {}",
                 counter.load(Ordering::Relaxed)
-            ));
+            );
         }
     }
 
@@ -492,39 +537,24 @@ impl Metrics {
              pipeline start through commit-status post.\n",
         );
         out.push_str("# TYPE auto_review_review_duration_seconds histogram\n");
-        for (i, &bound) in DURATION_BUCKETS_SECS.iter().enumerate() {
-            let count = self.duration_buckets[i].load(Ordering::Relaxed);
-            // Use `{:.3}` so 0.5 doesn't render as `0` and integer
-            // bounds don't grow trailing zeros beyond reason.
-            out.push_str(&format!(
-                "auto_review_review_duration_seconds_bucket{{le=\"{}\"}} {}\n",
-                fmt_bucket_bound(bound),
-                count
-            ));
+        // Writing these primitive values to a String cannot fail.
+        for (&bound, counter) in DURATION_BUCKETS_SECS.iter().zip(&self.duration_buckets) {
+            let count = counter.load(Ordering::Relaxed);
+            let _write_result = writeln!(
+                out,
+                "auto_review_review_duration_seconds_bucket{{le=\"{}\"}} {count}",
+                fmt_bucket_bound(bound)
+            );
         }
         let total = self.reviews_completed_count.load(Ordering::Relaxed);
-        out.push_str(&format!(
-            "auto_review_review_duration_seconds_bucket{{le=\"+Inf\"}} {total}\n"
-        ));
+        let _write_result = writeln!(
+            out,
+            "auto_review_review_duration_seconds_bucket{{le=\"+Inf\"}} {total}"
+        );
         let sum_ms = self.review_duration_ms_sum.load(Ordering::Relaxed);
-        let sum_secs = sum_ms as f64 / 1000.0;
-        out.push_str(&format!(
-            "auto_review_review_duration_seconds_sum {sum_secs}\n"
-        ));
-        out.push_str(&format!(
-            "auto_review_review_duration_seconds_count {total}\n"
-        ));
-    }
-}
-
-/// Render a bucket bound the way Prometheus expects: integers as
-/// `60`, fractions as `0.5`. Avoids `60.0` which is technically
-/// permitted but visually noisy.
-fn fmt_bucket_bound(b: f64) -> String {
-    if b == b.trunc() {
-        format!("{}", b as i64)
-    } else {
-        format!("{b}")
+        let sum_secs = millis_to_seconds(sum_ms);
+        let _sum_result = writeln!(out, "auto_review_review_duration_seconds_sum {sum_secs}");
+        let _count_result = writeln!(out, "auto_review_review_duration_seconds_count {total}");
     }
 }
 
@@ -532,17 +562,28 @@ fn fmt_bucket_bound(b: f64) -> String {
 /// gateway-owned [`Metrics`]. Wire one of these into
 /// `SpawningDispatcher::with_observer` and review outcomes flow
 /// straight to `/metrics`.
+#[expect(
+    clippy::module_name_repetitions,
+    reason = "Preserve the public MetricsObserver name"
+)]
 pub struct MetricsObserver {
+    /// Shared counters updated by observed review events.
     metrics: Arc<Metrics>,
 }
 
 impl MetricsObserver {
+    #[inline]
     pub fn new(metrics: Arc<Metrics>) -> Self {
         Self { metrics }
     }
 }
 
 impl ReviewObserver for MetricsObserver {
+    #[expect(
+        clippy::as_conversions,
+        reason = "Finding counts are usize, which fits in u64 on supported targets"
+    )]
+    #[inline]
     fn record(&self, observation: ReviewObservation) {
         match observation {
             ReviewObservation::Started => self.metrics.record_review_started(),
@@ -551,7 +592,7 @@ impl ReviewObserver for MetricsObserver {
                 findings_count,
                 verifier_dropped,
             } => self.metrics.record_review_succeeded(
-                duration.as_millis() as u64,
+                duration_millis(duration),
                 findings_count as u64,
                 verifier_dropped as u64,
             ),
@@ -560,7 +601,7 @@ impl ReviewObserver for MetricsObserver {
                 error_class,
             } => self
                 .metrics
-                .record_review_failed(duration.as_millis() as u64, error_class),
+                .record_review_failed(duration_millis(duration), error_class),
             ReviewObservation::Skipped { reason } => self.metrics.record_review_skipped(reason),
             ReviewObservation::QueueWait => self.metrics.record_review_queue_wait(),
             ReviewObservation::LocalDiffFallback { reason } => {
@@ -570,9 +611,51 @@ impl ReviewObserver for MetricsObserver {
     }
 }
 
+/// Convert observer durations to the millisecond counter representation.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    reason = "Preserve the low 64 bits for durations beyond the counter range"
+)]
+fn duration_millis(duration: Duration) -> u64 {
+    duration.as_millis() as u64
+}
+
+/// Render a bucket bound as `60` for integers or `0.5` for fractions.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_possible_truncation,
+    clippy::float_cmp,
+    reason = "Configured bounds fit in i64; exact integrality selects the integer rendering"
+)]
+fn fmt_bucket_bound(bound: f64) -> String {
+    if bound == bound.trunc() {
+        format!("{}", bound as i64)
+    } else {
+        format!("{bound}")
+    }
+}
+
+/// Convert the millisecond counter to Prometheus histogram seconds.
+#[expect(
+    clippy::as_conversions,
+    clippy::cast_precision_loss,
+    clippy::float_arithmetic,
+    reason = "Preserve the histogram's existing cast-then-divide rounding"
+)]
+fn millis_to_seconds(millis: u64) -> f64 {
+    let millis_per_second: f64 = 1_000.0;
+    millis as f64 / millis_per_second
+}
+
 #[cfg(test)]
+#[expect(
+    clippy::min_ident_chars,
+    reason = "m is the shared convention for the metrics fixture"
+)]
 mod tests {
     use super::*;
+    use alloc::collections::BTreeSet;
 
     #[test]
     fn render_exposes_every_known_counter() {
@@ -647,13 +730,12 @@ mod tests {
         // Also assert no unexpected counter families appear — if
         // someone adds one without updating EXPECTED, this catches
         // drift in the other direction.
-        let actual: std::collections::BTreeSet<&str> = out
+        let actual: BTreeSet<&str> = out
             .lines()
             .filter_map(|line| line.strip_prefix("# TYPE "))
             .filter_map(|rest| rest.strip_suffix(" counter"))
             .collect();
-        let expected: std::collections::BTreeSet<&str> =
-            EXPECTED.iter().chain(EXPECTED_LABELLED).copied().collect();
+        let expected: BTreeSet<&str> = EXPECTED.iter().chain(EXPECTED_LABELLED).copied().collect();
         let extra: Vec<&&str> = actual.difference(&expected).collect();
         assert!(
             extra.is_empty(),
@@ -690,12 +772,13 @@ mod tests {
     #[test]
     fn duration_histogram_buckets_cumulatively() {
         let m = Arc::new(Metrics::new());
-        let obs = MetricsObserver::new(m.clone());
+        let obs = MetricsObserver::new(Arc::clone(&m));
         // 500ms (in 1s bucket and up), 3s (in 5s+), 45s (in 60s+),
         // 200s (in 300s+), 700s (only +Inf).
-        for d in [500u64, 3000, 45_000, 200_000, 700_000] {
+        let durations_ms: [u64; 5] = [500, 3000, 45_000, 200_000, 700_000];
+        for duration_ms in durations_ms {
             obs.record(ReviewObservation::Succeeded {
-                duration: std::time::Duration::from_millis(d),
+                duration: Duration::from_millis(duration_ms),
                 findings_count: 0,
                 verifier_dropped: 0,
             });
@@ -730,9 +813,9 @@ mod tests {
     #[test]
     fn duration_histogram_includes_failed_reviews() {
         let m = Arc::new(Metrics::new());
-        let obs = MetricsObserver::new(m.clone());
+        let obs = MetricsObserver::new(Arc::clone(&m));
         obs.record(ReviewObservation::Failed {
-            duration: std::time::Duration::from_millis(2500),
+            duration: Duration::from_millis(2500),
             error_class: "llm",
         });
         let out = m.render();
@@ -745,7 +828,7 @@ mod tests {
     #[test]
     fn duration_histogram_skipped_reviews_do_not_register() {
         let m = Arc::new(Metrics::new());
-        let obs = MetricsObserver::new(m.clone());
+        let obs = MetricsObserver::new(Arc::clone(&m));
         obs.record(ReviewObservation::Skipped { reason: "same_sha" });
         let out = m.render();
         assert!(out.contains("auto_review_review_duration_seconds_bucket{le=\"+Inf\"} 0\n"));
@@ -770,7 +853,7 @@ mod tests {
     #[test]
     fn queue_wait_observation_increments_counter() {
         let m = Arc::new(Metrics::new());
-        let obs = MetricsObserver::new(m.clone());
+        let obs = MetricsObserver::new(Arc::clone(&m));
         obs.record(ReviewObservation::QueueWait);
         obs.record(ReviewObservation::QueueWait);
         let out = m.render();
@@ -785,21 +868,21 @@ mod tests {
     #[test]
     fn verifier_dropped_counter_sums_across_reviews() {
         let m = Arc::new(Metrics::new());
-        let obs = MetricsObserver::new(m.clone());
+        let obs = MetricsObserver::new(Arc::clone(&m));
         obs.record(ReviewObservation::Succeeded {
-            duration: std::time::Duration::from_millis(100),
+            duration: Duration::from_millis(100),
             findings_count: 5,
             verifier_dropped: 2,
         });
         obs.record(ReviewObservation::Succeeded {
-            duration: std::time::Duration::from_millis(100),
+            duration: Duration::from_millis(100),
             findings_count: 3,
             verifier_dropped: 1,
         });
         // Failed observations don't carry verifier_dropped (no
         // post-verifier output to compare against).
         obs.record(ReviewObservation::Failed {
-            duration: std::time::Duration::from_millis(50),
+            duration: Duration::from_millis(50),
             error_class: "llm",
         });
         let out = m.render();
@@ -815,28 +898,28 @@ mod tests {
     #[test]
     fn review_outcome_counters_route_by_class() {
         let m = Arc::new(Metrics::new());
-        let obs = MetricsObserver::new(m.clone());
+        let obs = MetricsObserver::new(Arc::clone(&m));
 
         obs.record(ReviewObservation::Started);
         obs.record(ReviewObservation::Started);
 
         obs.record(ReviewObservation::Succeeded {
-            duration: std::time::Duration::from_millis(1500),
+            duration: Duration::from_millis(1500),
             findings_count: 3,
             verifier_dropped: 0,
         });
         obs.record(ReviewObservation::Succeeded {
-            duration: std::time::Duration::from_millis(500),
+            duration: Duration::from_millis(500),
             findings_count: 1,
             verifier_dropped: 0,
         });
 
         obs.record(ReviewObservation::Failed {
-            duration: std::time::Duration::from_millis(800),
+            duration: Duration::from_millis(800),
             error_class: "llm",
         });
         obs.record(ReviewObservation::Failed {
-            duration: std::time::Duration::from_millis(200),
+            duration: Duration::from_millis(200),
             error_class: "workspace",
         });
 
@@ -945,7 +1028,7 @@ mod tests {
     #[test]
     fn local_diff_fallbacks_are_counted_by_reason() {
         let m = Arc::new(Metrics::new());
-        let obs = MetricsObserver::new(m.clone());
+        let obs = MetricsObserver::new(Arc::clone(&m));
         obs.record(ReviewObservation::LocalDiffFallback {
             reason: "history_cap",
         });

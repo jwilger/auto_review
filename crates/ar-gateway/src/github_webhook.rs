@@ -1,6 +1,8 @@
 //! GitHub App webhook intake and GitHub CI-review routing.
 
+use crate::dedup::CheckResult;
 use crate::{AppState, GitHubDeps};
+use alloc::sync::Arc;
 use ar_chat::{parse_chat_command, ChatCommand, ChatContext, ChatHandler};
 use ar_github::{
     verify_webhook_signature, InstallationRef, IssueCommentEvent, PullRequestReviewCommentEvent,
@@ -9,11 +11,30 @@ use ar_github::{
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
-use axum::response::{IntoResponse, Response};
+use axum::response::{IntoResponse as _, Response};
 
+/// Header carrying the HMAC signature.
 const SIGNATURE_HEADER: &str = "x-hub-signature-256";
+/// Header identifying the webhook event type.
 const EVENT_HEADER: &str = "x-github-event";
+/// Header carrying the delivery identifier used for deduplication.
 const DELIVERY_HEADER: &str = "x-github-delivery";
+
+/// Fields shared by issue comments and pull request review comments.
+struct MentionEvent<'event> {
+    /// Event action, such as `created`.
+    action: &'event str,
+    /// Comment text.
+    body: &'event str,
+    /// GitHub App installation supplied with the event.
+    installation: Option<InstallationRef>,
+    /// Pull request number within the repository.
+    pr_number: u64,
+    /// Repository containing the pull request.
+    repository: &'event WebhookRepository,
+    /// Account that sent the event.
+    sender: &'event WebhookUser,
+}
 
 /// `POST /webhooks/github`.
 ///
@@ -24,6 +45,11 @@ const DELIVERY_HEADER: &str = "x-github-delivery";
 /// 4. Routes `issue_comment` and `pull_request_review_comment` mentions to
 ///    the chat handler. Pull request events are intake-only: semantic review
 ///    is dispatched from CI through `/reviews/ci` (ADR-0012).
+#[inline]
+#[expect(
+    clippy::too_many_lines,
+    reason = "Keep the intake checks and event routing in their processing order"
+)]
 pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let Some(github) = state.github.clone() else {
         return reject(StatusCode::NOT_FOUND, "github webhooks not configured");
@@ -70,11 +96,11 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
             // delivery UUIDs in a shared dedup store.
             let key = format!("github:{delivery_id}");
             match dedup.check_and_record(&key).await {
-                Ok(crate::dedup::CheckResult::Duplicate) => {
+                Ok(CheckResult::Duplicate) => {
                     state.metrics.record_duplicate();
                     return (StatusCode::OK, "duplicate").into_response();
                 }
-                Ok(crate::dedup::CheckResult::FirstSight) => {}
+                Ok(CheckResult::FirstSight) => {}
                 Err(error) => {
                     // Fail open, matching the Forgejo route.
                     tracing::warn!(
@@ -92,7 +118,7 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
         "issue_comment" => {
             let evt: IssueCommentEvent = match serde_json::from_slice(&body) {
                 Ok(evt) => evt,
-                Err(error) => return payload_failure(&state, error),
+                Err(error) => return payload_failure(&state, &error),
             };
             if !evt.is_pull_request_comment() {
                 return accepted();
@@ -114,7 +140,7 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
         "pull_request_review_comment" => {
             let evt: PullRequestReviewCommentEvent = match serde_json::from_slice(&body) {
                 Ok(evt) => evt,
-                Err(error) => return payload_failure(&state, error),
+                Err(error) => return payload_failure(&state, &error),
             };
             handle_mention(
                 &state,
@@ -137,15 +163,7 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
     }
 }
 
-struct MentionEvent<'a> {
-    action: &'a str,
-    body: &'a str,
-    sender: &'a WebhookUser,
-    repository: &'a WebhookRepository,
-    installation: Option<InstallationRef>,
-    pr_number: u64,
-}
-
+/// Filters comment events and hands recognized mentions off to the chat handler.
 async fn handle_mention(state: &AppState, github: &GitHubDeps, evt: MentionEvent<'_>) -> Response {
     // Edited and deleted comments must not re-fire commands.
     if evt.action != "created" {
@@ -182,9 +200,9 @@ async fn handle_mention(state: &AppState, github: &GitHubDeps, evt: MentionEvent
 
     let issue_number = evt.pr_number;
     let commenter_login = evt.sender.login.clone();
-    let host = github.host.clone();
-    let dispatcher = github.dispatcher.clone();
-    let bot_login = github.bot_login.clone();
+    let host = Arc::clone(&github.host);
+    let dispatcher = Arc::clone(&github.dispatcher);
+    let bot_login = Arc::clone(&github.bot_login);
     tokio::spawn(async move {
         let handler = ChatHandler {
             host: host.as_ref(),
@@ -210,45 +228,60 @@ async fn handle_mention(state: &AppState, github: &GitHubDeps, evt: MentionEvent
     accepted()
 }
 
-fn payload_failure(state: &AppState, error: serde_json::Error) -> Response {
+/// Records a payload decode failure and returns its HTTP response.
+fn payload_failure(state: &AppState, error: &serde_json::Error) -> Response {
     state.metrics.record_payload_failure();
     reject(StatusCode::BAD_REQUEST, &format!("payload decode: {error}"))
 }
 
+/// Acknowledges an event with an empty response body.
 fn accepted() -> Response {
     (StatusCode::ACCEPTED, "").into_response()
 }
 
+/// Logs a rejected request and returns its status and message.
 fn reject(status: StatusCode, msg: &str) -> Response {
     tracing::warn!(%status, msg, "rejecting github webhook");
-    (status, msg.to_string()).into_response()
+    (status, msg.to_owned()).into_response()
 }
 
 #[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    reason = "Invalid fixtures or failed test requests should fail the test immediately"
+)]
 mod tests {
     use crate::{build_router, AppState, GitHubDeps};
+    use alloc::sync::Arc;
     use ar_orchestrator::{JobDispatcher, NoOpDispatcher, ReviewJob};
     use async_trait::async_trait;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
-    use std::sync::{Arc, Mutex};
-    use tower::ServiceExt;
+    use core::time::Duration;
+    use std::sync::Mutex;
+    use tokio::time::sleep;
+    use tower::ServiceExt as _;
     use wiremock::matchers::{header, method, path};
     use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const APP_ID: u64 = 12_345;
+    const COMMENT_ID: u64 = 1;
+    const INSTALLATION_ID: u64 = 42;
+    const PR_NUMBER: u64 = 42;
 
     struct RecordingDispatcher {
         seen: Mutex<Vec<ReviewJob>>,
     }
 
     impl RecordingDispatcher {
+        fn jobs(&self) -> Vec<ReviewJob> {
+            self.seen.lock().unwrap().clone()
+        }
+
         fn new() -> Arc<Self> {
             Arc::new(Self {
                 seen: Mutex::new(Vec::new()),
             })
-        }
-
-        fn jobs(&self) -> Vec<ReviewJob> {
-            self.seen.lock().unwrap().clone()
         }
     }
 
@@ -259,6 +292,12 @@ mod tests {
         }
     }
 
+    #[expect(
+        clippy::arithmetic_side_effects,
+        clippy::expect_used,
+        clippy::string_slice,
+        reason = "Extract the fixed ASCII PEM fixture using its known markers"
+    )]
     fn test_private_key() -> &'static str {
         let source = include_str!("../../ar-github/tests/app_jwt.rs");
         let start = source
@@ -269,6 +308,10 @@ mod tests {
         &source[start..end]
     }
 
+    #[expect(
+        clippy::expect_used,
+        reason = "The fixed test key and mock URL must construct a valid client"
+    )]
     fn app_host(base: &str) -> Arc<ar_github::AppReviewHost> {
         let signer = ar_github::GitHubAppJwt::from_rsa_pem(12345, test_private_key().as_bytes())
             .expect("signer");
@@ -299,7 +342,7 @@ mod tests {
             .and(path("/repos/o/r/pulls/42"))
             .and(header("authorization", "Bearer ghs_installation"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "number": 42,
+                "number": PR_NUMBER,
                 "title": "feat: github review",
                 "body": null,
                 "draft": false,
@@ -312,6 +355,10 @@ mod tests {
     }
 
     #[tokio::test]
+    #[expect(
+        clippy::indexing_slicing,
+        reason = "The test asserts the exact job count before indexing"
+    )]
     async fn ci_review_endpoint_routes_github_provider_to_github_host_and_dispatcher() {
         let github = MockServer::start().await;
         mount_installation_token(&github, 42).await;
@@ -322,12 +369,12 @@ mod tests {
         let app = build_router(
             AppState::new(
                 "forgejo-secret",
-                forgejo_dispatcher.clone() as Arc<dyn JobDispatcher>,
+                Arc::<RecordingDispatcher>::clone(&forgejo_dispatcher),
             )
             .with_ci_review_token("action-token")
             .with_github(github_deps(
                 &github.uri(),
-                github_dispatcher.clone() as Arc<dyn JobDispatcher>,
+                Arc::<RecordingDispatcher>::clone(&github_dispatcher),
             )),
         );
 
@@ -337,10 +384,10 @@ mod tests {
             .body(Body::from(
                 serde_json::to_vec(&serde_json::json!({
                     "provider": "github",
-                    "installation_id": 42,
+                    "installation_id": INSTALLATION_ID,
                     "owner": "o",
                     "repo": "r",
-                    "pr_number": 42,
+                    "pr_number": PR_NUMBER,
                     "head_sha": "deadbeef"
                 }))
                 .unwrap(),
@@ -360,7 +407,7 @@ mod tests {
     }
 
     fn sign(secret: &str, body: &[u8]) -> String {
-        use hmac::{Hmac, KeyInit, Mac};
+        use hmac::{Hmac, KeyInit as _, Mac as _};
         let mut mac = Hmac::<sha2::Sha256>::new_from_slice(secret.as_bytes()).unwrap();
         mac.update(body);
         format!("sha256={}", hex::encode(mac.finalize().into_bytes()))
@@ -371,8 +418,8 @@ mod tests {
             .header("x-github-event", event)
             .header("x-github-delivery", "delivery-1")
             .header("content-type", "application/json");
-        if let Some(signature) = signature {
-            req = req.header("x-hub-signature-256", signature);
+        if let Some(signature_value) = signature {
+            req = req.header("x-hub-signature-256", signature_value);
         }
         req.body(Body::from(body.to_vec())).unwrap()
     }
@@ -404,7 +451,7 @@ mod tests {
         );
         let body = br#"{"zen":"hi"}"#;
         let empty_key_signature = {
-            use hmac::{Hmac, KeyInit, Mac};
+            use hmac::{Hmac, KeyInit as _, Mac as _};
             let mut mac = Hmac::<sha2::Sha256>::new_from_slice(b"").unwrap();
             mac.update(body);
             hex::encode(mac.finalize().into_bytes())
@@ -444,7 +491,7 @@ mod tests {
     #[tokio::test]
     async fn github_webhook_rejects_missing_or_mismatched_signature() {
         let state = state_with_github("http://127.0.0.1:9");
-        let metrics = state.metrics.clone();
+        let metrics = Arc::clone(&state.metrics);
         let app = build_router(state);
         let body = br#"{"zen":"hi"}"#;
 
@@ -490,7 +537,7 @@ mod tests {
     #[tokio::test]
     async fn github_webhook_ignores_bot_authored_mentions() {
         let state = state_with_github("http://127.0.0.1:9");
-        let metrics = state.metrics.clone();
+        let metrics = Arc::clone(&state.metrics);
         let app = build_router(state);
         let body = issue_comment_payload("@auto-review help", "other-bot[bot]", "Bot");
 
@@ -518,7 +565,9 @@ mod tests {
         Mock::given(method("POST"))
             .and(path("/repos/o/r/issues/42/comments"))
             .and(header("authorization", "Bearer ghs_installation"))
-            .respond_with(ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": 1})))
+            .respond_with(
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": COMMENT_ID})),
+            )
             .mount(&github)
             .await;
         let deps =
@@ -527,7 +576,7 @@ mod tests {
                 learnings: Arc::new(ar_index::InMemoryLearningsStore::new()),
             });
         let state = AppState::new("forgejo-secret", Arc::new(NoOpDispatcher)).with_github(deps);
-        let metrics = state.metrics.clone();
+        let metrics = Arc::clone(&state.metrics);
         let app = build_router(state);
         let body = issue_comment_payload("@auto-review help", "alice", "User");
 
@@ -557,14 +606,14 @@ mod tests {
         Mock::given(method("GET"))
             .and(path("/app"))
             .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "id": 12345,
+                "id": APP_ID,
                 "slug": "auto-review"
             })))
             .mount(&github)
             .await;
         let probe = Arc::new(crate::ReadinessProbe::github_with_ttl(
             app_host(&github.uri()),
-            std::time::Duration::from_secs(60),
+            Duration::from_secs(60),
         ));
         let app = build_router(AppState::new("", Arc::new(NoOpDispatcher)).with_readiness(probe));
 
@@ -582,7 +631,9 @@ mod tests {
     }
 
     async fn wait_for_request(server: &MockServer, request_path: &str) -> bool {
-        for _ in 0..100 {
+        let first_attempt: i32 = 0;
+        let attempt_limit: i32 = 100;
+        for _ in first_attempt..attempt_limit {
             let seen = server
                 .received_requests()
                 .await
@@ -592,7 +643,7 @@ mod tests {
             if seen {
                 return true;
             }
-            tokio::time::sleep(std::time::Duration::from_millis(20)).await;
+            sleep(Duration::from_millis(20)).await;
         }
         false
     }
