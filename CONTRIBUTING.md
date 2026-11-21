@@ -63,6 +63,8 @@ Advisory checks require network access, so `just advisories` stays out
 of `just ci`; run it when bumping a dep. Land no commit that fails any
 required check.
 
+Use `bacon`, `bacon clippy`, or `bacon test` for focused Rust check loops.
+
 ### Required checks and repository settings
 
 Every pull request to `main` must pass these GitHub Actions checks before
@@ -156,11 +158,25 @@ everyone (and CI) picks up the same versions.
    workflow is the preferred approach for new features and bugfixes.
 3. Keep commits small and focused. Each commit should leave the tree
    green (tests pass, clippy clean, fmt clean).
-4. Mention rationale in the commit body, not just the what. The
-   project's history doubles as design documentation; future
-   contributors (including future you) will be grateful.
+4. Use Conventional Commits (`feat(scope):`, `fix(scope):`, `docs:`,
+   `chore:`, `refactor:`, or `test:`) and explain why in the commit body.
+   Use a conventional title for the whole PR and cover all its changes
+   under **Why**, **What**, and **Validation**. Release notes come from
+   merged conventional commits through the release PR.
+
+Use `gh` for this GitHub repository. For test and deployment Forgejo
+instances, use Forgejo MCP when available, or `tea` otherwise.
+`FORGEJO_TOKEN` belongs in the environment, never in code or commits.
 
 ## Testing approach
+
+Confirm one focused RED fails for the intended reason before the smallest
+production edit, then rerun to GREEN. Split multiple failures into separate
+cycles. User-visible changes need a regression through the affected public
+interface. Don't assert prose wording for docs-only content; justify any
+docs-reading contract test next to the test. Update the corresponding
+red-team test when a change affects a documented threat in
+[`docs/THREAT-MODEL.md`](docs/THREAT-MODEL.md).
 
 - **Unit tests** for pure functions live alongside the code in
   `#[cfg(test)] mod tests` blocks. Prefer `#[test]` for sync code and
@@ -174,6 +190,20 @@ everyone (and CI) picks up the same versions.
 - **End-to-end behaviour** that depends on real `git`, real Forgejo,
   or real LLMs is exercised via `auto-review review once` and is
   not currently covered by automated tests.
+
+## Rust and operations conventions
+
+- Use `read_non_empty_env(name)` and `parse_env::<T>(name)` rather than raw
+  env parsing in `crates/ar-gateway/src/startup.rs`.
+- Cap provider error bodies with `ar_llm::cap_for_error` or an equivalent helper.
+- No `unwrap()` or `expect()` outside `#[cfg(test)]`.
+- Update `deploy/prometheus/auto_review.rules.yaml` and
+  `deploy/grafana/auto_review.dashboard.json` by hand for metrics changes;
+  no automated test cross-checks them against `/metrics`.
+- Read [`docs/CRATES.md`](docs/CRATES.md) before changing public behavior.
+  For operator-facing changes see [`docs/CLI.md`](docs/CLI.md),
+  [`docs/OPERATIONS.md`](docs/OPERATIONS.md), and
+  [`docs/DEPLOYMENT.md`](docs/DEPLOYMENT.md).
 
 ## Architecture overview
 

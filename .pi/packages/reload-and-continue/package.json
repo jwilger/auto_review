@@ -1,0 +1,8 @@
+{
+  "name": "auto-review-pi-reload-and-continue",
+  "version": "0.1.0",
+  "private": true,
+  "pi": {
+    "extensions": ["./index.ts"]
+  }
+}
