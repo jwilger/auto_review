@@ -43,7 +43,7 @@ just promtool          # promtool check and unit tests of the Prometheus rules
 just conflict-markers  # no unresolved merge conflict markers in tracked files
 
 # Checks that `just ci` leaves out:
-just advisories   # cargo deny check advisories; needs network
+just advisories   # needs network for the RustSec advisory database
 just flake-check  # nix flake check; builds the packages
 ```
 
@@ -53,7 +53,10 @@ a workspace build, shellcheck on `scripts/release`, actionlint on
 `.github/workflows/`, `promtool check rules` plus the promtool unit tests in
 `deploy/prometheus/auto_review.rules.test.yaml` (which catch an alert
 expression that can never match), and a conflict-marker scan of tracked
-files.
+files. Clippy, tests, builds, and dependency checks (including advisories)
+use `--locked` locally and in CI. If a manifest change requires a lockfile
+update, update and commit `Cargo.lock` with it; checks will not rewrite it.
+
 `just test` runs the suite with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
 `GIT_COMMON_DIR`, `GIT_OBJECT_DIRECTORY`, `GIT_ALTERNATE_OBJECT_DIRECTORIES`
 and `GIT_PREFIX` unset: git exports them to its hooks, and a test fixture that
@@ -73,7 +76,7 @@ it can merge:
 | Check | What it runs |
 |---|---|
 | Format check, Clippy, Test, Dependency policy, Build | `just fmt`, `just clippy`, `just test`, `just deny`, `just build` |
-| Dependency advisories | `just advisories` (`cargo deny check advisories`); `.github/workflows/advisories.yml` also runs it daily against `main` so new advisories surface without a code change |
+| Dependency advisories | `just advisories`; `.github/workflows/advisories.yml` also runs it daily against `main` so new advisories surface without a code change |
 | Shellcheck | `just shellcheck` on `scripts/release` |
 | Actionlint | `just actionlint` on `.github/workflows/` |
 | Promtool | `just promtool`: `promtool check rules` and the promtool unit tests (`deploy/prometheus/auto_review.rules.test.yaml`) of the Prometheus rules in `deploy/prometheus/auto_review.rules.yaml` |

@@ -6,7 +6,7 @@ fmt:
 	cargo fmt --all -- --check
 
 clippy:
-	cargo clippy --workspace --all-targets -- -D warnings
+	cargo clippy --locked --workspace --all-targets -- -D warnings
 
 # git exports GIT_DIR and friends to its hooks, so under the pre-push hook a
 # test that spawns git would act on this repository (one fixture's `git init`
@@ -15,17 +15,17 @@ clippy:
 test:
 	env -u GIT_DIR -u GIT_WORK_TREE -u GIT_INDEX_FILE -u GIT_COMMON_DIR \
 		-u GIT_OBJECT_DIRECTORY -u GIT_ALTERNATE_OBJECT_DIRECTORIES -u GIT_PREFIX \
-		cargo nextest run --workspace --no-tests=pass
+		cargo nextest run --locked --workspace --no-tests=pass
 
 deny:
-	cargo deny check licenses bans sources
+	cargo deny --locked check licenses bans sources
 
 # Needs network: fetches the RustSec advisory database.
 advisories:
-	cargo deny check advisories
+	cargo deny --locked check advisories
 
 build:
-	cargo build --workspace
+	cargo build --locked --workspace
 
 shellcheck:
 	shellcheck scripts/release
