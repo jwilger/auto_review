@@ -11,6 +11,8 @@ use ar_review::{
     WorkspaceError,
 };
 use async_trait::async_trait;
+use core::future::{ready, Future};
+use core::pin::Pin;
 use core::time::Duration;
 use std::env;
 use std::path::Path;
@@ -148,6 +150,9 @@ impl From<&PullRequestEvent> for ReviewJob {
     }
 }
 
+/// Resolves a job at worker admission, or returns `None` to skip it.
+pub type ReviewPreparation = Pin<Box<dyn Future<Output = Option<ReviewJob>> + Send>>;
+
 /// Hands a [`ReviewJob`] off for processing. The webhook handler calls
 /// `dispatch` and returns immediately; the actual review may run for
 /// minutes in the background.
@@ -159,6 +164,14 @@ impl From<&PullRequestEvent> for ReviewJob {
 )]
 pub trait JobDispatcher: Send + Sync {
     async fn dispatch(&self, job: ReviewJob);
+
+    /// Prepare a job immediately before a worker accepts it.
+    #[inline]
+    async fn dispatch_when_ready(&self, prepare: ReviewPreparation) {
+        if let Some(job) = prepare.await {
+            self.dispatch(job).await;
+        }
+    }
 }
 
 /// Discards every job. Useful for tests that exercise the gateway's
@@ -407,6 +420,11 @@ impl SpawningDispatcher {
 impl JobDispatcher for SpawningDispatcher {
     #[inline]
     async fn dispatch(&self, job: ReviewJob) {
+        self.dispatch_when_ready(Box::pin(ready(Some(job)))).await;
+    }
+
+    #[inline]
+    async fn dispatch_when_ready(&self, prepare: ReviewPreparation) {
         let forgejo = Arc::clone(&self.host);
         let llm = Arc::clone(&self.llm);
         let base = Arc::clone(&self.forgejo_base);
@@ -421,14 +439,6 @@ impl JobDispatcher for SpawningDispatcher {
         // JoinHandle so panics or cancellations get logged AND surface to
         // the PR as a failure status — silent crashes make ops debugging
         // miserable.
-        let repo = format!("{}/{}", job.owner, job.repo);
-        let pr = job.pr_number;
-        let owner_for_status = job.owner.clone();
-        let repo_for_status = job.repo.clone();
-        let sha_for_status = job.head_sha.clone();
-        let forgejo_for_status = Arc::clone(&forgejo);
-        let observer_for_queue = observer.clone();
-        let observer_for_panic = observer.clone();
         tokio::spawn(async move {
             // Acquire the concurrency permit BEFORE the inner spawn
             // so the wait actually limits in-flight reviews. Held
@@ -442,7 +452,7 @@ impl JobDispatcher for SpawningDispatcher {
                     // change between the check and the acquire) but
                     // approximate is fine for an ops counter.
                     if sem.available_permits() == 0 {
-                        if let Some(obs) = observer_for_queue.as_deref() {
+                        if let Some(obs) = observer.as_deref() {
                             obs.record(ReviewObservation::QueueWait);
                         }
                     }
@@ -461,6 +471,16 @@ impl JobDispatcher for SpawningDispatcher {
                 }
                 None => None,
             };
+            let Some(job) = prepare.await else {
+                return;
+            };
+            let repo = format!("{}/{}", job.owner, job.repo);
+            let pr = job.pr_number;
+            let owner_for_status = job.owner.clone();
+            let repo_for_status = job.repo.clone();
+            let sha_for_status = job.head_sha.clone();
+            let forgejo_for_status = Arc::clone(&forgejo);
+            let observer_for_panic = observer.clone();
             let panic_started = Instant::now();
             let inner = tokio::spawn(async move {
                 run_review_job(
@@ -3409,6 +3429,37 @@ the repository instead.\",\"errors\":[{\"resource\":\"PullRequest\",\"field\":\"
         // (A third acquire would block — we don't test that path
         // here, since the timing's flaky; the prod code path
         // covers it via the spawned task.)
+    }
+
+    #[tokio::test]
+    async fn prepares_review_only_after_worker_admission() {
+        use tokio::sync::oneshot;
+        use tokio::time::timeout;
+
+        let forgejo = Arc::new(ForgejoClient::new("http://x", "tok").unwrap());
+        let dispatcher =
+            SpawningDispatcher::new(forgejo, Arc::new(Router::new()), "http://x", "tok")
+                .with_concurrency_limit(1);
+        let semaphore = dispatcher.concurrency_limit.as_ref().unwrap();
+        let permit = semaphore.acquire().await.unwrap();
+        let (prepared, mut notification) = oneshot::channel();
+        dispatcher
+            .dispatch_when_ready(Box::pin(async move {
+                prepared.send(()).unwrap();
+                None
+            }))
+            .await;
+        assert!(
+            timeout(Duration::from_millis(25), &mut notification)
+                .await
+                .is_err(),
+            "preparation must wait for a free review worker"
+        );
+        drop(permit);
+        timeout(Duration::from_secs(2), notification)
+            .await
+            .unwrap()
+            .unwrap();
     }
 
     fn outcome(errors: usize, warnings: usize, notes: usize) -> ar_review::ReviewOutcome {

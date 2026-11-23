@@ -12,6 +12,7 @@ extern crate alloc;
 
 pub mod config;
 pub mod dedup;
+mod github_review;
 pub mod github_webhook;
 pub mod hmac;
 pub mod metrics;
@@ -110,12 +111,12 @@ pub struct CiReviewEndpointDeps {
 
 /// Everything the gateway needs to serve GitHub App repositories.
 #[expect(
-    clippy::exhaustive_structs,
-    reason = "Preserve public dependency literals"
-)]
-#[expect(
     clippy::arbitrary_source_item_ordering,
     reason = "Preserve field drop order and keep review wiring before optional chat settings"
+)]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "Keep readiness bookkeeping private without changing existing dependency access"
 )]
 #[derive(Clone)]
 pub struct GitHubDeps {
@@ -131,6 +132,8 @@ pub struct GitHubDeps {
     pub bot_name: Arc<String>,
     /// Chat dependencies; `None` parses commands without handling them.
     pub chat: Option<GitHubChatDeps>,
+    /// Outstanding automatic review watches shared across webhook requests.
+    review_candidates: Arc<github_review::Candidates>,
 }
 
 #[expect(
@@ -161,6 +164,7 @@ impl GitHubDeps {
             bot_login: Arc::new("auto-review[bot]".into()),
             bot_name: Arc::new("auto-review".into()),
             chat: None,
+            review_candidates: Arc::default(),
         }
     }
 

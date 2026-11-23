@@ -43,5 +43,14 @@ jobs:
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        env:
+          # Local model packs resolve via --additional-packs, not --search-path.
+          # The CLI combines this path with the action's PR diff pack path.
+          CODEQL_ACTION_EXTRA_OPTIONS: >-
+            ${{ matrix.language == 'rust' &&
+            '{"database":{"run-queries":[
+            "--additional-packs=.github/codeql/extensions",
+            "--model-packs=jwilger/github-pr-payload"
+            ]}}' || '' }}
         with:
           category: "/language:${{ matrix.language }}"

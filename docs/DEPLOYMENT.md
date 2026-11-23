@@ -326,10 +326,11 @@ workflow that checks out or executes untrusted fork code with secrets.
 The gateway serves GitHub repositories when `GITHUB_APP_ID`,
 `GITHUB_APP_PRIVATE_KEY`, and `GITHUB_WEBHOOK_SECRET` are set; Forgejo settings
 then become optional. Point the GitHub App webhook at
-`https://reviewer.example.com/webhooks/github` and trigger review from GitHub
-Actions with `deploy/github-action`. For Helm, set `config.githubAppId` and the
-`secrets.githubAppPrivateKey` / `secrets.githubWebhookSecret` values (or
-`secrets.secretRef`). App permissions, events, and the workflow snippet are in
+`https://reviewer.example.com/webhooks/github` and subscribe to **Pull request**
+events for automatic review, no workflow required. For Helm, set
+`config.githubAppId` and the `secrets.githubAppPrivateKey` /
+`secrets.githubWebhookSecret` values (or `secrets.secretRef`). App permissions,
+events, and migration steps are in
 [GitHub repositories](./GITHUB.md).
 
 ### Comment editing permissions

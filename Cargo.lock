@@ -188,6 +188,7 @@ dependencies = [
  "ar-review",
  "async-trait",
  "axum",
+ "getrandom 0.4.3",
  "hex",
  "hmac",
  "http-body-util",

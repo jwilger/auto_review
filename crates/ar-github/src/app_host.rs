@@ -107,6 +107,23 @@ impl AppReviewHost {
         }
     }
 
+    /// Mint a repository-scoped token for reading PR readiness. This is
+    /// separate from the review token so chat and posting do not require Checks.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the installation cannot be resolved or does not grant
+    /// the requested permissions.
+    #[inline]
+    pub async fn readiness_token_for(&self, owner: &str, repo: &str) -> Result<String, Error> {
+        let id = self.installation_id(owner, repo).await?;
+        let request = InstallationTokenRequest::for_repository(repo)
+            .with_permission("checks", Permission::Read)
+            .with_permission("pull_requests", Permission::Read)
+            .with_permission("statuses", Permission::Read);
+        Ok(self.client.installation_token(id, request).await?.token)
+    }
+
     /// Record the installation id a webhook delivery reported for a
     /// repository, saving an installation lookup on the next API call.
     #[inline]

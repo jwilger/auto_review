@@ -75,7 +75,7 @@ Full setup: [Quickstart](./docs/QUICKSTART.md). Deployment options:
 contract is the single-binary Forgejo reviewer path: CI triggers semantic
 review, the gateway isolates workspace handling, and the bot posts verified
 review output back to Forgejo. The same gateway also serves GitHub repositories
-through a GitHub App — webhooks, chat commands, and CI-triggered review (see
+through a GitHub App — automatic webhook-triggered reviews and chat (see
 [GitHub repositories](./docs/GITHUB.md)). The reviewer can also run as an AWS
 Bedrock AgentCore runtime instead of the long-lived gateway service.
 
@@ -92,9 +92,10 @@ Forgejo webhook / CI trigger
   -> inline review comments + commit status
 ```
 
-The gateway accepts low-cost PR webhooks for intake and chat bookkeeping. Normal
-semantic reviews are dispatched by `POST /reviews/ci` after repository-selected
-CI prerequisites pass. Explicit `@auto-review re-review` can force a review.
+On Forgejo, CI calls `POST /reviews/ci` after repository-selected checks pass.
+On GitHub, the App webhook triggers review once visible checks permit it;
+no review-specific workflow is needed. Explicit `@auto-review re-review` can
+force a review.
 
 The chat handler supports `help`, `remember <text>`, `forget <id>`, `re-review`,
 `autofix`, `tests`, and free-form questions. The `bench` command

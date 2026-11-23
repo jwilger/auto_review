@@ -1,0 +1,13 @@
+---
+extensions:
+  - addsTo:
+      pack: codeql/rust-all
+      extensible: barrierGuardModel
+    data:
+      # Only the input on the successful branch is bounded, and only for
+      # deserialization. The signed PR decoder consumes a fixed DTO.
+      - - ar_gateway::github_webhook::pr_payload_fits_limit
+        - Argument[0]
+        - 'true'
+        - unsafe-deserialization
+        - manual
