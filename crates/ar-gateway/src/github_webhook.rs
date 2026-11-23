@@ -283,6 +283,7 @@ fn reject(status: StatusCode, msg: &str) -> Response {
 mod tests {
     use crate::{build_router, AppState, GitHubDeps};
     use alloc::sync::Arc;
+    use ar_forge::{CommitStatus, CommitStatusState, ReviewHost as _};
     use ar_orchestrator::{JobDispatcher, NoOpDispatcher, ReviewJob};
     use async_trait::async_trait;
     use axum::body::Body;
@@ -290,9 +291,9 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
     use core::time::Duration;
     use std::sync::Mutex;
-    use tokio::time::{sleep, timeout};
+    use tokio::time::{advance, pause, resume, sleep, timeout};
     use tower::ServiceExt as _;
-    use wiremock::matchers::{header, method, path};
+    use wiremock::matchers::{header, method, path, query_param};
     use wiremock::{Mock, MockServer, Request as MockRequest, ResponseTemplate};
 
     const APP_ID: u64 = 12_345;
@@ -369,20 +370,28 @@ mod tests {
     }
 
     async fn mount_pull_request(github: &MockServer, head_sha: &str) {
+        mount_pr(github, head_sha, false).await;
+    }
+
+    async fn mount_pr(github: &MockServer, head_sha: &str, draft: bool) {
         Mock::given(method("GET"))
             .and(path("/repos/o/r/pulls/42"))
             .and(header("authorization", "Bearer ghs_installation"))
-            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                "number": PR_NUMBER,
-                "title": "feat: github review",
-                "body": null,
-                "draft": false,
-                "state": "open",
-                "head": {"ref": "topic", "sha": head_sha},
-                "base": {"ref": "main", "sha": "cafef00d"}
-            })))
+            .respond_with(pr_response(head_sha, draft))
             .mount(github)
             .await;
+    }
+
+    fn pr_response(head_sha: &str, draft: bool) -> ResponseTemplate {
+        ResponseTemplate::new(200).set_body_json(serde_json::json!({
+            "number": PR_NUMBER,
+            "title": "feat: github review",
+            "body": null,
+            "draft": draft,
+            "state": "open",
+            "head": {"ref": "topic", "sha": head_sha},
+            "base": {"ref": "main", "sha": "cafef00d"}
+        }))
     }
 
     #[tokio::test]
@@ -452,26 +461,400 @@ mod tests {
         assert!(github.received_requests().await.unwrap().is_empty());
     }
 
+    async fn mount_policy(github: &MockServer, config: &str) {
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/contents/.auto_review.yaml"))
+            .and(query_param("ref", "main"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(config))
+            .mount(github)
+            .await;
+    }
+
+    async fn mount_required_ci(github: &MockServer) {
+        mount_policy(
+            github,
+            "github_automatic_review:\n  required_checks:\n    Test: pass\n",
+        )
+        .await;
+    }
+
+    async fn mount_review_status(github: &MockServer, state: &Arc<AtomicUsize>) {
+        let last_write = Arc::new(Mutex::new(None));
+        let captured = Arc::clone(&last_write);
+        let writes = Arc::clone(state);
+        Mock::given(method("POST"))
+            .and(path("/repos/o/r/statuses/deadbeef"))
+            .and(header("authorization", "Bearer ghs_installation"))
+            .respond_with(move |request: &MockRequest| {
+                let mut status: serde_json::Value = request.body_json().unwrap();
+                let fields = status.as_object_mut().unwrap();
+                let id = writes.fetch_add(1, Ordering::SeqCst).saturating_add(1);
+                fields.insert("id".into(), serde_json::json!(id));
+                fields.insert(
+                    "creator".into(),
+                    serde_json::json!({"login": "auto-review[bot]"}),
+                );
+                *captured.lock().unwrap() = Some(status);
+                ResponseTemplate::new(201).set_body_json(serde_json::json!({"id": id}))
+            })
+            .mount(github)
+            .await;
+        let reviewed_id: u64 = 2;
+        let latest = Arc::clone(state);
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits/deadbeef/statuses"))
+            .respond_with(move |_: &MockRequest| {
+                let statuses = if let Some(status) = last_write.lock().unwrap().as_ref() {
+                    serde_json::json!([status])
+                } else if latest.load(Ordering::SeqCst) == 0 {
+                    serde_json::json!([])
+                } else {
+                    serde_json::json!([{"id": reviewed_id, "state": "success", "context": "Auto_Review", "creator": {"login": "auto-review[bot]"}}])
+                };
+                ResponseTemplate::new(200).set_body_json(statuses)
+            })
+            .mount(github)
+            .await;
+    }
+
     #[tokio::test]
-    async fn github_pr_webhook_reviews_when_no_checks_exist() {
-        github_pr_webhook_waits_for_checks_case(false).await;
+    async fn github_pr_webhook_reports_wait_timeout_without_dispatch() {
+        github_wait_timeout_case(false).await;
+    }
+
+    #[tokio::test]
+    async fn github_pr_webhook_timeout_preserves_a_newer_review_status() {
+        github_wait_timeout_case(true).await;
+    }
+
+    #[tokio::test]
+    async fn github_pr_webhook_restarts_wait_after_reopening_the_same_commit() {
+        let github = MockServer::start().await;
+        mount_installation_token(&github, INSTALLATION_ID).await;
+        mount_required_ci(&github).await;
+        let closed = Arc::new(AtomicUsize::new(0));
+        let pr_state = Arc::clone(&closed);
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/42"))
+            .respond_with(move |_: &MockRequest| {
+                let state = if pr_state.load(Ordering::SeqCst) == 0 { "open" } else { "closed" };
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "number": PR_NUMBER, "title": "feat: github review", "draft": false, "state": state,
+                    "head": {"ref": "topic", "sha": "deadbeef"}, "base": {"ref": "main", "sha": "cafef00d"}
+                }))
+            })
+            .mount(&github).await;
+        let status = Arc::new(AtomicUsize::new(0));
+        mount_review_status(&github, &status).await;
+        let deps = github_deps(&github.uri(), RecordingDispatcher::new());
+        let app = build_router(
+            AppState::new("unused", Arc::new(NoOpDispatcher)).with_github(deps.clone()),
+        );
+        let response = app
+            .clone()
+            .oneshot(opened_pr_request(&deps.webhook_secret))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        wait_until_at_least(&status, 1).await;
+
+        closed.store(1, Ordering::SeqCst);
+        pause();
+        advance(Duration::from_secs(30)).await;
+        resume();
+        wait_for_watch_exit(&deps).await;
+        assert_eq!(
+            status.load(Ordering::SeqCst),
+            2,
+            "closing should retire the pending status"
+        );
+        closed.store(0, Ordering::SeqCst);
+
+        let reopened = app
+            .oneshot(pr_request(&deps.webhook_secret, "reopened"))
+            .await
+            .unwrap();
+        assert_eq!(reopened.status(), StatusCode::ACCEPTED);
+        wait_until_at_least(&status, 3).await;
+        let requests = github.received_requests().await.unwrap();
+        let history: Vec<String> = requests
+            .iter()
+            .filter(|request| request.url.path() == "/repos/o/r/statuses/deadbeef")
+            .map(|request| {
+                let body: serde_json::Value = request.body_json().unwrap();
+                body.get("state")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap()
+                    .to_owned()
+            })
+            .collect();
+        assert_eq!(history, ["pending", "error", "pending"]);
+    }
+
+    async fn github_wait_timeout_case(with_manual_review: bool) {
+        let github = MockServer::start().await;
+        mount_installation_token(&github, INSTALLATION_ID).await;
+        mount_required_ci(&github).await;
+        mount_pull_request(&github, "deadbeef").await;
+        let status = Arc::new(AtomicUsize::new(0));
+        mount_review_status(&github, &status).await;
+        let check_reads = Arc::new(AtomicUsize::new(0));
+        let reads = Arc::clone(&check_reads);
+        let one_check: usize = 1;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits/deadbeef/check-runs"))
+            .respond_with(move |_: &MockRequest| {
+                reads.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "total_count": one_check, "check_runs": [{"name": "Test", "status": "in_progress"}]
+                }))
+            })
+            .mount(&github)
+            .await;
+        let dispatcher = RecordingDispatcher::new();
+        let deps = github_deps(
+            &github.uri(),
+            Arc::<RecordingDispatcher>::clone(&dispatcher),
+        );
+        let delivery = opened_pr_request(&deps.webhook_secret);
+        let app = build_router(
+            AppState::new("unused", Arc::new(NoOpDispatcher)).with_github(deps.clone()),
+        );
+        let response = app.oneshot(delivery).await.unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        wait_until_at_least(&check_reads, 1).await;
+        assert_eq!(status.load(Ordering::SeqCst), 1);
+        if with_manual_review {
+            let result = CommitStatus {
+                context: "auto_review".into(),
+                description: "manual review finished".into(),
+                state: CommitStatusState::Success,
+                target_url: String::new(),
+            };
+            deps.host
+                .post_commit_status("o", "r", "deadbeef", &result)
+                .await
+                .unwrap();
+        }
+        pause();
+        advance(Duration::from_hours(2)).await;
+        resume();
+        wait_for_watch_exit(&deps).await;
+
+        assert!(dispatcher.jobs().is_empty());
+        let requests = github.received_requests().await.unwrap();
+        let writes: Vec<serde_json::Value> = requests
+            .iter()
+            .filter(|request| request.url.path() == "/repos/o/r/statuses/deadbeef")
+            .map(|request| request.body_json().unwrap())
+            .collect();
+        assert_eq!(writes.len(), 2);
+        let latest = writes.last().unwrap();
+        assert_eq!(latest.get("context").unwrap(), "auto_review");
+        if with_manual_review {
+            assert_eq!(latest.get("state").unwrap(), "success");
+        } else {
+            assert_eq!(latest.get("state").unwrap(), "error");
+            assert!(latest
+                .get("description")
+                .and_then(serde_json::Value::as_str)
+                .unwrap()
+                .contains("re-review"));
+        }
+    }
+
+    async fn wait_for_watch_exit(deps: &GitHubDeps) {
+        timeout(Duration::from_secs(2), async {
+            while !deps.review_candidates.is_empty().await {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+    }
+
+    async fn wait_until_at_least(counter: &AtomicUsize, expected: usize) {
+        assert!(
+            timeout(Duration::from_secs(2), async {
+                while counter.load(Ordering::SeqCst) < expected {
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_ok(),
+            "mock GitHub did not receive the expected requests"
+        );
+    }
+
+    fn opened_pr_request(secret: &str) -> Request<Body> {
+        pr_request(secret, "opened")
+    }
+
+    fn pr_request(secret: &str, action: &str) -> Request<Body> {
+        pr_request_with_draft(secret, action, false)
+    }
+
+    fn pr_request_with_draft(secret: &str, action: &str, draft: bool) -> Request<Body> {
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "action": action,
+            "number": PR_NUMBER,
+            "pull_request": {"draft": draft, "head": {"sha": "deadbeef"}},
+            "repository": {"name": "r", "full_name": "o/r", "owner": {"login": "o", "type": "User"}},
+            "installation": {"id": INSTALLATION_ID}
+        }))
+        .unwrap();
+        let signature = sign(secret, &payload);
+        github_request("pull_request", &payload, Some(&signature))
+    }
+
+    #[tokio::test]
+    async fn github_pr_webhook_dispatches_by_default_without_reading_ci() {
+        let github = MockServer::start().await;
+        mount_installation_token(&github, INSTALLATION_ID).await;
+        // An accepted delivery must survive a transient error while loading policy.
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/contents/.auto_review.yaml"))
+            .respond_with(ResponseTemplate::new(502))
+            .up_to_n_times(1)
+            .expect(1)
+            .mount(&github)
+            .await;
+        mount_pull_request(&github, "deadbeef").await;
+        let dispatcher = RecordingDispatcher::new();
+        let deps = github_deps(
+            &github.uri(),
+            Arc::<RecordingDispatcher>::clone(&dispatcher),
+        );
+        let delivery = opened_pr_request(&deps.webhook_secret);
+        let app = build_router(AppState::new("unused", Arc::new(NoOpDispatcher)).with_github(deps));
+        assert_eq!(
+            app.oneshot(delivery).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        assert!(
+            timeout(Duration::from_secs(2), async {
+                while dispatcher.jobs().is_empty() {
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_ok(),
+            "default automatic review should not wait for CI"
+        );
+        let requests = github.received_requests().await.unwrap();
+        assert!(!requests
+            .iter()
+            .any(|request| request.url.path().contains("/commits/")
+                || request.url.path().contains("/statuses/")));
+    }
+
+    #[tokio::test]
+    async fn github_pr_webhook_skips_draft_by_default() {
+        github_draft_case(false).await;
+    }
+
+    #[tokio::test]
+    async fn github_pr_webhook_can_opt_in_to_draft_reviews() {
+        github_draft_case(true).await;
+    }
+
+    async fn github_draft_case(allow_drafts: bool) {
+        let github = MockServer::start().await;
+        mount_installation_token(&github, INSTALLATION_ID).await;
+        mount_pr(&github, "deadbeef", true).await;
+        if allow_drafts {
+            mount_policy(&github, "github_automatic_review:\n  allow_drafts: true\n").await;
+        }
+        let dispatcher = RecordingDispatcher::new();
+        let deps = github_deps(
+            &github.uri(),
+            Arc::<RecordingDispatcher>::clone(&dispatcher),
+        );
+        let delivery = pr_request_with_draft(&deps.webhook_secret, "opened", true);
+        let app = build_router(
+            AppState::new("unused", Arc::new(NoOpDispatcher)).with_github(deps.clone()),
+        );
+        assert_eq!(
+            app.oneshot(delivery).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        wait_for_watch_exit(&deps).await;
+        assert_eq!(!dispatcher.jobs().is_empty(), allow_drafts);
+    }
+
+    #[tokio::test]
+    async fn github_pr_webhook_keeps_ready_event_during_draft_read() {
+        let github = MockServer::start().await;
+        mount_installation_token(&github, INSTALLATION_ID).await;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let pr_reads = Arc::clone(&reads);
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/pulls/42"))
+            .respond_with(move |_: &MockRequest| {
+                if pr_reads.fetch_add(1, Ordering::SeqCst) == 0 {
+                    pr_response("deadbeef", true).set_delay(Duration::from_millis(350))
+                } else {
+                    pr_response("deadbeef", false)
+                }
+            })
+            .mount(&github)
+            .await;
+        let dispatcher = RecordingDispatcher::new();
+        let deps = github_deps(
+            &github.uri(),
+            Arc::<RecordingDispatcher>::clone(&dispatcher),
+        );
+        let app = build_router(
+            AppState::new("unused", Arc::new(NoOpDispatcher)).with_github(deps.clone()),
+        );
+        let draft = pr_request_with_draft(&deps.webhook_secret, "opened", true);
+        assert_eq!(
+            app.clone().oneshot(draft).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        wait_until_at_least(&reads, 1).await;
+        let delivery = pr_request(&deps.webhook_secret, "ready_for_review");
+        assert_eq!(
+            app.oneshot(delivery).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        wait_for_watch_exit(&deps).await;
+        assert_eq!(
+            dispatcher.jobs().len(),
+            1,
+            "the ready event should not be dropped"
+        );
     }
 
     #[tokio::test]
     async fn github_pr_webhook_waits_for_pending_and_failing_merge_checks() {
-        github_pr_webhook_waits_for_checks_case(true).await;
+        github_pr_webhook_waits_for_checks_case(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn github_pr_webhook_preserves_an_existing_review_status() {
+        github_pr_webhook_waits_for_checks_case(false, true).await;
     }
 
     #[expect(
+        clippy::cognitive_complexity,
         clippy::too_many_lines,
         reason = "Keep the test's PR/check timeline together"
     )]
-    async fn github_pr_webhook_waits_for_checks_case(with_merge_checks: bool) {
+    async fn github_pr_webhook_waits_for_checks_case(with_merge_checks: bool, prior_status: bool) {
         let no_checks: usize = 0;
         let one_check: usize = 1;
         let github = MockServer::start().await;
         mount_installation_token(&github, INSTALLATION_ID).await;
+        if with_merge_checks {
+            mount_policy(&github, "github_automatic_review:\n  required_checks:\n    Test: pass\n    Coverage: complete\n").await;
+        } else {
+            mount_required_ci(&github).await;
+        }
+        let review_status = Arc::new(AtomicUsize::new(if prior_status { 2 } else { 0 }));
+        mount_review_status(&github, &review_status).await;
         let check_round = Arc::new(AtomicUsize::new(0));
+        let current_merge_round = Arc::new(AtomicUsize::new(0));
         if with_merge_checks {
             let merge_round = Arc::clone(&check_round);
             Mock::given(method("GET"))
@@ -499,11 +882,24 @@ mod tests {
                     let (status, conclusion) = match counter.fetch_add(1, Ordering::SeqCst) {
                         0 => ("in_progress", None),
                         1 => ("completed", Some("failure")),
-                        _ => ("completed", Some("success")),
+                        _ => ("completed", Some("neutral")),
                     };
                     ResponseTemplate::new(200).set_body_json(serde_json::json!({
-                        "total_count": one_check, "check_runs": [{"status": status, "conclusion": conclusion}]
+                        "total_count": one_check, "check_runs": [{"name": "Test", "status": status, "conclusion": conclusion}]
                     }))
+                })
+                .mount(&github)
+                .await;
+            let current_round = Arc::clone(&current_merge_round);
+            Mock::given(method("GET"))
+                .and(path("/repos/o/r/commits/abc456/check-runs"))
+                .respond_with(move |_: &MockRequest| {
+                    let checks = if current_round.fetch_add(1, Ordering::SeqCst) == 0 {
+                        serde_json::json!([{"name": "Unrelated", "status": "in_progress"}])
+                    } else {
+                        serde_json::json!([{"name": "Test", "status": "completed", "conclusion": "neutral"}])
+                    };
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({"total_count": one_check, "check_runs": checks}))
                 })
                 .mount(&github)
                 .await;
@@ -511,8 +907,7 @@ mod tests {
                 .and(path("/repos/o/r/commits/abc123/statuses"))
                 .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
                     {"state": "failure", "context": "auto_review", "creator": {"login": "auto-review[bot]"}},
-                    {"state": "success", "context": "ci", "creator": null},
-                    {"state": "failure", "context": "CI", "creator": null}
+                    {"state": "failure", "context": "Coverage"}
                 ])))
                 .mount(&github)
                 .await;
@@ -521,17 +916,18 @@ mod tests {
         }
         for (route, response) in [
             (
-                "/repos/o/r/commits/abc456/check-runs",
-                serde_json::json!({"total_count": no_checks, "check_runs": []}),
+                "/repos/o/r/commits/abc456/statuses",
+                serde_json::json!([
+                    {"state": "failure", "context": "Coverage"}
+                ]),
             ),
-            ("/repos/o/r/commits/abc456/statuses", serde_json::json!([])),
             (
                 "/repos/o/r/commits/deadbeef/check-runs",
-                serde_json::json!({"total_count": no_checks, "check_runs": []}),
-            ),
-            (
-                "/repos/o/r/commits/deadbeef/statuses",
-                serde_json::json!([]),
+                if with_merge_checks {
+                    serde_json::json!({"total_count": no_checks, "check_runs": []})
+                } else {
+                    serde_json::json!({"total_count": one_check, "check_runs": [{"name": "Test", "status": "completed", "conclusion": "skipped"}]})
+                },
             ),
         ] {
             Mock::given(method("GET"))
@@ -553,19 +949,7 @@ mod tests {
         let app = build_router(
             AppState::new("forgejo-secret", Arc::new(NoOpDispatcher)).with_github(deps),
         );
-        let payload = serde_json::to_vec(&serde_json::json!({
-            "action": "opened",
-            "number": PR_NUMBER,
-            "pull_request": {"draft": false, "head": {"sha": "deadbeef"}},
-            "repository": {"name": "r", "full_name": "o/r", "owner": {"login": "o", "type": "User"}},
-            "installation": {"id": INSTALLATION_ID}
-        }))
-        .unwrap();
-        let signature = sign(&secret, &payload);
-        let resp = app
-            .oneshot(github_request("pull_request", &payload, Some(&signature)))
-            .await
-            .unwrap();
+        let resp = app.oneshot(opened_pr_request(&secret)).await.unwrap();
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
         assert!(
             timeout(Duration::from_secs(2), async {
@@ -577,13 +961,47 @@ mod tests {
             .is_ok(),
             "signed PR should dispatch once GitHub checks allow review"
         );
+        let requests = github.received_requests().await.unwrap();
+        assert_wait_status(&requests, prior_status);
         let jobs = dispatcher.jobs();
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs.first().unwrap().head_sha, "deadbeef");
         assert_eq!(
             check_round.load(Ordering::SeqCst),
+            if with_merge_checks { 2 } else { 0 }
+        );
+        assert_eq!(
+            current_merge_round.load(Ordering::SeqCst),
             if with_merge_checks { 3 } else { 0 }
         );
+    }
+
+    fn assert_wait_status(requests: &[MockRequest], prior_status: bool) {
+        let status_write = requests.iter().enumerate().find(|&(_, request)| {
+            request.method.as_str() == "POST"
+                && request.url.path() == "/repos/o/r/statuses/deadbeef"
+        });
+        if prior_status {
+            assert!(status_write.is_none(), "do not replace an existing status");
+            return;
+        }
+        assert!(
+            status_write.is_some(),
+            "GitHub should show that auto_review is waiting for CI"
+        );
+        let (position, write) = status_write.unwrap();
+        let body: serde_json::Value = write.body_json().unwrap();
+        assert_eq!(body.get("state").unwrap(), "pending");
+        assert_eq!(body.get("context").unwrap(), "auto_review");
+        assert_eq!(
+            body.get("description").unwrap(),
+            "auto_review waiting for CI"
+        );
+        let first_check = requests
+            .iter()
+            .position(|request| request.url.path().ends_with("/check-runs"))
+            .unwrap();
+        assert!(position < first_check, "publish pending before polling CI");
     }
 
     fn sign(secret: &str, body: &[u8]) -> String {

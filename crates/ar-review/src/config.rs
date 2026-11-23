@@ -6,6 +6,8 @@
 //! so a pull request cannot change how it is reviewed. Anything missing
 //! falls back to defaults.
 
+use alloc::collections::BTreeMap;
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 
 /// Allow-list of every top-level key the loader recognizes. Kept
@@ -14,6 +16,7 @@ use serde::{Deserialize, Serialize};
 /// the relationship.
 const KNOWN_KEYS: &[&str] = &[
     "enabled",
+    "github_automatic_review",
     "guidelines",
     "ignored_paths",
     "pr_metadata_check",
@@ -38,11 +41,19 @@ const KNOWN_PR_METADATA_CHECKS_KEYS: &[&str] = &["body_required"];
     reason = "field order is the serialized YAML key order and matches the documented key order \
               in KNOWN_KEYS; reordering changes serialized config output"
 )]
+#[expect(
+    clippy::partial_pub_fields,
+    reason = "the deferred GitHub policy must be decoded through its validating accessor"
+)]
 pub struct RepoConfig {
     /// Top-level switch. When false, the bot skips reviewing this repo
     /// entirely (still posts a "skipped (config)" status).
     #[serde(default = "default_true")]
     pub enabled: bool,
+
+    /// Admission policy, decoded separately so a GitHub-only error does not discard shared settings.
+    #[serde(default)]
+    github_automatic_review: serde_yaml::Value,
 
     /// Repo-author free-form project conventions ("we never use raw
     /// SQL", "always prefer immutable types", etc.). They reach the
@@ -70,6 +81,28 @@ pub struct RepoConfig {
 }
 
 impl RepoConfig {
+    /// Decode the automatic GitHub App review policy.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid policy values or unusable check names.
+    #[inline]
+    pub fn github_automatic_review(&self) -> Result<GitHubAutomaticReview, serde_yaml::Error> {
+        if self.github_automatic_review.is_null() {
+            return Ok(GitHubAutomaticReview::default());
+        }
+        let policy: GitHubAutomaticReview =
+            serde_yaml::from_value(self.github_automatic_review.clone())?;
+        if policy
+            .required_checks
+            .keys()
+            .any(|name| name.trim().is_empty() || name.eq_ignore_ascii_case("auto_review"))
+        {
+            return Err(serde_yaml::Error::custom("github_automatic_review.required_checks cannot contain a blank name or the reserved auto_review context"));
+        }
+        Ok(policy)
+    }
+
     /// Whether `login` is authorized to force an override-approval over
     /// outstanding findings. Opt-in: an empty `override_approvers` list
     /// authorizes nobody. Matching is case-insensitive because Forgejo
@@ -88,12 +121,35 @@ impl Default for RepoConfig {
     fn default() -> Self {
         Self {
             enabled: true,
+            github_automatic_review: serde_yaml::Value::Null,
             guidelines: String::new(),
             ignored_paths: Vec::new(),
             pr_metadata_check: PrMetadataCheck::default(),
             override_approvers: Vec::new(),
         }
     }
+}
+
+/// Repository policy for automatic GitHub App reviews.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[non_exhaustive]
+#[serde(default, deny_unknown_fields)]
+pub struct GitHubAutomaticReview {
+    /// Also review open draft PRs.
+    pub allow_drafts: bool,
+    /// Check-run names or commit status contexts that must be satisfied.
+    pub required_checks: BTreeMap<String, CheckRequirement>,
+}
+
+/// Minimum result a named CI job must reach before automatic review.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum CheckRequirement {
+    /// Any completed outcome, including failure.
+    Complete,
+    /// Success, skipped or neutral.
+    Pass,
 }
 
 /// `pr_metadata_check` section: whether and how PR title/body are checked.
@@ -204,7 +260,9 @@ fn default_true() -> bool {
               that crate"
 )]
 pub fn parse_repo_config(yaml: &str) -> Result<RepoConfig, serde_yaml::Error> {
-    serde_yaml::from_str::<RepoConfig>(yaml)
+    let config: RepoConfig = serde_yaml::from_str(yaml)?;
+    config.github_automatic_review()?;
+    Ok(config)
 }
 
 /// Strict parser: surfaces unknown top-level keys as errors so a
@@ -299,6 +357,25 @@ mod tests {
             .and_then(|mapping| mapping.get(serde_yaml::Value::String("enabled".into())))
             .and_then(serde_yaml::Value::as_bool);
         assert_eq!(metadata_check, Some(true));
+    }
+
+    #[test]
+    #[expect(
+        clippy::unwrap_used,
+        reason = "both CLI validation modes must reject the fixture"
+    )]
+    fn invalid_github_admission_does_not_discard_other_runtime_settings() {
+        let yaml = "enabled: false\ngithub_automatic_review:\n  required_checks:\n    Test: typo\n";
+        assert!(parse_repo_config(yaml)
+            .unwrap_err()
+            .to_string()
+            .contains("typo"));
+        assert!(parse_repo_config_strict(yaml)
+            .unwrap_err()
+            .to_string()
+            .contains("typo"));
+        assert!(serde_yaml::from_str::<RepoConfig>(yaml)
+            .is_ok_and(|config| !config.enabled && config.github_automatic_review().is_err()));
     }
 
     #[test]

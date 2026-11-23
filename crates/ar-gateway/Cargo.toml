@@ -35,7 +35,7 @@ sqlx = { version = "0.9", default-features = false, features = ["runtime-tokio",
 
 [dev-dependencies]
 getrandom = "0.4"
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "test-util"] }
 tower = { workspace = true, features = ["util"] }
 http-body-util = "0.1"
 wiremock.workspace = true

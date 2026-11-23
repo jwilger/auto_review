@@ -8,7 +8,7 @@ differs.
 
 ```text
 GitHub App webhook ──> POST /webhooks/github ──> chat commands
-                                              └─> check readiness ──> review
+                                              └─> optional CI gate ──> review
 ```
 
 The gateway never uses a personal access token for GitHub. Each API call uses
@@ -30,14 +30,14 @@ GitHub Apps → New GitHub App**) or under your user account.
   | Contents | Read | clone at the PR head, read `.auto_review.yaml` |
   | Pull requests | Read & write | PR metadata, diffs, reviews, inline comments |
   | Issues | Read & write | PR conversation comments (chat replies) |
-  | Checks | Read | wait for GitHub check runs before reviewing |
+  | Checks | Read | read GitHub check runs when a repository enables CI gating |
   | Commit statuses | Read & write | read CI statuses and publish `auto_review` |
   | Metadata | Read | required by GitHub |
 
 - **Subscribe to events:** *Pull request* for automatic review, plus
   *Issue comment* and *Pull request review comment* for chat commands.
-  For an existing App, update its settings and have installation owners
-  accept the new **Checks: Read** permission before switching over.
+  If you enable CI gating with an existing App, have installation owners
+  accept the **Checks: Read** permission first.
 
 After creating the App, note its **App ID** and generate a **private key**
 (`.pem`). Install the App on the repositories it should review.
@@ -96,24 +96,42 @@ In the App settings, **Advanced → Recent Deliveries** should show the initial
 
 ## 4. Verify automatic review
 
-Open or update a non-draft PR. No review-specific workflow or repository
-secret is needed, including for fork PRs. The gateway waits 30 seconds for
-CI to register, then reads check runs and commit statuses visible to the
-base repository installation on the current PR head and its GitHub merge
-commit, when available. It does not start a review while a check is pending,
-failing, or unreadable. Successful, skipped, and neutral completed check
-runs pass the gate. The App's own `auto_review` status does not count.
-If the review waits for a worker, the gateway checks readiness again when
-that worker is available.
+Open a non-draft PR. By default, the App queues a review without waiting for
+CI. It also reacts to new commits, reopened PRs, and PRs marked ready for
+review. No review-specific workflow or repository secret is needed, including
+for fork PRs.
 
-A successful read with no checks permits review. This cannot account for
-checks that register after the review starts or checks reported only on the
-base branch (for example, some `pull_request_target` workflows). A known
-blocker on a replaced merge commit is not cleared just because the new
-merge commit has no checks. The gateway retries blocked revisions with
-backoff for up to two hours; a restart clears the in-memory watch. After
-that, a new PR update or a maintainer's explicit `@auto-review re-review`
-can request a review. That command bypasses CI.
+To review drafts or wait for particular CI jobs, add either option to
+`.auto_review.yaml` on the PR's **base branch**:
+
+```yaml
+github_automatic_review:
+  allow_drafts: true
+  required_checks:
+    Test: pass
+    Coverage: complete
+```
+
+`allow_drafts` defaults to `false`, and `required_checks` defaults to empty.
+Use exact check-run names or commit status contexts. Every listed name must
+appear on the current PR head or GitHub test merge commit, and every matching
+result must satisfy its requirement. `pass` accepts success, skipped, or
+neutral; `complete` also accepts terminal failures. Missing names and
+unreadable results block a configured wait. Unlisted results and the
+`auto_review` context do not count. Checks reported only on the base branch
+(for example, some `pull_request_target` workflows) cannot satisfy this gate.
+
+For a configured wait, the gateway posts `auto_review waiting for CI` unless
+a review status already exists for that commit (a canceled or timed-out wait
+can be replaced). It allows 30 seconds for CI to register, then polls with
+backoff for up to two hours and rechecks when a worker becomes available.
+If the watch expires or the PR is no longer eligible, the gateway attempts
+to replace its pending status with an error, but only if its status is still
+latest. A restart or a lost response can leave a pending status visible.
+The gateway reads the policy when the watch starts and uses it for that watch;
+base-branch config changes apply to new watches. An unreadable or invalid
+config does not fall back to immediate automatic review. A maintainer can request `@auto-review re-review` without
+this automatic admission policy.
 
 Remove existing review-request steps after confirming App delivery. The
 bundled action is now a no-op. Older pinned versions may still call

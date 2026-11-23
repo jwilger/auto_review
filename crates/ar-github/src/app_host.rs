@@ -11,10 +11,46 @@ use crate::{
     host_error, resolve_bot_login, with_clone_credentials, Client, Error, InstallationTokenRequest,
     Permission, IDENTITY_TIMEOUT,
 };
+use ar_forge::{CommitStatus, CommitStatusState};
 use async_trait::async_trait;
+use core::array;
+use core::hash::{Hash as _, Hasher as _};
 use core::time::Duration;
 use std::collections::HashMap;
-use tokio::sync::{Mutex, OnceCell};
+use std::hash::DefaultHasher;
+use tokio::sync::{Mutex, MutexGuard, OnceCell};
+use tokio::time::timeout;
+
+/// Bound the steps leading up to a watch's status write separately from the POST.
+const STATUS_LOOKUP_TIMEOUT: Duration = Duration::from_secs(25);
+
+/// Keep unrelated commit status writes concurrent without retaining per-SHA keys.
+const STATUS_WRITE_STRIPES: usize = 32;
+
+/// Why a CI watch ended without handing the revision to a review worker.
+#[non_exhaustive]
+#[derive(Clone, Copy, Debug)]
+pub enum ReviewWaitEnd {
+    /// The watch stopped because the PR is no longer eligible.
+    Canceled,
+    /// The watch spent its time budget waiting for CI or a worker.
+    TimedOut,
+}
+
+impl ReviewWaitEnd {
+    /// Description identifying a canceled watch.
+    const CANCELED: &str = "auto_review watch canceled; no review ran";
+    /// Description identifying an expired watch.
+    const TIMED_OUT: &str = "auto_review watch timed out; use the re-review command to retry";
+
+    /// The terminal status description shown on GitHub.
+    fn description(self) -> &'static str {
+        match self {
+            Self::Canceled => Self::CANCELED,
+            Self::TimedOut => Self::TIMED_OUT,
+        }
+    }
+}
 
 /// A [`ar_forge::ReviewHost`] that mints repository-scoped installation
 /// tokens on demand for every repository the app is installed on.
@@ -28,6 +64,8 @@ pub struct AppReviewHost {
     identity_timeout: Duration,
     /// Installation id per lowercased `owner/repo`.
     installations: Mutex<HashMap<String, u64>>,
+    /// Serialize a watch's status lookup and write against this host's worker writes.
+    status_writes: [Mutex<()>; STATUS_WRITE_STRIPES],
 }
 
 impl AppReviewHost {
@@ -95,6 +133,18 @@ impl AppReviewHost {
         }
     }
 
+    /// Lock by repository and commit, since the status context is shared across PRs.
+    async fn lock_status(&self, owner: &str, repo: &str, sha: &str) -> MutexGuard<'_, ()> {
+        let mut hash = DefaultHasher::new();
+        (installation_key(owner, repo), sha.to_ascii_lowercase()).hash(&mut hash);
+        let bucket = usize::try_from(hash.finish() & 31).unwrap_or_default();
+        self.status_writes
+            .get(bucket)
+            .unwrap_or(&self.status_writes[0])
+            .lock()
+            .await
+    }
+
     /// `client` should be built with [`Client::with_app_signer`] so app JWTs
     /// stay fresh for the life of the process.
     #[inline]
@@ -102,6 +152,7 @@ impl AppReviewHost {
         Self {
             client,
             installations: Mutex::new(HashMap::new()),
+            status_writes: array::from_fn(|_| Mutex::new(())),
             bot_login: OnceCell::new(),
             identity_timeout: IDENTITY_TIMEOUT,
         }
@@ -139,6 +190,71 @@ impl AppReviewHost {
         self.installation_token_for(owner, repo)
             .await
             .map_err(|error| host_error(&error))
+    }
+
+    /// When starting a watch, publish pending only if there is no review status
+    /// or the App's last status reports that an earlier watch ended without review.
+    /// When ending a watch, update only if the watch's exact pending write is still latest.
+    /// Returns the new status ID, or `None` if no identifiable status was created.
+    ///
+    /// Ordering is enforced against other writers using this host. GitHub does
+    /// not provide a conditional status write across separate processes.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if token acquisition, the status read, or the write fails.
+    #[inline]
+    pub async fn update_review_wait_status(
+        &self,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        bot_login: &str,
+        end: Option<(u64, ReviewWaitEnd)>,
+    ) -> Result<Option<u64>, Error> {
+        let (token, _guard, latest) = timeout(STATUS_LOOKUP_TIMEOUT, async {
+            let token = self.installation_token_for(owner, repo).await?;
+            let guard = self.lock_status(owner, repo, sha).await;
+            let latest = self
+                .client
+                .latest_review_status(owner, repo, sha, &token)
+                .await?;
+            Ok((token, guard, latest))
+        })
+        .await
+        .unwrap_or(Err(Error::Timeout(STATUS_LOOKUP_TIMEOUT)))?;
+        let (state, description) = match (end, latest.as_ref()) {
+            (None, prior)
+                if prior.is_none_or(|status| {
+                    status.state == "error"
+                        && matches!(
+                            status.description.as_deref(),
+                            Some(ReviewWaitEnd::CANCELED | ReviewWaitEnd::TIMED_OUT)
+                        )
+                        && status
+                            .creator
+                            .as_ref()
+                            .is_some_and(|creator| creator.login.eq_ignore_ascii_case(bot_login))
+                }) =>
+            {
+                (CommitStatusState::Pending, "auto_review waiting for CI")
+            }
+            (Some((id, reason)), Some(status)) if status.id == Some(id) => {
+                (CommitStatusState::Error, reason.description())
+            }
+            _ => return Ok(None),
+        };
+        let status = CommitStatus {
+            state,
+            description: description.into(),
+            context: "auto_review".into(),
+            target_url: String::new(),
+        };
+        let created = self
+            .client
+            .create_commit_status(owner, repo, sha, &status, &token)
+            .await?;
+        Ok(created.get("id").and_then(serde_json::Value::as_u64))
     }
 
     /// Seed the bot login resolved elsewhere (the gateway's startup
@@ -370,6 +486,7 @@ impl ar_forge::ReviewHost for AppReviewHost {
         status: &ar_forge::CommitStatus,
     ) -> Result<(), ar_forge::HostError> {
         let token = self.token(owner, repo).await?;
+        let _guard = self.lock_status(owner, repo, sha).await;
         self.client
             .post_commit_status(owner, repo, sha, status, &token)
             .await
