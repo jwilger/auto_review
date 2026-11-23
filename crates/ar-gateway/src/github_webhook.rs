@@ -1,6 +1,7 @@
-//! GitHub App webhook intake and GitHub CI-review routing.
+//! Signed GitHub App webhook intake.
 
 use crate::dedup::CheckResult;
+use crate::github_review::{schedule, PullRequestEvent};
 use crate::{AppState, GitHubDeps};
 use alloc::sync::Arc;
 use ar_chat::{parse_chat_command, ChatCommand, ChatContext, ChatHandler};
@@ -43,13 +44,9 @@ struct MentionEvent<'event> {
 ///    before parsing anything.
 /// 3. Drops redelivered `X-GitHub-Delivery` ids.
 /// 4. Routes `issue_comment` and `pull_request_review_comment` mentions to
-///    the chat handler. Pull request events are intake-only: semantic review
-///    is dispatched from CI through `/reviews/ci` (ADR-0012).
+///    the chat handler and schedules eligible pull requests for review once
+///    their GitHub checks allow it.
 #[inline]
-#[expect(
-    clippy::too_many_lines,
-    reason = "Keep the intake checks and event routing in their processing order"
-)]
 pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Bytes) -> Response {
     let Some(github) = state.github.clone() else {
         return reject(StatusCode::NOT_FOUND, "github webhooks not configured");
@@ -87,34 +84,13 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
         .unwrap_or("");
     state.metrics.record_event(event);
 
-    if let Some(dedup) = state.webhook_dedup.as_ref() {
-        if let Some(delivery_id) = headers
-            .get(DELIVERY_HEADER)
-            .and_then(|value| value.to_str().ok())
-        {
-            // Namespace GitHub ids so they can never collide with Forgejo
-            // delivery UUIDs in a shared dedup store.
-            let key = format!("github:{delivery_id}");
-            match dedup.check_and_record(&key).await {
-                Ok(CheckResult::Duplicate) => {
-                    state.metrics.record_duplicate();
-                    return (StatusCode::OK, "duplicate").into_response();
-                }
-                Ok(CheckResult::FirstSight) => {}
-                Err(error) => {
-                    // Fail open, matching the Forgejo route.
-                    tracing::warn!(
-                        %error,
-                        delivery_id,
-                        "github dedup check failed; handling anyway"
-                    );
-                }
-            }
-        }
+    if is_duplicate(&state, &headers).await {
+        return (StatusCode::OK, "duplicate").into_response();
     }
 
     match event {
         "ping" => (StatusCode::OK, "pong").into_response(),
+        "pull_request" => handle_pull_request(&state, github, &body).await,
         "issue_comment" => {
             let evt: IssueCommentEvent = match serde_json::from_slice(&body) {
                 Ok(evt) => evt,
@@ -161,6 +137,44 @@ pub async fn handle(State(state): State<AppState>, headers: HeaderMap, body: Byt
             accepted()
         }
     }
+}
+
+/// Recognize redeliveries without colliding with Forgejo delivery IDs.
+async fn is_duplicate(state: &AppState, headers: &HeaderMap) -> bool {
+    let Some(dedup) = state.webhook_dedup.as_ref() else {
+        return false;
+    };
+    let Some(delivery_id) = headers
+        .get(DELIVERY_HEADER)
+        .and_then(|value| value.to_str().ok())
+    else {
+        return false;
+    };
+    match dedup
+        .check_and_record(&format!("github:{delivery_id}"))
+        .await
+    {
+        Ok(CheckResult::Duplicate) => {
+            state.metrics.record_duplicate();
+            true
+        }
+        Ok(CheckResult::FirstSight) => false,
+        Err(error) => {
+            // Fail open, matching the Forgejo route.
+            tracing::warn!(%error, delivery_id, "github dedup check failed; handling anyway");
+            false
+        }
+    }
+}
+
+/// Parse the signed PR delivery and schedule its readiness watch.
+async fn handle_pull_request(state: &AppState, github: GitHubDeps, body: &[u8]) -> Response {
+    let evt: PullRequestEvent = match serde_json::from_slice(body) {
+        Ok(evt) => evt,
+        Err(error) => return payload_failure(state, &error),
+    };
+    schedule(state, github, evt).await;
+    accepted()
 }
 
 /// Filters comment events and hands recognized mentions off to the chat handler.
@@ -257,12 +271,13 @@ mod tests {
     use async_trait::async_trait;
     use axum::body::Body;
     use axum::http::{Request, StatusCode};
+    use core::sync::atomic::{AtomicUsize, Ordering};
     use core::time::Duration;
     use std::sync::Mutex;
-    use tokio::time::sleep;
+    use tokio::time::{sleep, timeout};
     use tower::ServiceExt as _;
     use wiremock::matchers::{header, method, path};
-    use wiremock::{Mock, MockServer, ResponseTemplate};
+    use wiremock::{Mock, MockServer, Request as MockRequest, ResponseTemplate};
 
     const APP_ID: u64 = 12_345;
     const COMMENT_ID: u64 = 1;
@@ -355,11 +370,7 @@ mod tests {
     }
 
     #[tokio::test]
-    #[expect(
-        clippy::indexing_slicing,
-        reason = "The test asserts the exact job count before indexing"
-    )]
-    async fn ci_review_endpoint_routes_github_provider_to_github_host_and_dispatcher() {
+    async fn ci_review_endpoint_acknowledges_legacy_github_request_without_dispatch() {
         let github = MockServer::start().await;
         mount_installation_token(&github, 42).await;
         mount_pull_request(&github, "deadbeef").await;
@@ -398,12 +409,136 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
         assert!(forgejo_dispatcher.jobs().is_empty());
-        let jobs = github_dispatcher.jobs();
+        assert!(github_dispatcher.jobs().is_empty());
+        assert!(github.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
+    async fn github_pr_webhook_reviews_when_no_checks_exist() {
+        github_pr_webhook_waits_for_checks_case(false).await;
+    }
+
+    #[tokio::test]
+    async fn github_pr_webhook_waits_for_pending_and_failing_merge_checks() {
+        github_pr_webhook_waits_for_checks_case(true).await;
+    }
+
+    #[expect(
+        clippy::too_many_lines,
+        reason = "Keep the test's PR/check timeline together"
+    )]
+    async fn github_pr_webhook_waits_for_checks_case(with_merge_checks: bool) {
+        let no_checks: usize = 0;
+        let one_check: usize = 1;
+        let github = MockServer::start().await;
+        mount_installation_token(&github, INSTALLATION_ID).await;
+        let check_round = Arc::new(AtomicUsize::new(0));
+        if with_merge_checks {
+            let merge_round = Arc::clone(&check_round);
+            Mock::given(method("GET"))
+                .and(path("/repos/o/r/pulls/42"))
+                .respond_with(move |_: &MockRequest| {
+                    // The base advances after the original merge check fails.
+                    let merge_sha = if merge_round.load(Ordering::SeqCst) < 2 {
+                        "abc123"
+                    } else {
+                        "abc456"
+                    };
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "number": PR_NUMBER, "title": "Review me", "body": null,
+                        "draft": false, "state": "open", "merge_commit_sha": merge_sha,
+                        "head": {"ref": "topic", "sha": "deadbeef"},
+                        "base": {"ref": "main", "sha": "cafef00d"}
+                    }))
+                })
+                .mount(&github)
+                .await;
+            let counter = Arc::clone(&check_round);
+            Mock::given(method("GET"))
+                .and(path("/repos/o/r/commits/abc123/check-runs"))
+                .respond_with(move |_: &MockRequest| {
+                    let (status, conclusion) = match counter.fetch_add(1, Ordering::SeqCst) {
+                        0 => ("in_progress", None),
+                        1 => ("completed", Some("failure")),
+                        _ => ("completed", Some("success")),
+                    };
+                    ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                        "total_count": one_check, "check_runs": [{"status": status, "conclusion": conclusion}]
+                    }))
+                })
+                .mount(&github)
+                .await;
+            Mock::given(method("GET"))
+                .and(path("/repos/o/r/commits/abc123/statuses"))
+                .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!([
+                    {"state": "failure", "context": "auto_review", "creator": {"login": "auto-review[bot]"}},
+                    {"state": "success", "context": "ci", "creator": null},
+                    {"state": "failure", "context": "CI", "creator": null}
+                ])))
+                .mount(&github)
+                .await;
+        } else {
+            mount_pull_request(&github, "deadbeef").await;
+        }
+        for (route, response) in [
+            (
+                "/repos/o/r/commits/abc456/check-runs",
+                serde_json::json!({"total_count": no_checks, "check_runs": []}),
+            ),
+            ("/repos/o/r/commits/abc456/statuses", serde_json::json!([])),
+            (
+                "/repos/o/r/commits/deadbeef/check-runs",
+                serde_json::json!({"total_count": no_checks, "check_runs": []}),
+            ),
+            (
+                "/repos/o/r/commits/deadbeef/statuses",
+                serde_json::json!([]),
+            ),
+        ] {
+            Mock::given(method("GET"))
+                .and(path(route))
+                .respond_with(ResponseTemplate::new(200).set_body_json(response))
+                .mount(&github)
+                .await;
+        }
+        let dispatcher = RecordingDispatcher::new();
+        let app = build_router(
+            AppState::new("forgejo-secret", Arc::new(NoOpDispatcher)).with_github(github_deps(
+                &github.uri(),
+                Arc::<RecordingDispatcher>::clone(&dispatcher),
+            )),
+        );
+        let payload = serde_json::to_vec(&serde_json::json!({
+            "action": "opened",
+            "number": PR_NUMBER,
+            "pull_request": {"draft": false, "head": {"sha": "deadbeef"}},
+            "repository": {"name": "r", "full_name": "o/r", "owner": {"login": "o", "type": "User"}},
+            "installation": {"id": INSTALLATION_ID}
+        }))
+        .unwrap();
+        let signature = sign("github-secret", &payload);
+        let resp = app
+            .oneshot(github_request("pull_request", &payload, Some(&signature)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::ACCEPTED);
+        assert!(
+            timeout(Duration::from_secs(2), async {
+                while dispatcher.jobs().is_empty() {
+                    sleep(Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .is_ok(),
+            "signed PR should dispatch once GitHub checks allow review"
+        );
+        let jobs = dispatcher.jobs();
         assert_eq!(jobs.len(), 1);
-        assert_eq!(jobs[0].owner, "o");
-        assert_eq!(jobs[0].pr_title, "feat: github review");
-        assert_eq!(jobs[0].pr_body, "");
-        assert!(!jobs[0].force);
+        assert_eq!(jobs.first().unwrap().head_sha, "deadbeef");
+        assert_eq!(
+            check_round.load(Ordering::SeqCst),
+            if with_merge_checks { 3 } else { 0 }
+        );
     }
 
     fn sign(secret: &str, body: &[u8]) -> String {

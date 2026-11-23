@@ -23,8 +23,9 @@ use core::time::Duration;
 use jsonwebtoken::errors::Error as JwtError;
 use jsonwebtoken::{Algorithm, EncodingKey, Header};
 use reqwest::header::{HeaderMap, HeaderValue, ACCEPT, AUTHORIZATION, CONTENT_TYPE, USER_AGENT};
+use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use thiserror::Error;
 use time::error::Parse as TimestampParseError;
 use time::format_description::well_known::Rfc3339;
@@ -64,6 +65,9 @@ const MAX_GITHUB_STATUS_DESCRIPTION_CHARS: usize = 140;
 /// Most pages (of 100 rows) a paginated list call fetches.
 const MAX_LIST_PAGES: u32 = 30;
 
+/// Rows requested per page for GitHub's readiness APIs.
+const READINESS_PAGE_SIZE: usize = 100;
+
 /// Cached installation tokens are refreshed this long before they expire.
 const TOKEN_REFRESH_MARGIN: TimeDuration = TimeDuration::minutes(5);
 
@@ -80,6 +84,8 @@ pub enum Error {
     CloneCredentialEncoding,
     #[error("HTTP error: {0}")]
     Http(#[from] reqwest::Error),
+    #[error("incomplete GitHub check or status listing")]
+    IncompleteChecks,
     #[error("invalid base URL: {0}")]
     InvalidBaseUrl(String),
     #[error("invalid expires_at timestamp: {0}")]
@@ -94,6 +100,53 @@ pub enum Error {
     Timeout(Duration),
     #[error("URL build error: {0}")]
     UrlBuild(#[from] url::ParseError),
+}
+
+/// Current check run for a commit.
+#[derive(Deserialize)]
+struct CheckSignal {
+    /// Final result, absent while running.
+    conclusion: Option<String>,
+    /// Lifecycle state (for example, `completed`).
+    status: String,
+}
+
+/// A page of check runs.
+#[derive(Deserialize)]
+struct CommitSignals<T> {
+    /// Signals on this page.
+    #[serde(rename = "check_runs")]
+    entries: Vec<T>,
+    /// Number of signals across all pages.
+    total_count: usize,
+}
+
+/// PR details with GitHub's current merge commit.
+#[derive(Deserialize)]
+struct ReadinessPullRequest {
+    /// Test merge commit, if GitHub has generated one.
+    merge_commit_sha: Option<String>,
+    /// Standard PR summary.
+    #[serde(flatten)]
+    summary: ar_forge::PullRequestSummary,
+}
+
+/// User or App bot that published a commit status.
+#[derive(Deserialize)]
+struct StatusCreator {
+    /// GitHub account login.
+    login: String,
+}
+
+/// One published commit status.
+#[derive(Deserialize)]
+struct StatusSignal {
+    /// Name of this status.
+    context: String,
+    /// Account that published it, if GitHub identifies one.
+    creator: Option<StatusCreator>,
+    /// Result (for example, `success`).
+    state: String,
 }
 
 /// A [`ar_forge::ReviewHost`] bound to one already-minted installation token,
@@ -558,6 +611,103 @@ impl Client {
         })
     }
 
+    /// Whether every visible check run and commit status for a revision permits review.
+    /// A successful, complete response with no signals permits review.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if either signals API fails or cannot be read completely.
+    #[inline]
+    pub async fn checks_allow_review(
+        &self,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        bot_login: &str,
+        token: &str,
+    ) -> Result<bool, Error> {
+        let commit = format!("repos/{owner}/{repo}/commits/{sha}");
+        let checks: Vec<CheckSignal> = self
+            .commit_signals(&format!("{commit}/check-runs"), token)
+            .await?;
+        if checks.iter().any(|check| {
+            check.status != "completed"
+                || !matches!(
+                    check.conclusion.as_deref(),
+                    Some("success" | "neutral" | "skipped")
+                )
+        }) {
+            return Ok(false);
+        }
+        self.commit_statuses_allow_review(&format!("{commit}/statuses"), bot_login, token)
+            .await
+    }
+
+    /// Read a complete paginated signal listing, failing closed on truncation.
+    async fn commit_signals<T>(&self, path: &str, token: &str) -> Result<Vec<T>, Error>
+    where
+        T: DeserializeOwned,
+    {
+        let mut entries = Vec::new();
+        let mut expected = None;
+        for page in 1..=MAX_LIST_PAGES {
+            let mut url = self.url(path)?;
+            url.query_pairs_mut()
+                .append_pair("per_page", &READINESS_PAGE_SIZE.to_string())
+                .append_pair("page", &page.to_string());
+            let response: CommitSignals<T> = self.get_with_installation_token(url, token).await?;
+            if response.total_count != *expected.get_or_insert(response.total_count) {
+                return Err(Error::IncompleteChecks);
+            }
+            let empty = response.entries.is_empty();
+            entries.extend(response.entries);
+            if entries.len() == response.total_count {
+                return Ok(entries);
+            }
+            if empty || entries.len() > response.total_count {
+                break;
+            }
+        }
+        Err(Error::IncompleteChecks)
+    }
+
+    /// Evaluate the newest non-review status per case-insensitive context.
+    async fn commit_statuses_allow_review(
+        &self,
+        path: &str,
+        bot_login: &str,
+        token: &str,
+    ) -> Result<bool, Error> {
+        let mut seen = HashSet::new();
+        for page in 1..=MAX_LIST_PAGES {
+            let mut url = self.url(path)?;
+            url.query_pairs_mut()
+                .append_pair("per_page", &READINESS_PAGE_SIZE.to_string())
+                .append_pair("page", &page.to_string());
+            // Unlike the combined status API, this listing includes creators.
+            // GitHub returns these in reverse chronological order.
+            let statuses: Vec<StatusSignal> = self.get_with_installation_token(url, token).await?;
+            let complete = statuses.len() < READINESS_PAGE_SIZE;
+            for status in statuses {
+                if status.context.eq_ignore_ascii_case("auto_review")
+                    && status
+                        .creator
+                        .as_ref()
+                        .is_some_and(|user| user.login.eq_ignore_ascii_case(bot_login))
+                {
+                    continue;
+                }
+                if seen.insert(status.context.to_ascii_lowercase()) && status.state != "success" {
+                    return Ok(false);
+                }
+            }
+            if complete {
+                return Ok(true);
+            }
+        }
+        Err(Error::IncompleteChecks)
+    }
+
     /// Builds the `contents` API URL with every path segment and the `ref`
     /// query value percent-encoded, so branch names such as `feature/a&b`
     /// or file paths with reserved characters cannot alter the request.
@@ -872,6 +1022,24 @@ impl Client {
         let url = self.url(&format!("repos/{owner}/{repo}/pulls/{pull_number}"))?;
         self.get_with_installation_token(url, installation_token)
             .await
+    }
+
+    /// Fetch the PR and the synthetic merge commit GitHub reports, if any.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the GitHub request or response decoding fails.
+    #[inline]
+    pub async fn get_pull_request_and_merge_sha(
+        &self,
+        owner: &str,
+        repo: &str,
+        number: u64,
+        token: &str,
+    ) -> Result<(ar_forge::PullRequestSummary, Option<String>), Error> {
+        let url = self.url(&format!("repos/{owner}/{repo}/pulls/{number}"))?;
+        let pr: ReadinessPullRequest = self.get_with_installation_token(url, token).await?;
+        Ok((pr.summary, pr.merge_commit_sha))
     }
 
     /// Fetch a pull request's unified diff.

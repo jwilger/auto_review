@@ -50,10 +50,6 @@ struct CiReviewRequest {
     /// Host to use when fetching and dispatching the review.
     #[serde(default)]
     provider: CiProvider,
-    /// GitHub App installation covering the repository. Optional: the
-    /// gateway looks it up when omitted.
-    #[serde(default)]
-    installation_id: Option<u64>,
     /// Repository owner.
     owner: String,
     /// Repository name.
@@ -329,16 +325,14 @@ pub async fn handle_ci_review(
             (forgejo.as_ref(), &state.dispatcher)
         }
         CiProvider::Github => {
-            let Some(github) = state.github.as_ref() else {
+            if state.github.is_none() {
                 return reject(StatusCode::NOT_FOUND, "github provider not configured");
-            };
-            if let Some(installation_id) = req.installation_id {
-                github
-                    .host
-                    .remember_installation(&req.owner, &req.repo, installation_id)
-                    .await;
             }
-            (github.host.as_ref(), &github.dispatcher)
+            return (
+                StatusCode::ACCEPTED,
+                "github reviews are triggered by webhooks",
+            )
+                .into_response();
         }
     };
 
@@ -373,7 +367,11 @@ pub async fn handle_ci_review(
 }
 
 /// Checks that a repository owner or name is safe as a single path segment.
-fn is_safe_repo_path_segment(segment: &str) -> bool {
+#[expect(
+    clippy::pub_with_shorthand,
+    reason = "rustfmt uses shorthand for crate scope"
+)]
+pub(crate) fn is_safe_repo_path_segment(segment: &str) -> bool {
     !matches!(segment, "" | "." | "..")
         && segment
             .bytes()

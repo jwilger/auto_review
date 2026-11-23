@@ -33,13 +33,14 @@ The gateway owns external request boundaries:
   rate limit, `X-Hub-Signature-256` verification with the App's webhook secret
   before parsing, and namespaced `X-GitHub-Delivery` dedup. `issue_comment` and
   `pull_request_review_comment` deliveries route `@<bot>` mentions to the chat
-  handler; bot senders are ignored. A gateway without a Forgejo webhook secret
-  answers `404` on `/webhooks/forgejo` rather than verifying with an empty key.
-- `POST /reviews/ci` is the authenticated CI intake path. It is enabled only when
-  `AR_CI_REVIEW_TOKEN` is configured and receives the owner, repo, PR number,
-  head SHA, and trigger metadata for the CI-validated revision. An optional
-  `provider` field (`forgejo` by default, or `github` with an optional
-  `installation_id`) selects the repository host and its dispatcher.
+  handler; bot senders are ignored. Eligible `pull_request` deliveries start
+  a bounded readiness watch before dispatching a semantic review. A gateway
+  without a Forgejo webhook secret answers `404` on `/webhooks/forgejo` rather
+  than verifying with an empty key.
+- `POST /reviews/ci` is the authenticated Forgejo CI intake path. It is enabled
+  only when `AR_CI_REVIEW_TOKEN` is configured and receives the owner, repo, PR
+  number, head SHA, and trigger metadata for the CI-validated revision. Legacy
+  `provider: github` requests are acknowledged without dispatching reviews.
 - Forgejo chat commands are handled through webhook and polling paths because
   Forgejo does not reliably deliver every inline-thread reply event. GitHub
   delivers review-comment webhooks reliably, so the GitHub path has no poller.
