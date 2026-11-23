@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [1.7.0] - 2026-11-23
+
+### Added
+
+- *(github)* make automatic reviews immediate by default (#285)
+
 ## [1.6.1] - 2026-11-23
 
 ### Other
