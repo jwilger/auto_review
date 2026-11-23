@@ -1,0 +1,13 @@
+---
+extensions:
+  - addsTo:
+      pack: codeql/rust-all
+      extensible: barrierModel
+    data:
+      # Only the successful output of the PR payload size check is modeled,
+      # and only for deserialization. The signed PR decoder consumes a
+      # fixed DTO with no polymorphic fields or input-sized collections.
+      - - ar_gateway::github_webhook::bounded_pr_payload
+        - ReturnValue.Field[core::option::Option::Some(0)]
+        - unsafe-deserialization
+        - manual

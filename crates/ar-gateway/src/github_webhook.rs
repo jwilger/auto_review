@@ -169,17 +169,23 @@ async fn is_duplicate(state: &AppState, headers: &HeaderMap) -> bool {
     }
 }
 
+/// Bound resource use before decoding the fixed-shape PR DTO. This function
+/// is modeled by the repository's `CodeQL` extension `github-pr-payload`.
+fn bounded_pr_payload(body: &[u8]) -> Option<&[u8]> {
+    (body.len() <= MAX_PR_PAYLOAD_BYTES).then_some(body)
+}
+
 /// Parse the signed PR delivery and schedule its readiness watch.
 async fn handle_pull_request(state: &AppState, github: GitHubDeps, body: &[u8]) -> Response {
-    if body.len() > MAX_PR_PAYLOAD_BYTES {
+    let Some(bounded) = bounded_pr_payload(body) else {
         return reject(
             StatusCode::PAYLOAD_TOO_LARGE,
             "pull request payload too large",
         );
-    }
+    };
     // The signed delivery is bounded above. The DTO has a fixed shape and
     // ignores additional GitHub fields without allocating a JSON value tree.
-    let evt: PullRequestEvent = match serde_json::from_slice(body) {
+    let evt: PullRequestEvent = match serde_json::from_slice(bounded) {
         Ok(evt) => evt,
         Err(error) => return payload_failure(state, &error),
     };
