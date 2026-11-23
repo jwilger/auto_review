@@ -222,7 +222,7 @@ jobs:
 
       - name: Request auto_review semantic review
         if: ${{ steps.config.outputs.configured == 'true' }}
-        uses: jwilger/auto_review/deploy/github-action@37f7893cd56e51dbd2e9d01f4c665bf2671630bd # v1.5.0
+        uses: jwilger/auto_review/deploy/github-action@fefd0c8cc048125f5653006b9b2486730f50cb0d # v1.5.2
         with:
           gateway-url: ${{ vars.AUTO_REVIEW_GATEWAY_URL }}
           action-token: ${{ secrets.AUTO_REVIEW_ACTION_TOKEN }}
