@@ -6,6 +6,10 @@
 //! dispatcher abstraction so the gateway can return quickly while reviews run in
 //! the background.
 
+#![expect(clippy::pub_use, reason = "Preserve the crate-root startup re-exports")]
+
+extern crate alloc;
+
 pub mod config;
 pub mod dedup;
 pub mod github_webhook;
@@ -13,12 +17,15 @@ pub mod hmac;
 pub mod metrics;
 pub mod poller;
 pub mod ratelimit;
+/// Configuration and wiring for gateway startup.
 mod startup;
 pub mod webhook;
 
 pub use startup::{run_from_env, StartupOptions};
 
+use alloc::sync::Arc;
 use ar_forgejo::Client as ForgejoClient;
+use ar_github::AppReviewHost;
 use ar_index::LearningsStore;
 use ar_llm::Router as LlmRouter;
 use ar_orchestrator::JobDispatcher;
@@ -26,14 +33,25 @@ use axum::extract::State;
 use axum::http::{header, StatusCode};
 use axum::response::IntoResponse;
 use axum::routing::{get, post};
-use axum::Router;
+use axum::{Json, Router};
+use core::time::Duration;
+use dedup::DeliveryDedup;
 use metrics::Metrics;
 use poller::SharedCommentCursors;
+use ratelimit::TokenBucket;
 use serde::Serialize;
-use std::sync::Arc;
-use std::time::{Duration, Instant};
+use serde_json::Value;
+use std::time::Instant;
 use tokio::sync::Mutex;
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "Preserve field declaration and drop order for the existing state"
+)]
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "External callers construct state literals"
+)]
 #[derive(Clone)]
 pub struct AppState {
     pub webhook_secret: Arc<String>,
@@ -64,12 +82,12 @@ pub struct AppState {
     /// `/webhooks/forgejo` route. T7 mitigation per the threat
     /// model. None = no throttling (current default for tests and
     /// trust-the-environment deployments).
-    pub webhook_rate_limit: Option<Arc<crate::ratelimit::TokenBucket>>,
+    pub webhook_rate_limit: Option<Arc<TokenBucket>>,
     /// Optional dedup of recently-seen `X-Forgejo-Delivery` IDs.
     /// `None` = no dedup (caller dispatches every well-signed
     /// webhook even on Forgejo retry). Backed by either the in-memory
     /// LRU or the SQLite table — `main.rs` picks based on env.
-    pub webhook_dedup: Option<Arc<dyn crate::dedup::DeliveryDedup>>,
+    pub webhook_dedup: Option<Arc<dyn DeliveryDedup>>,
     pub chat_comment_cursors: Option<SharedCommentCursors>,
     pub ci_review_endpoint: Option<CiReviewEndpointDeps>,
     /// GitHub App support. When set, `/webhooks/github` accepts
@@ -78,6 +96,10 @@ pub struct AppState {
     pub github: Option<GitHubDeps>,
 }
 
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "Preserve public dependency literals"
+)]
 #[derive(Clone)]
 pub struct CiReviewEndpointDeps {
     pub action_token: Arc<String>,
@@ -87,12 +109,20 @@ pub struct CiReviewEndpointDeps {
 }
 
 /// Everything the gateway needs to serve GitHub App repositories.
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "Preserve public dependency literals"
+)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "Preserve field drop order and keep review wiring before optional chat settings"
+)]
 #[derive(Clone)]
 pub struct GitHubDeps {
     /// Secret configured on the GitHub App webhook; verifies
     /// `X-Hub-Signature-256`.
     pub webhook_secret: Arc<String>,
-    pub host: Arc<ar_github::AppReviewHost>,
+    pub host: Arc<AppReviewHost>,
     /// Dispatcher whose reviews run against [`Self::host`].
     pub dispatcher: Arc<dyn JobDispatcher>,
     /// Login GitHub shows for the app's own comments (`<slug>[bot]`).
@@ -103,6 +133,14 @@ pub struct GitHubDeps {
     pub chat: Option<GitHubChatDeps>,
 }
 
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "Preserve public dependency literals"
+)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "Preserve field drop order"
+)]
 #[derive(Clone)]
 pub struct GitHubChatDeps {
     pub llm: Arc<LlmRouter>,
@@ -110,9 +148,10 @@ pub struct GitHubChatDeps {
 }
 
 impl GitHubDeps {
+    #[inline]
     pub fn new(
         webhook_secret: impl Into<String>,
-        host: Arc<ar_github::AppReviewHost>,
+        host: Arc<AppReviewHost>,
         dispatcher: Arc<dyn JobDispatcher>,
     ) -> Self {
         Self {
@@ -125,6 +164,8 @@ impl GitHubDeps {
         }
     }
 
+    #[inline]
+    #[must_use = "Use the returned dependencies to retain the new bot identity"]
     pub fn with_bot_identity(
         mut self,
         bot_login: impl Into<String>,
@@ -135,12 +176,22 @@ impl GitHubDeps {
         self
     }
 
+    #[inline]
+    #[must_use = "Use the returned dependencies to enable chat"]
     pub fn with_chat(mut self, chat: GitHubChatDeps) -> Self {
         self.chat = Some(chat);
         self
     }
 }
 
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "Preserve public snapshot literals"
+)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "Preserve serialized field order"
+)]
 #[derive(Debug, Clone, Serialize)]
 pub struct RuntimeIsolationPostureInfo {
     pub kind: &'static str,
@@ -149,15 +200,19 @@ pub struct RuntimeIsolationPostureInfo {
 }
 
 impl RuntimeIsolationPostureInfo {
+    #[inline]
+    #[must_use = "The default posture snapshot must be retained to report it"]
     pub fn oci_default() -> Self {
         Self {
             kind: "oci_default",
-            label: "packaged OCI container isolation".to_string(),
+            label: "packaged OCI container isolation".to_owned(),
             detail: "Gateway uses embedded OCI container-equivalent isolation by default."
-                .to_string(),
+                .to_owned(),
         }
     }
 
+    #[inline]
+    #[must_use = "The failure posture snapshot must be retained to report it"]
     pub fn oci_setup_failed(detail: &str) -> Self {
         let public_detail = if detail.contains("/run/secrets")
             || detail.contains("secret-bearing")
@@ -170,7 +225,7 @@ impl RuntimeIsolationPostureInfo {
 
         Self {
             kind: "oci_setup_failed",
-            label: "OCI setup failed".to_string(),
+            label: "OCI setup failed".to_owned(),
             detail: format!("OCI setup failed: {public_detail}; set AR_GATEWAY_BARE to opt out"),
         }
     }
@@ -182,6 +237,14 @@ impl RuntimeIsolationPostureInfo {
 ///
 /// JSON shape is stable — operators script against this. Adding a
 /// field is fine; renaming or removing one is a breaking change.
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "External callers construct snapshot literals"
+)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "Preserve serialized field order"
+)]
 #[derive(Debug, Clone, Serialize)]
 pub struct GatewayInfo {
     pub name: &'static str,
@@ -224,59 +287,90 @@ pub struct GatewayInfo {
 /// checks (Forgejo server version, GitHub App authentication). The cache
 /// stays small intentionally — readiness should be independent of fancy
 /// metrics infrastructure.
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "Keep probe inputs before cached state"
+)]
 pub struct ReadinessProbe {
+    /// Hosts to probe, in the order their details appear in the response.
     targets: Vec<ReadinessTarget>,
+    /// How long a probe result can be reused.
     ttl: Duration,
+    /// Most recent result, shared by all readiness requests.
     cache: Mutex<Option<CachedReadiness>>,
 }
 
+/// A host whose reachability or authentication is required for readiness.
 enum ReadinessTarget {
+    /// Probe the Forgejo server version.
     Forgejo(Arc<ForgejoClient>),
-    GitHub(Arc<ar_github::AppReviewHost>),
+    /// Probe GitHub App authentication.
+    GitHub(Arc<AppReviewHost>),
 }
 
 impl ReadinessTarget {
+    /// Return this host's readiness status and a human-readable explanation.
+    #[expect(
+        clippy::pattern_type_mismatch,
+        reason = "Match ergonomics borrow the host client"
+    )]
     async fn check(&self) -> (bool, String) {
         match self {
             Self::Forgejo(forgejo) => match forgejo.get_server_version().await {
-                Ok(v) => (true, format!("forgejo reachable ({v})")),
-                Err(e) => (false, format!("forgejo unreachable: {e}")),
+                Ok(version) => (true, format!("forgejo reachable ({version})")),
+                Err(error) => (false, format!("forgejo unreachable: {error}")),
             },
             Self::GitHub(host) => match host.client().get_authenticated_app().await {
                 Ok(app) => (true, format!("github reachable (app {})", app.slug)),
-                Err(e) => (false, format!("github unreachable: {e}")),
+                Err(error) => (false, format!("github unreachable: {error}")),
             },
         }
     }
 }
 
+/// Cached result of probing all configured hosts.
 #[derive(Clone)]
 struct CachedReadiness {
+    /// Timestamp used to check the cache TTL.
     checked_at: Instant,
-    healthy: bool,
+    /// Combined human-readable result for all configured hosts.
     detail: String,
+    /// Whether every host passed its probe.
+    healthy: bool,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "Keep constructors and probe configuration together before the probe operation"
+)]
 impl ReadinessProbe {
+    #[inline]
+    #[must_use = "The readiness probe must be installed to run checks"]
     pub fn new(forgejo: Arc<ForgejoClient>) -> Self {
         Self::with_ttl(forgejo, Duration::from_secs(10))
     }
 
+    #[inline]
+    #[must_use = "The readiness probe must be installed to run checks"]
     pub fn with_ttl(forgejo: Arc<ForgejoClient>, ttl: Duration) -> Self {
         Self::from_targets(vec![ReadinessTarget::Forgejo(forgejo)], ttl)
     }
 
     /// Probe only GitHub App authentication (GitHub-only gateways).
-    pub fn github_with_ttl(host: Arc<ar_github::AppReviewHost>, ttl: Duration) -> Self {
+    #[inline]
+    pub fn github_with_ttl(host: Arc<AppReviewHost>, ttl: Duration) -> Self {
         Self::from_targets(vec![ReadinessTarget::GitHub(host)], ttl)
     }
 
     /// Also require GitHub App authentication to succeed.
-    pub fn and_github(mut self, host: Arc<ar_github::AppReviewHost>) -> Self {
+    #[inline]
+    #[must_use = "Use the returned probe to include the GitHub check"]
+    pub fn and_github(mut self, host: Arc<AppReviewHost>) -> Self {
         self.targets.push(ReadinessTarget::GitHub(host));
         self
     }
 
+    /// Create an empty cache for the configured targets and TTL.
     fn from_targets(targets: Vec<ReadinessTarget>, ttl: Duration) -> Self {
         Self {
             targets,
@@ -288,12 +382,13 @@ impl ReadinessProbe {
     /// Returns `(healthy, detail)`. Probes every configured host when the
     /// cache is empty or stale; serves from cache otherwise. Healthy only
     /// when every host is reachable.
+    #[inline]
     pub async fn check(&self) -> (bool, String) {
         let mut guard = self.cache.lock().await;
         let now = Instant::now();
-        if let Some(c) = guard.as_ref() {
-            if now.duration_since(c.checked_at) < self.ttl {
-                return (c.healthy, c.detail.clone());
+        if let Some(cached) = guard.as_ref() {
+            if now.duration_since(cached.checked_at) < self.ttl {
+                return (cached.healthy, cached.detail.clone());
             }
         }
         let mut healthy = true;
@@ -315,6 +410,14 @@ impl ReadinessProbe {
 
 /// Dependencies the chat handler needs. Bundled so the optional-ness
 /// is one Option, not three.
+#[expect(
+    clippy::exhaustive_structs,
+    reason = "Preserve public dependency literals"
+)]
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "Preserve field drop order"
+)]
 #[derive(Clone)]
 pub struct ChatDeps {
     pub forgejo: Arc<ForgejoClient>,
@@ -322,7 +425,12 @@ pub struct ChatDeps {
     pub learnings: Arc<dyn LearningsStore>,
 }
 
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "Group handler wiring and runtime overrides by purpose rather than name"
+)]
 impl AppState {
+    #[inline]
     pub fn new(webhook_secret: impl Into<String>, dispatcher: Arc<dyn JobDispatcher>) -> Self {
         Self {
             webhook_secret: Arc::new(webhook_secret.into()),
@@ -344,7 +452,9 @@ impl AppState {
     /// Wire in a global token-bucket rate limiter for the
     /// `/webhooks/forgejo` route. Without this, the route accepts
     /// every well-signed request.
-    pub fn with_webhook_rate_limit(mut self, bucket: Arc<crate::ratelimit::TokenBucket>) -> Self {
+    #[inline]
+    #[must_use = "Use the returned state to enable webhook throttling"]
+    pub fn with_webhook_rate_limit(mut self, bucket: Arc<TokenBucket>) -> Self {
         self.webhook_rate_limit = Some(bucket);
         self
     }
@@ -352,16 +462,22 @@ impl AppState {
     /// Wire in a recently-seen-delivery dedup so retried webhooks
     /// (same `X-Forgejo-Delivery` UUID) are answered 200 OK
     /// without re-dispatching to the orchestrator.
-    pub fn with_webhook_dedup(mut self, dedup: Arc<dyn crate::dedup::DeliveryDedup>) -> Self {
+    #[inline]
+    #[must_use = "Use the returned state to enable webhook deduplication"]
+    pub fn with_webhook_dedup(mut self, dedup: Arc<dyn DeliveryDedup>) -> Self {
         self.webhook_dedup = Some(dedup);
         self
     }
 
+    #[inline]
+    #[must_use = "Use the returned state to install the comment cursors"]
     pub fn with_chat_comment_cursors(mut self, cursors: SharedCommentCursors) -> Self {
         self.chat_comment_cursors = Some(cursors);
         self
     }
 
+    #[inline]
+    #[must_use = "Use the returned state to enable the Forgejo CI review endpoint"]
     pub fn with_ci_review_endpoint(
         mut self,
         action_token: impl Into<String>,
@@ -376,6 +492,8 @@ impl AppState {
 
     /// Enable `/reviews/ci` without a Forgejo client, for GitHub-only
     /// deployments. Forgejo-provider requests are then rejected.
+    #[inline]
+    #[must_use = "Use the returned state to enable GitHub-only CI reviews"]
     pub fn with_ci_review_token(mut self, action_token: impl Into<String>) -> Self {
         self.ci_review_endpoint = Some(CiReviewEndpointDeps {
             action_token: Arc::new(action_token.into()),
@@ -384,6 +502,8 @@ impl AppState {
         self
     }
 
+    #[inline]
+    #[must_use = "Use the returned state to install the GitHub dependencies"]
     pub fn with_github(mut self, github: GitHubDeps) -> Self {
         self.github = Some(github);
         self
@@ -392,17 +512,23 @@ impl AppState {
     /// Wire in a `/readyz` probe. When unset, `/readyz` returns the
     /// same response as `/healthz` (200 OK) — readiness checks
     /// degrade to liveness, which is safe for single-pod deploys.
+    #[inline]
+    #[must_use = "Use the returned state to install the readiness probe"]
     pub fn with_readiness(mut self, probe: Arc<ReadinessProbe>) -> Self {
         self.readiness = Some(probe);
         self
     }
 
     /// Inject the runtime-config snapshot surfaced at `/info`.
+    #[inline]
+    #[must_use = "Use the returned state to expose the runtime snapshot"]
     pub fn with_info(mut self, info: Arc<GatewayInfo>) -> Self {
         self.info = Some(info);
         self
     }
 
+    #[inline]
+    #[must_use = "Use the returned state to enable chat"]
     pub fn with_chat(mut self, chat: ChatDeps) -> Self {
         self.chat = Some(chat);
         self
@@ -410,6 +536,8 @@ impl AppState {
 
     /// Override the bot identity used for self-loop detection and
     /// `@<bot_name>` mention parsing.
+    #[inline]
+    #[must_use = "Use the returned state to retain the new bot identity"]
     pub fn with_bot_identity(
         mut self,
         bot_login: impl Into<String>,
@@ -424,12 +552,15 @@ impl AppState {
     /// `MetricsObserver` and the `/metrics` endpoint read/write the
     /// same counters. Without this, `/metrics` returns the gateway's
     /// own (empty) instance.
+    #[inline]
+    #[must_use = "Use the returned state to install the shared counters"]
     pub fn with_metrics(mut self, metrics: Arc<Metrics>) -> Self {
         self.metrics = metrics;
         self
     }
 }
 
+#[inline]
 pub fn build_router(state: AppState) -> Router {
     Router::new()
         .route("/healthz", get(|| async { "ok" }))
@@ -443,19 +574,26 @@ pub fn build_router(state: AppState) -> Router {
         .with_state(state)
 }
 
+/// Serve the startup configuration, or version metadata when it is not wired.
+#[expect(
+    clippy::unreachable,
+    reason = "GatewayInfo contains only JSON-compatible fields"
+)]
 async fn info_handler(State(state): State<AppState>) -> impl IntoResponse {
     match state.info {
-        Some(info) => (
-            StatusCode::OK,
-            axum::Json(serde_json::to_value(&*info).unwrap()),
-        )
-            .into_response(),
+        Some(info) => {
+            // Keep the Value conversion so /info retains its existing key order.
+            let Ok(value) = serde_json::to_value(&*info) else {
+                unreachable!("GatewayInfo contains only JSON-compatible fields");
+            };
+            (StatusCode::OK, Json(value)).into_response()
+        }
         // No info wired (tests, partial setups). Fall back to the
         // same {name, version} the /version endpoint emits so the
         // route still answers.
         None => (
             StatusCode::OK,
-            axum::Json(serde_json::json!({
+            Json(serde_json::json!({
                 "name": "auto_review",
                 "version": env!("CARGO_PKG_VERSION"),
                 "info": "not wired",
@@ -465,6 +603,7 @@ async fn info_handler(State(state): State<AppState>) -> impl IntoResponse {
     }
 }
 
+/// Serve readiness using the optional host probe, falling back to liveness.
 async fn readyz_handler(State(state): State<AppState>) -> impl IntoResponse {
     match state.readiness {
         Some(probe) => {
@@ -483,18 +622,20 @@ async fn readyz_handler(State(state): State<AppState>) -> impl IntoResponse {
         None => (
             StatusCode::OK,
             [(header::CONTENT_TYPE, "text/plain; charset=utf-8")],
-            "ready (no probe configured; same as /healthz)".to_string(),
+            "ready (no probe configured; same as /healthz)".to_owned(),
         ),
     }
 }
 
-async fn version_handler() -> axum::response::Json<serde_json::Value> {
-    axum::response::Json(serde_json::json!({
+/// Serve the gateway name and build version.
+async fn version_handler() -> Json<Value> {
+    Json(serde_json::json!({
         "name": "auto_review",
         "version": env!("CARGO_PKG_VERSION"),
     }))
 }
 
+/// Serve the current metrics in Prometheus text format.
 async fn metrics_handler(State(state): State<AppState>) -> impl IntoResponse {
     (
         StatusCode::OK,

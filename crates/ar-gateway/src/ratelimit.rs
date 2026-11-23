@@ -21,17 +21,27 @@
 use std::sync::Mutex;
 use std::time::Instant;
 
+/// Token balance and refill timestamp under the same lock.
 #[derive(Debug)]
-pub struct TokenBucket {
-    capacity: f64,
-    refill_per_sec: f64,
-    state: Mutex<BucketState>,
+#[expect(
+    clippy::arbitrary_source_item_ordering,
+    reason = "preserve the derived Debug output of TokenBucket"
+)]
+struct BucketState {
+    /// Available tokens, including partial refills.
+    tokens: f64,
+    /// Last timestamp applied to the balance.
+    last_refilled: Instant,
 }
 
 #[derive(Debug)]
-struct BucketState {
-    tokens: f64,
-    last_refilled: Instant,
+pub struct TokenBucket {
+    /// Maximum number of accumulated tokens.
+    capacity: f64,
+    /// Number of tokens replenished per second.
+    refill_per_sec: f64,
+    /// Shared balance for all intake requests.
+    state: Mutex<BucketState>,
 }
 
 impl TokenBucket {
@@ -39,11 +49,13 @@ impl TokenBucket {
     /// second. The bucket starts full, so a freshly-constructed
     /// limiter accepts up to `burst` requests immediately before
     /// throttling kicks in.
+    #[inline]
+    #[must_use = "the constructed bucket must be retained to rate-limit requests"]
     pub fn new(burst: u32, rate_per_sec: u32) -> Self {
-        let capacity = burst.max(1) as f64;
+        let capacity = f64::from(burst.max(1));
         Self {
             capacity,
-            refill_per_sec: rate_per_sec.max(1) as f64,
+            refill_per_sec: f64::from(rate_per_sec.max(1)),
             state: Mutex::new(BucketState {
                 tokens: capacity,
                 last_refilled: Instant::now(),
@@ -54,11 +66,26 @@ impl TokenBucket {
     /// Attempt to consume one token. Returns true on success
     /// (request allowed), false on empty bucket (request denied —
     /// caller should reply 429).
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous caller poisoned the bucket lock.
+    #[inline]
     pub fn try_take(&self) -> bool {
         self.try_take_at(Instant::now())
     }
 
-    /// Like [`try_take`] but with an injectable `now` for tests.
+    /// Like [`Self::try_take`] but with an injectable `now` for tests.
+    ///
+    /// # Panics
+    ///
+    /// Panics if a previous caller poisoned the bucket lock.
+    #[inline]
+    #[expect(clippy::expect_used, reason = "preserve the poisoned-lock policy")]
+    #[expect(
+        clippy::float_arithmetic,
+        reason = "elapsed subsecond time earns fractional tokens"
+    )]
     pub fn try_take_at(&self, now: Instant) -> bool {
         let mut state = self.state.lock().expect("bucket lock");
         let elapsed = now
@@ -78,13 +105,14 @@ impl TokenBucket {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use core::time::Duration;
 
     #[test]
     fn fresh_bucket_accepts_burst_consecutive_requests() {
-        let bucket = TokenBucket::new(5, 1);
-        for i in 0..5 {
-            assert!(bucket.try_take(), "expected take {i}");
+        let burst = 5;
+        let bucket = TokenBucket::new(burst, 1);
+        for take in 0..burst {
+            assert!(bucket.try_take(), "expected take {take}");
         }
         // Bucket is now empty — sixth take fails.
         assert!(!bucket.try_take());

@@ -1,12 +1,24 @@
+#![expect(
+    clippy::tests_outside_test_module,
+    reason = "this integration target is already a test harness"
+)]
+#![expect(
+    clippy::expect_used,
+    reason = "the webhook fixtures and in-process requests must succeed"
+)]
+
+extern crate alloc;
+
+use alloc::sync::Arc;
 use ar_gateway::{build_router, AppState};
 use ar_orchestrator::{JobDispatcher, ReviewJob};
 use async_trait::async_trait;
 use axum::body::Body;
 use axum::http::{Request, StatusCode};
-use hmac::{Hmac, KeyInit, Mac};
+use hmac::{Hmac, KeyInit as _, Mac as _};
 use sha2::Sha256;
-use std::sync::{Arc, Mutex};
-use tower::ServiceExt;
+use std::sync::Mutex;
+use tower::ServiceExt as _;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -16,12 +28,12 @@ struct RecordingDispatcher {
 }
 
 impl RecordingDispatcher {
-    fn new() -> Arc<Self> {
-        Arc::new(Self::default())
-    }
-
     fn jobs(&self) -> Vec<ReviewJob> {
         self.jobs.lock().expect("jobs lock").clone()
+    }
+
+    fn new() -> Arc<Self> {
+        Arc::new(Self::default())
     }
 }
 
@@ -69,10 +81,9 @@ async fn post_pull_request_webhook(
 ) -> StatusCode {
     let secret = "s";
     let sig = sign(secret, &body);
-    let app = build_router(
-        AppState::new(secret, dispatcher as Arc<dyn JobDispatcher>)
-            .with_bot_identity(bot_login, bot_login),
-    );
+    let job_dispatcher: Arc<dyn JobDispatcher> = dispatcher;
+    let app =
+        build_router(AppState::new(secret, job_dispatcher).with_bot_identity(bot_login, bot_login));
     let req = Request::post("/webhooks/forgejo")
         .header("x-forgejo-event", "pull_request")
         .header("x-forgejo-signature", sig)
@@ -87,7 +98,7 @@ async fn review_requested_for_configured_bot_is_accepted_without_dispatching_rev
     let body = review_requested_pr_payload("pr-bot", false, "open");
     let recorder = RecordingDispatcher::new();
 
-    let status = post_pull_request_webhook(recorder.clone(), "pr-bot", body).await;
+    let status = post_pull_request_webhook(Arc::clone(&recorder), "pr-bot", body).await;
 
     assert_eq!(status, StatusCode::ACCEPTED);
     assert!(recorder.jobs().is_empty());
@@ -98,7 +109,7 @@ async fn review_requested_for_non_bot_is_not_dispatched() {
     let body = review_requested_pr_payload("human-reviewer", false, "open");
     let recorder = RecordingDispatcher::new();
 
-    let status = post_pull_request_webhook(recorder.clone(), "auto_review", body).await;
+    let status = post_pull_request_webhook(Arc::clone(&recorder), "auto_review", body).await;
 
     assert_eq!(status, StatusCode::ACCEPTED);
     assert!(recorder.jobs().is_empty());
@@ -110,7 +121,7 @@ async fn review_requested_for_draft_or_closed_pr_is_not_dispatched() {
         let body = review_requested_pr_payload("auto_review", draft, state);
         let recorder = RecordingDispatcher::new();
 
-        let status = post_pull_request_webhook(recorder.clone(), "auto_review", body).await;
+        let status = post_pull_request_webhook(Arc::clone(&recorder), "auto_review", body).await;
 
         assert_eq!(status, StatusCode::ACCEPTED, "draft={draft} state={state}");
         assert!(
