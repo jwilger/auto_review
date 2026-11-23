@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [1.6.1] - 2026-11-23
+
+### Other
+
+- Trigger GitHub App reviews from pull request webhooks (#276)
+
 ## [1.6.0] - 2026-11-23
 
 ### Added
