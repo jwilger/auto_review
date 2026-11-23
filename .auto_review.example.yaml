@@ -12,6 +12,16 @@
 # status and return without calling the LLM.
 enabled: true
 
+# GitHub App webhook reviews only. By default, review open non-draft PRs
+# without waiting for CI. To opt in, uncomment either option below. Name
+# exact check runs or status contexts. Every listed name must appear:
+# pass accepts success, skipped, or neutral; complete also accepts failures.
+# github_automatic_review:
+#   allow_drafts: true
+#   required_checks:
+#     Test: pass
+#     Coverage: complete
+
 # Qualitative PR metadata check. Existing repos may keep the boolean form
 # (`pr_metadata_check: true/false`). Use object form to tune individual
 # expectations while keeping the gate enabled.

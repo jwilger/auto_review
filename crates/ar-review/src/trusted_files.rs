@@ -14,7 +14,7 @@
 //! clone. The module depends only on `ar_forge` host types (ADR-0020), so
 //! Forgejo and GitHub hosts behave the same.
 
-use crate::config::{parse_repo_config, RepoConfig};
+use crate::config::RepoConfig;
 use ar_forge::{HostError, ReviewHost};
 
 /// Largest repository-controlled file body the trusted loader will parse.
@@ -170,7 +170,7 @@ where
         match read_trusted_repo_file(host, owner, repo, path, base_ref).await {
             Ok(None) => {}
             Ok(Some(body)) => {
-                return match parse_repo_config(&body) {
+                return match serde_yaml::from_str(&body) {
                     Ok(config) => LoadedRepoConfig {
                         config,
                         provenance: ConfigProvenance::BaseBranch {

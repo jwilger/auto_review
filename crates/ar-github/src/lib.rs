@@ -15,7 +15,7 @@ pub mod webhook;
     reason = "ar-gateway (lib, startup) imports AppReviewHost from the crate root, and \
               app_host is a private module; dropping the re-export removes the type from the API"
 )]
-pub use app_host::{review_installation_token_request, AppReviewHost};
+pub use app_host::{review_installation_token_request, AppReviewHost, ReviewWaitEnd};
 
 use alloc::collections::BTreeMap;
 use async_trait::async_trait;
@@ -62,6 +62,9 @@ pub const IDENTITY_TIMEOUT: Duration = Duration::from_secs(10);
 /// GitHub's commit-status limit for `description`, in characters.
 const MAX_GITHUB_STATUS_DESCRIPTION_CHARS: usize = 140;
 
+/// Bound how long a status write can hold a same-commit writer lock.
+const STATUS_REQUEST_TIMEOUT: Duration = Duration::from_secs(20);
+
 /// Most pages (of 100 rows) a paginated list call fetches.
 const MAX_LIST_PAGES: u32 = 30;
 
@@ -107,6 +110,8 @@ pub enum Error {
 struct CheckSignal {
     /// Final result, absent while running.
     conclusion: Option<String>,
+    /// Job name as reported by GitHub.
+    name: Option<String>,
     /// Lifecycle state (for example, `completed`).
     status: String,
 }
@@ -138,6 +143,18 @@ struct StatusCreator {
     login: String,
 }
 
+/// Progress of a GitHub check run or commit status.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[non_exhaustive]
+pub enum CheckProgress {
+    /// Terminal outcome that does not pass a merge check.
+    Complete,
+    /// Successful, skipped, or neutral.
+    Passed,
+    /// No terminal outcome yet.
+    Pending,
+}
+
 /// One published commit status.
 #[derive(Deserialize)]
 struct StatusSignal {
@@ -145,6 +162,10 @@ struct StatusSignal {
     context: String,
     /// Account that published it, if GitHub identifies one.
     creator: Option<StatusCreator>,
+    /// Explanation shown alongside the state, if present.
+    description: Option<String>,
+    /// Identity of this particular write, when present.
+    id: Option<u64>,
     /// Result (for example, `success`).
     state: String,
 }
@@ -611,36 +632,45 @@ impl Client {
         })
     }
 
-    /// Whether every visible check run and commit status for a revision permits review.
-    /// A successful, complete response with no signals permits review.
+    /// Read the visible check runs and latest commit statuses for a revision.
     ///
     /// # Errors
     ///
-    /// Returns an error if either signals API fails or cannot be read completely.
+    /// Returns an error if either listing fails or cannot be read completely.
     #[inline]
-    pub async fn checks_allow_review(
+    pub async fn check_progress(
         &self,
         owner: &str,
         repo: &str,
         sha: &str,
-        bot_login: &str,
         token: &str,
-    ) -> Result<bool, Error> {
+    ) -> Result<Vec<(String, CheckProgress)>, Error> {
         let commit = format!("repos/{owner}/{repo}/commits/{sha}");
         let checks: Vec<CheckSignal> = self
             .commit_signals(&format!("{commit}/check-runs"), token)
             .await?;
-        if checks.iter().any(|check| {
-            check.status != "completed"
-                || !matches!(
-                    check.conclusion.as_deref(),
-                    Some("success" | "neutral" | "skipped")
-                )
-        }) {
-            return Ok(false);
-        }
-        self.commit_statuses_allow_review(&format!("{commit}/statuses"), bot_login, token)
-            .await
+        let mut progress = self
+            .commit_status_progress(&format!("{commit}/statuses"), token)
+            .await?;
+        progress.extend(checks.into_iter().filter_map(|check| {
+            let state = if check.status != "completed" {
+                CheckProgress::Pending
+            } else if matches!(
+                check.conclusion.as_deref(),
+                Some("success" | "neutral" | "skipped")
+            ) {
+                CheckProgress::Passed
+            } else if check.conclusion.is_some() {
+                CheckProgress::Complete
+            } else {
+                CheckProgress::Pending
+            };
+            check
+                .name
+                .filter(|name| !name.eq_ignore_ascii_case("auto_review"))
+                .map(|name| (name, state))
+        }));
+        Ok(progress)
     }
 
     /// Read a complete paginated signal listing, failing closed on truncation.
@@ -671,14 +701,14 @@ impl Client {
         Err(Error::IncompleteChecks)
     }
 
-    /// Evaluate the newest non-review status per case-insensitive context.
-    async fn commit_statuses_allow_review(
+    /// Collect the newest non-review status per case-insensitive context.
+    async fn commit_status_progress(
         &self,
         path: &str,
-        bot_login: &str,
         token: &str,
-    ) -> Result<bool, Error> {
+    ) -> Result<Vec<(String, CheckProgress)>, Error> {
         let mut seen = HashSet::new();
+        let mut progress = Vec::new();
         for page in 1..=MAX_LIST_PAGES {
             let mut url = self.url(path)?;
             url.query_pairs_mut()
@@ -690,19 +720,19 @@ impl Client {
             let complete = statuses.len() < READINESS_PAGE_SIZE;
             for status in statuses {
                 if status.context.eq_ignore_ascii_case("auto_review")
-                    && status
-                        .creator
-                        .as_ref()
-                        .is_some_and(|user| user.login.eq_ignore_ascii_case(bot_login))
+                    || !seen.insert(status.context.to_ascii_lowercase())
                 {
                     continue;
                 }
-                if seen.insert(status.context.to_ascii_lowercase()) && status.state != "success" {
-                    return Ok(false);
-                }
+                let outcome = match status.state.as_str() {
+                    "success" => CheckProgress::Passed,
+                    "error" | "failure" => CheckProgress::Complete,
+                    _ => CheckProgress::Pending,
+                };
+                progress.push((status.context, outcome));
             }
             if complete {
-                return Ok(true);
+                return Ok(progress);
             }
         }
         Err(Error::IncompleteChecks)
@@ -726,6 +756,25 @@ impl Client {
             .extend(file_path.split('/').filter(|segment| !segment.is_empty()));
         url.query_pairs_mut().append_pair("ref", ref_);
         Ok(url)
+    }
+
+    /// Preserve the created status identity for callers that own its lifecycle.
+    async fn create_commit_status(
+        &self,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        status: &ar_forge::CommitStatus,
+        installation_token: &str,
+    ) -> Result<serde_json::Value, Error> {
+        let url = self.url(&format!("repos/{owner}/{repo}/statuses/{sha}"))?;
+        let github_status = GitHubCommitStatus::from(status);
+        timeout(
+            STATUS_REQUEST_TIMEOUT,
+            self.post_with_installation_token(url, &github_status, installation_token),
+        )
+        .await
+        .unwrap_or(Err(Error::Timeout(STATUS_REQUEST_TIMEOUT)))
     }
 
     /// Create a pull request review. When GitHub rejects an inline comment
@@ -1287,6 +1336,35 @@ impl Client {
         Ok(token)
     }
 
+    /// Read the latest status in a context, requiring a complete read to infer absence.
+    async fn latest_review_status(
+        &self,
+        owner: &str,
+        repo: &str,
+        sha: &str,
+        token: &str,
+    ) -> Result<Option<StatusSignal>, Error> {
+        let path = format!("repos/{owner}/{repo}/commits/{sha}/statuses");
+        for page in 1..=MAX_LIST_PAGES {
+            let mut url = self.url(&path)?;
+            url.query_pairs_mut()
+                .append_pair("per_page", &READINESS_PAGE_SIZE.to_string())
+                .append_pair("page", &page.to_string());
+            let statuses: Vec<StatusSignal> = self.get_with_installation_token(url, token).await?;
+            let complete = statuses.len() < READINESS_PAGE_SIZE;
+            if let Some(status) = statuses
+                .into_iter()
+                .find(|status| status.context.eq_ignore_ascii_case("auto_review"))
+            {
+                return Ok(Some(status));
+            }
+            if complete {
+                return Ok(None);
+            }
+        }
+        Err(Error::IncompleteChecks)
+    }
+
     /// List every file a pull request changes, up to 30 pages of 100.
     ///
     /// # Errors
@@ -1478,12 +1556,9 @@ impl Client {
         status: &ar_forge::CommitStatus,
         installation_token: &str,
     ) -> Result<(), Error> {
-        let url = self.url(&format!("repos/{owner}/{repo}/statuses/{sha}"))?;
-        let github_status = GitHubCommitStatus::from(status);
-        let _: serde_json::Value = self
-            .post_with_installation_token(url, &github_status, installation_token)
-            .await?;
-        Ok(())
+        self.create_commit_status(owner, repo, sha, status, installation_token)
+            .await
+            .map(drop)
     }
 
     /// Post a top-level comment on an issue or pull request, returning the
