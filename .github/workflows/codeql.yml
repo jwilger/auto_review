@@ -43,5 +43,14 @@ jobs:
 
       - name: Perform CodeQL analysis
         uses: github/codeql-action/analyze@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
+        env:
+          # Advanced setup did not discover the checked-in model automatically.
+          # Leave --additional-packs to the action's PR diff extension.
+          CODEQL_ACTION_EXTRA_OPTIONS: >-
+            ${{ matrix.language == 'rust' &&
+            '{"database":{"run-queries":[
+            "--search-path=.github/codeql/extensions",
+            "--model-packs=jwilger/github-pr-payload"
+            ]}}' || '' }}
         with:
           category: "/language:${{ matrix.language }}"
