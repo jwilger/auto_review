@@ -20,6 +20,8 @@ const SIGNATURE_HEADER: &str = "x-hub-signature-256";
 const EVENT_HEADER: &str = "x-github-event";
 /// Header carrying the delivery identifier used for deduplication.
 const DELIVERY_HEADER: &str = "x-github-delivery";
+/// Cap the input to the PR JSON decoder independently of Axum's body limit.
+const MAX_PR_PAYLOAD_BYTES: usize = 1 << 20;
 
 /// Fields shared by issue comments and pull request review comments.
 struct MentionEvent<'event> {
@@ -169,6 +171,14 @@ async fn is_duplicate(state: &AppState, headers: &HeaderMap) -> bool {
 
 /// Parse the signed PR delivery and schedule its readiness watch.
 async fn handle_pull_request(state: &AppState, github: GitHubDeps, body: &[u8]) -> Response {
+    if body.len() > MAX_PR_PAYLOAD_BYTES {
+        return reject(
+            StatusCode::PAYLOAD_TOO_LARGE,
+            "pull request payload too large",
+        );
+    }
+    // The signed delivery is bounded above. The DTO has a fixed shape and
+    // ignores additional GitHub fields without allocating a JSON value tree.
     let evt: PullRequestEvent = match serde_json::from_slice(body) {
         Ok(evt) => evt,
         Err(error) => return payload_failure(state, &error),
@@ -414,6 +424,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn github_pr_webhook_rejects_oversized_signed_payload() {
+        let github = MockServer::start().await;
+        let deps = github_deps(&github.uri(), Arc::new(NoOpDispatcher));
+        let mut payload = serde_json::to_vec(&serde_json::json!({
+            "action": "opened",
+            "number": PR_NUMBER,
+            "pull_request": {"draft": false, "head": {"sha": "deadbeef"}},
+            "repository": {"name": "r", "full_name": "o/r", "owner": {"login": "o", "type": "User"}},
+            "installation": {"id": INSTALLATION_ID}
+        })).unwrap();
+        // Still valid JSON, and below Axum's default 2 MiB limit.
+        payload.resize((1 << 20) + 1, b' ');
+        let signature = sign(&deps.webhook_secret, &payload);
+        let app = build_router(AppState::new("unused", Arc::new(NoOpDispatcher)).with_github(deps));
+        let resp = app
+            .oneshot(github_request("pull_request", &payload, Some(&signature)))
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert!(github.received_requests().await.unwrap().is_empty());
+    }
+
+    #[tokio::test]
     async fn github_pr_webhook_reviews_when_no_checks_exist() {
         github_pr_webhook_waits_for_checks_case(false).await;
     }
@@ -502,11 +535,17 @@ mod tests {
                 .await;
         }
         let dispatcher = RecordingDispatcher::new();
+        let mut key = [0; 32];
+        getrandom::fill(&mut key).unwrap();
+        let secret = hex::encode(key);
+        let deps = GitHubDeps::new(
+            secret.as_str(),
+            app_host(&github.uri()),
+            Arc::<RecordingDispatcher>::clone(&dispatcher),
+        )
+        .with_bot_identity("auto-review[bot]", "auto-review");
         let app = build_router(
-            AppState::new("forgejo-secret", Arc::new(NoOpDispatcher)).with_github(github_deps(
-                &github.uri(),
-                Arc::<RecordingDispatcher>::clone(&dispatcher),
-            )),
+            AppState::new("forgejo-secret", Arc::new(NoOpDispatcher)).with_github(deps),
         );
         let payload = serde_json::to_vec(&serde_json::json!({
             "action": "opened",
@@ -516,7 +555,7 @@ mod tests {
             "installation": {"id": INSTALLATION_ID}
         }))
         .unwrap();
-        let signature = sign("github-secret", &payload);
+        let signature = sign(&secret, &payload);
         let resp = app
             .oneshot(github_request("pull_request", &payload, Some(&signature)))
             .await
