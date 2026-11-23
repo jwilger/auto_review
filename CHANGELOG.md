@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 <!-- release-prepare inserts generated release sections below this line -->
 
+## [1.6.0] - 2026-11-23
+
+### Added
+
+- *(factory)* reload Pi and continue after resource changes (#268)
+
+### Other
+
+- require an up-to-date Cargo.lock (#270)
+- define engineering standards and self-review rubric (#272)
+
 ## [1.5.2] - 2026-11-18
 
 ### Fixed
