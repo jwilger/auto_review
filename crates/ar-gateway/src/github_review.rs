@@ -101,7 +101,7 @@ enum Admission {
 }
 
 /// Base branch and its repository-controlled admission policy for this watch.
-#[derive(Clone)]
+#[derive(Clone, Eq, PartialEq)]
 struct Policy {
     /// Discard the watch if the PR is retargeted.
     base: String,
@@ -147,12 +147,18 @@ async fn admit(
             if remaining.is_zero() || notify.is_closed() {
                 return None;
             }
-            let (admission, job) = match timeout(
-                API_TIMEOUT.min(remaining),
-                reconcile(&gateway, &candidate, &admission_policy),
-            )
-            .await
-            {
+            let checked = timeout(API_TIMEOUT.min(remaining), async {
+                if load_policy(&gateway, &candidate).await?.as_ref() != Some(&admission_policy) {
+                    return Ok(Readiness::Obsolete);
+                }
+                reconcile(&gateway, &candidate, &admission_policy)
+                    .await
+                    .map_err(|error| {
+                        tracing::debug!(%error, "Could not confirm GitHub review admission");
+                    })
+            })
+            .await;
+            let (admission, job) = match checked {
                 Ok(Ok(Readiness::Ready(job))) => (Admission::Dispatched, Some(job)),
                 Ok(Ok(Readiness::Obsolete)) => (Admission::Obsolete, None),
                 _ => (Admission::Retry, None),

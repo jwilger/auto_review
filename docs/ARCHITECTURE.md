@@ -62,10 +62,13 @@ The gateway owns external request boundaries:
   `installation_id` so the runtime can mint a repository-scoped installation
   token before repository-host operations.
 
-Normal semantic review is gated behind repository-selected CI prerequisites.
-Regular Forgejo webhooks perform low-cost intake, bookkeeping, status updates,
-and chat routing; they do not normally start expensive semantic review. Explicit
-chat commands such as `@auto-review re-review` may force a review.
+[ADR 0029](./ADR-0029-share-automatic-review-policy-across-forges.md) defines
+webhook admission for both hosts. Eligible webhook revisions queue immediately
+unless trusted base-branch `automatic_review` config sets named CI gates. A
+configured wait polls before dispatch, without occupying a review worker.
+Forgejo defaults to CI callbacks until the repository explicitly opts into
+webhook admission. Explicit chat commands such as `@auto-review re-review`
+may force a review independently of automatic admission.
 
 ## Review pipeline
 

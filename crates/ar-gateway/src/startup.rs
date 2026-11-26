@@ -1890,7 +1890,7 @@ pub async fn run_from_env(options: StartupOptions) -> Result<()> {
         .with_chat_comment_cursors(chat_comment_cursors)
         .with_info(info);
     if let Some(forgejo) = forgejo_host.as_ref() {
-        state = state.with_chat(ChatDeps {
+        state = state.with_forgejo(Arc::clone(forgejo)).with_chat(ChatDeps {
             forgejo: Arc::clone(forgejo),
             llm: Arc::clone(&llm_router),
             learnings: Arc::clone(&learnings),

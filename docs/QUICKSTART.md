@@ -65,7 +65,6 @@ Create a secret env file for the gateway host or container:
 FORGEJO_BASE_URL=https://forgejo.example.com
 AR_FORGEJO_TOKEN=<bot PAT>
 WEBHOOK_SECRET=<generate with: openssl rand -hex 32>
-AR_CI_REVIEW_TOKEN=<generate with: openssl rand -hex 32>
 
 # Local Ollama/vLLM example
 LLM_BASE_URL=http://localhost:11434
@@ -79,8 +78,8 @@ LLM_REASONING_MODEL=qwen2.5-coder:32b
 # LLM_OMIT_TEMPERATURE=true
 ```
 
-`AR_CI_REVIEW_TOKEN` enables `POST /reviews/ci`; store the same value as the Forgejo
-Actions secret `AR_CI_REVIEW_TOKEN`.
+Webhook mode does not need `AR_CI_REVIEW_TOKEN`. Configure it only if you use
+[the CI callback](#6-enable-automatic-review).
 
 ## 4. Run the gateway
 
@@ -112,19 +111,32 @@ $AUTO_REVIEW webhook register \
   --webhook-secret "$WEBHOOK_SECRET"
 ```
 
-This subscribes the bot to `pull_request` and `issue_comment` events. Pull
-request webhooks are low-cost intake and chat bookkeeping; normal semantic
-review waits for the CI-triggered `/reviews/ci` request.
+This subscribes the bot to `pull_request` and `issue_comment` events.
 
-## 6. Add the CI review trigger
+## 6. Enable automatic review
 
+For a new repository, put this in `.auto_review.yaml` on the default branch:
+
+```yaml
+automatic_review:
+  forgejo_trigger: webhook
+```
+
+Open a non-draft PR to verify it. The gateway starts a review without waiting
+for CI unless you configure named gates. See [Forgejo automatic review](./DEPLOYMENT.md#forgejo-automatic-review)
+for draft reviews, named gates, and migration steps.
+
+### Alternative: keep CI-triggered review
+
+Omit `forgejo_trigger` or set it to `ci`. Set `AR_CI_REVIEW_TOKEN` on the
+gateway and store the same value as the Forgejo Actions secret of that name.
 After your normal deterministic checks pass, call the gateway action:
 
 ```yaml
 name: auto_review
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    types: [opened, synchronize, reopened]
 
 jobs:
   fmt:

@@ -105,7 +105,7 @@ To review drafts or wait for particular CI jobs, add either option to
 `.auto_review.yaml` on the PR's **base branch**:
 
 ```yaml
-github_automatic_review:
+automatic_review:
   allow_drafts: true
   required_checks:
     Test: pass
@@ -113,6 +113,9 @@ github_automatic_review:
 ```
 
 `allow_drafts` defaults to `false`, and `required_checks` defaults to empty.
+Existing `github_automatic_review` sections still work when the shared
+`automatic_review` section is absent; if both are present, the shared section
+wins (the two sections are not merged).
 Use exact check-run names or commit status contexts. Every listed name must
 appear on the current PR head or GitHub test merge commit, and every matching
 result must satisfy its requirement. `pass` accepts success, skipped, or
@@ -128,10 +131,11 @@ backoff for up to two hours and rechecks when a worker becomes available.
 If the watch expires or the PR is no longer eligible, the gateway attempts
 to replace its pending status with an error, but only if its status is still
 latest. A restart or a lost response can leave a pending status visible.
-The gateway reads the policy when the watch starts and uses it for that watch;
-base-branch config changes apply to new watches. An unreadable or invalid
-config does not fall back to immediate automatic review. A maintainer can request `@auto-review re-review` without
-this automatic admission policy.
+The gateway starts each watch with the policy from the base branch and
+rechecks it when a worker becomes available. If the policy changed, it
+discards the queued review rather than using the old rules. An unreadable or
+invalid config does not fall back to immediate automatic review. A maintainer
+can request `@auto-review re-review` without this automatic admission policy.
 
 Remove existing review-request steps after confirming App delivery. The
 bundled action is now a no-op. Older pinned versions may still call

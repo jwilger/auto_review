@@ -12,6 +12,7 @@ extern crate alloc;
 
 pub mod config;
 pub mod dedup;
+mod forgejo_review;
 mod github_review;
 pub mod github_webhook;
 pub mod hmac;
@@ -50,8 +51,8 @@ use tokio::sync::Mutex;
     reason = "Preserve field declaration and drop order for the existing state"
 )]
 #[expect(
-    clippy::exhaustive_structs,
-    reason = "External callers construct state literals"
+    clippy::partial_pub_fields,
+    reason = "Keep Forgejo trigger history internal to the router"
 )]
 #[derive(Clone)]
 pub struct AppState {
@@ -91,10 +92,23 @@ pub struct AppState {
     pub webhook_dedup: Option<Arc<dyn DeliveryDedup>>,
     pub chat_comment_cursors: Option<SharedCommentCursors>,
     pub ci_review_endpoint: Option<CiReviewEndpointDeps>,
+    /// Forgejo host and outstanding automatic review watches.
+    pub forgejo: Option<ForgejoDeps>,
+    /// Last known webhook opt-ins for this gateway's Forgejo host.
+    forgejo_triggers: Arc<forgejo_review::TriggerHistory>,
     /// GitHub App support. When set, `/webhooks/github` accepts
     /// `X-Hub-Signature-256`-signed deliveries and `/reviews/ci` accepts
     /// `"provider": "github"` requests.
     pub github: Option<GitHubDeps>,
+}
+
+/// Dependencies shared by signed Forgejo PR deliveries.
+#[derive(Clone)]
+pub struct ForgejoDeps {
+    /// Authenticated host for live metadata and CI reads.
+    host: Arc<ForgejoClient>,
+    /// Concurrent watches shared across router state clones.
+    review_candidates: Arc<forgejo_review::Candidates>,
 }
 
 #[expect(
@@ -449,6 +463,8 @@ impl AppState {
             webhook_dedup: None,
             chat_comment_cursors: None,
             ci_review_endpoint: None,
+            forgejo: None,
+            forgejo_triggers: Arc::default(),
             github: None,
         }
     }
@@ -490,6 +506,17 @@ impl AppState {
         self.ci_review_endpoint = Some(CiReviewEndpointDeps {
             action_token: Arc::new(action_token.into()),
             forgejo: Some(forgejo),
+        });
+        self
+    }
+
+    /// Wire the Forgejo host for signed PR webhooks, independently of the CI endpoint.
+    #[inline]
+    #[must_use = "Use the returned state to enable Forgejo automatic review"]
+    pub fn with_forgejo(mut self, host: Arc<ForgejoClient>) -> Self {
+        self.forgejo = Some(ForgejoDeps {
+            host,
+            review_candidates: Arc::new(forgejo_review::Candidates::default()),
         });
         self
     }
