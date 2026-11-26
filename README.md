@@ -38,7 +38,6 @@ compatibility alias).
    FORGEJO_BASE_URL=https://forgejo.example.com
    AR_FORGEJO_TOKEN=<bot PAT>
    WEBHOOK_SECRET=<openssl rand -hex 32>
-   AR_CI_REVIEW_TOKEN=<openssl rand -hex 32>
    LLM_BASE_URL=http://localhost:11434
    LLM_REASONING_MODEL=qwen2.5-coder:32b
    ```
@@ -59,8 +58,8 @@ compatibility alias).
    $AUTO_REVIEW gateway --bare
    ```
 
-5. Register a repo webhook and add the Forgejo Actions CI trigger shown in
-   [Quickstart](./docs/QUICKSTART.md).
+5. Register a repo webhook and opt in to automatic webhook reviews as shown
+   in [Quickstart](./docs/QUICKSTART.md).
 
 Full setup: [Quickstart](./docs/QUICKSTART.md). Deployment options:
 [Deployment](./docs/DEPLOYMENT.md). Day-2 operation:
@@ -72,8 +71,8 @@ Full setup: [Quickstart](./docs/QUICKSTART.md). Deployment options:
 
 `auto_review` is released and versioned under semver — see
 [CHANGELOG](./CHANGELOG.md) for the current release. The supported runtime
-contract is the single-binary Forgejo reviewer path: CI triggers semantic
-review, the gateway isolates workspace handling, and the bot posts verified
+contract is the single-binary Forgejo reviewer path: a signed PR webhook or
+CI callback triggers semantic review, the gateway isolates workspace handling, and the bot posts verified
 review output back to Forgejo. The same gateway also serves GitHub repositories
 through a GitHub App — automatic webhook-triggered reviews and chat (see
 [GitHub repositories](./docs/GITHUB.md)). The reviewer can also run as an AWS
@@ -92,10 +91,10 @@ Forgejo webhook / CI trigger
   -> inline review comments + commit status
 ```
 
-On Forgejo, CI calls `POST /reviews/ci` after repository-selected checks pass.
-On GitHub, the App webhook triggers review once visible checks permit it;
-no review-specific workflow is needed. Explicit `@auto-review re-review` can
-force a review.
+Webhook mode starts review for eligible non-draft PRs on either host without
+waiting for CI unless the repository configures named gates. Existing Forgejo
+repositories can keep calling `POST /reviews/ci` after their selected checks.
+Explicit `@auto-review re-review` can force a review.
 
 The chat handler supports `help`, `remember <text>`, `forget <id>`, `re-review`,
 `autofix`, `tests`, and free-form questions. The `bench` command

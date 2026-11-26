@@ -281,9 +281,11 @@ fn reject(status: StatusCode, msg: &str) -> Response {
     reason = "Invalid fixtures or failed test requests should fail the test immediately"
 )]
 mod tests {
+    use super::DELIVERY_HEADER;
     use crate::{build_router, AppState, GitHubDeps};
     use alloc::sync::Arc;
     use ar_forge::{CommitStatus, CommitStatusState, ReviewHost as _};
+    use ar_orchestrator::dispatcher::ReviewPreparation;
     use ar_orchestrator::{JobDispatcher, NoOpDispatcher, ReviewJob};
     use async_trait::async_trait;
     use axum::body::Body;
@@ -291,6 +293,7 @@ mod tests {
     use core::sync::atomic::{AtomicUsize, Ordering};
     use core::time::Duration;
     use std::sync::Mutex;
+    use tokio::sync::Notify;
     use tokio::time::{advance, pause, resume, sleep, timeout};
     use tower::ServiceExt as _;
     use wiremock::matchers::{header, method, path, query_param};
@@ -321,6 +324,28 @@ mod tests {
     impl JobDispatcher for RecordingDispatcher {
         async fn dispatch(&self, job: ReviewJob) {
             self.seen.lock().unwrap().push(job);
+        }
+    }
+
+    #[derive(Default)]
+    struct QueuedDispatcher {
+        queued: Notify,
+        seen: Mutex<Vec<ReviewJob>>,
+        slot: Notify,
+    }
+
+    #[async_trait]
+    impl JobDispatcher for QueuedDispatcher {
+        async fn dispatch(&self, job: ReviewJob) {
+            self.seen.lock().unwrap().push(job);
+        }
+
+        async fn dispatch_when_ready(&self, prepare: ReviewPreparation) {
+            self.queued.notify_one();
+            self.slot.notified().await;
+            if let Some(job) = prepare.await {
+                self.dispatch(job).await;
+            }
         }
     }
 
@@ -519,12 +544,17 @@ mod tests {
 
     #[tokio::test]
     async fn github_pr_webhook_reports_wait_timeout_without_dispatch() {
-        github_wait_timeout_case(false).await;
+        github_wait_timeout_case(false, false).await;
     }
 
     #[tokio::test]
     async fn github_pr_webhook_timeout_preserves_a_newer_review_status() {
-        github_wait_timeout_case(true).await;
+        github_wait_timeout_case(true, false).await;
+    }
+
+    #[tokio::test]
+    async fn github_pr_webhook_unreadable_check_prevents_dispatch() {
+        github_wait_timeout_case(false, true).await;
     }
 
     #[tokio::test]
@@ -591,7 +621,71 @@ mod tests {
         assert_eq!(history, ["pending", "error", "pending"]);
     }
 
-    async fn github_wait_timeout_case(with_manual_review: bool) {
+    #[tokio::test]
+    async fn github_pr_webhook_unknown_conclusion_does_not_complete_gate() {
+        github_check_gate_case("Test", "unknown_conclusion").await;
+    }
+
+    #[tokio::test]
+    async fn github_pr_webhook_wrong_case_does_not_complete_gate() {
+        github_check_gate_case("test", "success").await;
+    }
+
+    async fn github_check_gate_case(name: &'static str, conclusion: &'static str) {
+        let github = MockServer::start().await;
+        mount_installation_token(&github, INSTALLATION_ID).await;
+        mount_policy(
+            &github,
+            "automatic_review:\n  required_checks:\n    Test: complete\n",
+        )
+        .await;
+        mount_pull_request(&github, "deadbeef").await;
+        mount_review_status(&github, &Arc::new(AtomicUsize::new(0))).await;
+        let reads = Arc::new(AtomicUsize::new(0));
+        let check_reads = Arc::clone(&reads);
+        let one_check: usize = 1;
+        Mock::given(method("GET"))
+            .and(path("/repos/o/r/commits/deadbeef/check-runs"))
+            .respond_with(move |_: &MockRequest| {
+                check_reads.fetch_add(1, Ordering::SeqCst);
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "total_count": one_check, "check_runs": [
+                        {"name": name, "status": "completed", "conclusion": conclusion}
+                    ]
+                }))
+            })
+            .mount(&github)
+            .await;
+        let dispatcher = RecordingDispatcher::new();
+        let deps = github_deps(
+            &github.uri(),
+            Arc::<RecordingDispatcher>::clone(&dispatcher),
+        );
+        let app = build_router(
+            AppState::new("unused", Arc::new(NoOpDispatcher)).with_github(deps.clone()),
+        );
+        let response = app
+            .oneshot(opened_pr_request(&deps.webhook_secret))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        // A successful admission uses two reads. Require another read without
+        // ever changing the fixture, or observe a premature dispatch.
+        timeout(Duration::from_secs(2), async {
+            while dispatcher.jobs().is_empty() && reads.load(Ordering::SeqCst) < 3 {
+                sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert!(
+            dispatcher.jobs().is_empty(),
+            "{name}/{conclusion} must not satisfy the complete gate"
+        );
+        assert!(reads.load(Ordering::SeqCst) >= 3);
+    }
+
+    async fn github_wait_timeout_case(with_manual_review: bool, unreadable: bool) {
         let github = MockServer::start().await;
         mount_installation_token(&github, INSTALLATION_ID).await;
         mount_required_ci(&github).await;
@@ -605,6 +699,9 @@ mod tests {
             .and(path("/repos/o/r/commits/deadbeef/check-runs"))
             .respond_with(move |_: &MockRequest| {
                 reads.fetch_add(1, Ordering::SeqCst);
+                if unreadable {
+                    return ResponseTemplate::new(502);
+                }
                 ResponseTemplate::new(200).set_body_json(serde_json::json!({
                     "total_count": one_check, "check_runs": [{"name": "Test", "status": "in_progress"}]
                 }))
@@ -709,6 +806,8 @@ mod tests {
 
     #[tokio::test]
     async fn github_pr_webhook_dispatches_by_default_without_reading_ci() {
+        use crate::dedup::RecentDeliveries;
+
         let github = MockServer::start().await;
         mount_installation_token(&github, INSTALLATION_ID).await;
         // An accepted delivery must survive a transient error while loading policy.
@@ -725,12 +824,21 @@ mod tests {
             &github.uri(),
             Arc::<RecordingDispatcher>::clone(&dispatcher),
         );
-        let delivery = opened_pr_request(&deps.webhook_secret);
-        let app = build_router(AppState::new("unused", Arc::new(NoOpDispatcher)).with_github(deps));
-        assert_eq!(
-            app.oneshot(delivery).await.unwrap().status(),
-            StatusCode::ACCEPTED
+        let app = build_router(
+            AppState::new("unused", Arc::new(NoOpDispatcher))
+                .with_webhook_dedup(Arc::new(RecentDeliveries::new(8)))
+                .with_github(deps.clone()),
         );
+        for expected in [StatusCode::ACCEPTED, StatusCode::OK] {
+            let mut delivery = opened_pr_request(&deps.webhook_secret);
+            delivery
+                .headers_mut()
+                .insert(DELIVERY_HEADER, "same-delivery".parse().unwrap());
+            assert_eq!(
+                app.clone().oneshot(delivery).await.unwrap().status(),
+                expected
+            );
+        }
         assert!(
             timeout(Duration::from_secs(2), async {
                 while dispatcher.jobs().is_empty() {
@@ -741,6 +849,8 @@ mod tests {
             .is_ok(),
             "default automatic review should not wait for CI"
         );
+        wait_for_watch_exit(&deps).await;
+        assert_eq!(dispatcher.jobs().len(), 1);
         let requests = github.received_requests().await.unwrap();
         assert!(!requests
             .iter()
@@ -749,21 +859,90 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn github_pr_webhook_does_not_dispatch_under_changed_queued_policy() {
+        let github = MockServer::start().await;
+        mount_installation_token(&github, INSTALLATION_ID).await;
+        mount_pull_request(&github, "deadbeef").await;
+        let dispatcher = Arc::new(QueuedDispatcher::default());
+        let deps = github_deps(&github.uri(), Arc::<QueuedDispatcher>::clone(&dispatcher));
+        let app = build_router(
+            AppState::new("unused", Arc::new(NoOpDispatcher)).with_github(deps.clone()),
+        );
+        assert_eq!(
+            app.oneshot(opened_pr_request(&deps.webhook_secret))
+                .await
+                .unwrap()
+                .status(),
+            StatusCode::ACCEPTED
+        );
+        timeout(Duration::from_secs(2), dispatcher.queued.notified())
+            .await
+            .unwrap();
+        mount_policy(
+            &github,
+            "automatic_review:\n  required_checks:\n    Test: pass\n",
+        )
+        .await;
+        dispatcher.slot.notify_one();
+        wait_for_watch_exit(&deps).await;
+        assert!(
+            dispatcher.seen.lock().unwrap().is_empty(),
+            "queued work must not ignore a newly required check"
+        );
+    }
+
+    #[tokio::test]
+    async fn github_pr_webhook_rejects_stale_head_before_reading_ci() {
+        let github = MockServer::start().await;
+        mount_installation_token(&github, INSTALLATION_ID).await;
+        mount_pull_request(&github, "aaaa").await;
+        let dispatcher = RecordingDispatcher::new();
+        let deps = github_deps(
+            &github.uri(),
+            Arc::<RecordingDispatcher>::clone(&dispatcher),
+        );
+        let delivery = opened_pr_request(&deps.webhook_secret);
+        let app = build_router(
+            AppState::new("unused", Arc::new(NoOpDispatcher)).with_github(deps.clone()),
+        );
+        assert_eq!(
+            app.oneshot(delivery).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        wait_for_watch_exit(&deps).await;
+        assert!(dispatcher.jobs().is_empty());
+        assert!(github
+            .received_requests()
+            .await
+            .unwrap()
+            .iter()
+            .all(|request| {
+                !request.url.path().contains("/commits/")
+                    && !request.url.path().contains("/statuses/")
+            }));
+    }
+
+    #[tokio::test]
     async fn github_pr_webhook_skips_draft_by_default() {
-        github_draft_case(false).await;
+        github_draft_case(None).await;
     }
 
     #[tokio::test]
     async fn github_pr_webhook_can_opt_in_to_draft_reviews() {
-        github_draft_case(true).await;
+        github_draft_case(Some("github_automatic_review:\n  allow_drafts: true\n")).await;
     }
 
-    async fn github_draft_case(allow_drafts: bool) {
+    #[tokio::test]
+    async fn github_pr_webhook_honors_shared_policy_on_base_branch() {
+        github_draft_case(Some("automatic_review:\n  allow_drafts: true\n")).await;
+    }
+
+    async fn github_draft_case(policy: Option<&str>) {
         let github = MockServer::start().await;
         mount_installation_token(&github, INSTALLATION_ID).await;
         mount_pr(&github, "deadbeef", true).await;
-        if allow_drafts {
-            mount_policy(&github, "github_automatic_review:\n  allow_drafts: true\n").await;
+        if let Some(yaml) = policy {
+            mount_policy(&github, yaml).await;
         }
         let dispatcher = RecordingDispatcher::new();
         let deps = github_deps(
@@ -779,7 +958,7 @@ mod tests {
             StatusCode::ACCEPTED
         );
         wait_for_watch_exit(&deps).await;
-        assert_eq!(!dispatcher.jobs().is_empty(), allow_drafts);
+        assert_eq!(!dispatcher.jobs().is_empty(), policy.is_some());
     }
 
     #[tokio::test]
@@ -847,7 +1026,11 @@ mod tests {
         let github = MockServer::start().await;
         mount_installation_token(&github, INSTALLATION_ID).await;
         if with_merge_checks {
-            mount_policy(&github, "github_automatic_review:\n  required_checks:\n    Test: pass\n    Coverage: complete\n").await;
+            mount_policy(
+                &github,
+                "automatic_review:\n  required_checks:\n    Test: pass\n    Coverage: complete\n",
+            )
+            .await;
         } else {
             mount_required_ci(&github).await;
         }

@@ -1,3 +1,6 @@
+#[path = "ci.rs"]
+pub(crate) mod ci;
+
 use crate::capabilities::capabilities_for_version;
 use crate::types::{
     ChangedFile, CommitStatus, CreateReviewRequest, CreateWebhookRequest, CreatedWebhook,
@@ -56,6 +59,12 @@ pub struct Client {
     capabilities: Arc<OnceCell<ar_forge::HostCapabilities>>,
     /// HTTP client carrying the token auth and JSON default headers.
     http: reqwest::Client,
+    /// Actual token account, independent of a configured review bot login.
+    pat_login: Arc<OnceCell<String>>,
+    /// Successful version probe, shared by every clone.
+    server_version: Arc<OnceCell<String>>,
+    /// Serialize guarded watch writes with worker writes for a commit.
+    status_writes: Arc<ci::StatusWriters>,
     /// The bot's API token, also embedded in clone URLs.
     token: String,
 }
@@ -107,7 +116,20 @@ struct WebhookListItem {
     reason = "ar-cli (commands) and ar-gateway call these inherent methods on Client by the same \
               names the ReviewHost impl below delegates to; renaming either side breaks callers"
 )]
+#[expect(
+    clippy::multiple_inherent_impl,
+    reason = "CI polling and wait-status operations live with their wire types in ci.rs"
+)]
 impl Client {
+    /// Probe the server version once, retrying on transport, HTTP, or timeout errors.
+    async fn cached_server_version(&self) -> Result<&str, Error> {
+        let version = self
+            .server_version
+            .get_or_try_init(|| probe(self.get_server_version()))
+            .await?;
+        Ok(version.as_str())
+    }
+
     /// Build an authenticated `git clone` URL for `owner/repo`, keeping a
     /// subpath deploy's base path and carrying the token as the password.
     ///
@@ -665,6 +687,9 @@ impl Client {
             token: token.to_owned(),
             capabilities: Arc::new(OnceCell::new()),
             bot_login: Arc::new(OnceCell::new()),
+            pat_login: Arc::new(OnceCell::new()),
+            server_version: Arc::new(OnceCell::new()),
+            status_writes: Arc::new(ci::StatusWriters::default()),
         })
     }
 
@@ -683,6 +708,20 @@ impl Client {
         status: &CommitStatus,
     ) -> Result<(), Error> {
         let url = self.url(&format!("repos/{owner}/{repo}/statuses/{sha}"))?;
+        ci::bounded(ci::STATUS_TIMEOUT, async {
+            let _guard = self.status_writes.lock(owner, repo, sha).await;
+            self.post_commit_status_unlocked(url, status).await?;
+            Ok(())
+        })
+        .await
+    }
+
+    /// Send a status while the caller holds the commit's writer lock.
+    async fn post_commit_status_unlocked(
+        &self,
+        url: Url,
+        status: &CommitStatus,
+    ) -> Result<reqwest::Response, Error> {
         let resp = self.http.post(url).json(status).send().await?;
         let response_status = resp.status();
         if !response_status.is_success() {
@@ -692,7 +731,7 @@ impl Client {
                 body: cap_for_error(&body),
             });
         }
-        Ok(())
+        Ok(resp)
     }
 
     /// Post a top-level comment on an issue or pull request. Used by
@@ -813,10 +852,10 @@ impl ar_forge::ReviewHost for Client {
         let probed = self
             .capabilities
             .get_or_try_init(|| async {
-                let version = probe(self.get_server_version()).await?;
-                Ok::<_, Error>(capabilities_for_version(&version).unwrap_or_else(|| {
+                let version = self.cached_server_version().await?;
+                Ok::<_, Error>(capabilities_for_version(version).unwrap_or_else(|| {
                     tracing::warn!(
-                        version = %cap_for_error(&version),
+                        version = %cap_for_error(version),
                         "unparseable Forgejo version; treating the server as \
                          supporting no optional review features"
                     );
@@ -1055,7 +1094,14 @@ async fn json_get<T>(http: &reqwest::Client, url: Url) -> Result<T, Error>
 where
     T: DeserializeOwned,
 {
-    let resp = http.get(url).send().await?;
+    decode_json_response(http.get(url).send().await?).await
+}
+
+/// Decode a JSON response and cap the body included in any reported error.
+async fn decode_json_response<T>(resp: reqwest::Response) -> Result<T, Error>
+where
+    T: DeserializeOwned,
+{
     let status = resp.status();
     let body = resp.text().await?;
     if !status.is_success() {

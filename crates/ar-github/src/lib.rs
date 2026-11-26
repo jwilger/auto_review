@@ -653,17 +653,13 @@ impl Client {
             .commit_status_progress(&format!("{commit}/statuses"), token)
             .await?;
         progress.extend(checks.into_iter().filter_map(|check| {
-            let state = if check.status != "completed" {
-                CheckProgress::Pending
-            } else if matches!(
-                check.conclusion.as_deref(),
-                Some("success" | "neutral" | "skipped")
-            ) {
-                CheckProgress::Passed
-            } else if check.conclusion.is_some() {
-                CheckProgress::Complete
-            } else {
-                CheckProgress::Pending
+            let state = match (check.status.as_str(), check.conclusion.as_deref()) {
+                ("completed", Some("success" | "neutral" | "skipped")) => CheckProgress::Passed,
+                (
+                    "completed",
+                    Some("action_required" | "cancelled" | "failure" | "stale" | "timed_out"),
+                ) => CheckProgress::Complete,
+                _ => CheckProgress::Pending,
             };
             check
                 .name

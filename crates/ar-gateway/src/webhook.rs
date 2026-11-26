@@ -1,19 +1,22 @@
 use crate::dedup::CheckResult;
+use crate::forgejo_review;
 use crate::hmac::{verify, HmacError};
 use crate::poller::claim_chat_comment;
 use crate::AppState;
 use alloc::sync::Arc;
 use ar_chat::{parse_chat_command, ChatCommand, ChatContext, ChatHandler};
-use ar_forge::ReviewHost;
-use ar_forgejo::{IssueCommentAction, IssueCommentEvent, PullRequestAction, PullRequestEvent};
+use ar_forge::PullRequestSummary;
+use ar_forgejo::{
+    Client, IssueCommentAction, IssueCommentEvent, PullRequestAction, PullRequestEvent,
+};
 use ar_orchestrator::review_history::PrKey;
-use ar_orchestrator::JobDispatcher;
 use ar_orchestrator::ReviewJob;
 use axum::body::Bytes;
 use axum::extract::State;
 use axum::http::{HeaderMap, StatusCode};
 use axum::response::{IntoResponse as _, Response};
 use serde::Deserialize;
+use serde_json::Value;
 use subtle::ConstantTimeEq as _;
 
 /// Forgejo's HMAC signature header.
@@ -67,8 +70,7 @@ struct CiReviewRequest {
 ///
 /// 1. HMAC-verifies the body against the configured secret.
 /// 2. Dispatches by `X-Forgejo-Event`.
-/// 3. For `pull_request`, decodes the payload and records acceptance without
-///    dispatching review work; CI-triggered reviews use `/reviews/ci`.
+/// 3. For `pull_request`, defers admission to the trusted repository policy.
 #[inline]
 #[expect(
     clippy::cognitive_complexity,
@@ -317,12 +319,12 @@ pub async fn handle_ci_review(
         return reject(StatusCode::BAD_REQUEST, "unsafe owner/repo path segment");
     }
 
-    let (host, dispatcher): (&dyn ReviewHost, &Arc<dyn JobDispatcher>) = match req.provider {
+    let host = match req.provider {
         CiProvider::Forgejo => {
             let Some(forgejo) = deps.forgejo.as_ref() else {
                 return reject(StatusCode::NOT_FOUND, "forgejo provider not configured");
             };
-            (forgejo.as_ref(), &state.dispatcher)
+            forgejo
         }
         CiProvider::Github => {
             if state.github.is_none() {
@@ -349,21 +351,65 @@ pub async fn handle_ci_review(
     if pr.draft || !pr.state.eq_ignore_ascii_case("open") {
         return reject(StatusCode::CONFLICT, "pull request is not reviewable");
     }
+    let triggers = &state.forgejo_triggers;
+    if triggers
+        .load(host, &req.owner, &req.repo, &pr.base.ref_name)
+        .await
+        .veto_callback()
+    {
+        return (
+            StatusCode::ACCEPTED,
+            "forgejo reviews are triggered by webhooks",
+        )
+            .into_response();
+    }
 
-    dispatcher
-        .dispatch(ReviewJob {
-            owner: req.owner,
-            repo: req.repo,
-            pr_number: req.pr_number,
-            head_sha: req.head_sha,
-            pr_title: pr.title,
-            pr_body: pr.body,
-            base_sha: Some(pr.base.sha),
-            force: req.force,
-        })
+    let worker_host = Arc::clone(host);
+    let worker_triggers = Arc::clone(triggers);
+    let metrics = Arc::clone(&state.metrics);
+    state
+        .dispatcher
+        .dispatch_when_ready(Box::pin(async move {
+            let job = prepare_ci_job(&worker_host, &worker_triggers, req).await;
+            if job.is_some() {
+                metrics.record_job_dispatched();
+            }
+            job
+        }))
         .await;
-    state.metrics.record_job_dispatched();
     (StatusCode::ACCEPTED, "").into_response()
+}
+
+/// Revalidate a legacy callback after waiting for a review worker.
+async fn prepare_ci_job(
+    host: &Client,
+    triggers: &forgejo_review::TriggerHistory,
+    req: CiReviewRequest,
+) -> Option<ReviewJob> {
+    let pr: PullRequestSummary = host
+        .get_pull_request(&req.owner, &req.repo, req.pr_number)
+        .await
+        .ok()?;
+    if pr.head.sha != req.head_sha
+        || pr.draft
+        || !pr.state.eq_ignore_ascii_case("open")
+        || triggers
+            .load(host, &req.owner, &req.repo, &pr.base.ref_name)
+            .await
+            .veto_callback()
+    {
+        return None;
+    }
+    Some(ReviewJob {
+        owner: req.owner,
+        repo: req.repo,
+        pr_number: req.pr_number,
+        head_sha: req.head_sha,
+        pr_title: pr.title,
+        pr_body: pr.body,
+        base_sha: Some(pr.base.sha),
+        force: req.force,
+    })
 }
 
 /// Checks that a repository owner or name is safe as a single path segment.
@@ -378,11 +424,7 @@ pub(crate) fn is_safe_repo_path_segment(segment: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'.' | b'_' | b'-'))
 }
 
-/// Acknowledges pull request intake without dispatching a semantic review.
-#[expect(
-    clippy::unused_async,
-    reason = "Keep event handlers awaited uniformly at the webhook routing boundary"
-)]
+/// Acknowledge a signed PR delivery and schedule admission for lifecycle events.
 async fn handle_pull_request(state: &AppState, body: &[u8]) -> Response {
     let evt: PullRequestEvent = match serde_json::from_slice(body) {
         Ok(event) => event,
@@ -391,6 +433,12 @@ async fn handle_pull_request(state: &AppState, body: &[u8]) -> Response {
             return reject(StatusCode::BAD_REQUEST, &format!("payload decode: {error}"));
         }
     };
+    if let (Some(forgejo), Some(transition)) =
+        (state.forgejo.clone(), admission_trigger(&evt, body))
+    {
+        forgejo_review::schedule(state, forgejo, evt, transition).await;
+        return (StatusCode::ACCEPTED, "").into_response();
+    }
     if !is_actionable(&evt, &state.bot_login) {
         tracing::debug!(action = ?evt.action, "ignoring non-review-triggering action");
         return (StatusCode::ACCEPTED, "").into_response();
@@ -407,6 +455,38 @@ async fn handle_pull_request(state: &AppState, body: &[u8]) -> Response {
         "accepted PR webhook without dispatching review",
     );
     (StatusCode::ACCEPTED, "").into_response()
+}
+
+/// Identify candidate events and mark those that may restore same-head eligibility.
+fn admission_trigger(evt: &PullRequestEvent, body: &[u8]) -> Option<bool> {
+    match evt.action {
+        PullRequestAction::Opened | PullRequestAction::Synchronized => Some(false),
+        PullRequestAction::ReadyForReview | PullRequestAction::Reopened => Some(true),
+        // Forgejo signals draft removal through a title edit.
+        PullRequestAction::Edited => {
+            (!evt.pull_request.draft && title_changed(body)).then_some(true)
+        }
+        PullRequestAction::Assigned
+        | PullRequestAction::Closed
+        | PullRequestAction::Demilestoned
+        | PullRequestAction::Labeled
+        | PullRequestAction::Milestoned
+        | PullRequestAction::Other
+        | PullRequestAction::ReviewRequestRemoved
+        | PullRequestAction::ReviewRequested
+        | PullRequestAction::Unassigned
+        | PullRequestAction::Unlabeled => None,
+    }
+}
+
+/// Check that an edited delivery names the title as a changed field.
+fn title_changed(body: &[u8]) -> bool {
+    serde_json::from_slice::<Value>(body).is_ok_and(|payload| {
+        payload
+            .pointer("/changes/title/from")
+            .and_then(Value::as_str)
+            .is_some()
+    })
 }
 
 /// Checks whether the PR action is relevant to the configured reviewer.
@@ -445,6 +525,9 @@ fn reject(status: StatusCode, msg: &str) -> Response {
     reason = "Sequential HTTP test steps reuse request and response names once the prior step has been checked"
 )]
 mod tests {
+    #[path = "forgejo_review_cases.rs"]
+    mod forgejo_review_cases;
+
     use super::*;
     use crate::build_router;
     use ::hmac::{Hmac, KeyInit as _, Mac as _};
@@ -631,6 +714,113 @@ mod tests {
         )
         .await;
         assert_eq!(status, StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn signed_forgejo_pr_webhook_dispatches_without_reading_ci_after_opt_in() {
+        use ar_forgejo::Client as ForgejoClient;
+        use core::sync::atomic::{AtomicU16, Ordering};
+        use tokio::time::{sleep, timeout};
+        use wiremock::matchers::{method, path, query_param};
+        use wiremock::{Mock, MockServer, Request as MockRequest, ResponseTemplate};
+
+        let forgejo = MockServer::start().await;
+        let number: u64 = 7;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/7"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": number, "title": "live title", "state": "open",
+                "head": {"ref": "topic", "sha": "deadbeef"},
+                "base": {"ref": "main", "sha": "cafef00d"}
+            })))
+            .mount(&forgejo)
+            .await;
+        let config_response = Arc::new(AtomicU16::new(200));
+        let config = Arc::clone(&config_response);
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/raw/.auto_review.yaml"))
+            .and(query_param("ref", "main"))
+            .respond_with(move |_: &MockRequest| match config.load(Ordering::SeqCst) {
+                200 => ResponseTemplate::new(200)
+                    .set_body_string("automatic_review:\n  forgejo_trigger: webhook\n"),
+                201 => ResponseTemplate::new(200).set_body_string("{}"),
+                422 => ResponseTemplate::new(200)
+                    .set_body_string("automatic_review:\n  forgejo_trigger: invalid\n"),
+                status => ResponseTemplate::new(status),
+            })
+            .mount(&forgejo)
+            .await;
+        let recorder = RecordingDispatcher::new();
+        let client = Arc::new(ForgejoClient::new(&forgejo.uri(), "forgejo-token").unwrap());
+        let app = build_router(
+            AppState::new("s", Arc::<RecordingDispatcher>::clone(&recorder))
+                .with_forgejo(Arc::clone(&client))
+                .with_ci_review_endpoint("action-token", client),
+        );
+        let body = pr_payload("opened", false);
+        let req = Request::post("/webhooks/forgejo")
+            .header(EVENT_HEADER, "pull_request")
+            .header(SIG_HEADER, sign("s", &body))
+            .body(Body::from(body))
+            .unwrap();
+        assert_eq!(
+            app.clone().oneshot(req).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        let dispatched = timeout(Duration::from_secs(2), async {
+            loop {
+                let jobs = recorder.jobs();
+                if !jobs.is_empty() {
+                    break jobs;
+                }
+                sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await;
+        assert!(
+            dispatched.is_ok(),
+            "signed PR webhook should start review in webhook mode"
+        );
+        let jobs = dispatched.unwrap();
+        assert_eq!(jobs.len(), 1);
+        assert_eq!(jobs[0].pr_title, "live title");
+        for request in forgejo.received_requests().await.unwrap() {
+            assert!(
+                matches!(
+                    request.url.path(),
+                    "/api/v1/repos/o/r/pulls/7" | "/api/v1/repos/o/r/raw/.auto_review.yaml"
+                ),
+                "unexpected API request: {}",
+                request.url
+            );
+        }
+
+        for status in [503, 404, 422] {
+            config_response.store(status, Ordering::SeqCst);
+            let response = app
+                .clone()
+                .oneshot(legacy_ci_request(number))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED, "status {status}");
+            assert_eq!(
+                recorder.jobs().len(),
+                1,
+                "status {status} bypassed webhook opt-in"
+            );
+        }
+
+        // A freshly readable config selecting default CI can undo the opt-in.
+        for (status, expected_jobs) in [(201, 2), (503, 3)] {
+            config_response.store(status, Ordering::SeqCst);
+            let response = app
+                .clone()
+                .oneshot(legacy_ci_request(number))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            assert_eq!(recorder.jobs().len(), expected_jobs);
+        }
     }
 
     #[tokio::test]
@@ -914,10 +1104,125 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ci_review_endpoint_fetches_matching_pr_and_dispatches_review_job() {
+    async fn ci_review_endpoint_acknowledges_base_branch_webhook_opt_in_without_dispatch() {
         use ar_forgejo::Client as ForgejoClient;
-        use wiremock::matchers::{header, method, path};
+        use wiremock::matchers::{method, path, query_param};
         use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let forgejo = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": PR_NUMBER, "title": "feature", "state": "open",
+                "head": {"ref": "topic", "sha": "deadbeef"},
+                "base": {"ref": "main", "sha": "cafef00d"}
+            })))
+            .mount(&forgejo)
+            .await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/raw/.auto_review.yaml"))
+            .and(query_param("ref", "main"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .set_body_string("automatic_review:\n  forgejo_trigger: webhook\n"),
+            )
+            .mount(&forgejo)
+            .await;
+        let recorder = RecordingDispatcher::new();
+        let client = Arc::new(ForgejoClient::new(&forgejo.uri(), "forgejo-token").unwrap());
+        let app = build_router(
+            AppState::new("s", Arc::<RecordingDispatcher>::clone(&recorder))
+                .with_ci_review_endpoint("action-token", client),
+        );
+        let req = Request::post("/reviews/ci")
+            .header("authorization", "Bearer action-token")
+            .body(Body::from(
+                r#"{"owner":"o","repo":"r","pr_number":42,"head_sha":"deadbeef"}"#,
+            ))
+            .unwrap();
+
+        assert_eq!(
+            app.oneshot(req).await.unwrap().status(),
+            StatusCode::ACCEPTED
+        );
+        assert!(
+            recorder.jobs().is_empty(),
+            "webhook mode must suppress the legacy CI dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn ci_review_endpoint_fetches_matching_pr_and_dispatches_review_job() {
+        ci_review_with_worker_policy(false).await;
+    }
+
+    #[tokio::test]
+    async fn ci_review_endpoint_discarded_when_repository_switches_before_worker_admission() {
+        ci_review_with_worker_policy(true).await;
+    }
+
+    fn legacy_ci_request(pr_number: u64) -> Request<Body> {
+        Request::post("/reviews/ci")
+            .header("authorization", "Bearer action-token")
+            .body(Body::from(
+                serde_json::json!({
+                    "owner": "o", "repo": "r", "pr_number": pr_number,
+                    "head_sha": "deadbeef", "force": true
+                })
+                .to_string(),
+            ))
+            .unwrap()
+    }
+
+    #[tokio::test]
+    async fn ci_review_endpoint_dispatches_legacy_callbacks_during_config_failures() {
+        use wiremock::matchers::{method, path};
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let forgejo = MockServer::start().await;
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/pulls/42"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                "number": PR_NUMBER, "title": "feature", "state": "open",
+                "head": {"ref": "topic", "sha": "deadbeef"},
+                "base": {"ref": "main", "sha": "cafef00d"}
+            })))
+            .mount(&forgejo)
+            .await;
+        let recorder = RecordingDispatcher::new();
+        let client = Arc::new(Client::new(&forgejo.uri(), "forgejo-token").unwrap());
+        let app = build_router(
+            AppState::new("s", Arc::<RecordingDispatcher>::clone(&recorder))
+                .with_ci_review_endpoint("action-token", client),
+        );
+        let failures = [
+            ResponseTemplate::new(503),
+            ResponseTemplate::new(200).set_body_string("broken: ["),
+            ResponseTemplate::new(200)
+                .set_body_string("automatic_review:\n  forgejo_trigger: invalid\n"),
+        ];
+        for (index, failure) in failures.into_iter().enumerate() {
+            let _policy = Mock::given(method("GET"))
+                .and(path("/api/v1/repos/o/r/raw/.auto_review.yaml"))
+                .respond_with(failure)
+                .expect(2)
+                .mount_as_scoped(&forgejo)
+                .await;
+            let response = app
+                .clone()
+                .oneshot(legacy_ci_request(PR_NUMBER))
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED, "failure {index}");
+            assert_eq!(recorder.jobs().len(), index + 1, "failure {index}");
+        }
+    }
+
+    async fn ci_review_with_worker_policy(switch_to_webhook: bool) {
+        use ar_forgejo::Client as ForgejoClient;
+        use core::sync::atomic::{AtomicBool, Ordering};
+        use wiremock::matchers::{header, method, path};
+        use wiremock::{Mock, MockServer, Request as MockRequest, ResponseTemplate};
 
         let forgejo = MockServer::start().await;
         Mock::given(method("GET"))
@@ -930,7 +1235,21 @@ mod tests {
                 "head": {"ref": "topic", "sha": "deadbeef"},
                 "base": {"ref": "main", "sha": "cafef00d"}
             })))
-            .expect(1)
+            .expect(2)
+            .mount(&forgejo)
+            .await;
+        let policy_read = AtomicBool::new(false);
+        Mock::given(method("GET"))
+            .and(path("/api/v1/repos/o/r/raw/.auto_review.yaml"))
+            .respond_with(move |_: &MockRequest| {
+                if policy_read.swap(true, Ordering::SeqCst) && switch_to_webhook {
+                    ResponseTemplate::new(200)
+                        .set_body_string("automatic_review:\n  forgejo_trigger: webhook\n")
+                } else {
+                    ResponseTemplate::new(404)
+                }
+            })
+            .expect(2)
             .mount(&forgejo)
             .await;
 
@@ -964,6 +1283,10 @@ mod tests {
 
         assert_eq!(resp.status(), StatusCode::ACCEPTED);
         let jobs = recorder.jobs();
+        if switch_to_webhook {
+            assert!(jobs.is_empty());
+            return;
+        }
         assert_eq!(jobs.len(), 1);
         assert_eq!(jobs[0].owner, "o");
         assert_eq!(jobs[0].repo, "r");
@@ -992,7 +1315,7 @@ mod tests {
                 "head": {"ref": "topic", "sha": "deadbeef"},
                 "base": {"ref": "main", "sha": "cafef00d"}
             })))
-            .expect(1)
+            .expect(2)
             .mount(&forgejo)
             .await;
 

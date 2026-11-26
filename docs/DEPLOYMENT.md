@@ -289,6 +289,57 @@ The chart sets `AR_GATEWAY_EXTERNAL_ISOLATION=container` and wires liveness to
 state directory if you want SQLite learnings, review history, vector snippets,
 and webhook dedup state to survive pod replacement.
 
+## Forgejo automatic review
+
+For new repositories, register the signed Forgejo webhook and put this in
+`.auto_review.yaml` on the PR's base branch:
+
+```yaml
+automatic_review:
+  forgejo_trigger: webhook
+```
+
+Open, synchronize, and reopen events start admission. Forgejo represents draft
+removal as a title edit; the gateway verifies that the live PR is open, current,
+and no longer a draft. No CI API is queried unless you add `required_checks`.
+Set `allow_drafts: true` to review drafts as well.
+
+On **Forgejo v16 or later**, you can also configure named Actions jobs:
+
+```yaml
+automatic_review:
+  forgejo_trigger: webhook
+  required_checks:
+    Test: pass
+    Coverage: complete
+```
+
+Use the exact job name reported by Forgejo's run-jobs API, including any
+matrix suffix, not the workflow name or commit status context. All named jobs
+must be present for the exact head and PR. `pass` accepts success or skipped;
+`complete` also accepts terminal failures. Unlisted jobs are ignored. A missing
+job, inaccessible API, or unsupported server keeps the review waiting. The
+gateway publishes a pending status when possible, polls for up to two hours,
+and then attempts to replace its own pending status with an error and manual
+re-review guidance.
+
+**Migrating:** Existing repositories stay in CI mode until they set
+`forgejo_trigger: webhook`. Authenticate and verify your PR webhook, then
+**disable the legacy review callback and let any in-flight callback jobs finish
+before merging the webhook opt-in** into each target base branch. Remove its
+repository secret if nothing else uses it. An authenticated legacy callback is
+a no-op once the gateway reads the base branch's webhook opt-in. Disabling the
+old callback first matters because, during a config outage, a fresh gateway
+cannot distinguish an unreadable opt-in from an existing CI-mode repository.
+
+To go back, set `forgejo_trigger: ci` in the same base-branch config file
+and restore the callback job and token. Keep the config file in place for the
+switch back: a gateway that has seen the opt-in treats a missing file as
+potentially unavailable, not as an explicit rollback. On v11–v15, use CI mode
+if you need named prerequisites; ungated webhook mode still works. See the
+[Forgejo capabilities audit](./research/forgejo-automatic-review-capabilities.md)
+for the API and event details.
+
 ## Forgejo Actions semantic-review trigger
 
 `deploy/forgejo-action/action.yml` is a thin gateway client. It does not run the

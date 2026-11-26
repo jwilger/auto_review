@@ -12,11 +12,13 @@
 # status and return without calling the LLM.
 enabled: true
 
-# GitHub App webhook reviews only. By default, review open non-draft PRs
-# without waiting for CI. To opt in, uncomment either option below. Name
-# exact check runs or status contexts. Every listed name must appear:
-# pass accepts success, skipped, or neutral; complete also accepts failures.
-# github_automatic_review:
+# Automatic webhook reviews on GitHub and opted-in Forgejo repositories.
+# With no required checks, review open non-draft PRs without waiting for CI.
+# Use exact GitHub check names/status contexts or Forgejo Actions job names
+# (Forgejo v16+). Every listed name must appear: pass accepts success,
+# skipped, or neutral; complete also accepts failures.
+# automatic_review:
+#   forgejo_trigger: webhook # Forgejo only: default is ci
 #   allow_drafts: true
 #   required_checks:
 #     Test: pass

@@ -15,6 +15,7 @@ use serde::{Deserialize, Serialize};
 /// `strict_allowlist_matches_struct_fields` in `config.rs` pins
 /// the relationship.
 const KNOWN_KEYS: &[&str] = &[
+    "automatic_review",
     "enabled",
     "github_automatic_review",
     "guidelines",
@@ -43,9 +44,13 @@ const KNOWN_PR_METADATA_CHECKS_KEYS: &[&str] = &["body_required"];
 )]
 #[expect(
     clippy::partial_pub_fields,
-    reason = "the deferred GitHub policy must be decoded through its validating accessor"
+    reason = "deferred admission policies must be decoded through their validating accessors"
 )]
 pub struct RepoConfig {
+    /// Shared admission policy, decoded separately from the review pipeline settings.
+    #[serde(default)]
+    automatic_review: serde_yaml::Value,
+
     /// Top-level switch. When false, the bot skips reviewing this repo
     /// entirely (still posts a "skipped (config)" status).
     #[serde(default = "default_true")]
@@ -81,26 +86,41 @@ pub struct RepoConfig {
 }
 
 impl RepoConfig {
-    /// Decode the automatic GitHub App review policy.
+    /// Decode the shared policy; Forgejo never reads the legacy GitHub key.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid policy values or unusable check names.
+    #[inline]
+    pub fn automatic_review(&self) -> Result<AutomaticReview, serde_yaml::Error> {
+        decode_automatic_review(&self.automatic_review, "automatic_review")
+    }
+
+    /// Whether the trusted config explicitly selected webhook admission for Forgejo.
+    ///
+    /// A malformed check requirement must not undo an otherwise unambiguous
+    /// cutover. The webhook still needs a fully valid policy before dispatch.
+    #[inline]
+    #[must_use = "callers use the explicit cutover to suppress legacy callbacks"]
+    pub fn forgejo_webhook_requested(&self) -> bool {
+        self.automatic_review
+            .get("forgejo_trigger")
+            .and_then(serde_yaml::Value::as_str)
+            == Some("webhook")
+    }
+
+    /// Decode the GitHub policy, preferring the shared section when present.
     ///
     /// # Errors
     ///
     /// Returns an error for invalid policy values or unusable check names.
     #[inline]
     pub fn github_automatic_review(&self) -> Result<GitHubAutomaticReview, serde_yaml::Error> {
-        if self.github_automatic_review.is_null() {
-            return Ok(GitHubAutomaticReview::default());
+        if self.automatic_review.is_null() {
+            decode_automatic_review(&self.github_automatic_review, "github_automatic_review")
+        } else {
+            self.automatic_review()
         }
-        let policy: GitHubAutomaticReview =
-            serde_yaml::from_value(self.github_automatic_review.clone())?;
-        if policy
-            .required_checks
-            .keys()
-            .any(|name| name.trim().is_empty() || name.eq_ignore_ascii_case("auto_review"))
-        {
-            return Err(serde_yaml::Error::custom("github_automatic_review.required_checks cannot contain a blank name or the reserved auto_review context"));
-        }
-        Ok(policy)
     }
 
     /// Whether `login` is authorized to force an override-approval over
@@ -120,6 +140,7 @@ impl Default for RepoConfig {
     #[inline]
     fn default() -> Self {
         Self {
+            automatic_review: serde_yaml::Value::Null,
             enabled: true,
             github_automatic_review: serde_yaml::Value::Null,
             guidelines: String::new(),
@@ -130,15 +151,32 @@ impl Default for RepoConfig {
     }
 }
 
-/// Repository policy for automatic GitHub App reviews.
+/// Repository policy for automatic webhook reviews.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 #[non_exhaustive]
 #[serde(default, deny_unknown_fields)]
-pub struct GitHubAutomaticReview {
+pub struct AutomaticReview {
     /// Also review open draft PRs.
     pub allow_drafts: bool,
+    /// Forgejo only: explicitly select webhook admission instead of CI callbacks.
+    pub forgejo_trigger: ForgejoTrigger,
     /// Check-run names or commit status contexts that must be satisfied.
     pub required_checks: BTreeMap<String, CheckRequirement>,
+}
+
+/// Compatibility name for the policy formerly exclusive to GitHub.
+pub type GitHubAutomaticReview = AutomaticReview;
+
+/// Where automatic Forgejo reviews are triggered for this repository.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+#[non_exhaustive]
+pub enum ForgejoTrigger {
+    /// Keep the existing authenticated CI callback.
+    #[default]
+    Ci,
+    /// Admit from signed PR webhooks; acknowledge but do not dispatch CI callbacks.
+    Webhook,
 }
 
 /// Minimum result a named CI job must reach before automatic review.
@@ -212,6 +250,27 @@ pub enum RepoConfigStrictError {
     UnknownKeys(Vec<String>),
 }
 
+/// Decode and validate one host's automatic review policy independently.
+fn decode_automatic_review(
+    value: &serde_yaml::Value,
+    key: &str,
+) -> Result<AutomaticReview, serde_yaml::Error> {
+    if value.is_null() {
+        return Ok(AutomaticReview::default());
+    }
+    let policy: AutomaticReview = serde_yaml::from_value(value.clone())?;
+    if policy
+        .required_checks
+        .keys()
+        .any(|name| name.trim().is_empty() || name.eq_ignore_ascii_case("auto_review"))
+    {
+        return Err(serde_yaml::Error::custom(format!(
+            "{key}.required_checks cannot contain a blank name or the reserved auto_review context"
+        )));
+    }
+    Ok(policy)
+}
+
 /// Accept `pr_metadata_check` as either a bare boolean (the `enabled`
 /// switch, other fields defaulted) or a full mapping.
 fn deserialize_pr_metadata_check<'de, D>(deserializer: D) -> Result<PrMetadataCheck, D::Error>
@@ -261,7 +320,8 @@ fn default_true() -> bool {
 )]
 pub fn parse_repo_config(yaml: &str) -> Result<RepoConfig, serde_yaml::Error> {
     let config: RepoConfig = serde_yaml::from_str(yaml)?;
-    config.github_automatic_review()?;
+    config.automatic_review()?;
+    decode_automatic_review(&config.github_automatic_review, "github_automatic_review")?;
     Ok(config)
 }
 
@@ -357,6 +417,17 @@ mod tests {
             .and_then(|mapping| mapping.get(serde_yaml::Value::String("enabled".into())))
             .and_then(serde_yaml::Value::as_bool);
         assert_eq!(metadata_check, Some(true));
+    }
+
+    #[test]
+    fn invalid_checks_do_not_erase_explicit_forgejo_cutover() {
+        let yaml =
+            "automatic_review:\n  forgejo_trigger: webhook\n  required_checks:\n    Test: typo\n";
+        assert!(
+            serde_yaml::from_str::<RepoConfig>(yaml).is_ok_and(|config| {
+                config.forgejo_webhook_requested() && config.automatic_review().is_err()
+            })
+        );
     }
 
     #[test]

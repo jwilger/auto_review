@@ -30,7 +30,10 @@ use tokio::time::timeout;
               breaks them"
 )]
 pub use crate::{
-    client::{Client, Error},
+    client::{
+        ci::{ActionJobProgress, ReviewWaitEnd},
+        Client, Error,
+    },
     init::InitClient,
     types::{
         ChangedFile, CommitStatus, CommitStatusState, CreateAccessTokenRequest,
